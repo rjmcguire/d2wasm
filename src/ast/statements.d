@@ -1,0 +1,132 @@
+/**
+ * AST Statement Nodes for D-to-WASM Compiler
+ * 
+ * This module contains all statement AST node implementations.
+ */
+module ast.statements;
+
+import ast.nodes;
+import ast.expressions;
+import std.string;
+import std.conv;
+
+// ===== STATEMENTS =====
+
+/**
+ * Compound statement: { statements }
+ */
+class CompoundStatement : Statement {
+    Statement[] statements;
+    
+    this(SourceLocation loc, Statement[] statements) {
+        super(loc);
+        this.statements = statements;
+    }
+    
+    
+    override string toString() const {
+        return format("CompoundStatement(%d statements)", statements.length);
+    }
+}
+
+/**
+ * If statement: if (condition) thenStmt else elseStmt
+ */
+class IfStatement : Statement {
+    Expression condition;
+    Statement thenStatement;
+    Statement elseStatement;  // null if no else
+    
+    this(SourceLocation loc, Expression condition, 
+         Statement thenStatement, Statement elseStatement = null) {
+        super(loc);
+        this.condition = condition;
+        this.thenStatement = thenStatement;
+        this.elseStatement = elseStatement;
+    }
+    
+    
+    override string toString() const {
+        return "IfStatement";
+    }
+}
+
+/**
+ * While statement: while (condition) body
+ */
+class WhileStatement : Statement {
+    Expression condition;
+    Statement body_;
+    
+    this(SourceLocation loc, Expression condition, Statement body_) {
+        super(loc);
+        this.condition = condition;
+        this.body_ = body_;
+    }
+    
+    
+    override string toString() const {
+        return "WhileStatement";
+    }
+}
+
+/**
+ * For statement: for (init; condition; update) body
+ */
+class ForStatement : Statement {
+    Statement init;       // Can be variable declaration or expression statement
+    Expression condition; // null means infinite loop
+    Expression update;    // null if no update
+    Statement body_;
+    
+    this(SourceLocation loc, Statement init, Expression condition, 
+         Expression update, Statement body_) {
+        super(loc);
+        this.init = init;
+        this.condition = condition;
+        this.update = update;
+        this.body_ = body_;
+    }
+    
+    
+    override string toString() const {
+        return "ForStatement";
+    }
+}
+
+/**
+ * Return statement: return expression;
+ */
+class ReturnStatement : Statement {
+    Expression value;  // null for void return
+    
+    this(SourceLocation loc, Expression value = null) {
+        super(loc);
+        this.value = value;
+    }
+    
+    
+    override string toString() const {
+        if (value) {
+            return format("ReturnStatement(%s)", value.toString());
+        }
+        return "ReturnStatement(void)";
+    }
+}
+
+/**
+ * Expression statement: expression;
+ */
+class ExpressionStatement : Statement {
+    Expression expression;
+    
+    this(SourceLocation loc, Expression expression) {
+        super(loc);
+        this.expression = expression;
+    }
+    
+    
+    override string toString() const {
+        return format("ExpressionStatement(%s)", expression.toString());
+    }
+}

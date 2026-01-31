@@ -1,0 +1,118 @@
+name: D-to-WASM Compiler CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        dc: [dmd-latest, ldc-latest]
+    
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        submodules: recursive
+    
+    - name: Install D compiler
+      uses: dlang-community/setup-dlang@v1
+      with:
+        compiler: ${{ matrix.dc }}
+    
+    - name: Install tree-sitter
+      run: |
+        npm install -g tree-sitter-cli
+    
+    - name: Build tree-sitter grammar
+      run: |
+        cd grammar/tree-sitter-d
+        tree-sitter generate
+    
+    - name: Cache DUB dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.dub
+        key: ${{ runner.os }}-dub-${{ hashFiles('**/dub.json') }}
+        restore-keys: |
+          ${{ runner.os }}-dub-
+    
+    - name: Build compiler
+      run: dub build
+    
+    - name: Run unit tests
+      run: dub test
+    
+    - name: Run integration tests
+      run: |
+        dub run :tests
+    
+    - name: Test example compilation
+      run: |
+        ./d2wasm examples/fibonacci.d
+        ls -la fibonacci.wasm.wat
+    
+    - name: Validate feature detection
+      run: |
+        # These should fail with helpful error messages
+        ! ./d2wasm tests/examples/template.d
+        ! ./d2wasm tests/examples/gc_alloc.d
+
+  performance:
+    runs-on: ubuntu-latest
+    needs: test
+    
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        submodules: recursive
+    
+    - name: Install D compiler
+      uses: dlang-community/setup-dlang@v1
+      with:
+        compiler: ldc-latest
+    
+    - name: Install tree-sitter
+      run: npm install -g tree-sitter-cli
+    
+    - name: Build optimized compiler
+      run: dub build --build=release
+    
+    - name: Performance benchmark
+      run: |
+        # Time compilation of various file sizes
+        time ./d2wasm examples/fibonacci.d
+        
+        # Generate larger test file
+        python3 scripts/generate_test_file.py 1000 > large_test.d
+        time ./d2wasm large_test.d
+    
+    - name: Memory usage test
+      run: |
+        # Check memory usage during compilation
+        /usr/bin/time -v ./d2wasm examples/fibonacci.d 2>&1 | grep "Maximum resident"
+
+  documentation:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Install D compiler
+      uses: dlang-community/setup-dlang@v1
+      with:
+        compiler: dmd-latest
+    
+    - name: Generate documentation
+      run: |
+        dub run ddox -- generate-html --navigation-type=ModuleTree docs/
+    
+    - name: Upload documentation
+      uses: actions/upload-artifact@v3
+      with:
+        name: documentation
+        path: docs/

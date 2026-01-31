@@ -1,0 +1,428 @@
+/**
+ * AST Node Hierarchy for D-to-WASM Compiler
+ * 
+ * This module defines the abstract syntax tree structure for the D language subset
+ * supported by the compiler. The design follows these principles:
+ * 
+ * 1. Clean separation between syntax and semantics
+ * 2. Visitor pattern for tree traversal  
+ * 3. Source location tracking for error messages
+ * 4. Immutable once constructed (functional approach)
+ * 5. Specific node types for each supported construct
+ */
+module ast.nodes;
+
+import std.string;
+import std.conv;
+
+// Source location for error reporting
+struct SourceLocation {
+    string filename;
+    uint line;
+    uint column;
+    uint startOffset;
+    uint endOffset;
+    
+    string toString() const {
+        return format("%s:%d:%d", filename, line, column);
+    }
+}
+
+// Forward declarations will be resolved by importing statements and expressions modules
+
+/**
+ * Base class for all AST nodes.
+ * Provides common functionality like location tracking and visitor support.
+ */
+abstract class ASTNode {
+    SourceLocation location;
+    ASTNode parent;
+    
+    this(SourceLocation loc) {
+        location = loc;
+    }
+    
+    // TODO: Add visitor pattern support later
+    abstract override string toString() const;
+}
+
+// TODO: Add visitor pattern support in a future iteration
+
+/**
+ * Abstract base for all declaration nodes
+ */
+abstract class Declaration : ASTNode {
+    string name;
+    bool isPublic;
+    
+    this(SourceLocation loc, string name, bool isPublic = false) {
+        super(loc);
+        this.name = name;
+        this.isPublic = isPublic;
+    }
+}
+
+/**
+ * Abstract base for all type nodes
+ */
+abstract class Type : ASTNode {
+    this(SourceLocation loc) {
+        super(loc);
+    }
+    
+    abstract bool isBasicType() const;
+    abstract bool isPointer() const;
+    abstract bool isArray() const;
+    abstract bool isFunction() const;
+    abstract size_t size() const;
+}
+
+/**
+ * Abstract base for all statement nodes
+ */
+abstract class Statement : ASTNode {
+    this(SourceLocation loc) {
+        super(loc);
+    }
+}
+
+/**
+ * Abstract base for all expression nodes
+ */
+abstract class Expression : ASTNode {
+    Type type;  // Semantic type - filled during semantic analysis
+    
+    this(SourceLocation loc) {
+        super(loc);
+    }
+    
+    abstract bool isConstant() const;
+    abstract bool hasLValue() const;
+}
+
+// ===== DECLARATIONS =====
+
+/**
+ * Function declaration: returnType name(parameters) contracts { body }
+ */
+class FunctionDecl : Declaration {
+    Type returnType;
+    Parameter[] parameters;
+    Statement body_;
+    string[] attributes;  // @safe, @pure, etc.
+    
+    this(SourceLocation loc, string name, Type returnType, 
+         Parameter[] parameters, Statement body_, 
+         string[] attributes = [], bool isPublic = false) {
+        super(loc, name, isPublic);
+        this.returnType = returnType;
+        this.parameters = parameters;
+        this.body_ = body_;
+        this.attributes = attributes;
+    }
+    
+    
+    override string toString() const {
+        return format("FunctionDecl(%s %s)", returnType.toString(), name);
+    }
+}
+
+/**
+ * Function parameter
+ */
+struct Parameter {
+    Type type;
+    string name;
+    Expression defaultValue;  // null if no default
+    
+    string toString() const {
+        if (defaultValue) {
+            return format("%s %s = %s", type.toString(), name, defaultValue.toString());
+        }
+        return format("%s %s", type.toString(), name);
+    }
+}
+
+/**
+ * Class declaration: class Name : BaseClass, Interface { members }
+ */
+class ClassDecl : Declaration {
+    Type baseClass;  // null if no inheritance
+    Type[] interfaces;
+    Declaration[] members;
+    
+    this(SourceLocation loc, string name, Type baseClass, Type[] interfaces,
+         Declaration[] members, bool isPublic = false) {
+        super(loc, name, isPublic);
+        this.baseClass = baseClass;
+        this.interfaces = interfaces;
+        this.members = members;
+    }
+    
+    
+    override string toString() const {
+        return format("ClassDecl(%s)", name);
+    }
+}
+
+/**
+ * Struct declaration: struct Name { members }
+ */
+class StructDecl : Declaration {
+    Declaration[] members;
+    
+    this(SourceLocation loc, string name, Declaration[] members, bool isPublic = false) {
+        super(loc, name, isPublic);
+        this.members = members;
+    }
+    
+    
+    override string toString() const {
+        return format("StructDecl(%s)", name);
+    }
+}
+
+/**
+ * Interface declaration: interface Name : ParentInterfaces { methods }
+ */
+class InterfaceDecl : Declaration {
+    Type[] parentInterfaces;
+    FunctionDecl[] methods;
+    
+    this(SourceLocation loc, string name, Type[] parentInterfaces,
+         FunctionDecl[] methods, bool isPublic = false) {
+        super(loc, name, isPublic);
+        this.parentInterfaces = parentInterfaces;
+        this.methods = methods;
+    }
+    
+    
+    override string toString() const {
+        return format("InterfaceDecl(%s)", name);
+    }
+}
+
+/**
+ * Variable declaration: Type name = initializer;
+ */
+class VariableDecl : Declaration {
+    Type type;
+    Expression initializer;  // null if no initializer
+    
+    this(SourceLocation loc, string name, Type type, 
+         Expression initializer = null, bool isPublic = false) {
+        super(loc, name, isPublic);
+        this.type = type;
+        this.initializer = initializer;
+    }
+    
+    
+    override string toString() const {
+        return format("VariableDecl(%s %s)", type.toString(), name);
+    }
+}
+
+/**
+ * Enum declaration: enum Name { members }
+ */
+class EnumDecl : Declaration {
+    Type baseType;  // underlying type (int by default)
+    EnumMember[] members;
+    
+    this(SourceLocation loc, string name, Type baseType, 
+         EnumMember[] members, bool isPublic = false) {
+        super(loc, name, isPublic);
+        this.baseType = baseType;
+        this.members = members;
+    }
+    
+    
+    override string toString() const {
+        return format("EnumDecl(%s)", name);
+    }
+}
+
+struct EnumMember {
+    string name;
+    Expression value;  // null if auto-calculated
+    
+    string toString() const {
+        if (value) {
+            return format("%s = %s", name, value.toString());
+        }
+        return name;
+    }
+}
+
+// ===== TYPES =====
+
+/**
+ * Basic types: int, float, bool, void, etc.
+ */
+class BasicType : Type {
+    enum Kind {
+        Void, Bool,
+        Int8, Int16, Int32, Int64,
+        UInt8, UInt16, UInt32, UInt64,
+        Float32, Float64,
+        Char
+    }
+    
+    Kind kind;
+    
+    this(SourceLocation loc, Kind kind) {
+        super(loc);
+        this.kind = kind;
+    }
+    
+    override bool isBasicType() const { return true; }
+    override bool isPointer() const { return false; }
+    override bool isArray() const { return false; }
+    override bool isFunction() const { return false; }
+    
+    override size_t size() const {
+        final switch (kind) {
+            case Kind.Void: return 0;
+            case Kind.Bool: return 1;
+            case Kind.Int8, Kind.UInt8, Kind.Char: return 1;
+            case Kind.Int16, Kind.UInt16: return 2;
+            case Kind.Int32, Kind.UInt32, Kind.Float32: return 4;
+            case Kind.Int64, Kind.UInt64, Kind.Float64: return 8;
+        }
+    }
+    
+    
+    override string toString() const {
+        final switch (kind) {
+            case Kind.Void: return "void";
+            case Kind.Bool: return "bool";
+            case Kind.Int8: return "byte";
+            case Kind.Int16: return "short";
+            case Kind.Int32: return "int";
+            case Kind.Int64: return "long";
+            case Kind.UInt8: return "ubyte";
+            case Kind.UInt16: return "ushort";
+            case Kind.UInt32: return "uint";
+            case Kind.UInt64: return "ulong";
+            case Kind.Float32: return "float";
+            case Kind.Float64: return "double";
+            case Kind.Char: return "char";
+        }
+    }
+}
+
+/**
+ * Array types: Type[] or Type[size]
+ */
+class ArrayType : Type {
+    Type elementType;
+    Expression arraySize;  // null for dynamic arrays
+    
+    this(SourceLocation loc, Type elementType, Expression arraySize = null) {
+        super(loc);
+        this.elementType = elementType;
+        this.arraySize = arraySize;
+    }
+    
+    override bool isBasicType() const { return false; }
+    override bool isPointer() const { return false; }
+    override bool isArray() const { return true; }
+    override bool isFunction() const { return false; }
+    
+    override size_t size() const {
+        // Dynamic arrays are just pointers (8 bytes on 64-bit)
+        if (!arraySize) return 8;
+        // Static arrays: element_size * count
+        // TODO: evaluate size expression during semantic analysis
+        return elementType.size() * 1;  // Placeholder
+    }
+    
+    
+    override string toString() const {
+        if (arraySize) {
+            return format("%s[%s]", elementType.toString(), arraySize.toString());
+        }
+        return format("%s[]", elementType.toString());
+    }
+}
+
+/**
+ * Pointer types: Type*
+ */
+class PointerType : Type {
+    Type pointeeType;
+    
+    this(SourceLocation loc, Type pointeeType) {
+        super(loc);
+        this.pointeeType = pointeeType;
+    }
+    
+    override bool isBasicType() const { return false; }
+    override bool isPointer() const { return true; }
+    override bool isArray() const { return false; }
+    override bool isFunction() const { return false; }
+    override size_t size() const { return 8; }  // 64-bit pointers
+    
+    
+    override string toString() const {
+        return format("%s*", pointeeType.toString());
+    }
+}
+
+/**
+ * Function types: ReturnType function(Parameters)
+ */
+class FunctionType : Type {
+    Type returnType;
+    Type[] parameterTypes;
+    
+    this(SourceLocation loc, Type returnType, Type[] parameterTypes) {
+        super(loc);
+        this.returnType = returnType;
+        this.parameterTypes = parameterTypes;
+    }
+    
+    override bool isBasicType() const { return false; }
+    override bool isPointer() const { return false; }
+    override bool isArray() const { return false; }
+    override bool isFunction() const { return true; }
+    override size_t size() const { return 8; }  // Function pointer size
+    
+    
+    override string toString() const {
+        string params = "";
+        foreach (i, param; parameterTypes) {
+            if (i > 0) params ~= ", ";
+            params ~= param.toString();
+        }
+        return format("%s function(%s)", returnType.toString(), params);
+    }
+}
+
+/**
+ * User-defined types: struct/class/interface names
+ */
+class UserType : Type {
+    string name;
+    Declaration declaration;  // Set during semantic analysis
+    
+    this(SourceLocation loc, string name) {
+        super(loc);
+        this.name = name;
+    }
+    
+    override bool isBasicType() const { return false; }
+    override bool isPointer() const { return false; }
+    override bool isArray() const { return false; }
+    override bool isFunction() const { return false; }
+    
+    override size_t size() const {
+        // TODO: Calculate size from declaration during semantic analysis
+        return 8;  // Placeholder
+    }
+    
+    
+    override string toString() const {
+        return name;
+    }
+}
