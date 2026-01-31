@@ -571,8 +571,31 @@ class TreeSitterBridge {
      */
     IfStatement parseIfStatement(TSNode node, SourceLocation loc) {
         TSNode conditionNode = TreeSitterParser.getChildByFieldName(node, "condition");
-        TSNode thenNode = TreeSitterParser.getChildByFieldName(node, "then_statement");
-        TSNode elseNode = TreeSitterParser.getChildByFieldName(node, "else_statement");
+        TSNode thenNode = TreeSitterParser.getChildByFieldName(node, "consequence");
+        TSNode elseNode = TreeSitterParser.getChildByFieldName(node, "alternative");
+        
+        // Fallback for if_condition node
+        if (!TreeSitterParser.isValid(conditionNode)) {
+            uint childCount = TreeSitterParser.getChildCount(node);
+            for (uint i = 0; i < childCount; i++) {
+                TSNode child = TreeSitterParser.getChild(node, i);
+                if (TreeSitterParser.getNodeType(child) == "if_condition") {
+                    // if_condition usually has '(' expression ')'
+                    uint condChildren = TreeSitterParser.getChildCount(child);
+                    for (uint j = 0; j < condChildren; j++) {
+                        TSNode condChild = TreeSitterParser.getChild(child, j);
+                        if (TreeSitterParser.getNodeType(condChild).endsWith("expression") || 
+                            TreeSitterParser.getNodeType(condChild) == "identifier") {
+                            conditionNode = condChild;
+                            break;
+                        }
+                    }
+                }
+                if (TreeSitterParser.getNodeType(child).endsWith("statement") && !TreeSitterParser.isValid(thenNode)) {
+                    thenNode = child;
+                }
+            }
+        }
         
         if (!TreeSitterParser.isValid(conditionNode) || !TreeSitterParser.isValid(thenNode)) {
             throw new ParseError("If statement missing condition or body", loc);
@@ -666,25 +689,22 @@ class TreeSitterBridge {
         SourceLocation loc = makeSourceLocation(node);
         string nodeType = TreeSitterParser.getNodeType(node);
         
-        // Debug: print node info
-        writeln("Parsing expression: ", nodeType, " with ", TreeSitterParser.getChildCount(node), " children");
-        for (uint i = 0; i < TreeSitterParser.getChildCount(node); i++) {
-            writeln("  Child ", i, ": ", TreeSitterParser.getNodeType(TreeSitterParser.getChild(node, i)), 
-                    " (field: ", TreeSitterParser.getChildFieldName(node, i), ")");
-        }
-        
-        // Handle expression wrapper node
-        if (nodeType == "expression") {
-            // Look for the actual expression inside the expression node
+        // Handle expression wrapper node or specific expression types that are just wrappers
+        if (nodeType == "expression" || nodeType == "unary_expression" || nodeType == "binary_expression") {
             uint childCount = TreeSitterParser.getChildCount(node);
-            for (uint i = 0; i < childCount; i++) {
-                TSNode child = TreeSitterParser.getChild(node, i);
-                return parseExpression(child);
+            if (childCount == 1) {
+                return parseExpression(TreeSitterParser.getChild(node, 0));
             }
         }
         
         switch (nodeType) {
             case "binary_expression":
+            case "add_expression":
+            case "mul_expression":
+            case "rel_expression":
+            case "equal_expression":
+            case "and_expression":
+            case "or_expression":
                 return parseBinaryExpression(node, loc);
             case "unary_expression":
                 return parseUnaryExpression(node, loc);
@@ -725,12 +745,24 @@ class TreeSitterBridge {
      * Parse binary expression
      */
     BinaryExpression parseBinaryExpression(TSNode node, SourceLocation loc) {
-        TSNode leftNode = TreeSitterParser.getChildByFieldName(node, "left");
-        TSNode operatorNode = TreeSitterParser.getChildByFieldName(node, "operator");
-        TSNode rightNode = TreeSitterParser.getChildByFieldName(node, "right");
+        TSNode leftNode, operatorNode, rightNode;
+        
+        uint childCount = TreeSitterParser.getChildCount(node);
+        if (childCount >= 3) {
+            // Usually: left operator right
+            leftNode = TreeSitterParser.getChild(node, 0);
+            operatorNode = TreeSitterParser.getChild(node, 1);
+            rightNode = TreeSitterParser.getChild(node, 2);
+        } else {
+            // Try field names just in case
+            leftNode = TreeSitterParser.getChildByFieldName(node, "left");
+            operatorNode = TreeSitterParser.getChildByFieldName(node, "operator");
+            rightNode = TreeSitterParser.getChildByFieldName(node, "right");
+        }
         
         if (!TreeSitterParser.isValid(leftNode) || !TreeSitterParser.isValid(operatorNode) || !TreeSitterParser.isValid(rightNode)) {
-            throw new ParseError("Binary expression missing operands or operator", loc);
+            // For binary expressions with 1 child (wrappers), they should have been caught in parseExpression
+            throw new ParseError("Binary expression missing operands or operator: " ~ TreeSitterParser.getNodeType(node), loc);
         }
         
         Expression left = parseExpression(leftNode);
@@ -816,15 +848,28 @@ class TreeSitterBridge {
         TSNode argumentsNode = TreeSitterParser.getChildByFieldName(node, "arguments");
         
         if (!TreeSitterParser.isValid(functionNode)) {
-            // Try fallback - first child is usually the function
             functionNode = TreeSitterParser.getChild(node, 0);
-            if (!TreeSitterParser.isValid(functionNode)) {
-                throw new ParseError("Call expression missing function", loc);
-            }
+        }
+        
+        if (!TreeSitterParser.isValid(functionNode)) {
+            throw new ParseError("Call expression missing function", loc);
         }
         
         Expression function_ = parseExpression(functionNode);
         Expression[] arguments;
+        
+        if (!TreeSitterParser.isValid(argumentsNode)) {
+            // Look for arguments in other nodes like named_arguments
+            uint childCount = TreeSitterParser.getChildCount(node);
+            for (uint i = 0; i < childCount; i++) {
+                TSNode child = TreeSitterParser.getChild(node, i);
+                string type = TreeSitterParser.getNodeType(child);
+                if (type == "named_arguments" || type == "arguments") {
+                    argumentsNode = child;
+                    break;
+                }
+            }
+        }
         
         if (TreeSitterParser.isValid(argumentsNode)) {
             uint childCount = TreeSitterParser.getChildCount(argumentsNode);
@@ -832,12 +877,11 @@ class TreeSitterBridge {
                 TSNode child = TreeSitterParser.getChild(argumentsNode, i);
                 string nodeType = TreeSitterParser.getNodeType(child);
                 
-                // Only parse children that are actually expressions
                 if (nodeType != "(" && nodeType != ")" && nodeType != ",") {
                     try {
                         arguments ~= parseExpression(child);
                     } catch (ParseError e) {
-                        // Skip invalid arguments
+                        // Skip punctuation or garbage
                     }
                 }
             }
