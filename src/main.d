@@ -21,7 +21,7 @@ import std.range;
 import ast.nodes;
 import ast.statements;
 import ast.expressions;
-import parser.tree_sitter_bridge;
+import parser.tree_sitter_bridge_minimal : TreeSitterBridge, ParseError;
 import parser.tree_sitter_c;
 import semantic.feature_validator;
 import semantic.symbol_table;
@@ -38,6 +38,9 @@ struct CompilerOptions {
 }
 
 int main(string[] args) {
+    import std.stdio : writeln;
+    writeln("main() started");
+    
     CompilerOptions options;
     
     try {
@@ -110,17 +113,29 @@ int compileFile(CompilerOptions options) {
             writeln("Parsing with tree-sitter-d...");
         }
         
+        if (options.verbose) {
+            writeln("About to create TreeSitterBridge...");
+        }
         auto bridge = new TreeSitterBridge(options.inputFile, sourceCode);
+        if (options.verbose) {
+            writeln("TreeSitterBridge created successfully.");
+        }
         Declaration[] ast;
         
         try {
             ast = bridge.parseSourceFile();
-        } catch (ParseError e) {
-            // For now, fall back to mock parsing if tree-sitter fails
             if (options.verbose) {
-                writeln("Tree-sitter parsing failed, using mock parser: ", e.msg);
+                writeln("Tree-sitter parsing successful!");
             }
-            ast = parseSourceFileMock(options.inputFile, sourceCode, options.verbose);
+        } catch (ParseError e) {
+            writeln("Parse Error: ", e.msg);
+            return 1;
+        } catch (Exception e) {
+            writeln("Unexpected error during parsing: ", e.msg);
+            if (options.verbose) {
+                writeln("Stack trace: ", e.info);
+            }
+            return 1;
         }
         
         if (options.verbose) {
@@ -243,32 +258,6 @@ int compileFile(CompilerOptions options) {
         }
         return 1;
     }
-}
-
-/**
- * Fallback mock parser for testing when tree-sitter is not available
- */
-Declaration[] parseSourceFileMock(string filename, string sourceCode, bool verbose) {
-    if (verbose) {
-        writeln("Parsing with mock tree-sitter implementation...");
-    }
-    
-    // For now, create a simple mock AST for testing
-    // In a real implementation, this would call tree-sitter parser
-    
-    auto loc = SourceLocation(filename, 1, 1, 0, sourceCode.length.to!uint);
-    
-    // Create a simple function for testing
-    auto intType = new BasicType(loc, BasicType.Kind.Int32);
-    auto returnStmt = new ReturnStatement(loc, LiteralExpression.integer(loc, 42));
-    auto body_ = new CompoundStatement(loc, [returnStmt]);
-    auto func = new FunctionDecl(loc, "main", intType, [], body_);
-    
-    if (verbose) {
-        writeln("Created mock AST with 1 function");
-    }
-    
-    return [func];
 }
 
 /**

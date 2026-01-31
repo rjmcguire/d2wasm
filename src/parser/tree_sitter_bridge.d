@@ -48,53 +48,82 @@ class TreeSitterBridge {
      * Parse the source file and return AST declarations
      */
     Declaration[] parseSourceFile() {
-        auto root = parser.parseString(sourceText);
-        return parseSourceFileNode(root);
+        try {
+            auto root = parser.parseString(sourceText);
+            if (!TreeSitterParser.isValid(root)) {
+                throw new ParseError("Invalid parse tree root", SourceLocation(filename, 1, 1, 0, 0));
+            }
+            return parseSourceFileNode(root);
+        } catch (Exception e) {
+            import std.stdio : writeln;
+            writeln("Exception in parseSourceFile: ", e.msg);
+            throw e;
+        }
     }
     
     /**
      * Convert a tree-sitter parse tree root to our AST
      */
     Declaration[] parseSourceFileNode(TSNode root) {
-        if (!TreeSitterParser.isValid(root)) {
-            throw new ParseError("Invalid parse tree root", SourceLocation(filename, 1, 1, 0, 0));
-        }
-        
-        if (TreeSitterParser.hasError(root)) {
-            throw new ParseError("Parse errors in source file", SourceLocation(filename, 1, 1, 0, 0));
-        }
-        
-        Declaration[] declarations;
-        
-        uint childCount = TreeSitterParser.getChildCount(root);
-        for (uint i = 0; i < childCount; i++) {
-            TSNode child = TreeSitterParser.getChild(root, i);
-            string nodeType = TreeSitterParser.getNodeType(child);
+        try {
+            import std.stdio : writeln;
             
-            try {
-                if (nodeType == "function_declaration") {
-                    declarations ~= parseFunctionDeclaration(child);
-                } else if (nodeType == "class_declaration") {
-                    declarations ~= parseClassDeclaration(child);
-                } else if (nodeType == "struct_declaration") {
-                    declarations ~= parseStructDeclaration(child);
-                } else if (nodeType == "interface_declaration") {
-                    declarations ~= parseInterfaceDeclaration(child);
-                } else if (nodeType == "variable_declaration") {
-                    declarations ~= parseVariableDeclaration(child);
-                } else if (nodeType == "enum_declaration") {
-                    declarations ~= parseEnumDeclaration(child);
-                } else if (nodeType != "comment" && nodeType.length > 0) {
-                    // Skip comments and whitespace, but warn about unknown nodes
-                    writeln("Warning: Skipping unknown top-level node: ", nodeType);
-                }
-            } catch (ParseError e) {
-                writeln("Parse error in ", nodeType, ": ", e.msg);
-                // Continue parsing other declarations
+            if (!TreeSitterParser.isValid(root)) {
+                throw new ParseError("Invalid parse tree root", SourceLocation(filename, 1, 1, 0, 0));
             }
+            
+            if (TreeSitterParser.hasError(root)) {
+                throw new ParseError("Parse errors in source file", SourceLocation(filename, 1, 1, 0, 0));
+            }
+            
+            Declaration[] declarations;
+            
+            uint childCount = TreeSitterParser.getChildCount(root);
+            writeln("Root has ", childCount, " children");
+            
+            for (uint i = 0; i < childCount; i++) {
+                TSNode child = TreeSitterParser.getChild(root, i);
+                if (!TreeSitterParser.isValid(child)) {
+                    writeln("Warning: Invalid child node at index ", i);
+                    continue;
+                }
+                
+                string nodeType = TreeSitterParser.getNodeType(child);
+                writeln("Processing child ", i, " of type: ", nodeType);
+                
+                try {
+                    if (nodeType == "function_declaration") {
+                        auto decl = parseFunctionDeclaration(child);
+                        declarations ~= decl;
+                        writeln("Successfully parsed function declaration");
+                    } else if (nodeType == "class_declaration") {
+                        declarations ~= parseClassDeclaration(child);
+                    } else if (nodeType == "struct_declaration") {
+                        declarations ~= parseStructDeclaration(child);
+                    } else if (nodeType == "interface_declaration") {
+                        declarations ~= parseInterfaceDeclaration(child);
+                    } else if (nodeType == "variable_declaration") {
+                        declarations ~= parseVariableDeclaration(child);
+                    } else if (nodeType == "enum_declaration") {
+                        declarations ~= parseEnumDeclaration(child);
+                    } else if (nodeType != "comment" && nodeType.length > 0) {
+                        writeln("Warning: Skipping unknown top-level node: ", nodeType);
+                    }
+                } catch (ParseError e) {
+                    writeln("Parse error in ", nodeType, ": ", e.msg);
+                    // Continue parsing other declarations
+                } catch (Exception e) {
+                    writeln("Unexpected error in ", nodeType, ": ", e.msg);
+                    // Continue parsing other declarations
+                }
+            }
+            
+            return declarations;
+        } catch (Exception e) {
+            import std.stdio : writeln;
+            writeln("Exception in parseSourceFileNode: ", e.msg);
+            throw e;
         }
-        
-        return declarations;
     }
     
     /**
@@ -103,23 +132,38 @@ class TreeSitterBridge {
     FunctionDecl parseFunctionDeclaration(TSNode node) {
         SourceLocation loc = makeSourceLocation(node);
         
-        // Extract components using real tree-sitter field access
-        TSNode returnTypeNode = TreeSitterParser.getChildByFieldName(node, "return_type");
-        TSNode nameNode = TreeSitterParser.getChildByFieldName(node, "name");
-        TSNode parametersNode = TreeSitterParser.getChildByFieldName(node, "parameters");
-        TSNode bodyNode = TreeSitterParser.getChildByFieldName(node, "body");
+        // Parse function declaration by examining children in order:
+        // 1. type (return type)
+        // 2. identifier (function name) 
+        // 3. parameters
+        // 4. function_body
+        
+        TSNode returnTypeNode, nameNode, parametersNode, bodyNode;
+        
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string nodeType = TreeSitterParser.getNodeType(child);
+            
+            if (nodeType == "type" && !TreeSitterParser.isValid(returnTypeNode)) {
+                returnTypeNode = child;
+            } else if (nodeType == "identifier" && !TreeSitterParser.isValid(nameNode)) {
+                nameNode = child;
+            } else if (nodeType == "parameters") {
+                parametersNode = child;
+            } else if (nodeType == "function_body") {
+                bodyNode = child;
+            }
+        }
         
         if (!TreeSitterParser.isValid(nameNode)) {
             throw new ParseError("Function declaration missing name", loc);
         }
         
         string name = TreeSitterParser.getNodeText(nameNode, sourceText);
-        if (name.length == 0) {
-            name = nameNode.text;  // fallback to stored text
-        }
-        Type returnType = !TreeSitterParser.isValid(returnTypeNode) ? 
-            new BasicType(loc, BasicType.Kind.Void) : 
-            parseType(returnTypeNode);
+        Type returnType = TreeSitterParser.isValid(returnTypeNode) ? 
+            parseType(returnTypeNode) : 
+            new BasicType(loc, BasicType.Kind.Void);
         
         Parameter[] parameters;
         if (TreeSitterParser.isValid(parametersNode)) {
@@ -128,7 +172,7 @@ class TreeSitterBridge {
         
         Statement body_;
         if (TreeSitterParser.isValid(bodyNode)) {
-            body_ = parseStatement(bodyNode);
+            body_ = parseFunctionBody(bodyNode);
         } else {
             // Abstract function or declaration
             body_ = null;
@@ -146,25 +190,91 @@ class TreeSitterBridge {
     Parameter[] parseParameterList(TSNode parametersNode) {
         Parameter[] parameters;
         
-        foreach (child; parametersNode.children) {
-            if (child.nodeType == "parameter") {
-                TSNode typeNode = TreeSitterParser.getChildByFieldName(*child, "type");
-                TSNode nameNode = TreeSitterParser.getChildByFieldName(*child, "name");
-                TSNode defaultNode = TreeSitterParser.getChildByFieldName(*child, "default_value");
-                
-                if (typeNode.isNull() || nameNode.isNull()) {
-                    continue;  // Skip malformed parameters
-                }
-                
-                Type paramType = parseType(typeNode);
-                string paramName = nameNode.text;
-                Expression defaultValue = defaultNode.isNull() ? null : parseExpression(defaultNode);
-                
-                parameters ~= Parameter(paramType, paramName, defaultValue);
+        uint childCount = TreeSitterParser.getChildCount(parametersNode);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(parametersNode, i);
+            string nodeType = TreeSitterParser.getNodeType(child);
+            
+            if (nodeType == "parameter") {
+                parameters ~= parseParameter(child);
             }
         }
         
         return parameters;
+    }
+    
+    /**
+     * Parse a single parameter
+     */
+    Parameter parseParameter(TSNode parameterNode) {
+        // Parameter structure: type identifier [default_value]
+        TSNode typeNode, nameNode, defaultNode;
+        
+        uint childCount = TreeSitterParser.getChildCount(parameterNode);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(parameterNode, i);
+            string nodeType = TreeSitterParser.getNodeType(child);
+            
+            if (nodeType == "type" && !TreeSitterParser.isValid(typeNode)) {
+                typeNode = child;
+            } else if (nodeType == "identifier" && !TreeSitterParser.isValid(nameNode)) {
+                nameNode = child;
+            } else if (nodeType == "default_value") {
+                defaultNode = child;
+            }
+        }
+        
+        if (!TreeSitterParser.isValid(typeNode) || !TreeSitterParser.isValid(nameNode)) {
+            throw new ParseError("Parameter missing type or name", makeSourceLocation(parameterNode));
+        }
+        
+        Type paramType = parseType(typeNode);
+        string paramName = TreeSitterParser.getNodeText(nameNode, sourceText);
+        Expression defaultValue = TreeSitterParser.isValid(defaultNode) ? parseExpression(defaultNode) : null;
+        
+        return Parameter(paramType, paramName, defaultValue);
+    }
+    
+    /**
+     * Parse function body
+     */
+    Statement parseFunctionBody(TSNode bodyNode) {
+        uint childCount = TreeSitterParser.getChildCount(bodyNode);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(bodyNode, i);
+            string nodeType = TreeSitterParser.getNodeType(child);
+            
+            if (nodeType == "block_statement") {
+                return parseBlockStatement(child);
+            }
+        }
+        
+        throw new ParseError("Function body missing block statement", makeSourceLocation(bodyNode));
+    }
+    
+    /**
+     * Parse block statement
+     */
+    CompoundStatement parseBlockStatement(TSNode node) {
+        SourceLocation loc = makeSourceLocation(node);
+        Statement[] statements;
+        
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string nodeType = TreeSitterParser.getNodeType(child);
+            
+            // Skip braces and parse actual statements
+            if (nodeType != "{" && nodeType != "}") {
+                try {
+                    statements ~= parseStatement(child);
+                } catch (ParseError e) {
+                    writeln("Warning: Skipping statement due to parse error: ", e.msg);
+                }
+            }
+        }
+        
+        return new CompoundStatement(loc, statements);
     }
     
     /**
@@ -174,11 +284,11 @@ class TreeSitterBridge {
         SourceLocation loc = makeSourceLocation(node);
         
         TSNode nameNode = TreeSitterParser.getChildByFieldName(node, "name");
-        if (nameNode.isNull()) {
+        if (!TreeSitterParser.isValid(nameNode)) {
             throw new ParseError("Class declaration missing name", loc);
         }
         
-        string name = nameNode.text;
+        string name = TreeSitterParser.getNodeText(nameNode, sourceText);
         
         // TODO: Parse base class and interfaces
         Type baseClass = null;
@@ -197,11 +307,11 @@ class TreeSitterBridge {
         SourceLocation loc = makeSourceLocation(node);
         
         TSNode nameNode = TreeSitterParser.getChildByFieldName(node, "name");
-        if (nameNode.isNull()) {
+        if (!TreeSitterParser.isValid(nameNode)) {
             throw new ParseError("Struct declaration missing name", loc);
         }
         
-        string name = nameNode.text;
+        string name = TreeSitterParser.getNodeText(nameNode, sourceText);
         
         // TODO: Parse struct members
         Declaration[] members;
@@ -216,11 +326,11 @@ class TreeSitterBridge {
         SourceLocation loc = makeSourceLocation(node);
         
         TSNode nameNode = TreeSitterParser.getChildByFieldName(node, "name");
-        if (nameNode.isNull()) {
+        if (!TreeSitterParser.isValid(nameNode)) {
             throw new ParseError("Interface declaration missing name", loc);
         }
         
-        string name = nameNode.text;
+        string name = TreeSitterParser.getNodeText(nameNode, sourceText);
         
         // TODO: Parse parent interfaces and methods
         Type[] parentInterfaces;
@@ -239,13 +349,13 @@ class TreeSitterBridge {
         TSNode nameNode = TreeSitterParser.getChildByFieldName(node, "name");
         TSNode initNode = TreeSitterParser.getChildByFieldName(node, "initializer");
         
-        if (typeNode.isNull() || nameNode.isNull()) {
+        if (!TreeSitterParser.isValid(typeNode) || !TreeSitterParser.isValid(nameNode)) {
             throw new ParseError("Variable declaration missing type or name", loc);
         }
         
         Type varType = parseType(typeNode);
-        string name = nameNode.text;
-        Expression initializer = initNode.isNull() ? null : parseExpression(initNode);
+        string name = TreeSitterParser.getNodeText(nameNode, sourceText);
+        Expression initializer = TreeSitterParser.isValid(initNode) ? parseExpression(initNode) : null;
         
         return new VariableDecl(loc, name, varType, initializer);
     }
@@ -257,11 +367,11 @@ class TreeSitterBridge {
         SourceLocation loc = makeSourceLocation(node);
         
         TSNode nameNode = TreeSitterParser.getChildByFieldName(node, "name");
-        if (nameNode.isNull()) {
+        if (!TreeSitterParser.isValid(nameNode)) {
             throw new ParseError("Enum declaration missing name", loc);
         }
         
-        string name = nameNode.text;
+        string name = TreeSitterParser.getNodeText(nameNode, sourceText);
         
         // TODO: Parse base type and enum members
         Type baseType = new BasicType(loc, BasicType.Kind.Int32);
@@ -275,26 +385,59 @@ class TreeSitterBridge {
      */
     Type parseType(TSNode node) {
         SourceLocation loc = makeSourceLocation(node);
+        string nodeType = TreeSitterParser.getNodeType(node);
         
-        switch (node.nodeType) {
-            case "basic_type":
-                return parseBasicType(node, loc);
+        // Handle different type node structures
+        if (nodeType == "type") {
+            // Look for the actual type inside the type node
+            uint childCount = TreeSitterParser.getChildCount(node);
+            for (uint i = 0; i < childCount; i++) {
+                TSNode child = TreeSitterParser.getChild(node, i);
+                return parseType(child);
+            }
+        }
+        
+        switch (nodeType) {
+            case "int":
+                return new BasicType(loc, BasicType.Kind.Int32);
+            case "void":
+                return new BasicType(loc, BasicType.Kind.Void);
+            case "bool":
+                return new BasicType(loc, BasicType.Kind.Bool);
+            case "byte":
+                return new BasicType(loc, BasicType.Kind.Int8);
+            case "short":
+                return new BasicType(loc, BasicType.Kind.Int16);
+            case "long":
+                return new BasicType(loc, BasicType.Kind.Int64);
+            case "ubyte":
+                return new BasicType(loc, BasicType.Kind.UInt8);
+            case "ushort":
+                return new BasicType(loc, BasicType.Kind.UInt16);
+            case "uint":
+                return new BasicType(loc, BasicType.Kind.UInt32);
+            case "ulong":
+                return new BasicType(loc, BasicType.Kind.UInt64);
+            case "float":
+                return new BasicType(loc, BasicType.Kind.Float32);
+            case "double":
+                return new BasicType(loc, BasicType.Kind.Float64);
+            case "char":
+                return new BasicType(loc, BasicType.Kind.Char);
             case "array_type":
                 return parseArrayType(node, loc);
             case "pointer_type":
                 return parsePointerType(node, loc);
             case "identifier":
-                return new UserType(loc, node.text);
-            case "return_type":  // Mock parser creates this
-                return parseBasicType(node, loc);
+                return new UserType(loc, TreeSitterParser.getNodeText(node, sourceText));
             default:
-                // For mock parser, try to parse the text directly as a basic type
-                return parseBasicTypeByText(node.text, loc);
+                // Try to parse the text directly as a basic type
+                return parseBasicTypeByText(TreeSitterParser.getNodeText(node, sourceText), loc);
         }
     }
     
     /**
-     * Parse basic type by text content (for mock parser)
+     * Parse basic type by text content
      */
     BasicType parseBasicTypeByText(string typeName, SourceLocation loc) {
         switch (typeName) {
@@ -320,7 +463,7 @@ class TreeSitterBridge {
      * Parse basic type
      */
     BasicType parseBasicType(TSNode node, SourceLocation loc) {
-        string typeName = node.text;
+        string typeName = TreeSitterParser.getNodeText(node, sourceText);
         
         switch (typeName) {
             case "void": return new BasicType(loc, BasicType.Kind.Void);
@@ -348,12 +491,12 @@ class TreeSitterBridge {
         TSNode elementTypeNode = TreeSitterParser.getChildByFieldName(node, "element_type");
         TSNode sizeNode = TreeSitterParser.getChildByFieldName(node, "size");
         
-        if (elementTypeNode.isNull()) {
+        if (!TreeSitterParser.isValid(elementTypeNode)) {
             throw new ParseError("Array type missing element type", loc);
         }
         
         Type elementType = parseType(elementTypeNode);
-        Expression size = sizeNode.isNull() ? null : parseExpression(sizeNode);
+        Expression size = TreeSitterParser.isValid(sizeNode) ? parseExpression(sizeNode) : null;
         
         return new ArrayType(loc, elementType, size);
     }
@@ -364,7 +507,7 @@ class TreeSitterBridge {
     PointerType parsePointerType(TSNode node, SourceLocation loc) {
         TSNode pointeeTypeNode = TreeSitterParser.getChildByFieldName(node, "pointee_type");
         
-        if (pointeeTypeNode.isNull()) {
+        if (!TreeSitterParser.isValid(pointeeTypeNode)) {
             throw new ParseError("Pointer type missing pointee type", loc);
         }
         
@@ -377,10 +520,11 @@ class TreeSitterBridge {
      */
     Statement parseStatement(TSNode node) {
         SourceLocation loc = makeSourceLocation(node);
+        string nodeType = TreeSitterParser.getNodeType(node);
         
-        switch (node.nodeType) {
-            case "compound_statement":
-                return parseCompoundStatement(node, loc);
+        switch (nodeType) {
+            case "block_statement":
+                return parseBlockStatement(node);
             case "if_statement":
                 return parseIfStatement(node, loc);
             case "while_statement":
@@ -392,7 +536,7 @@ class TreeSitterBridge {
             case "expression_statement":
                 return parseExpressionStatement(node, loc);
             default:
-                throw new ParseError("Unknown statement node: " ~ node.nodeType, loc);
+                throw new ParseError("Unknown statement node: " ~ nodeType, loc);
         }
     }
     
@@ -402,9 +546,13 @@ class TreeSitterBridge {
     CompoundStatement parseCompoundStatement(TSNode node, SourceLocation loc) {
         Statement[] statements;
         
-        foreach (child; node.children) {
-            if (child.nodeType != "{" && child.nodeType != "}") {
-                statements ~= parseStatement(*child);
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string nodeType = TreeSitterParser.getNodeType(child);
+            
+            if (nodeType != "{" && nodeType != "}") {
+                statements ~= parseStatement(child);
             }
         }
         
@@ -419,13 +567,13 @@ class TreeSitterBridge {
         TSNode thenNode = TreeSitterParser.getChildByFieldName(node, "then_statement");
         TSNode elseNode = TreeSitterParser.getChildByFieldName(node, "else_statement");
         
-        if (conditionNode.isNull() || thenNode.isNull()) {
+        if (!TreeSitterParser.isValid(conditionNode) || !TreeSitterParser.isValid(thenNode)) {
             throw new ParseError("If statement missing condition or body", loc);
         }
         
         Expression condition = parseExpression(conditionNode);
         Statement thenStatement = parseStatement(thenNode);
-        Statement elseStatement = elseNode.isNull() ? null : parseStatement(elseNode);
+        Statement elseStatement = TreeSitterParser.isValid(elseNode) ? parseStatement(elseNode) : null;
         
         return new IfStatement(loc, condition, thenStatement, elseStatement);
     }
@@ -437,7 +585,7 @@ class TreeSitterBridge {
         TSNode conditionNode = TreeSitterParser.getChildByFieldName(node, "condition");
         TSNode bodyNode = TreeSitterParser.getChildByFieldName(node, "body");
         
-        if (conditionNode.isNull() || bodyNode.isNull()) {
+        if (!TreeSitterParser.isValid(conditionNode) || !TreeSitterParser.isValid(bodyNode)) {
             throw new ParseError("While statement missing condition or body", loc);
         }
         
@@ -456,13 +604,13 @@ class TreeSitterBridge {
         TSNode updateNode = TreeSitterParser.getChildByFieldName(node, "update");
         TSNode bodyNode = TreeSitterParser.getChildByFieldName(node, "body");
         
-        if (bodyNode.isNull()) {
+        if (!TreeSitterParser.isValid(bodyNode)) {
             throw new ParseError("For statement missing body", loc);
         }
         
-        Statement init = initNode.isNull() ? null : parseStatement(initNode);
-        Expression condition = conditionNode.isNull() ? null : parseExpression(conditionNode);
-        Expression update = updateNode.isNull() ? null : parseExpression(updateNode);
+        Statement init = TreeSitterParser.isValid(initNode) ? parseStatement(initNode) : null;
+        Expression condition = TreeSitterParser.isValid(conditionNode) ? parseExpression(conditionNode) : null;
+        Expression update = TreeSitterParser.isValid(updateNode) ? parseExpression(updateNode) : null;
         Statement body_ = parseStatement(bodyNode);
         
         return new ForStatement(loc, init, condition, update, body_);
@@ -472,9 +620,21 @@ class TreeSitterBridge {
      * Parse return statement
      */
     ReturnStatement parseReturnStatement(TSNode node, SourceLocation loc) {
-        TSNode valueNode = TreeSitterParser.getChildByFieldName(node, "value");
+        // Return statement structure: return [expression]
+        TSNode expressionNode;
         
-        Expression value = valueNode.isNull() ? null : parseExpression(valueNode);
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string nodeType = TreeSitterParser.getNodeType(child);
+            
+            if (nodeType == "expression") {
+                expressionNode = child;
+                break;
+            }
+        }
+        
+        Expression value = TreeSitterParser.isValid(expressionNode) ? parseExpression(expressionNode) : null;
         return new ReturnStatement(loc, value);
     }
     
@@ -484,7 +644,7 @@ class TreeSitterBridge {
     ExpressionStatement parseExpressionStatement(TSNode node, SourceLocation loc) {
         TSNode exprNode = TreeSitterParser.getChildByFieldName(node, "expression");
         
-        if (exprNode.isNull()) {
+        if (!TreeSitterParser.isValid(exprNode)) {
             throw new ParseError("Expression statement missing expression", loc);
         }
         
@@ -497,8 +657,19 @@ class TreeSitterBridge {
      */
     Expression parseExpression(TSNode node) {
         SourceLocation loc = makeSourceLocation(node);
+        string nodeType = TreeSitterParser.getNodeType(node);
         
-        switch (node.nodeType) {
+        // Handle expression wrapper node
+        if (nodeType == "expression") {
+            // Look for the actual expression inside the expression node
+            uint childCount = TreeSitterParser.getChildCount(node);
+            for (uint i = 0; i < childCount; i++) {
+                TSNode child = TreeSitterParser.getChild(node, i);
+                return parseExpression(child);
+            }
+        }
+        
+        switch (nodeType) {
             case "binary_expression":
                 return parseBinaryExpression(node, loc);
             case "unary_expression":
@@ -510,15 +681,21 @@ class TreeSitterBridge {
             case "member_expression":
                 return parseMemberExpression(node, loc);
             case "identifier":
-                return new IdentifierExpression(loc, node.text);
-            case "integer_literal":
-                return LiteralExpression.integer(loc, to!long(node.text));
+                return new IdentifierExpression(loc, TreeSitterParser.getNodeText(node, sourceText));
+            case "int_literal":
+                return LiteralExpression.integer(loc, to!long(TreeSitterParser.getNodeText(node, sourceText)));
             case "float_literal":
-                return LiteralExpression.floating(loc, to!double(node.text));
-            case "string_literal":
-                return LiteralExpression.string_(loc, node.text[1..$-1]); // Remove quotes
-            case "boolean_literal":
-                return LiteralExpression.boolean(loc, node.text == "true");
+                return LiteralExpression.floating(loc, to!double(TreeSitterParser.getNodeText(node, sourceText)));
+            case "string_literal": {
+                string text = TreeSitterParser.getNodeText(node, sourceText);
+                return LiteralExpression.string_(loc, text[1..$-1]); // Remove quotes
+            }
+            case "bool_literal":
+            case "true":
+            case "false": {
+                string text = TreeSitterParser.getNodeText(node, sourceText);
+                return LiteralExpression.boolean(loc, text == "true");
+            }
             case "null_literal":
                 return LiteralExpression.null_(loc);
             case "cast_expression":
@@ -526,7 +703,7 @@ class TreeSitterBridge {
             case "assignment_expression":
                 return parseAssignmentExpression(node, loc);
             default:
-                throw new ParseError("Unknown expression node: " ~ node.nodeType, loc);
+                throw new ParseError("Unknown expression node: " ~ nodeType, loc);
         }
     }
     
@@ -538,13 +715,13 @@ class TreeSitterBridge {
         TSNode operatorNode = TreeSitterParser.getChildByFieldName(node, "operator");
         TSNode rightNode = TreeSitterParser.getChildByFieldName(node, "right");
         
-        if (leftNode.isNull() || operatorNode.isNull() || rightNode.isNull()) {
+        if (!TreeSitterParser.isValid(leftNode) || !TreeSitterParser.isValid(operatorNode) || !TreeSitterParser.isValid(rightNode)) {
             throw new ParseError("Binary expression missing operands or operator", loc);
         }
         
         Expression left = parseExpression(leftNode);
         Expression right = parseExpression(rightNode);
-        BinaryExpression.Operator operator = parseBinaryOperator(operatorNode.text);
+        BinaryExpression.Operator operator = parseBinaryOperator(TreeSitterParser.getNodeText(operatorNode, sourceText));
         
         return new BinaryExpression(loc, left, operator, right);
     }
@@ -629,6 +806,8 @@ class TreeSitterBridge {
      * Create source location from tree-sitter node
      */
     SourceLocation makeSourceLocation(TSNode node) {
+        import parser.tree_sitter_c : ts_node_start_byte, ts_node_end_byte;
+        
         auto startPoint = TreeSitterParser.getStartPoint(node);
         auto endPoint = TreeSitterParser.getEndPoint(node);
         
@@ -636,8 +815,8 @@ class TreeSitterBridge {
             filename,
             startPoint.row + 1,  // tree-sitter uses 0-based rows
             startPoint.column + 1,  // tree-sitter uses 0-based columns
-            node.startOffset,
-            node.endOffset
+            ts_node_start_byte(node),
+            ts_node_end_byte(node)
         );
     }
 }

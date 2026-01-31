@@ -127,6 +127,41 @@ shared int counter;
 
 ## Implementation Rules
 
+### 🚫 **Compiler Design Integrity - NO CHEATING!**
+
+**MUST**: Build a language compiler, NOT an algorithm recognizer
+**MUST**: Generate code by composing language constructs, NOT by pattern matching algorithms
+**MUST NOT**: Include algorithm-specific templates (fibonacci, sorting, searching, etc.)
+**MUST NOT**: Recognize specific code patterns and substitute pre-written implementations
+
+**Valid Templates** (Language Constructs):
+```
+✅ if_statement.wat          - How D if-statements become WASM
+✅ while_loop.wat           - How D while-loops become WASM  
+✅ function_call.wat        - How D function calls become WASM
+✅ class_method.wat         - How D method dispatch becomes WASM
+✅ array_access.wat         - How D array[index] becomes WASM
+✅ variable_assignment.wat  - How D assignments become WASM
+```
+
+**Invalid Templates** (Algorithm Cheating):
+```
+❌ fibonacci_recursive.wat  - CHEATING! Not a language construct
+❌ quicksort.wat           - CHEATING! Not a language construct  
+❌ matrix_multiply.wat     - CHEATING! Not a language construct
+❌ binary_search.wat       - CHEATING! Not a language construct
+```
+
+**Core Principle**: The compiler should generate fibonacci by composing function calls, if statements, arithmetic operations, and returns - NOT by recognizing "this is fibonacci" and substituting a pre-written implementation.
+
+**Why This Matters**: 
+- Ensures the compiler works for ANY valid D program, not just recognized patterns
+- Maintains correctness - the generated WASM reflects the actual D semantics
+- Prevents brittle pattern matching that breaks on variations
+- Upholds compiler engineering integrity
+
+**Test**: If you can't explain how your template applies to ALL instances of a D language construct, it's cheating.
+
 ### 🏗️ **Architecture Constraints**
 
 **MUST**: Maintain this exact pipeline:
