@@ -522,6 +522,13 @@ class TreeSitterBridge {
         SourceLocation loc = makeSourceLocation(node);
         string nodeType = TreeSitterParser.getNodeType(node);
         
+        // Debug: print node info
+        writeln("Parsing statement: ", nodeType, " with ", TreeSitterParser.getChildCount(node), " children");
+        for (uint i = 0; i < TreeSitterParser.getChildCount(node); i++) {
+            writeln("  Child ", i, ": ", TreeSitterParser.getNodeType(TreeSitterParser.getChild(node, i)), 
+                    " (field: ", TreeSitterParser.getChildFieldName(node, i), ")");
+        }
+        
         switch (nodeType) {
             case "block_statement":
                 return parseBlockStatement(node);
@@ -659,6 +666,13 @@ class TreeSitterBridge {
         SourceLocation loc = makeSourceLocation(node);
         string nodeType = TreeSitterParser.getNodeType(node);
         
+        // Debug: print node info
+        writeln("Parsing expression: ", nodeType, " with ", TreeSitterParser.getChildCount(node), " children");
+        for (uint i = 0; i < TreeSitterParser.getChildCount(node); i++) {
+            writeln("  Child ", i, ": ", TreeSitterParser.getNodeType(TreeSitterParser.getChild(node, i)), 
+                    " (field: ", TreeSitterParser.getChildFieldName(node, i), ")");
+        }
+        
         // Handle expression wrapper node
         if (nodeType == "expression") {
             // Look for the actual expression inside the expression node
@@ -758,48 +772,166 @@ class TreeSitterBridge {
      * Parse unary expression (placeholder implementation)
      */
     UnaryExpression parseUnaryExpression(TSNode node, SourceLocation loc) {
-        // TODO: Implement full unary expression parsing
-        throw new ParseError("Unary expressions not yet implemented", loc);
+        TSNode operatorNode = TreeSitterParser.getChildByFieldName(node, "operator");
+        TSNode operandNode = TreeSitterParser.getChildByFieldName(node, "operand");
+        
+        if (!TreeSitterParser.isValid(operatorNode) || !TreeSitterParser.isValid(operandNode)) {
+            // Some grammars might not use field names for unary operators
+            uint childCount = TreeSitterParser.getChildCount(node);
+            if (childCount >= 2) {
+                operatorNode = TreeSitterParser.getChild(node, 0);
+                operandNode = TreeSitterParser.getChild(node, 1);
+            } else {
+                throw new ParseError("Unary expression missing operator or operand", loc);
+            }
+        }
+        
+        string opStr = TreeSitterParser.getNodeText(operatorNode, sourceText);
+        UnaryExpression.Operator op = parseUnaryOperator(opStr);
+        Expression operand = parseExpression(operandNode);
+        
+        return new UnaryExpression(loc, op, operand, false);
+    }
+
+    UnaryExpression.Operator parseUnaryOperator(string opStr) {
+        switch (opStr) {
+            case "+": return UnaryExpression.Operator.Plus;
+            case "-": return UnaryExpression.Operator.Minus;
+            case "!": return UnaryExpression.Operator.LogicalNot;
+            case "~": return UnaryExpression.Operator.BitwiseNot;
+            case "++": return UnaryExpression.Operator.PreIncrement;
+            case "--": return UnaryExpression.Operator.PreDecrement;
+            case "&": return UnaryExpression.Operator.AddressOf;
+            case "*": return UnaryExpression.Operator.Dereference;
+            default:
+                throw new ParseError("Unknown unary operator: " ~ opStr, SourceLocation());
+        }
     }
     
     /**
      * Parse call expression (placeholder implementation)
      */
     CallExpression parseCallExpression(TSNode node, SourceLocation loc) {
-        // TODO: Implement full call expression parsing
-        throw new ParseError("Call expressions not yet implemented", loc);
+        TSNode functionNode = TreeSitterParser.getChildByFieldName(node, "function");
+        TSNode argumentsNode = TreeSitterParser.getChildByFieldName(node, "arguments");
+        
+        if (!TreeSitterParser.isValid(functionNode)) {
+            // Try fallback - first child is usually the function
+            functionNode = TreeSitterParser.getChild(node, 0);
+            if (!TreeSitterParser.isValid(functionNode)) {
+                throw new ParseError("Call expression missing function", loc);
+            }
+        }
+        
+        Expression function_ = parseExpression(functionNode);
+        Expression[] arguments;
+        
+        if (TreeSitterParser.isValid(argumentsNode)) {
+            uint childCount = TreeSitterParser.getChildCount(argumentsNode);
+            for (uint i = 0; i < childCount; i++) {
+                TSNode child = TreeSitterParser.getChild(argumentsNode, i);
+                string nodeType = TreeSitterParser.getNodeType(child);
+                
+                // Only parse children that are actually expressions
+                if (nodeType != "(" && nodeType != ")" && nodeType != ",") {
+                    try {
+                        arguments ~= parseExpression(child);
+                    } catch (ParseError e) {
+                        // Skip invalid arguments
+                    }
+                }
+            }
+        }
+        
+        return new CallExpression(loc, function_, arguments);
     }
     
     /**
      * Parse index expression (placeholder implementation)
      */
     IndexExpression parseIndexExpression(TSNode node, SourceLocation loc) {
-        // TODO: Implement full index expression parsing
-        throw new ParseError("Index expressions not yet implemented", loc);
+        TSNode arrayNode = TreeSitterParser.getChildByFieldName(node, "array");
+        TSNode indexNode = TreeSitterParser.getChildByFieldName(node, "index");
+        
+        if (!TreeSitterParser.isValid(arrayNode) || !TreeSitterParser.isValid(indexNode)) {
+            throw new ParseError("Index expression missing array or index", loc);
+        }
+        
+        Expression array = parseExpression(arrayNode);
+        Expression index = parseExpression(indexNode);
+        
+        return new IndexExpression(loc, array, index);
     }
     
     /**
      * Parse member expression (placeholder implementation)
      */
     MemberExpression parseMemberExpression(TSNode node, SourceLocation loc) {
-        // TODO: Implement full member expression parsing
-        throw new ParseError("Member expressions not yet implemented", loc);
+        TSNode objectNode = TreeSitterParser.getChildByFieldName(node, "object");
+        TSNode nameNode = TreeSitterParser.getChildByFieldName(node, "name");
+        
+        if (!TreeSitterParser.isValid(objectNode) || !TreeSitterParser.isValid(nameNode)) {
+            throw new ParseError("Member expression missing object or member name", loc);
+        }
+        
+        Expression object = parseExpression(objectNode);
+        string name = TreeSitterParser.getNodeText(nameNode, sourceText);
+        
+        return new MemberExpression(loc, object, name);
     }
     
     /**
      * Parse cast expression (placeholder implementation)
      */
     CastExpression parseCastExpression(TSNode node, SourceLocation loc) {
-        // TODO: Implement full cast expression parsing
-        throw new ParseError("Cast expressions not yet implemented", loc);
+        TSNode typeNode = TreeSitterParser.getChildByFieldName(node, "type");
+        TSNode exprNode = TreeSitterParser.getChildByFieldName(node, "expression");
+        
+        if (!TreeSitterParser.isValid(typeNode) || !TreeSitterParser.isValid(exprNode)) {
+            throw new ParseError("Cast expression missing type or expression", loc);
+        }
+        
+        Type targetType = parseType(typeNode);
+        Expression expression = parseExpression(exprNode);
+        
+        return new CastExpression(loc, targetType, expression);
     }
     
     /**
      * Parse assignment expression (placeholder implementation)
      */
     AssignmentExpression parseAssignmentExpression(TSNode node, SourceLocation loc) {
-        // TODO: Implement full assignment expression parsing
-        throw new ParseError("Assignment expressions not yet implemented", loc);
+        TSNode leftNode = TreeSitterParser.getChildByFieldName(node, "left");
+        TSNode operatorNode = TreeSitterParser.getChildByFieldName(node, "operator");
+        TSNode rightNode = TreeSitterParser.getChildByFieldName(node, "right");
+        
+        if (!TreeSitterParser.isValid(leftNode) || !TreeSitterParser.isValid(operatorNode) || !TreeSitterParser.isValid(rightNode)) {
+            throw new ParseError("Assignment expression missing operands or operator", loc);
+        }
+        
+        Expression left = parseExpression(leftNode);
+        Expression right = parseExpression(rightNode);
+        AssignmentExpression.Operator op = parseAssignmentOperator(TreeSitterParser.getNodeText(operatorNode, sourceText));
+        
+        return new AssignmentExpression(loc, left, op, right);
+    }
+
+    AssignmentExpression.Operator parseAssignmentOperator(string opStr) {
+        switch (opStr) {
+            case "=": return AssignmentExpression.Operator.Assign;
+            case "+=": return AssignmentExpression.Operator.AddAssign;
+            case "-=": return AssignmentExpression.Operator.SubtractAssign;
+            case "*=": return AssignmentExpression.Operator.MultiplyAssign;
+            case "/=": return AssignmentExpression.Operator.DivideAssign;
+            case "%=": return AssignmentExpression.Operator.ModuloAssign;
+            case "&=": return AssignmentExpression.Operator.AndAssign;
+            case "|=": return AssignmentExpression.Operator.OrAssign;
+            case "^=": return AssignmentExpression.Operator.XorAssign;
+            case "<<=": return AssignmentExpression.Operator.ShiftLeftAssign;
+            case ">>=": return AssignmentExpression.Operator.ShiftRightAssign;
+            default:
+                throw new ParseError("Unknown assignment operator: " ~ opStr, SourceLocation());
+        }
     }
     
     /**

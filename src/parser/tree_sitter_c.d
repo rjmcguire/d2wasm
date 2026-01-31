@@ -54,6 +54,7 @@ extern (C) {
     TSNode ts_node_child_by_field_name(TSNode node, const(char)* field_name, uint32_t field_name_length);
     bool ts_node_is_null(TSNode node);
     bool ts_node_has_error(TSNode node);
+    const(char)* ts_node_field_name_for_child(TSNode node, uint32_t index);
 
     // Language function - statically linked
     TSLanguage* tree_sitter_d();
@@ -159,6 +160,11 @@ class TreeSitterParser {
 
     static TSNode getChildByFieldName(TSNode node, string fieldName) {
         return ts_node_child_by_field_name(node, fieldName.toStringz(), cast(uint32_t)fieldName.length);
+    }
+
+    static string getChildFieldName(TSNode node, uint index) {
+        const char* fieldName = ts_node_field_name_for_child(node, index);
+        return fieldName ? to!string(fieldName) : "";
     }
 
     static TSPoint getStartPoint(TSNode node) {

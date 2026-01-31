@@ -21,7 +21,7 @@ import std.range;
 import ast.nodes;
 import ast.statements;
 import ast.expressions;
-import parser.tree_sitter_bridge_minimal : TreeSitterBridge, ParseError;
+import parser.tree_sitter_bridge : TreeSitterBridge, ParseError;
 import parser.tree_sitter_c;
 import semantic.feature_validator;
 import semantic.symbol_table;
