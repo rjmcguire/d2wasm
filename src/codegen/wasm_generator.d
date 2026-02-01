@@ -403,6 +403,9 @@ class WasmGenerator {
             bodyCode = generateStatement(decl.body_);
         }
         
+        // Copy locals from context back to wasmFunc (since struct was copied by value)
+        wasmFunc.localVariables = context.currentFunction.localVariables;
+        
         // Add implicit return for void functions if body doesn't end with one
         if (wasmFunc.returnType == WasmType.void_ && !bodyCode.canFind("return")) {
             bodyCode ~= "\n  return";
@@ -499,8 +502,31 @@ class WasmGenerator {
             
             params["DROP_IF_NEEDED"] = needsDrop ? "drop" : "";
             return templateEngine.substitute("core/expression_statement", params);
+        } else if (auto varDeclStmt = cast(VariableDeclarationStatement)stmt) {
+            return generateVariableDeclarationStatement(varDeclStmt);
         }
         return "";
+    }
+    
+    /**
+     * Generate local variable declaration statement
+     */
+    string generateVariableDeclarationStatement(VariableDeclarationStatement stmt) {
+        // Determine the WASM type
+        WasmType wasmType = context.dTypeToWasmType(stmt.type);
+        
+        // Register the local variable
+        uint localId = context.addLocalVariable(stmt.name, wasmType);
+        
+        // Generate initialization code if there's an initializer
+        if (stmt.initializer) {
+            string initCode = generateExpression(stmt.initializer);
+            return format("%s\nlocal.set $l%d", initCode, localId);
+        }
+        
+        // No initializer - initialize to zero
+        string wasmTypeStr = context.wasmTypeToString(wasmType);
+        return format("%s.const 0\nlocal.set $l%d", wasmTypeStr, localId);
     }
     
     /**
@@ -619,6 +645,8 @@ class WasmGenerator {
     string generateExpression(Expression expr) {
         if (auto binary = cast(BinaryExpression)expr) {
             return generateBinaryExpression(binary);
+        } else if (auto unary = cast(UnaryExpression)expr) {
+            return generateUnaryExpression(unary);
         } else if (auto call = cast(CallExpression)expr) {
             return generateCallExpression(call);
         } else if (auto ident = cast(IdentifierExpression)expr) {
@@ -629,6 +657,111 @@ class WasmGenerator {
             return generateAssignmentExpression(assign);
         }
         return ";; unknown expr";
+    }
+    
+    /**
+     * Generate unary expression
+     */
+    string generateUnaryExpression(UnaryExpression expr) {
+        string operandCode = generateExpression(expr.operand);
+        
+        final switch (expr.operator) {
+            case UnaryExpression.Operator.Plus:
+                // Unary plus is a no-op
+                return operandCode;
+                
+            case UnaryExpression.Operator.Minus:
+                // Negate: 0 - value
+                return format("i32.const 0\n%s\ni32.sub", operandCode);
+                
+            case UnaryExpression.Operator.LogicalNot:
+                // Logical not: value == 0
+                return format("%s\ni32.eqz", operandCode);
+                
+            case UnaryExpression.Operator.BitwiseNot:
+                // Bitwise not: value xor -1
+                return format("%s\ni32.const -1\ni32.xor", operandCode);
+                
+            case UnaryExpression.Operator.PreIncrement:
+            case UnaryExpression.Operator.PostIncrement:
+                return generateIncrementDecrement(expr, true);
+                
+            case UnaryExpression.Operator.PreDecrement:
+            case UnaryExpression.Operator.PostDecrement:
+                return generateIncrementDecrement(expr, false);
+                
+            case UnaryExpression.Operator.AddressOf:
+            case UnaryExpression.Operator.Dereference:
+                // TODO: Implement pointer operations
+                return ";; pointer operation not implemented";
+        }
+    }
+    
+    /**
+     * Generate increment/decrement operation (i++, ++i, i--, --i)
+     */
+    string generateIncrementDecrement(UnaryExpression expr, bool isIncrement) {
+        // Get the variable name from the operand
+        auto identExpr = cast(IdentifierExpression)expr.operand;
+        if (!identExpr) {
+            return ";; increment/decrement requires identifier";
+        }
+        
+        string varName;
+        string getInstr, setInstr;
+        
+        // Look up in local variables
+        auto ptr = identExpr.name in context.localVariableIds;
+        if (ptr) {
+            uint localId = *ptr;
+            varName = format("l%d", localId);
+            getInstr = "local.get";
+            setInstr = "local.set";
+        } else {
+            // Try global
+            auto sym = context.symbolTable.lookupSymbol(identExpr.name);
+            if (sym && sym.isGlobal) {
+                varName = identExpr.name;
+                getInstr = "global.get";
+                setInstr = "global.set";
+            } else {
+                return format(";; cannot find variable %s for increment", identExpr.name);
+            }
+        }
+        
+        string op = isIncrement ? "add" : "sub";
+        
+        if (expr.isPostfix) {
+            // Post-increment/decrement: return old value, then modify
+            // old_value = get var
+            // new_value = old_value +/- 1
+            // set var = new_value
+            // result = old_value
+            return format(
+                "%s $%s\n" ~  // get old value (will be result)
+                "%s $%s\n" ~  // get old value again for computation
+                "i32.const 1\n" ~
+                "i32.%s\n" ~   // add or sub
+                "%s $%s",      // set new value
+                getInstr, varName,
+                getInstr, varName,
+                op,
+                setInstr, varName
+            );
+        } else {
+            // Pre-increment/decrement: modify first, return new value
+            return format(
+                "%s $%s\n" ~  // get old value
+                "i32.const 1\n" ~
+                "i32.%s\n" ~   // add or sub
+                "%s $%s\n" ~   // set new value
+                "%s $%s",      // get new value (result)
+                getInstr, varName,
+                op,
+                setInstr, varName,
+                getInstr, varName
+            );
+        }
     }
     
     /**

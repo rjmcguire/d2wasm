@@ -130,3 +130,27 @@ class ExpressionStatement : Statement {
         return format("ExpressionStatement(%s)", expression.toString());
     }
 }
+
+/**
+ * Variable declaration statement: type name = initializer;
+ * Used for local variable declarations inside function bodies.
+ */
+class VariableDeclarationStatement : Statement {
+    string name;
+    Type type;
+    Expression initializer;  // null if no initializer
+    
+    this(SourceLocation loc, string name, Type type, Expression initializer = null) {
+        super(loc);
+        this.name = name;
+        this.type = type;
+        this.initializer = initializer;
+    }
+    
+    override string toString() const {
+        if (initializer) {
+            return format("VariableDeclarationStatement(%s %s = %s)", type.toString(), name, initializer.toString());
+        }
+        return format("VariableDeclarationStatement(%s %s)", type.toString(), name);
+    }
+}

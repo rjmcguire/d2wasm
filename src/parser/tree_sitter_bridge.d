@@ -548,6 +548,8 @@ class TreeSitterBridge {
                 return parseReturnStatement(node, loc);
             case "expression_statement":
                 return parseExpressionStatement(node, loc);
+            case "variable_declaration":
+                return parseVariableDeclarationStatement(node, loc);
             default:
                 throw new ParseError("Unknown statement node: " ~ nodeType, loc);
         }
@@ -636,8 +638,8 @@ class TreeSitterBridge {
      */
     ForStatement parseForStatement(TSNode node, SourceLocation loc) {
         TSNode initNode = TreeSitterParser.getChildByFieldName(node, "init");
-        TSNode conditionNode = TreeSitterParser.getChildByFieldName(node, "condition");
-        TSNode updateNode = TreeSitterParser.getChildByFieldName(node, "update");
+        TSNode conditionNode = TreeSitterParser.getChildByFieldName(node, "test");  // tree-sitter uses "test" not "condition"
+        TSNode updateNode = TreeSitterParser.getChildByFieldName(node, "step");     // tree-sitter uses "step" not "update"
         TSNode bodyNode = TreeSitterParser.getChildByFieldName(node, "body");
         
         if (!TreeSitterParser.isValid(bodyNode)) {
@@ -650,6 +652,73 @@ class TreeSitterBridge {
         Statement body_ = parseStatement(bodyNode);
         
         return new ForStatement(loc, init, condition, update, body_);
+    }
+    
+    /**
+     * Parse variable declaration as a statement (for local variables)
+     * Structure: variable_declaration with children: type, declarator, ;
+     * The declarator contains the name and optional initializer.
+     */
+    VariableDeclarationStatement parseVariableDeclarationStatement(TSNode node, SourceLocation loc) {
+        // Variable declaration structure (from tree-sitter):
+        //   Child 0: type
+        //   Child 1: declarator (contains name and optional initializer)
+        //   Child 2: ;
+        
+        TSNode typeNode, declaratorNode;
+        
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            
+            if (childType == "type") {
+                typeNode = child;
+            } else if (childType == "declarator") {
+                declaratorNode = child;
+            }
+        }
+        
+        if (!TreeSitterParser.isValid(typeNode)) {
+            throw new ParseError("Variable declaration missing type", loc);
+        }
+        if (!TreeSitterParser.isValid(declaratorNode)) {
+            throw new ParseError("Variable declaration missing declarator", loc);
+        }
+        
+        Type varType = parseType(typeNode);
+        
+        // Parse the declarator - it may contain just a name, or name = initializer
+        // Structure varies: could be just identifier, or identifier = expression
+        string name;
+        Expression initializer = null;
+        
+        uint declChildCount = TreeSitterParser.getChildCount(declaratorNode);
+        if (declChildCount == 0) {
+            // The declarator itself is the identifier
+            name = TreeSitterParser.getNodeText(declaratorNode, sourceText);
+        } else {
+            // Look for identifier and initializer in children
+            for (uint i = 0; i < declChildCount; i++) {
+                TSNode child = TreeSitterParser.getChild(declaratorNode, i);
+                string childType = TreeSitterParser.getNodeType(child);
+                
+                if (childType == "identifier") {
+                    name = TreeSitterParser.getNodeText(child, sourceText);
+                } else if (childType == "=" || childType == "initializer") {
+                    // Skip the equals sign, next meaningful child is the value
+                } else if (name.length > 0 && childType != "=") {
+                    // This should be the initializer expression
+                    initializer = parseExpression(child);
+                }
+            }
+        }
+        
+        if (name.length == 0) {
+            throw new ParseError("Variable declaration missing name", loc);
+        }
+        
+        return new VariableDeclarationStatement(loc, name, varType, initializer);
     }
     
     /**
@@ -702,9 +771,12 @@ class TreeSitterBridge {
         string nodeType = TreeSitterParser.getNodeType(exprNode);
         if (nodeType == "expression_list") {
             uint childCount = TreeSitterParser.getChildCount(exprNode);
+            writeln("DEBUG expression_list has ", childCount, " children:");
             for (uint i = 0; i < childCount; i++) {
                 TSNode child = TreeSitterParser.getChild(exprNode, i);
                 string childType = TreeSitterParser.getNodeType(child);
+                string fieldName = TreeSitterParser.getChildFieldName(exprNode, i);
+                writeln("  Child ", i, ": ", childType, " (field: ", fieldName, ") = ", TreeSitterParser.getNodeText(child, sourceText));
                 if (childType != "," && childType != "(" && childType != ")") {
                     exprNode = child;
                     break;
@@ -732,6 +804,12 @@ class TreeSitterBridge {
         }
         
         switch (nodeType) {
+            case "expression_list":
+                // Take the first expression from the list
+                if (TreeSitterParser.getChildCount(node) > 0) {
+                    return parseExpression(TreeSitterParser.getChild(node, 0));
+                }
+                throw new ParseError("Empty expression_list", loc);
             case "binary_expression":
             case "add_expression":
             case "mul_expression":
@@ -740,6 +818,8 @@ class TreeSitterBridge {
             case "and_expression":
             case "or_expression":
                 return parseBinaryExpression(node, loc);
+            case "postfix_expression":
+                return parsePostfixExpression(node, loc);
             case "unary_expression":
                 return parseUnaryExpression(node, loc);
             case "call_expression":
@@ -875,6 +955,36 @@ class TreeSitterBridge {
     }
     
     /**
+     * Parse postfix expression (i++, i--)
+     */
+    UnaryExpression parsePostfixExpression(TSNode node, SourceLocation loc) {
+        // Postfix expression has operand first, then operator
+        // Structure: operand ++  or  operand --
+        TSNode operandNode, operatorNode;
+        
+        uint childCount = TreeSitterParser.getChildCount(node);
+        if (childCount >= 2) {
+            operandNode = TreeSitterParser.getChild(node, 0);
+            operatorNode = TreeSitterParser.getChild(node, childCount - 1);
+        } else {
+            throw new ParseError("Postfix expression missing operand or operator", loc);
+        }
+        
+        string opStr = TreeSitterParser.getNodeText(operatorNode, sourceText);
+        UnaryExpression.Operator op;
+        if (opStr == "++") {
+            op = UnaryExpression.Operator.PostIncrement;
+        } else if (opStr == "--") {
+            op = UnaryExpression.Operator.PostDecrement;
+        } else {
+            throw new ParseError("Unknown postfix operator: " ~ opStr, loc);
+        }
+        
+        Expression operand = parseExpression(operandNode);
+        return new UnaryExpression(loc, op, operand, true);
+    }
+    
+    /**
      * Parse call expression (placeholder implementation)
      */
     CallExpression parseCallExpression(TSNode node, SourceLocation loc) {
@@ -989,20 +1099,37 @@ class TreeSitterBridge {
     }
     
     /**
-     * Parse assignment expression (placeholder implementation)
+     * Parse assignment expression
+     * Structure: left_operand operator right_operand
      */
     AssignmentExpression parseAssignmentExpression(TSNode node, SourceLocation loc) {
+        // Try field-based access first
         TSNode leftNode = TreeSitterParser.getChildByFieldName(node, "left");
         TSNode operatorNode = TreeSitterParser.getChildByFieldName(node, "operator");
         TSNode rightNode = TreeSitterParser.getChildByFieldName(node, "right");
         
-        if (!TreeSitterParser.isValid(leftNode) || !TreeSitterParser.isValid(operatorNode) || !TreeSitterParser.isValid(rightNode)) {
-            throw new ParseError("Assignment expression missing operands or operator", loc);
+        // If field-based access fails, parse by position
+        if (!TreeSitterParser.isValid(leftNode) || !TreeSitterParser.isValid(rightNode)) {
+            // Structure: left = right  (3 children: left, operator, right)
+            uint childCount = TreeSitterParser.getChildCount(node);
+            if (childCount >= 3) {
+                leftNode = TreeSitterParser.getChild(node, 0);
+                operatorNode = TreeSitterParser.getChild(node, 1);
+                rightNode = TreeSitterParser.getChild(node, 2);
+            } else {
+                throw new ParseError(
+                    format("Assignment expression has unexpected structure (%d children)", childCount), loc);
+            }
+        }
+        
+        if (!TreeSitterParser.isValid(leftNode) || !TreeSitterParser.isValid(rightNode)) {
+            throw new ParseError("Assignment expression missing operands", loc);
         }
         
         Expression left = parseExpression(leftNode);
         Expression right = parseExpression(rightNode);
-        AssignmentExpression.Operator op = parseAssignmentOperator(TreeSitterParser.getNodeText(operatorNode, sourceText));
+        string opStr = TreeSitterParser.getNodeText(operatorNode, sourceText);
+        AssignmentExpression.Operator op = parseAssignmentOperator(opStr);
         
         return new AssignmentExpression(loc, left, op, right);
     }

@@ -284,6 +284,23 @@ class TypeChecker {
             }
         } else if (auto exprStmt = cast(ExpressionStatement)stmt) {
             checkExpression(exprStmt.expression);
+        } else if (auto varDeclStmt = cast(VariableDeclarationStatement)stmt) {
+            // Type check initializer if present
+            if (varDeclStmt.initializer) {
+                Type initType = checkExpression(varDeclStmt.initializer);
+                auto compat = checkTypeCompatibility(initType, varDeclStmt.type);
+                if (!compat.isCompatible) {
+                    throw new TypeError(
+                        format("Initializer type '%s' is not compatible with variable type '%s'",
+                               initType.toString(), varDeclStmt.type.toString()),
+                        varDeclStmt.initializer.location
+                    );
+                }
+            }
+            // Add the variable to the symbol table
+            auto symbol = new Symbol(varDeclStmt.name, SymbolKind.Variable, varDeclStmt.type, 
+                                     null, varDeclStmt.location, false);
+            symbolTable.addSymbol(symbol);
         }
     }
     
@@ -468,10 +485,72 @@ class TypeChecker {
     }
     
     /**
-     * Check other expression types (simplified for now)
+     * Check unary expression types
      */
     Type checkUnaryExpression(UnaryExpression expr) {
-        throw new TypeError("Unary expressions not yet implemented", expr.location);
+        Type operandType = checkExpression(expr.operand);
+        
+        final switch (expr.operator) {
+            case UnaryExpression.Operator.Plus:
+            case UnaryExpression.Operator.Minus:
+                // Arithmetic unary operators require numeric type
+                if (!isNumericType(operandType)) {
+                    throw new TypeError(
+                        format("Unary %s requires numeric type, got '%s'",
+                               expr.operator == UnaryExpression.Operator.Plus ? "+" : "-",
+                               operandType.toString()),
+                        expr.location);
+                }
+                return operandType;
+                
+            case UnaryExpression.Operator.LogicalNot:
+                // Logical not requires boolean-convertible type
+                if (!isBooleanConvertible(operandType)) {
+                    throw new TypeError(
+                        format("Logical not requires boolean-convertible type, got '%s'",
+                               operandType.toString()),
+                        expr.location);
+                }
+                return new BasicType(expr.location, BasicType.Kind.Bool);
+                
+            case UnaryExpression.Operator.BitwiseNot:
+                // Bitwise not requires integral type
+                if (!isIntegralType(operandType)) {
+                    throw new TypeError(
+                        format("Bitwise not requires integral type, got '%s'",
+                               operandType.toString()),
+                        expr.location);
+                }
+                return operandType;
+                
+            case UnaryExpression.Operator.PreIncrement:
+            case UnaryExpression.Operator.PostIncrement:
+            case UnaryExpression.Operator.PreDecrement:
+            case UnaryExpression.Operator.PostDecrement:
+                // Increment/decrement require numeric lvalue
+                if (!isNumericType(operandType)) {
+                    throw new TypeError(
+                        format("Increment/decrement requires numeric type, got '%s'",
+                               operandType.toString()),
+                        expr.location);
+                }
+                // TODO: Check that operand is an lvalue
+                return operandType;
+                
+            case UnaryExpression.Operator.AddressOf:
+                // Returns pointer to operand type
+                return new PointerType(expr.location, operandType);
+                
+            case UnaryExpression.Operator.Dereference:
+                // Requires pointer type, returns pointed-to type
+                if (auto ptrType = cast(PointerType)operandType) {
+                    return ptrType.pointeeType;
+                }
+                throw new TypeError(
+                    format("Cannot dereference non-pointer type '%s'",
+                           operandType.toString()),
+                    expr.location);
+        }
     }
     
     Type checkIndexExpression(IndexExpression expr) {
@@ -606,6 +685,16 @@ class TypeChecker {
         if (!type) return false;
         auto basic = cast(BasicType)type;
         return basic && (isIntegerType(basic) || isFloatingType(basic));
+    }
+    
+    bool isNumericType(Type type) {
+        return isArithmeticType(type);
+    }
+    
+    bool isIntegralType(Type type) {
+        if (!type) return false;
+        auto basic = cast(BasicType)type;
+        return basic && isIntegerType(basic);
     }
     
     bool isIntegerType(BasicType type) {
