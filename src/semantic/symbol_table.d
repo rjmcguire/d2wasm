@@ -36,6 +36,7 @@ class Symbol {
     Declaration declaration;  // AST node that declares this symbol
     SourceLocation location;
     bool isGlobal;
+    bool isConstant;  // True for manifest constants (enum X = ...)
     
     this(string name, SymbolKind kind, Type type, Declaration decl, SourceLocation location, bool isGlobal = false) {
         this.name = name;
@@ -309,6 +310,8 @@ class SymbolCollector {
             collectVariableSymbol(varDecl);
         } else if (auto enumDecl = cast(EnumDecl)decl) {
             collectEnumSymbol(enumDecl);
+        } else if (auto manifestDecl = cast(ManifestConstantDecl)decl) {
+            collectManifestConstant(manifestDecl);
         }
     }
     
@@ -369,6 +372,21 @@ class SymbolCollector {
             decl.location,
             symbolTable.inGlobalScope()
         );
+        symbolTable.addSymbol(symbol);
+    }
+    
+    private void collectManifestConstant(ManifestConstantDecl decl) {
+        // For now, assume i32 type until CTFE resolves it
+        // TODO: Infer type from CTFE result
+        auto symbol = new Symbol(
+            decl.name,
+            SymbolKind.Variable,  // Manifest constants are like compile-time variables
+            new BasicType(decl.location, BasicType.Kind.Int32),
+            decl,
+            decl.location,
+            symbolTable.inGlobalScope()
+        );
+        symbol.isConstant = true;  // Mark as constant
         symbolTable.addSymbol(symbol);
     }
     

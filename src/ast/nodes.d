@@ -254,6 +254,31 @@ struct EnumMember {
     }
 }
 
+/**
+ * Manifest constant: enum NAME = expression;
+ * A compile-time constant whose value is determined by CTFE.
+ */
+class ManifestConstantDecl : Declaration {
+    Expression initializer;  // The expression to evaluate at compile time
+    Type inferredType;       // Type inferred after CTFE (null before)
+    long ctfeValue;          // Value after CTFE evaluation (for integral types)
+    bool ctfeComplete;       // Whether CTFE has been performed
+    
+    this(SourceLocation loc, string name, Expression initializer) {
+        super(loc, name, true);  // Manifest constants are always "public" in their scope
+        this.initializer = initializer;
+        this.inferredType = null;
+        this.ctfeComplete = false;
+    }
+    
+    override string toString() const {
+        if (ctfeComplete) {
+            return format("ManifestConstant(%s = %d)", name, ctfeValue);
+        }
+        return format("ManifestConstant(%s = %s)", name, initializer.toString());
+    }
+}
+
 // ===== TYPES =====
 
 /**

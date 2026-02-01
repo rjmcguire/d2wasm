@@ -106,6 +106,8 @@ class TreeSitterBridge {
                         declarations ~= parseVariableDeclaration(child);
                     } else if (nodeType == "enum_declaration") {
                         declarations ~= parseEnumDeclaration(child);
+                    } else if (nodeType == "manifest_constant") {
+                        declarations ~= parseManifestConstant(child);
                     } else if (nodeType != "comment" && nodeType.length > 0) {
                         writeln("Warning: Skipping unknown top-level node: ", nodeType);
                     }
@@ -363,6 +365,62 @@ class TreeSitterBridge {
     /**
      * Parse enum declaration
      */
+    /**
+     * Parse manifest constant: enum NAME = expression;
+     */
+    ManifestConstantDecl parseManifestConstant(TSNode node) {
+        SourceLocation loc = makeSourceLocation(node);
+        
+        // Find the manifest_declarator child
+        TSNode declarator;
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            if (childType == "manifest_declarator") {
+                declarator = child;
+                break;
+            }
+        }
+        
+        if (!TreeSitterParser.isValid(declarator)) {
+            throw new ParseError("Manifest constant missing declarator", loc);
+        }
+        
+        // Parse the declarator: NAME = expression
+        TSNode nameNode;
+        TSNode initNode;
+        
+        uint declChildCount = TreeSitterParser.getChildCount(declarator);
+        for (uint i = 0; i < declChildCount; i++) {
+            TSNode child = TreeSitterParser.getChild(declarator, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            
+            if (childType == "identifier") {
+                nameNode = child;
+            } else if (childType != "=" && childType.length > 0) {
+                // This should be the expression
+                initNode = child;
+            }
+        }
+        
+        if (!TreeSitterParser.isValid(nameNode)) {
+            throw new ParseError("Manifest constant missing name", loc);
+        }
+        
+        string name = TreeSitterParser.getNodeText(nameNode, sourceText);
+        
+        Expression initializer = null;
+        if (TreeSitterParser.isValid(initNode)) {
+            initializer = parseExpression(initNode);
+        } else {
+            throw new ParseError("Manifest constant '" ~ name ~ "' missing initializer", loc);
+        }
+        
+        writeln("Parsed manifest constant: ", name, " = ", initializer.toString());
+        return new ManifestConstantDecl(loc, name, initializer);
+    }
+    
     EnumDecl parseEnumDeclaration(TSNode node) {
         SourceLocation loc = makeSourceLocation(node);
         
