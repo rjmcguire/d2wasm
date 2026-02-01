@@ -192,7 +192,20 @@ int compileFile(CompilerOptions options) {
             writeln("Type checking passed");
         }
         
-        // 6. Code generation (binary WASM emission)
+        // 6. CTFE evaluation (compile-time function execution)
+        if (options.verbose) {
+            writeln("Evaluating compile-time expressions...");
+        }
+        
+        import semantic.ctfe;
+        auto ctfeEvaluator = new CTFEEvaluator(symbolTable, ast);
+        ctfeEvaluator.evaluateManifestConstants();
+        
+        if (options.verbose) {
+            writeln("CTFE evaluation complete");
+        }
+        
+        // 7. Code generation (binary WASM emission)
         if (!options.dryRun) {
             if (options.verbose) {
                 writeln("Generating binary WASM...");

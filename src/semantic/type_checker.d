@@ -445,7 +445,7 @@ class TypeChecker {
         string funcName = "unknown";
         if (auto identExpr = cast(IdentifierExpression)expr.function_) {
             funcName = identExpr.name;
-            isVariadicBuiltin = (funcName == "writeln"); // Add other variadic builtins here
+            isVariadicBuiltin = (funcName == "writeln" || funcName == "__writeln"); // CTFE writeln too
         }
         
         // Check argument count (skip for variadic builtins)

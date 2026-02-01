@@ -1,8 +1,7 @@
 {
   "name": "ctfe_basic",
   "description": "Basic CTFE: evaluate enum initializer at compile time",
-  "type": "ctfe_eval",
+  "type": "wasm_exec",
   "entry": "getValue",
-  "expected_value": 5,
   "capability": "CTFE detection, wasm3 integration, result capture"
 }

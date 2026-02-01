@@ -9,6 +9,7 @@
 module semantic.ctfe;
 
 import ast.nodes;
+import ast.statements;
 import ast.expressions;
 import semantic.symbol_table;
 import codegen.emitter;
@@ -21,6 +22,7 @@ import std.path;
 import std.conv;
 import std.format;
 import std.array;
+import std.string;
 
 /**
  * CTFE evaluation error
@@ -89,12 +91,18 @@ class CTFEEvaluator {
     
     /**
      * Evaluate a function call at compile time
+     * Returns 0 for void functions
      */
     long evaluateCallExpression(CallExpression callExpr) {
         // Get the function name
         auto identExpr = cast(IdentifierExpression)callExpr.function_;
         if (!identExpr) {
             throw new CTFEError("CTFE: Indirect function calls not supported");
+        }
+        
+        // Handle CTFE intrinsics
+        if (identExpr.name == "__writeln") {
+            return evaluateCtfeWriteln(callExpr);
         }
         string funcName = identExpr.name;
         
@@ -111,6 +119,13 @@ class CTFEEvaluator {
         
         if (!funcDecl) {
             throw new CTFEError("CTFE: Function '" ~ funcName ~ "' not found");
+        }
+        
+        // Check if this is a simple function that only contains CTFE intrinsics
+        // If so, interpret it directly instead of compiling to WASM
+        if (canInterpretDirectly(funcDecl)) {
+            writeln("CTFE: Interpreting ", funcName, " directly");
+            return interpretFunction(funcDecl);
         }
         
         // Evaluate arguments (must be literals or simple expressions)
@@ -132,6 +147,104 @@ class CTFEEvaluator {
         long result = executeWasm(wasmBytes, funcName, args);
         
         return result;
+    }
+    
+    /**
+     * Check if a function can be interpreted directly (only contains CTFE intrinsics)
+     */
+    bool canInterpretDirectly(FunctionDecl funcDecl) {
+        if (!funcDecl.body_) return false;
+        return containsOnlyIntrinsics(funcDecl.body_);
+    }
+    
+    bool containsOnlyIntrinsics(Statement stmt) {
+        if (auto compound = cast(CompoundStatement)stmt) {
+            foreach (s; compound.statements) {
+                if (!containsOnlyIntrinsics(s)) return false;
+            }
+            return true;
+        }
+        
+        if (auto exprStmt = cast(ExpressionStatement)stmt) {
+            if (auto call = cast(CallExpression)exprStmt.expression) {
+                if (auto ident = cast(IdentifierExpression)call.function_) {
+                    // __writeln is an intrinsic we can interpret
+                    if (ident.name == "__writeln") return true;
+                }
+            }
+        }
+        
+        if (auto returnStmt = cast(ReturnStatement)stmt) {
+            // Empty return is fine for void functions
+            return returnStmt.value is null;
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Interpret a function directly (for functions with only CTFE intrinsics)
+     */
+    long interpretFunction(FunctionDecl funcDecl) {
+        interpretStatement(funcDecl.body_);
+        return 0;  // Void function returns 0
+    }
+    
+    void interpretStatement(Statement stmt) {
+        if (auto compound = cast(CompoundStatement)stmt) {
+            foreach (s; compound.statements) {
+                interpretStatement(s);
+            }
+        } else if (auto exprStmt = cast(ExpressionStatement)stmt) {
+            interpretExpression(exprStmt.expression);
+        } else if (auto returnStmt = cast(ReturnStatement)stmt) {
+            // Void return - do nothing
+        }
+    }
+    
+    void interpretExpression(Expression expr) {
+        if (auto call = cast(CallExpression)expr) {
+            if (auto ident = cast(IdentifierExpression)call.function_) {
+                if (ident.name == "__writeln") {
+                    evaluateCtfeWriteln(call);
+                }
+            }
+        }
+    }
+    
+    /**
+     * Handle __writeln intrinsic - prints during compile time
+     */
+    long evaluateCtfeWriteln(CallExpression callExpr) {
+        import std.stdio : write, writeln;
+        
+        foreach (arg; callExpr.arguments) {
+            if (auto literal = cast(LiteralExpression)arg) {
+                // String literal
+                if (literal.value.type == typeid(string)) {
+                    write(literal.value.get!string());
+                }
+                // Integer literal
+                else if (literal.value.type == typeid(long)) {
+                    write(literal.value.get!long());
+                }
+                // Boolean literal
+                else if (literal.value.type == typeid(bool)) {
+                    write(literal.value.get!bool() ? "true" : "false");
+                }
+            } else {
+                // Try to evaluate as simple expression (numbers)
+                try {
+                    long val = evaluateSimpleExpression(arg);
+                    write(val);
+                } catch (Exception e) {
+                    write("<expr>");
+                }
+            }
+        }
+        writeln();  // Newline after all arguments
+        
+        return 0;  // __writeln returns void (0)
     }
     
     /**
@@ -226,7 +339,8 @@ class CTFEEvaluator {
         string output = result.output.strip();
         writeln("CTFE: wasm3 output: ", output);
         
-        auto resultMatch = output.indexOf("Result:");
+        import std.algorithm : countUntil;
+        auto resultMatch = output.countUntil("Result:");
         if (resultMatch == -1) {
             throw new CTFEError("CTFE: Could not parse wasm3 output: " ~ output);
         }

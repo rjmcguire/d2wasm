@@ -196,6 +196,11 @@ class BinaryEmitter {
     }
     
     private void collectFunction(FunctionDecl decl) {
+        // Skip CTFE-only functions (those containing CTFE intrinsics like __writeln)
+        if (isCtfeOnlyFunction(decl)) {
+            return;
+        }
+        
         // Build signature
         FuncSig sig;
         sig.params = decl.parameters.map!(p => dTypeToValType(p.type)).array;
@@ -232,6 +237,41 @@ class BinaryEmitter {
     private bool isVoidType(Type t) {
         auto basic = cast(BasicType)t;
         return basic && basic.kind == BasicType.Kind.Void;
+    }
+    
+    /**
+     * Check if a function contains only CTFE intrinsics (like __writeln)
+     * Such functions are evaluated at compile-time and don't need WASM emission
+     */
+    private bool isCtfeOnlyFunction(FunctionDecl decl) {
+        if (!decl.body_) return false;
+        return containsOnlyCtfeIntrinsics(decl.body_);
+    }
+    
+    private bool containsOnlyCtfeIntrinsics(Statement stmt) {
+        if (auto compound = cast(CompoundStatement)stmt) {
+            foreach (s; compound.statements) {
+                if (!containsOnlyCtfeIntrinsics(s)) return false;
+            }
+            return true;
+        }
+        
+        if (auto exprStmt = cast(ExpressionStatement)stmt) {
+            if (auto call = cast(CallExpression)exprStmt.expression) {
+                if (auto ident = cast(IdentifierExpression)call.function_) {
+                    // __writeln is a CTFE-only intrinsic
+                    if (ident.name == "__writeln") return true;
+                }
+            }
+            return false;  // Other expressions need WASM
+        }
+        
+        if (auto returnStmt = cast(ReturnStatement)stmt) {
+            // Empty return (void) is OK for CTFE-only functions
+            return returnStmt.value is null;
+        }
+        
+        return false;  // Other statement types need WASM
     }
     
     private ValType dTypeToValType(Type t) {
@@ -817,12 +857,27 @@ private class FuncContext {
     }
     
     void emitIdentifier(ref Appender!(ubyte[]) out_, IdentifierExpression expr) {
+        // First check if it's a local variable
         if (auto idx = expr.name in localIndex) {
             out_ ~= Op.local_get;
             leb128u(out_, *idx);
-        } else {
-            throw new EmitError("Unknown identifier: " ~ expr.name);
+            return;
         }
+        
+        // Check if it's a manifest constant (CTFE-evaluated)
+        auto symbol = emitter.symbolTable.lookupSymbol(expr.name);
+        if (symbol && symbol.isConstant) {
+            if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
+                if (manifest.ctfeComplete) {
+                    // Emit the CTFE-evaluated value directly
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, manifest.ctfeValue);
+                    return;
+                }
+            }
+        }
+        
+        throw new EmitError("Unknown identifier: " ~ expr.name);
     }
     
     void emitBinary(ref Appender!(ubyte[]) out_, BinaryExpression expr) {

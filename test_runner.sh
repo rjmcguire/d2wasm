@@ -69,7 +69,25 @@ run_test() {
     fi
     
     local compile_output
-    if ! compile_output=$("$COMPILER" "$test_file" -o "$wasm_file" 2>&1); then
+    compile_output=$("$COMPILER" "$test_file" -o "$wasm_file" 2>&1)
+    local compile_status=$?
+    
+    # Handle compile_output test type (check output during compilation)
+    if [ "$test_type" = "compile_output" ]; then
+        local expected_output=$(jq -r '.expected_output' "$config_file")
+        if echo "$compile_output" | grep -qF "$expected_output"; then
+            echo -e "${GREEN}PASS${NC} $test_name (output: $expected_output)"
+            return 0
+        else
+            echo -e "${RED}FAIL${NC} $test_name"
+            echo "  Expected output: $expected_output"
+            echo "  Compile output:"
+            echo "$compile_output" | sed 's/^/    /'
+            return 1
+        fi
+    fi
+    
+    if [ $compile_status -ne 0 ]; then
         if [ "$test_type" = "compile_error" ]; then
             # Expected to fail compilation
             if [ -f "$expected_file" ]; then

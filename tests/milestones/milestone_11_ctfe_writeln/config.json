@@ -1,6 +1,7 @@
 {
   "name": "ctfe_writeln",
   "description": "CTFE builtin __writeln outputs to compiler stdout",
-  "type": "ctfe_output",
+  "type": "compile_output",
+  "expected_output": "hello world",
   "capability": "WASI fd_write, __writeln builtin, CTFE I/O"
 }

@@ -228,6 +228,9 @@ class SymbolTable {
         
         // Builtin functions
         addBuiltinFunction("writeln", loc);
+        
+        // CTFE-specific builtins
+        addBuiltinFunction("__writeln", loc);  // CTFE output during compilation
     }
     
     /**
