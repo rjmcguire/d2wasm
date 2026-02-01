@@ -16,8 +16,6 @@ import codegen.emitter;
 import codegen.wasm;
 
 import std.stdio;
-import std.process;
-import std.file;
 import std.path;
 import std.conv;
 import std.format;
@@ -339,46 +337,31 @@ class CTFEEvaluator {
     }
     
     /**
-     * Execute WASM with wasm3 and return result
+     * Execute WASM with embedded wasm3 runtime and return result
      */
     long executeWasm(ubyte[] wasmBytes, string funcName, long[] args) {
-        // Write WASM to temp file
-        string tempDir = tempDir();
-        string wasmPath = buildPath(tempDir, "ctfe_temp.wasm");
-        std.file.write(wasmPath, wasmBytes);
+        import semantic.ctfe_runtime : CTFERuntime, CTFERuntimeError;
         
-        scope(exit) {
-            if (exists(wasmPath)) {
-                remove(wasmPath);
+        writeln("CTFE: Executing ", funcName, " via embedded wasm3");
+        
+        auto runtime = new CTFERuntime();
+        scope(exit) destroy(runtime);
+        
+        try {
+            runtime.loadModule(wasmBytes);
+            
+            // Convert long[] to int[] for the call
+            int[] intArgs;
+            foreach (arg; args) {
+                intArgs ~= cast(int)arg;
             }
+            
+            auto result = runtime.callI32(funcName, intArgs);
+            writeln("CTFE: Result = ", result.asInt());
+            return result.asInt();
+            
+        } catch (CTFERuntimeError e) {
+            throw new CTFEError("CTFE: wasm3 execution failed: " ~ e.msg);
         }
-        
-        // Build wasm3 command
-        string[] cmd = ["wasm3", "--func", funcName, wasmPath];
-        foreach (arg; args) {
-            cmd ~= to!string(arg);
-        }
-        
-        writeln("CTFE: Running ", cmd);
-        
-        // Execute
-        auto result = execute(cmd);
-        
-        if (result.status != 0) {
-            throw new CTFEError("CTFE: wasm3 execution failed: " ~ result.output);
-        }
-        
-        // Parse result from output like "Result: 42"
-        string output = result.output.strip();
-        writeln("CTFE: wasm3 output: ", output);
-        
-        import std.algorithm : countUntil;
-        auto resultMatch = output.countUntil("Result:");
-        if (resultMatch == -1) {
-            throw new CTFEError("CTFE: Could not parse wasm3 output: " ~ output);
-        }
-        
-        string valueStr = output[resultMatch + 7 .. $].strip();
-        return to!long(valueStr);
     }
 }

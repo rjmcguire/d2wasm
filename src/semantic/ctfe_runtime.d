@@ -291,3 +291,46 @@ CTFEValue executeWasmI32(const(ubyte)[] wasmBytes, string funcName, int[] args..
     rt.loadModule(wasmBytes);
     return rt.callI32(funcName, args);
 }
+
+//==============================================================================
+// Unit Tests
+//==============================================================================
+
+unittest {
+    import std.stdio : writeln;
+    
+    // WASM module with memory and data section containing "Hello"
+    // Generated from:
+    // (module
+    //   (memory (export "memory") 1)
+    //   (data (i32.const 100) "Hello")
+    //   (func (export "getPtr") (result i32) i32.const 100)
+    //   (func (export "getLen") (result i32) i32.const 5)
+    // )
+    ubyte[] wasmWithData = [
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60,
+        0x00, 0x01, 0x7f, 0x03, 0x03, 0x02, 0x00, 0x00, 0x05, 0x03, 0x01, 0x00,
+        0x01, 0x07, 0x1c, 0x03, 0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02,
+        0x00, 0x06, 0x67, 0x65, 0x74, 0x50, 0x74, 0x72, 0x00, 0x00, 0x06, 0x67,
+        0x65, 0x74, 0x4c, 0x65, 0x6e, 0x00, 0x01, 0x0a, 0x0c, 0x02, 0x05, 0x00,
+        0x41, 0xe4, 0x00, 0x0b, 0x04, 0x00, 0x41, 0x05, 0x0b, 0x0b, 0x0c, 0x01,
+        0x00, 0x41, 0xe4, 0x00, 0x0b, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f
+    ];
+    
+    auto rt = new CTFERuntime();
+    rt.loadModule(wasmWithData);
+    
+    // Get pointer and length from WASM functions
+    auto ptr = rt.callI32("getPtr").asInt();
+    auto len = rt.callI32("getLen").asInt();
+    
+    writeln("String at ptr=", ptr, " len=", len);
+    
+    // Read the string from WASM linear memory - this is the live memory access!
+    auto str = rt.readString(ptr, len);
+    writeln("Read from WASM memory: \"", str, "\"");
+    
+    assert(str == "Hello", "Expected 'Hello', got '" ~ str ~ "'");
+    
+    writeln("✓ Live WASM memory access test passed");
+}
