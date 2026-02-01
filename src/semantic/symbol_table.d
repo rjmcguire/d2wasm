@@ -224,6 +224,9 @@ class SymbolTable {
         addBuiltinType("float", BasicType.Kind.Float32, loc);
         addBuiltinType("double", BasicType.Kind.Float64, loc);
         addBuiltinType("char", BasicType.Kind.Char, loc);
+        
+        // Builtin functions
+        addBuiltinFunction("writeln", loc);
     }
     
     /**
@@ -232,6 +235,23 @@ class SymbolTable {
     private void addBuiltinType(string name, BasicType.Kind kind, SourceLocation loc) {
         auto type = new BasicType(loc, kind);
         auto symbol = new Symbol(name, SymbolKind.Type, type, null, loc, true);
+        globalScope.addSymbol(symbol);
+    }
+    
+    /**
+     * Helper to add built-in function
+     */
+    private void addBuiltinFunction(string name, SourceLocation loc) {
+        // Create a function type for writeln - it's variadic but we'll simplify it
+        // Parameters: variadic (accepts any number of arguments)
+        // Return type: void
+        auto returnType = new BasicType(loc, BasicType.Kind.Void);
+        
+        // For now, create a simple function type that can accept any arguments
+        // In a complete implementation, this would be more sophisticated
+        Type[] paramTypes = []; // Empty parameter list - writeln is variadic
+        auto funcType = new FunctionType(loc, returnType, paramTypes);
+        auto symbol = new Symbol(name, SymbolKind.Function, funcType, null, loc, true);
         globalScope.addSymbol(symbol);
     }
     

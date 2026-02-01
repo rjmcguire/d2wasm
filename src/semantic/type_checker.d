@@ -423,8 +423,16 @@ class TypeChecker {
             );
         }
         
-        // Check argument count
-        if (expr.arguments.length != functionType.parameterTypes.length) {
+        // Special handling for builtin variadic functions
+        bool isVariadicBuiltin = false;
+        string funcName = "unknown";
+        if (auto identExpr = cast(IdentifierExpression)expr.function_) {
+            funcName = identExpr.name;
+            isVariadicBuiltin = (funcName == "writeln"); // Add other variadic builtins here
+        }
+        
+        // Check argument count (skip for variadic builtins)
+        if (!isVariadicBuiltin && expr.arguments.length != functionType.parameterTypes.length) {
             throw new TypeError(
                 format("Function expects %d arguments, got %d",
                        functionType.parameterTypes.length, expr.arguments.length),
@@ -432,18 +440,27 @@ class TypeChecker {
             );
         }
         
-        // Check argument types
-        for (size_t i = 0; i < expr.arguments.length; i++) {
-            Type argType = checkExpression(expr.arguments[i]);
-            Type paramType = functionType.parameterTypes[i];
-            
-            auto compat = checkTypeCompatibility(argType, paramType);
-            if (!compat.isCompatible) {
-                throw new TypeError(
-                    format("Argument %d: expected type '%s', got '%s'",
-                           i + 1, paramType.toString(), argType.toString()),
-                    expr.arguments[i].location
-                );
+        // Check argument types (for variadic builtins, just validate argument expressions)
+        if (isVariadicBuiltin) {
+            // For variadic functions like writeln, just type-check the arguments
+            // without enforcing specific parameter types
+            for (size_t i = 0; i < expr.arguments.length; i++) {
+                checkExpression(expr.arguments[i]); // Just validate the expression
+            }
+        } else {
+            // Standard argument type checking for non-variadic functions
+            for (size_t i = 0; i < expr.arguments.length; i++) {
+                Type argType = checkExpression(expr.arguments[i]);
+                Type paramType = functionType.parameterTypes[i];
+                
+                auto compat = checkTypeCompatibility(argType, paramType);
+                if (!compat.isCompatible) {
+                    throw new TypeError(
+                        format("Argument %d: expected type '%s', got '%s'",
+                               i + 1, paramType.toString(), argType.toString()),
+                        expr.arguments[i].location
+                    );
+                }
             }
         }
         

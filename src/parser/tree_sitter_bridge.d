@@ -681,7 +681,35 @@ class TreeSitterBridge {
         TSNode exprNode = TreeSitterParser.getChildByFieldName(node, "expression");
         
         if (!TreeSitterParser.isValid(exprNode)) {
+            // Try to find expression in children
+            uint childCount = TreeSitterParser.getChildCount(node);
+            for (uint i = 0; i < childCount; i++) {
+                TSNode child = TreeSitterParser.getChild(node, i);
+                string nodeType = TreeSitterParser.getNodeType(child);
+                
+                if (nodeType == "expression_list" || nodeType == "expression" || nodeType.endsWith("expression")) {
+                    exprNode = child;
+                    break;
+                }
+            }
+        }
+        
+        if (!TreeSitterParser.isValid(exprNode)) {
             throw new ParseError("Expression statement missing expression", loc);
+        }
+        
+        // Handle expression_list by taking the first expression
+        string nodeType = TreeSitterParser.getNodeType(exprNode);
+        if (nodeType == "expression_list") {
+            uint childCount = TreeSitterParser.getChildCount(exprNode);
+            for (uint i = 0; i < childCount; i++) {
+                TSNode child = TreeSitterParser.getChild(exprNode, i);
+                string childType = TreeSitterParser.getNodeType(child);
+                if (childType != "," && childType != "(" && childType != ")") {
+                    exprNode = child;
+                    break;
+                }
+            }
         }
         
         Expression expression = parseExpression(exprNode);

@@ -85,6 +85,7 @@ struct WasmModule {
     string[] imports;
     string[] exports;
     string[] globalVariables;
+    string[] dataEntries;  // Data section entries
     uint memorySize = 1;  // Memory pages (64KB each)
     
     /**
@@ -95,12 +96,17 @@ struct WasmModule {
         
         result ~= "(module\n";
         
+        // Imports must come first
+        foreach (imp; imports) {
+            result ~= "  " ~ imp ~ "\n";
+        }
+        
         // Memory declaration and export
         result ~= format("  (memory (export \"memory\") %d)\n", memorySize);
         
-        // Imports
-        foreach (imp; imports) {
-            result ~= "  " ~ imp ~ "\n";
+        // Data section entries
+        foreach (data; dataEntries) {
+            result ~= "  " ~ data ~ "\n";
         }
         
         // Global variables
@@ -113,9 +119,11 @@ struct WasmModule {
             result ~= func.toWAT() ~ "\n\n";
         }
         
-        // Automatic exports for all functions
+        // Automatic exports for all functions (skip internal WASI helpers)
         foreach (func; functions) {
-            result ~= format("  (export \"%s\" (func $%s))\n", func.name, func.name);
+            if (func.name != "write_str" && func.name != "_start") {
+                result ~= format("  (export \"%s\" (func $%s))\n", func.name, func.name);
+            }
         }
         
         // Manual exports
@@ -257,12 +265,91 @@ class WasmGenerator {
     WasmModule generateModule(Declaration[] declarations) {
         wasmModule = WasmModule();
         
+        // Add WASI imports for console output
+        addWasiImports();
+        
+        // Add WASI helper functions
+        addWasiHelpers();
+        
         // Generate code for all declarations
         foreach (decl; declarations) {
             generateDeclaration(decl);
         }
         
+        // Add WASI _start entry point if main function exists
+        addWasiEntryPoint();
+        
+        // Transfer pending data entries to module
+        wasmModule.dataEntries = pendingDataEntries;
+        
         return wasmModule;
+    }
+    
+    /**
+     * Add WASI imports to the module
+     */
+    private void addWasiImports() {
+        wasmModule.imports ~= "(import \"wasi_snapshot_preview1\" \"fd_write\" (func $fd_write (param i32 i32 i32 i32) (result i32)))";
+    }
+    
+    /**
+     * Add WASI helper functions for console output
+     */
+    private void addWasiHelpers() {
+        // Add string data section at the end of module generation
+        // For now, we'll add a generic write_str function
+        auto writeStrFunc = WasmFunction();
+        writeStrFunc.name = "write_str";
+        writeStrFunc.parameters = [WasmType.i32, WasmType.i32]; // offset, length
+        writeStrFunc.returnType = WasmType.void_;
+        
+        // Generate WASI fd_write helper function
+        string wasiHelper = `  (func $write_str (param $offset i32) (param $len i32)
+    ;; Setup iovec at memory[0]: [string_ptr, string_len]
+    (i32.store (i32.const 0) (local.get $offset))
+    (i32.store (i32.const 4) (local.get $len))
+    
+    ;; fd_write(stdout=1, iovec=0, iovec_count=1, bytes_written=8)
+    (call $fd_write
+      (i32.const 1)   ;; stdout
+      (i32.const 0)   ;; iovec pointer
+      (i32.const 1)   ;; number of iovecs
+      (i32.const 8))  ;; bytes written output
+    drop
+  )`;
+        
+        writeStrFunc.instructions = [wasiHelper];
+        wasmModule.functions ~= writeStrFunc;
+    }
+    
+    /**
+     * Add WASI _start entry point if main function exists
+     */
+    private void addWasiEntryPoint() {
+        // Check if we have a main function
+        bool hasMain = false;
+        foreach (func; wasmModule.functions) {
+            if (func.name == "main") {
+                hasMain = true;
+                break;
+            }
+        }
+        
+        if (hasMain) {
+            auto startFunc = WasmFunction();
+            startFunc.name = "_start";
+            startFunc.parameters = [];
+            startFunc.returnType = WasmType.void_;
+            startFunc.instructions = [`  (func $_start
+    (call $main)
+    drop
+  )`];
+            
+            wasmModule.functions ~= startFunc;
+            
+            // Export _start instead of main for WASI compatibility
+            wasmModule.exports ~= `(export "_start" (func $_start))`;
+        }
     }
     
     /**
@@ -389,10 +476,26 @@ class WasmGenerator {
             params["EXPRESSION_CODE"] = exprCode;
             
             // Determine if we need to drop the result
-            // If the expression produces a result but the statement doesn't use it, we drop.
-            // For now, we use a simple heuristic: if it's a CallExpression or BinaryExpression, it likely left something.
-            // A more robust way would be to get the expression's inferred type.
-            bool needsDrop = true; // Default to safe drop
+            bool needsDrop = false; // Default to no drop
+            
+            if (auto callExpr = cast(CallExpression)exprStmt.expression) {
+                string funcName = "unknown";
+                if (auto identExpr = cast(IdentifierExpression)callExpr.function_) {
+                    funcName = identExpr.name;
+                }
+                
+                // writeln() and other void functions don't leave values on the stack
+                if (funcName == "writeln") {
+                    needsDrop = false;
+                } else {
+                    // For other function calls, we may need to drop if they return values
+                    // For now, assume they return values
+                    needsDrop = true;
+                }
+            } else if (auto binaryExpr = cast(BinaryExpression)exprStmt.expression) {
+                // Binary expressions typically leave a value
+                needsDrop = true;
+            }
             
             params["DROP_IF_NEEDED"] = needsDrop ? "drop" : "";
             return templateEngine.substitute("core/expression_statement", params);
@@ -524,14 +627,19 @@ class WasmGenerator {
      * Generate function call
      */
     string generateCallExpression(CallExpression expr) {
-        string args = "";
-        foreach (arg; expr.arguments) {
-            args ~= generateExpression(arg) ~ "\n";
-        }
-        
         string funcName = "unknown";
         if (auto identExpr = cast(IdentifierExpression)expr.function_) {
             funcName = identExpr.name;
+        }
+        
+        // Special handling for writeln() - map to WASI console output
+        if (funcName == "writeln") {
+            return generateWritelnCall(expr);
+        }
+        
+        string args = "";
+        foreach (arg; expr.arguments) {
+            args ~= generateExpression(arg) ~ "\n";
         }
         
         string[string] params;
@@ -540,6 +648,111 @@ class WasmGenerator {
         
         return templateEngine.substitute("core/function_call", params);
     }
+    
+    /**
+     * Generate WASI-compatible writeln() call
+     */
+    private string generateWritelnCall(CallExpression expr) {
+        if (expr.arguments.length == 0) {
+            // writeln() with no arguments - just print newline
+            return generateWritelnNewline();
+        }
+        
+        string result = "";
+        foreach (arg; expr.arguments) {
+            if (auto literal = cast(LiteralExpression)arg) {
+                if (literal.value.type == typeid(string)) {
+                    // String literal - add to data section and generate call
+                    string str = literal.value.get!string();
+                    result ~= generateWritelnString(str);
+                } else if (literal.value.type == typeid(long)) {
+                    // Integer literal - convert to string and output
+                    long val = literal.value.get!long();
+                    result ~= generateWritelnInteger(val);
+                }
+            } else {
+                // For complex expressions, we'd need runtime string conversion
+                // For now, treat as placeholder
+                result ~= ";; TODO: Complex expression writeln(" ~ arg.toString() ~ ")\n";
+            }
+        }
+        
+        return result;
+    }
+    
+    /**
+     * Generate string data and WASI call for string literal
+     */
+    private string generateWritelnString(string str) {
+        // Add newline to string
+        string strWithNewline = str ~ "\n";
+        
+        // Find next available memory offset (simple strategy)
+        uint offset = getNextStringOffset();
+        
+        // Add string to data section
+        addStringToDataSection(strWithNewline, offset);
+        
+        // Generate call to write_str with offset and length
+        return format("  (call $write_str (i32.const %d) (i32.const %d))\n", 
+                     offset, strWithNewline.length);
+    }
+    
+    /**
+     * Generate WASI call for integer output
+     */
+    private string generateWritelnInteger(long value) {
+        // Convert integer to string with newline
+        string strValue = format("%d\n", value);
+        
+        uint offset = getNextStringOffset();
+        addStringToDataSection(strValue, offset);
+        
+        return format("  (call $write_str (i32.const %d) (i32.const %d))\n",
+                     offset, strValue.length);
+    }
+    
+    /**
+     * Generate writeln() with just newline
+     */
+    private string generateWritelnNewline() {
+        uint offset = getNextStringOffset();
+        addStringToDataSection("\n", offset);
+        
+        return format("  (call $write_str (i32.const %d) (i32.const %d))\n",
+                     offset, 1);
+    }
+    
+    /**
+     * Simple string memory allocation strategy
+     */
+    private uint nextStringOffset = 100;  // Start strings at offset 100
+    
+    private uint getNextStringOffset() {
+        uint current = nextStringOffset;
+        nextStringOffset += 50;  // Leave 50 bytes between strings
+        return current;
+    }
+    
+    /**
+     * Add string to module data section
+     */
+    private void addStringToDataSection(string str, uint offset) {
+        // Escape the string for WAT format
+        string escapedStr = str.replace("\\", "\\\\")
+                              .replace("\"", "\\\"")
+                              .replace("\n", "\\n")
+                              .replace("\r", "\\r")
+                              .replace("\t", "\\t");
+        string dataEntry = format("(data (i32.const %d) \"%s\")", offset, escapedStr);
+        
+        // Add to module data section (we'll need to modify WasmModule for this)
+        // For now, store in a temporary array
+        pendingDataEntries ~= dataEntry;
+    }
+    
+    // Temporary storage for data entries
+    private string[] pendingDataEntries;
     
     /**
      * Generate identifier reference (variable access)
