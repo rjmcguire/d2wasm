@@ -47,7 +47,8 @@ class Symbol {
     }
     
     override string toString() {
-        return format("%s %s: %s", kind, name, type.toString());
+        string typeStr = type ? type.toString() : "<unknown>";
+        return format("%s %s: %s", kind, name, typeStr);
     }
 }
 

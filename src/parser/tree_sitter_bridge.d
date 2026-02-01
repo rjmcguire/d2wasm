@@ -531,7 +531,13 @@ class TreeSitterBridge {
         
         switch (nodeType) {
             case "block_statement":
-                return parseBlockStatement(node);
+                return parseCompoundStatement(node, loc);
+            case "scope_statement":
+                // scope_statement usually has one child: a block_statement or a simple statement
+                if (TreeSitterParser.getChildCount(node) > 0) {
+                    return parseStatement(TreeSitterParser.getChild(node, 0));
+                }
+                throw new ParseError("Empty scope_statement", loc);
             case "if_statement":
                 return parseIfStatement(node, loc);
             case "while_statement":
@@ -879,7 +885,20 @@ class TreeSitterBridge {
                 
                 if (nodeType != "(" && nodeType != ")" && nodeType != ",") {
                     try {
-                        arguments ~= parseExpression(child);
+                        if (nodeType == "named_argument") {
+                            // Find the actual expression inside named_argument
+                            uint innerCount = TreeSitterParser.getChildCount(child);
+                            for (uint j = 0; j < innerCount; j++) {
+                                TSNode inner = TreeSitterParser.getChild(child, j);
+                                string innerType = TreeSitterParser.getNodeType(inner);
+                                if (innerType.endsWith("expression") || innerType == "identifier" || innerType.endsWith("literal")) {
+                                    arguments ~= parseExpression(inner);
+                                    break;
+                                }
+                            }
+                        } else {
+                            arguments ~= parseExpression(child);
+                        }
                     } catch (ParseError e) {
                         // Skip punctuation or garbage
                     }

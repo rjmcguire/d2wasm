@@ -90,7 +90,10 @@ class TypeChecker {
      * Type check function declaration
      */
     void checkFunctionDeclaration(FunctionDecl decl) {
+        writeln("Type checking function: ", decl.name);
+        
         // Enter function scope
+        if (!symbolTable) { writeln("Error: symbolTable is null!"); return; }
         symbolTable.enterScope("function:" ~ decl.name);
         scope(exit) symbolTable.exitScope();
         
@@ -100,7 +103,18 @@ class TypeChecker {
         scope(exit) currentFunctionReturnType = oldReturnType;
         
         // Add parameters to scope
+        writeln("Checking parameters for ", decl.name);
         foreach (param; decl.parameters) {
+            writeln("  Parameter: ", param.name);
+            
+            // Check if parameter type is null (from parsing issues)
+            if (!param.type) {
+                throw new TypeError(
+                    format("Parameter '%s' has unknown type", param.name),
+                    decl.location
+                );
+            }
+            
             auto symbol = new Symbol(
                 param.name,
                 SymbolKind.Parameter,
@@ -127,6 +141,7 @@ class TypeChecker {
         
         // Type check function body
         if (decl.body_) {
+            writeln("Checking body for ", decl.name);
             checkStatement(decl.body_);
         }
     }
@@ -185,6 +200,12 @@ class TypeChecker {
      * Type check a statement
      */
     void checkStatement(Statement stmt) {
+        if (!stmt) {
+            writeln("Warning: visiting null statement in TypeChecker");
+            return;
+        }
+        // writeln("Checking statement type: ", typeid(stmt).name);
+        
         if (auto compound = cast(CompoundStatement)stmt) {
             symbolTable.enterScope("block");
             scope(exit) symbolTable.exitScope();
@@ -240,6 +261,9 @@ class TypeChecker {
         } else if (auto returnStmt = cast(ReturnStatement)stmt) {
             if (returnStmt.value) {
                 Type returnType = checkExpression(returnStmt.value);
+                if (!currentFunctionReturnType) {
+                    throw new TypeError("Return statement outside of any function", returnStmt.location);
+                }
                 auto compat = checkTypeCompatibility(returnType, currentFunctionReturnType);
                 if (!compat.isCompatible) {
                     throw new TypeError(
@@ -267,6 +291,12 @@ class TypeChecker {
      * Type check an expression and return its type
      */
     Type checkExpression(Expression expr) {
+        if (!expr) {
+            writeln("Error: visiting null expression in TypeChecker");
+            return new BasicType(SourceLocation(), BasicType.Kind.Void);
+        }
+        // writeln("Checking expression type: ", typeid(expr).name);
+        
         if (auto binary = cast(BinaryExpression)expr) {
             return checkBinaryExpression(binary);
         } else if (auto unary = cast(UnaryExpression)expr) {
@@ -280,7 +310,7 @@ class TypeChecker {
         } else if (auto ident = cast(IdentifierExpression)expr) {
             return checkIdentifierExpression(ident);
         } else if (auto literal = cast(LiteralExpression)expr) {
-            return literal.type;
+            return inferLiteralType(literal);
         } else if (auto cast_ = cast(CastExpression)expr) {
             return checkCastExpression(cast_);
         } else if (auto assign = cast(AssignmentExpression)expr) {
@@ -315,6 +345,20 @@ class TypeChecker {
         // Comparison operators
         if (expr.operator >= BinaryExpression.Operator.Equal && 
             expr.operator <= BinaryExpression.Operator.GreaterEqual) {
+            
+            // Check for null types first
+            if (!leftType) {
+                throw new TypeError(
+                    format("Left operand has unknown type in binary expression (operator: %s)", expr.operator),
+                    expr.location
+                );
+            }
+            if (!rightType) {
+                throw new TypeError(
+                    format("Right operand has unknown type in binary expression (operator: %s)", expr.operator),
+                    expr.location
+                );
+            }
             
             auto compat = checkTypeCompatibility(leftType, rightType);
             if (!compat.isCompatible && !checkTypeCompatibility(rightType, leftType).isCompatible) {
@@ -535,11 +579,14 @@ class TypeChecker {
      * Type utility functions
      */
     bool typesEqual(Type a, Type b) {
+        if (a is b) return true;
+        if (!a || !b) return false;
         // Simplified equality check - in a full implementation this would be more sophisticated
         return a.toString() == b.toString();
     }
     
     bool isArithmeticType(Type type) {
+        if (!type) return false;
         auto basic = cast(BasicType)type;
         return basic && (isIntegerType(basic) || isFloatingType(basic));
     }
@@ -588,6 +635,7 @@ class TypeChecker {
     }
     
     bool isVoidType(Type type) {
+        if (!type) return false;
         auto basic = cast(BasicType)type;
         return basic && basic.kind == BasicType.Kind.Void;
     }
@@ -612,6 +660,35 @@ class TypeChecker {
                 return 8;
             default:
                 return 0;
+        }
+    }
+    
+    /**
+     * Infer type for literal expressions based on their value
+     */
+    Type inferLiteralType(LiteralExpression literal) {
+        import std.variant;
+        
+        if (literal.value.type == typeid(long)) {
+            // Integer literal
+            return new BasicType(literal.location, BasicType.Kind.Int32);
+        } else if (literal.value.type == typeid(double)) {
+            // Floating point literal
+            return new BasicType(literal.location, BasicType.Kind.Float64);
+        } else if (literal.value.type == typeid(bool)) {
+            // Boolean literal
+            return new BasicType(literal.location, BasicType.Kind.Bool);
+        } else if (literal.value.type == typeid(string)) {
+            // String literal
+            return new BasicType(literal.location, BasicType.Kind.Char);  // TODO: Proper string type
+        } else if (literal.value.type == typeid(typeof(null))) {
+            // Null literal
+            return new BasicType(literal.location, BasicType.Kind.Void);  // TODO: Proper null type
+        } else {
+            throw new TypeError(
+                format("Unknown literal type: %s", literal.value.type),
+                literal.location
+            );
         }
     }
 }

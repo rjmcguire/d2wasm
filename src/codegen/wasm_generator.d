@@ -261,13 +261,6 @@ class WasmGenerator {
             generateDeclaration(decl);
         }
         
-        // Add exports for main function if it exists
-        foreach (func; wasmModule.functions) {
-            if (func.name == "main") {
-                wasmModule.exports ~= format("(export \"main\" (func $%s))", func.name);
-            }
-        }
-        
         return wasmModule;
     }
     
@@ -304,9 +297,10 @@ class WasmGenerator {
             wasmFunc.parameters ~= paramType;
             
             // Parameters are automatically local variables with IDs 0, 1, 2...
-            context.localVariableIds[param.name] = cast(uint)i;
+            uint id = cast(uint)i;
+            context.localVariableIds[param.name] = id;
             
-            paramList ~= format(" (param $p%d %s)", i, context.wasmTypeToString(paramType));
+            paramList ~= format(" (param $l%d %s)", id, context.wasmTypeToString(paramType));
         }
         context.nextLocalId = cast(uint)decl.parameters.length;
         
@@ -520,16 +514,22 @@ class WasmGenerator {
      * Generate identifier reference (variable access)
      */
     string generateIdentifierExpression(IdentifierExpression expr) {
+        // Try to look up in local variables first
+        auto ptr = expr.name in context.localVariableIds;
+        if (ptr) {
+            string[string] params;
+            params["VARIABLE_NAME"] = format("l%d", *ptr);
+            params["GET_INSTRUCTION"] = "local.get";
+            return templateEngine.substitute("expressions/variable_access", params);
+        }
+        
+        // Fall back to global symbol table
         Symbol symbol = symbolTable.lookupSymbol(expr.name);
         if (!symbol) return ";; unknown symbol " ~ expr.name;
         
         string[string] params;
         params["VARIABLE_NAME"] = symbol.name;
         params["GET_INSTRUCTION"] = symbol.isGlobal ? "global.get" : "local.get";
-        if (!symbol.isGlobal) {
-            uint localId = context.getLocalVariableId(symbol.name);
-            params["VARIABLE_NAME"] = format("l%d", localId);
-        }
         
         return templateEngine.substitute("expressions/variable_access", params);
     }
@@ -555,18 +555,28 @@ class WasmGenerator {
         string valExpr = generateExpression(expr.right);
         
         if (auto identExpr = cast(IdentifierExpression)expr.left) {
-            Symbol symbol = symbolTable.lookupSymbol(identExpr.name);
-            if (!symbol) return ";; unknown assignment target";
-            
             string[string] params;
             params["VALUE_EXPRESSION"] = valExpr;
-            params["VARIABLE_NAME"] = symbol.name;
-            params["SET_INSTRUCTION"] = symbol.isGlobal ? "global.set" : "local.set";
-            params["GET_INSTRUCTION"] = symbol.isGlobal ? "global.get" : "local.get";
             
-            if (!symbol.isGlobal) {
-                uint localId = context.getLocalVariableId(symbol.name);
-                params["VARIABLE_NAME"] = format("l%d", localId);
+            // Try to look up in local variables first
+            auto ptr = identExpr.name in context.localVariableIds;
+            if (ptr) {
+                params["VARIABLE_NAME"] = format("l%d", *ptr);
+                params["SET_INSTRUCTION"] = "local.set";
+                params["GET_INSTRUCTION"] = "local.get";
+            } else {
+                // Fall back to global symbol table
+                Symbol symbol = symbolTable.lookupSymbol(identExpr.name);
+                if (!symbol) return ";; unknown assignment target " ~ identExpr.name;
+                
+                params["VARIABLE_NAME"] = symbol.name;
+                params["SET_INSTRUCTION"] = symbol.isGlobal ? "global.set" : "local.set";
+                params["GET_INSTRUCTION"] = symbol.isGlobal ? "global.get" : "local.get";
+                
+                if (!symbol.isGlobal) {
+                    uint localId = context.getLocalVariableId(symbol.name);
+                    params["VARIABLE_NAME"] = format("l%d", localId);
+                }
             }
             
             return templateEngine.substitute("core/variable_assignment", params);
