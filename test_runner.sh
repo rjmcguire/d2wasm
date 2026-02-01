@@ -1,0 +1,184 @@
+#!/bin/bash
+#
+# Milestone Test Runner
+# Runs tests in order, stops at first failure
+#
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+COMPILER="$SCRIPT_DIR/d2wasm"
+TESTS_DIR="$SCRIPT_DIR/tests/milestones"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Options
+VERBOSE=0
+AGENT_MODE=0
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -v|--verbose) VERBOSE=1; shift ;;
+        --agent-mode) AGENT_MODE=1; shift ;;
+        *) echo "Unknown option: $1"; exit 1 ;;
+    esac
+done
+
+# Check dependencies
+check_deps() {
+    local missing=()
+    command -v wasm3 >/dev/null 2>&1 || missing+=("wasm3")
+    command -v wasm2wat >/dev/null 2>&1 || missing+=("wasm2wat")
+    
+    if [ ${#missing[@]} -ne 0 ]; then
+        echo -e "${RED}Missing dependencies: ${missing[*]}${NC}"
+        echo "Install with: brew install wasm3 wabt"
+        exit 1
+    fi
+}
+
+# Run a single test
+run_test() {
+    local test_dir="$1"
+    local test_name="$(basename "$test_dir")"
+    local config_file="$test_dir/config.json"
+    local test_file="$test_dir/test.d"
+    local expected_file="$test_dir/expected.txt"
+    
+    if [ ! -f "$config_file" ]; then
+        echo -e "${YELLOW}SKIP${NC} $test_name (no config.json)"
+        return 0
+    fi
+    
+    # Parse config
+    local test_type=$(jq -r '.type' "$config_file")
+    local func_name=$(jq -r '.entry // .function // "main"' "$config_file")
+    local args=$(jq -r '.args // [] | join(" ")' "$config_file")
+    local expected_exit=$(jq -r '.expected_exit // 0' "$config_file")
+    
+    # Build
+    local wasm_file="$test_dir/test.wasm"
+    rm -f "$wasm_file"
+    
+    if [ $VERBOSE -eq 1 ]; then
+        echo "Compiling $test_file..."
+    fi
+    
+    local compile_output
+    if ! compile_output=$("$COMPILER" "$test_file" -o "$wasm_file" 2>&1); then
+        if [ "$test_type" = "compile_error" ]; then
+            # Expected to fail compilation
+            if [ -f "$expected_file" ]; then
+                local expected=$(cat "$expected_file")
+                if echo "$compile_output" | grep -qF "$expected"; then
+                    echo -e "${GREEN}PASS${NC} $test_name (compile error as expected)"
+                    return 0
+                fi
+            fi
+            echo -e "${GREEN}PASS${NC} $test_name (compile error)"
+            return 0
+        fi
+        
+        echo -e "${RED}FAIL${NC} $test_name"
+        echo "  Compilation failed:"
+        echo "$compile_output" | sed 's/^/    /'
+        return 1
+    fi
+    
+    # Validate binary with wasm2wat
+    if ! wasm2wat "$wasm_file" >/dev/null 2>&1; then
+        echo -e "${RED}FAIL${NC} $test_name"
+        echo "  Invalid WASM binary (wasm2wat failed)"
+        return 1
+    fi
+    
+    case "$test_type" in
+        compile_only)
+            echo -e "${GREEN}PASS${NC} $test_name"
+            return 0
+            ;;
+            
+        wasm_exec)
+            local result
+            if ! result=$(wasm3 --func "$func_name" "$wasm_file" $args 2>&1); then
+                echo -e "${RED}FAIL${NC} $test_name"
+                echo "  wasm3 execution failed:"
+                echo "$result" | sed 's/^/    /'
+                return 1
+            fi
+            
+            # Extract numeric result
+            local actual=$(echo "$result" | grep -oE 'Result: -?[0-9]+' | grep -oE '\-?[0-9]+')
+            
+            if [ -f "$expected_file" ]; then
+                # Extract expected number (may be "42" or "Result: 42")
+                local expected=$(cat "$expected_file" | grep -oE '\-?[0-9]+' | head -1)
+                if [ "$actual" != "$expected" ]; then
+                    echo -e "${RED}FAIL${NC} $test_name"
+                    echo "  Expected: $expected"
+                    echo "  Actual: $actual"
+                    return 1
+                fi
+            fi
+            
+            echo -e "${GREEN}PASS${NC} $test_name (result: $actual)"
+            return 0
+            ;;
+            
+        ctfe_eval|ctfe_output)
+            # TODO: Implement CTFE tests
+            echo -e "${YELLOW}SKIP${NC} $test_name (CTFE not implemented)"
+            return 0
+            ;;
+            
+        *)
+            echo -e "${YELLOW}SKIP${NC} $test_name (unknown type: $test_type)"
+            return 0
+            ;;
+    esac
+}
+
+# Main
+check_deps
+
+if [ ! -x "$COMPILER" ]; then
+    echo "Building compiler..."
+    (cd "$SCRIPT_DIR" && dub build)
+fi
+
+echo "Running milestone tests..."
+echo
+
+passed=0
+failed=0
+skipped=0
+
+for test_dir in $(ls -d "$TESTS_DIR"/milestone_* 2>/dev/null | sort); do
+    if run_test "$test_dir"; then
+        ((passed++)) || true
+    else
+        ((failed++)) || true
+        if [ $AGENT_MODE -eq 1 ]; then
+            echo
+            echo "=== AGENT MODE: First failure details ==="
+            echo "Test: $(basename "$test_dir")"
+            echo "Config: $(cat "$test_dir/config.json")"
+            echo "Source:"
+            cat "$test_dir/test.d"
+            if [ -f "$test_dir/test.wasm" ]; then
+                echo "Decompiled WASM:"
+                wasm2wat "$test_dir/test.wasm" 2>/dev/null || echo "(decompilation failed)"
+            fi
+        fi
+        break  # Stop at first failure
+    fi
+done
+
+echo
+echo "Results: $passed passed, $failed failed, $skipped skipped"
+
+[ $failed -eq 0 ]

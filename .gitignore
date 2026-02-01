@@ -1,0 +1,4 @@
+
+# Build artifacts
+*.wasm
+d2wasm

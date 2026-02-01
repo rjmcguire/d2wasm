@@ -26,7 +26,7 @@ import parser.tree_sitter_c;
 import semantic.feature_validator;
 import semantic.symbol_table;
 import semantic.type_checker;
-// TODO: import codegen.binary_emitter;
+import codegen.emitter;
 
 struct CompilerOptions {
     string inputFile;
@@ -195,18 +195,24 @@ int compileFile(CompilerOptions options) {
         // 6. Code generation (binary WASM emission)
         if (!options.dryRun) {
             if (options.verbose) {
-                writeln("Code generation not yet implemented");
-                writeln("Frontend phases (parse, validate, typecheck) completed successfully");
+                writeln("Generating binary WASM...");
             }
             
-            // TODO: Implement binary WASM emission
-            // auto emitter = new BinaryEmitter(symbolTable);
-            // ubyte[] wasm = emitter.emit(ast);
-            // std.file.write(options.outputFile, wasm);
+            auto emitter = new BinaryEmitter(symbolTable);
+            ubyte[] wasm = emitter.emit(ast);
             
-            writeln("ERROR: Binary WASM codegen not implemented yet");
-            writeln("Frontend OK - AST has ", ast.length, " declarations");
-            return 1;
+            if (wasm is null) {
+                writeln("Code Generation Error: ", emitter.error());
+                return 1;
+            }
+            
+            std.file.write(options.outputFile, wasm);
+            
+            if (options.verbose) {
+                writeln("Generated ", wasm.length, " bytes of binary WASM");
+            }
+            
+            writeln("Successfully compiled to ", options.outputFile);
         } else {
             writeln("Dry run complete - frontend phases successful");
         }
