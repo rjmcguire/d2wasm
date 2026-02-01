@@ -28,7 +28,10 @@ class BinaryExpression : Expression {
         
         // Bitwise
         BitwiseAnd, BitwiseOr, BitwiseXor,
-        ShiftLeft, ShiftRight
+        ShiftLeft, ShiftRight,
+        
+        // Array/String
+        Concat  // ~ operator
     }
     
     Expression left;
@@ -75,6 +78,7 @@ class BinaryExpression : Expression {
             case Operator.BitwiseXor: return "^";
             case Operator.ShiftLeft: return "<<";
             case Operator.ShiftRight: return ">>";
+            case Operator.Concat: return "~";
         }
     }
 }

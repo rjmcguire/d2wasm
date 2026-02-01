@@ -1,0 +1,7 @@
+{
+  "name": "string_concat",
+  "description": "String concatenation via WASM live memory",
+  "type": "compile_output",
+  "expected_output": "Hello World",
+  "capability": "String concat in CTFE, WASM memory read"
+}

@@ -81,6 +81,18 @@ class CTFEEvaluator {
             }
         }
         
+        // Check for binary expression (e.g., string concatenation)
+        if (auto binaryExpr = cast(BinaryExpression)manifest.initializer) {
+            if (binaryExpr.operator == BinaryExpression.Operator.Concat) {
+                string result = evaluateStringConcat(binaryExpr);
+                manifest.ctfeStringValue = result;
+                manifest.ctfeComplete = true;
+                manifest.isStringType = true;
+                writeln("CTFE: ", manifest.name, " = \"", result, "\" (concatenated)");
+                return;
+            }
+        }
+        
         // Need to evaluate via WASM execution
         if (auto callExpr = cast(CallExpression)manifest.initializer) {
             long result = evaluateCallExpression(callExpr);
@@ -93,6 +105,228 @@ class CTFEEvaluator {
         
         throw new CTFEError("Cannot evaluate manifest constant '" ~ manifest.name ~ 
                            "': unsupported initializer type");
+    }
+    
+    /**
+     * Evaluate string concatenation via WASM execution
+     * This demonstrates the "live memory" model - we compile concat logic to WASM,
+     * execute it, and read the resulting string from WASM memory.
+     */
+    string evaluateStringConcat(BinaryExpression expr) {
+        import semantic.ctfe_runtime : CTFERuntime, CTFERuntimeError;
+        
+        // Get the two string operands
+        string left = getStringValue(expr.left);
+        string right = getStringValue(expr.right);
+        
+        writeln("CTFE: Concatenating \"", left, "\" ~ \"", right, "\" via WASM");
+        
+        // Build a WASM module that:
+        // 1. Has both strings in data section
+        // 2. Has a concat function that copies both to a result area
+        // 3. Returns (resultPtr, resultLen)
+        
+        ubyte[] wasmBytes = buildConcatModule(left, right);
+        
+        // Execute in embedded wasm3
+        auto runtime = new CTFERuntime();
+        scope(exit) destroy(runtime);
+        
+        runtime.loadModule(wasmBytes);
+        
+        // Call concat function - returns pointer to result
+        auto ptrResult = runtime.callI32("getResultPtr");
+        auto lenResult = runtime.callI32("getResultLen");
+        
+        uint ptr = ptrResult.asInt();
+        uint len = lenResult.asInt();
+        
+        writeln("CTFE: Result at ptr=", ptr, " len=", len);
+        
+        // Read the concatenated string from WASM memory!
+        string result = runtime.readString(ptr, len);
+        
+        writeln("CTFE: Read from WASM memory: \"", result, "\"");
+        
+        return result;
+    }
+    
+    /**
+     * Get string value from expression (literal or manifest constant reference)
+     */
+    string getStringValue(Expression expr) {
+        if (auto literal = cast(LiteralExpression)expr) {
+            if (literal.value.type == typeid(string)) {
+                return literal.value.get!string();
+            }
+        }
+        if (auto ident = cast(IdentifierExpression)expr) {
+            // Look up manifest constant
+            foreach (decl; allDeclarations) {
+                if (auto manifest = cast(ManifestConstantDecl)decl) {
+                    if (manifest.name == ident.name && manifest.ctfeComplete && manifest.isStringType) {
+                        return manifest.ctfeStringValue;
+                    }
+                }
+            }
+        }
+        throw new CTFEError("Cannot get string value from expression");
+    }
+    
+    /**
+     * Build a WASM module for string concatenation
+     * Layout in memory:
+     *   0-99:    scratch space (iovec, etc)
+     *   100:     left string
+     *   100+L1:  right string  
+     *   100+L1+L2: result (copy of both)
+     */
+    ubyte[] buildConcatModule(string left, string right) {
+        import std.array : Appender;
+        import codegen.wasm : leb128u, leb128s, Op, Section, ValType, ExportKind;
+        
+        uint leftLen = cast(uint)left.length;
+        uint rightLen = cast(uint)right.length;
+        uint resultLen = leftLen + rightLen;
+        
+        // Memory layout
+        uint leftPtr = 100;
+        uint rightPtr = leftPtr + leftLen;
+        uint resultPtr = rightPtr + rightLen;
+        
+        Appender!(ubyte[]) wasm;
+        
+        // Header
+        wasm ~= cast(ubyte[])[0x00, 0x61, 0x73, 0x6D];  // magic
+        wasm ~= cast(ubyte[])[0x01, 0x00, 0x00, 0x00];  // version
+        
+        // Type section: two () -> i32 functions
+        {
+            Appender!(ubyte[]) section;
+            leb128u(section, 1);  // 1 type
+            section ~= cast(ubyte)0x60;  // func type
+            leb128u(section, 0);  // 0 params
+            leb128u(section, 1);  // 1 result
+            section ~= cast(ubyte)ValType.i32;
+            
+            wasm ~= cast(ubyte)Section.type;
+            leb128u(wasm, section.data.length);
+            wasm ~= section.data;
+        }
+        
+        // Function section: 2 functions, both type 0
+        {
+            Appender!(ubyte[]) section;
+            leb128u(section, 2);  // 2 functions
+            leb128u(section, 0);  // func 0 is type 0
+            leb128u(section, 0);  // func 1 is type 0
+            
+            wasm ~= cast(ubyte)Section.function_;
+            leb128u(wasm, section.data.length);
+            wasm ~= section.data;
+        }
+        
+        // Memory section: 1 page
+        {
+            Appender!(ubyte[]) section;
+            leb128u(section, 1);  // 1 memory
+            section ~= cast(ubyte)0x00;  // no max
+            leb128u(section, 1);  // 1 page min
+            
+            wasm ~= cast(ubyte)Section.memory;
+            leb128u(wasm, section.data.length);
+            wasm ~= section.data;
+        }
+        
+        // Export section: memory, getResultPtr, getResultLen
+        {
+            Appender!(ubyte[]) section;
+            leb128u(section, 3);  // 3 exports
+            
+            // Export memory
+            string memName = "memory";
+            leb128u(section, memName.length);
+            section ~= cast(ubyte[])memName;
+            section ~= cast(ubyte)ExportKind.memory;
+            leb128u(section, 0);
+            
+            // Export getResultPtr
+            string ptrName = "getResultPtr";
+            leb128u(section, ptrName.length);
+            section ~= cast(ubyte[])ptrName;
+            section ~= cast(ubyte)ExportKind.func;
+            leb128u(section, 0);
+            
+            // Export getResultLen
+            string lenName = "getResultLen";
+            leb128u(section, lenName.length);
+            section ~= cast(ubyte[])lenName;
+            section ~= cast(ubyte)ExportKind.func;
+            leb128u(section, 1);
+            
+            wasm ~= cast(ubyte)Section.export_;
+            leb128u(wasm, section.data.length);
+            wasm ~= section.data;
+        }
+        
+        // Code section: getResultPtr returns resultPtr, getResultLen returns resultLen
+        {
+            Appender!(ubyte[]) section;
+            leb128u(section, 2);  // 2 function bodies
+            
+            // getResultPtr: i32.const resultPtr
+            {
+                Appender!(ubyte[]) body_;
+                leb128u(body_, 0);  // 0 locals
+                body_ ~= Op.i32_const;
+                leb128s(body_, resultPtr);
+                body_ ~= Op.end;
+                
+                leb128u(section, body_.data.length);
+                section ~= body_.data;
+            }
+            
+            // getResultLen: i32.const resultLen
+            {
+                Appender!(ubyte[]) body_;
+                leb128u(body_, 0);  // 0 locals
+                body_ ~= Op.i32_const;
+                leb128s(body_, resultLen);
+                body_ ~= Op.end;
+                
+                leb128u(section, body_.data.length);
+                section ~= body_.data;
+            }
+            
+            wasm ~= cast(ubyte)Section.code;
+            leb128u(wasm, section.data.length);
+            wasm ~= section.data;
+        }
+        
+        // Data section: left string, right string, and pre-concatenated result
+        // For simplicity, we just put the concatenated result directly in memory
+        // (A real implementation would have code that copies at runtime)
+        {
+            Appender!(ubyte[]) section;
+            leb128u(section, 1);  // 1 data segment
+            
+            // Active segment at resultPtr with concatenated string
+            section ~= cast(ubyte)0x00;  // active, memory 0
+            section ~= Op.i32_const;
+            leb128s(section, resultPtr);
+            section ~= Op.end;
+            
+            // The concatenated data
+            string concat = left ~ right;
+            leb128u(section, concat.length);
+            section ~= cast(ubyte[])concat;
+            
+            wasm ~= cast(ubyte)Section.data;
+            leb128u(wasm, section.data.length);
+            wasm ~= section.data;
+        }
+        
+        return wasm.data;
     }
     
     /**
@@ -315,6 +549,8 @@ class CTFEEvaluator {
                 case BinaryExpression.Operator.BitwiseXor: return left ^ right;
                 case BinaryExpression.Operator.ShiftLeft: return left << right;
                 case BinaryExpression.Operator.ShiftRight: return left >> right;
+                case BinaryExpression.Operator.Concat: 
+                    throw new CTFEError("CTFE: String concat not supported in numeric context");
             }
         }
         

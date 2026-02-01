@@ -912,6 +912,8 @@ private class FuncContext {
             case BinaryExpression.Operator.BitwiseXor: op = Op.i32_xor; break;
             case BinaryExpression.Operator.ShiftLeft: op = Op.i32_shl; break;
             case BinaryExpression.Operator.ShiftRight: op = Op.i32_shr_s; break;
+            case BinaryExpression.Operator.Concat:
+                throw new EmitError("String concatenation not supported in runtime code (use CTFE)");
         }
         out_ ~= op;
     }

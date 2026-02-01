@@ -967,6 +967,7 @@ class TreeSitterBridge {
             case "^": return BinaryExpression.Operator.BitwiseXor;
             case "<<": return BinaryExpression.Operator.ShiftLeft;
             case ">>": return BinaryExpression.Operator.ShiftRight;
+            case "~": return BinaryExpression.Operator.Concat;
             default:
                 throw new ParseError("Unknown binary operator: " ~ opStr, SourceLocation());
         }
