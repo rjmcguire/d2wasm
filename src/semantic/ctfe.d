@@ -119,19 +119,19 @@ class CTFEEvaluator {
      */
     string evaluateStringConcat(BinaryExpression expr) {
         import semantic.ctfe_runtime : CTFERuntime, CTFERuntimeError;
-        import codegen.wasm : STRING_PTR_OFFSET, STRING_LEN_OFFSET;
+        import codegen.wasm : ARRAY_PTR_OFFSET, ARRAY_LEN_OFFSET;
         
-        writeln("CTFE: Evaluating string concat via WASM");
+        writeln("CTFE: Evaluating array concat via WASM");
         
         // First, ensure any manifest constants referenced are already evaluated
         ensureDependenciesEvaluated(expr);
         
         // Emit a WASM module that evaluates this expression
         auto emitter = new BinaryEmitter(symbolTable);
-        ubyte[] wasmBytes = emitter.emitStringExpressionModule(expr);
+        ubyte[] wasmBytes = emitter.emitArrayExpressionModule(expr);
         
         if (wasmBytes is null) {
-            throw new CTFEError("CTFE: Failed to compile string expression: " ~ emitter.error());
+            throw new CTFEError("CTFE: Failed to compile array expression: " ~ emitter.error());
         }
         
         // Debug: show the generated WASM size
@@ -151,8 +151,8 @@ class CTFEEvaluator {
             writeln("CTFE: __eval returned struct at ", structPtr);
             
             // Read the String struct from memory
-            uint dataPtr = runtime.readU32(structPtr + STRING_PTR_OFFSET);
-            uint len = runtime.readU32(structPtr + STRING_LEN_OFFSET);
+            uint dataPtr = runtime.readU32(structPtr + ARRAY_PTR_OFFSET);
+            uint len = runtime.readU32(structPtr + ARRAY_LEN_OFFSET);
             
             writeln("CTFE: String data at ", dataPtr, ", len=", len);
             

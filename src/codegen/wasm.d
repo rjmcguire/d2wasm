@@ -54,16 +54,16 @@ enum ExportKind : ubyte {
 }
 
 //==============================================================================
-// D String Representation
+// D Array/Slice Representation
 //==============================================================================
-// D strings are (ptr, length, capacity) - a 12-byte struct in WASM32
+// D strings are (ptr, length, capacity) - a 12-byte struct (ptr, length, capacity) in WASM32
 // ptr is first, so dereferencing the struct pointer gives the char data
 
 enum : uint {
-    STRING_PTR_OFFSET = 0,    // Offset of ptr field in string struct
-    STRING_LEN_OFFSET = 4,    // Offset of length field
-    STRING_CAP_OFFSET = 8,    // Offset of capacity field
-    STRING_STRUCT_SIZE = 12,  // Total size of string struct
+    ARRAY_PTR_OFFSET = 0,    // Offset of ptr field in array struct
+    ARRAY_LEN_OFFSET = 4,    // Offset of length field
+    ARRAY_CAP_OFFSET = 8,    // Offset of capacity field
+    ARRAY_STRUCT_SIZE = 12,  // Total size of array struct
 }
 
 //==============================================================================
@@ -71,7 +71,7 @@ enum : uint {
 //==============================================================================
 // Memory is organized as:
 //   0-1023:     Reserved (null guard, scratch space)
-//   1024+:      Data section (string literals, string structs)
+//   1024+:      Data section (string literals, array structs)
 //   heap_start: After data section, managed by arena allocator
 
 enum : uint {
