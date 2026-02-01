@@ -522,6 +522,13 @@ class TreeSitterBridge {
         SourceLocation loc = makeSourceLocation(node);
         string nodeType = TreeSitterParser.getNodeType(node);
         
+        // Debug: print node info
+        writeln("Parsing statement: ", nodeType, " with ", TreeSitterParser.getChildCount(node), " children");
+        for (uint i = 0; i < TreeSitterParser.getChildCount(node); i++) {
+            writeln("  Child ", i, ": ", TreeSitterParser.getNodeType(TreeSitterParser.getChild(node, i)), 
+                    " (field: ", TreeSitterParser.getChildFieldName(node, i), ")");
+        }
+        
         switch (nodeType) {
             case "block_statement":
                 return parseCompoundStatement(node, loc);
@@ -569,6 +576,32 @@ class TreeSitterBridge {
      * Parse if statement
      */
     IfStatement parseIfStatement(TSNode node, SourceLocation loc) {
+        TSNode conditionNode = TreeSitterParser.getChildByFieldName(node, "condition");
+        TSNode thenNode = TreeSitterParser.getChildByFieldName(node, "consequence");
+        TSNode elseNode = TreeSitterParser.getChildByFieldName(node, "alternative");
+        
+        // Fallback for if_condition node
+        if (!TreeSitterParser.isValid(conditionNode)) {
+            uint childCount = TreeSitterParser.getChildCount(node);
+            for (uint i = 0; i < childCount; i++) {
+                TSNode child = TreeSitterParser.getChild(node, i);
+                if (TreeSitterParser.getNodeType(child) == "if_condition") {
+                    // if_condition usually has '(' expression ')'
+                    uint condChildren = TreeSitterParser.getChildCount(child);
+                    for (uint j = 0; j < condChildren; j++) {
+                        TSNode condChild = TreeSitterParser.getChild(child, j);
+                        if (TreeSitterParser.getNodeType(condChild).endsWith("expression") || 
+                            TreeSitterParser.getNodeType(condChild) == "identifier") {
+                            conditionNode = condChild;
+                            break;
+                        }
+                    }
+                }
+                if (TreeSitterParser.getNodeType(child).endsWith("statement") && !TreeSitterParser.isValid(thenNode)) {
+                    thenNode = child;
+                }
+            }
+        }
         
         if (!TreeSitterParser.isValid(conditionNode) || !TreeSitterParser.isValid(thenNode)) {
             throw new ParseError("If statement missing condition or body", loc);
