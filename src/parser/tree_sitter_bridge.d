@@ -904,6 +904,29 @@ class TreeSitterBridge {
             }
             case "null_literal":
                 return LiteralExpression.null_(loc);
+            case "char_literal": {
+                string text = TreeSitterParser.getNodeText(node, sourceText);
+                // Remove quotes: 'a' -> a
+                if (text.length >= 2) {
+                    char c = text[1];
+                    // Handle escape sequences
+                    if (text.length >= 3 && text[1] == '\\') {
+                        switch (text[2]) {
+                            case 'n': c = '\n'; break;
+                            case 't': c = '\t'; break;
+                            case 'r': c = '\r'; break;
+                            case '0': c = '\0'; break;
+                            case '\\': c = '\\'; break;
+                            case '\'': c = '\''; break;
+                            default: c = text[2]; break;
+                        }
+                    }
+                    return LiteralExpression.char_(loc, c);
+                }
+                throw new ParseError("Invalid char literal: " ~ text, loc);
+            }
+            case "array_literal":
+                return parseArrayLiteral(node, loc);
             case "cast_expression":
                 return parseCastExpression(node, loc);
             case "assignment_expression":
@@ -1011,6 +1034,29 @@ class TreeSitterBridge {
             default:
                 throw new ParseError("Unknown unary operator: " ~ opStr, SourceLocation());
         }
+    }
+    
+    /**
+     * Parse array literal: [1, 2, 3]
+     */
+    ArrayLiteralExpression parseArrayLiteral(TSNode node, SourceLocation loc) {
+        Expression[] elements;
+        
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            
+            // Skip brackets and commas
+            if (childType == "[" || childType == "]" || childType == ",") {
+                continue;
+            }
+            
+            // Parse element expression
+            elements ~= parseExpression(child);
+        }
+        
+        return new ArrayLiteralExpression(loc, elements);
     }
     
     /**

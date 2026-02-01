@@ -263,8 +263,12 @@ class ManifestConstantDecl : Declaration {
     Type inferredType;       // Type inferred after CTFE (null before)
     long ctfeValue;          // Value after CTFE evaluation (for integral types)
     string ctfeStringValue;  // Value for string types
+    long[] ctfeArrayValue;   // Value for array types (elements as longs)
+    ubyte[] ctfeArrayBytes;  // Raw bytes for array data (for codegen)
+    uint ctfeElementSize;    // Size of each element in bytes
     bool ctfeComplete;       // Whether CTFE has been performed
     bool isStringType;       // True if this is a string constant
+    bool isArrayType;        // True if this is an array constant
     
     this(SourceLocation loc, string name, Expression initializer) {
         super(loc, name, true);  // Manifest constants are always "public" in their scope
@@ -272,6 +276,7 @@ class ManifestConstantDecl : Declaration {
         this.inferredType = null;
         this.ctfeComplete = false;
         this.isStringType = false;
+        this.isArrayType = false;
     }
     
     override string toString() const {

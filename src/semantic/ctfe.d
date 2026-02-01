@@ -79,18 +79,37 @@ class CTFEEvaluator {
                 writeln("CTFE: ", manifest.name, " = \"", manifest.ctfeStringValue, "\" (string literal)");
                 return;
             }
-        }
-        
-        // Check for binary expression (e.g., string concatenation)
-        if (auto binaryExpr = cast(BinaryExpression)manifest.initializer) {
-            if (binaryExpr.operator == BinaryExpression.Operator.Concat) {
-                string result = evaluateStringConcat(binaryExpr);
-                manifest.ctfeStringValue = result;
+            if (literal.value.type == typeid(char)) {
+                // Char is stored as its integer value (same as D semantics)
+                manifest.ctfeValue = cast(long)literal.value.get!char();
                 manifest.ctfeComplete = true;
-                manifest.isStringType = true;
-                writeln("CTFE: ", manifest.name, " = \"", result, "\" (concatenated)");
+                manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Char);
+                writeln("CTFE: ", manifest.name, " = '", literal.value.get!char(), "' (char literal)");
                 return;
             }
+        }
+        
+        // Check for binary expression (e.g., array/string concatenation)
+        if (auto binaryExpr = cast(BinaryExpression)manifest.initializer) {
+            if (binaryExpr.operator == BinaryExpression.Operator.Concat) {
+                // Determine if this is string or array concat
+                if (isArrayConcatExpression(binaryExpr)) {
+                    evaluateArrayConcat(manifest, binaryExpr);
+                } else {
+                    string result = evaluateStringConcat(binaryExpr);
+                    manifest.ctfeStringValue = result;
+                    manifest.ctfeComplete = true;
+                    manifest.isStringType = true;
+                    writeln("CTFE: ", manifest.name, " = \"", result, "\" (concatenated)");
+                }
+                return;
+            }
+        }
+        
+        // Check for array literal
+        if (auto arrayLit = cast(ArrayLiteralExpression)manifest.initializer) {
+            evaluateArrayLiteral(manifest, arrayLit);
+            return;
         }
         
         // Need to evaluate via WASM execution
@@ -184,6 +203,195 @@ class CTFEEvaluator {
             ensureDependenciesEvaluated(binary.left);
             ensureDependenciesEvaluated(binary.right);
         }
+    }
+    
+    /**
+     * Evaluate an array literal at compile time.
+     * Stores elements as raw bytes for codegen.
+     */
+    void evaluateArrayLiteral(ManifestConstantDecl manifest, ArrayLiteralExpression arrayLit) {
+        import std.array : appender;
+        
+        // Evaluate all elements
+        long[] values;
+        foreach (elem; arrayLit.elements) {
+            values ~= evaluateSimpleExpression(elem);
+        }
+        
+        // Determine element size (assume i32 for now - 4 bytes)
+        // TODO: proper type inference
+        uint elementSize = 4;
+        
+        // Convert to bytes (little-endian)
+        auto bytes = appender!(ubyte[]);
+        foreach (val; values) {
+            int v = cast(int)val;
+            bytes ~= cast(ubyte)(v & 0xFF);
+            bytes ~= cast(ubyte)((v >> 8) & 0xFF);
+            bytes ~= cast(ubyte)((v >> 16) & 0xFF);
+            bytes ~= cast(ubyte)((v >> 24) & 0xFF);
+        }
+        
+        manifest.ctfeArrayValue = values;
+        manifest.ctfeArrayBytes = bytes.data;
+        manifest.ctfeElementSize = elementSize;
+        manifest.ctfeComplete = true;
+        manifest.isArrayType = true;
+        
+        writeln("CTFE: ", manifest.name, " = ", values, " (array literal, ", bytes.data.length, " bytes)");
+    }
+    
+    /**
+     * Check if a concat expression is array concat (vs string concat).
+     * Returns true if either operand is an array literal or array manifest constant.
+     */
+    bool isArrayConcatExpression(BinaryExpression expr) {
+        return isArrayExpression(expr.left) || isArrayExpression(expr.right);
+    }
+    
+    /**
+     * Check if an expression evaluates to an array (not string).
+     */
+    bool isArrayExpression(Expression expr) {
+        // Direct array literal
+        if (cast(ArrayLiteralExpression)expr) {
+            return true;
+        }
+        
+        // Manifest constant reference - check if it's an array
+        if (auto ident = cast(IdentifierExpression)expr) {
+            foreach (decl; allDeclarations) {
+                if (auto manifest = cast(ManifestConstantDecl)decl) {
+                    if (manifest.name == ident.name) {
+                        if (!manifest.ctfeComplete) {
+                            evaluateManifestConstant(manifest);
+                        }
+                        return manifest.isArrayType;
+                    }
+                }
+            }
+        }
+        
+        // Nested concat - check recursively
+        if (auto binary = cast(BinaryExpression)expr) {
+            if (binary.operator == BinaryExpression.Operator.Concat) {
+                return isArrayConcatExpression(binary);
+            }
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Evaluate array concatenation at compile time.
+     * For simplicity, we do this in D rather than WASM (arrays are just bytes).
+     */
+    void evaluateArrayConcat(ManifestConstantDecl manifest, BinaryExpression expr) {
+        import std.array : appender;
+        
+        writeln("CTFE: Evaluating array concat");
+        
+        // Ensure operands are evaluated
+        ensureDependenciesEvaluated(expr);
+        
+        // Get array bytes from both operands
+        auto leftBytes = getArrayBytes(expr.left);
+        auto rightBytes = getArrayBytes(expr.right);
+        
+        // Concatenate bytes
+        auto combined = appender!(ubyte[]);
+        combined ~= leftBytes;
+        combined ~= rightBytes;
+        
+        // Also concatenate values for display
+        auto leftVals = getArrayValues(expr.left);
+        auto rightVals = getArrayValues(expr.right);
+        long[] combinedVals = leftVals ~ rightVals;
+        
+        manifest.ctfeArrayValue = combinedVals;
+        manifest.ctfeArrayBytes = combined.data;
+        manifest.ctfeElementSize = 4;  // Assume i32 for now
+        manifest.ctfeComplete = true;
+        manifest.isArrayType = true;
+        
+        writeln("CTFE: ", manifest.name, " = ", combinedVals, " (array concat, ", combined.data.length, " bytes)");
+    }
+    
+    /**
+     * Get the raw bytes of an array expression.
+     */
+    ubyte[] getArrayBytes(Expression expr) {
+        import std.array : appender;
+        
+        // Array literal
+        if (auto arrayLit = cast(ArrayLiteralExpression)expr) {
+            auto bytes = appender!(ubyte[]);
+            foreach (elem; arrayLit.elements) {
+                long val = evaluateSimpleExpression(elem);
+                int v = cast(int)val;
+                bytes ~= cast(ubyte)(v & 0xFF);
+                bytes ~= cast(ubyte)((v >> 8) & 0xFF);
+                bytes ~= cast(ubyte)((v >> 16) & 0xFF);
+                bytes ~= cast(ubyte)((v >> 24) & 0xFF);
+            }
+            return bytes.data;
+        }
+        
+        // Manifest constant reference
+        if (auto ident = cast(IdentifierExpression)expr) {
+            foreach (decl; allDeclarations) {
+                if (auto manifest = cast(ManifestConstantDecl)decl) {
+                    if (manifest.name == ident.name && manifest.ctfeComplete && manifest.isArrayType) {
+                        return manifest.ctfeArrayBytes;
+                    }
+                }
+            }
+        }
+        
+        // Nested concat
+        if (auto binary = cast(BinaryExpression)expr) {
+            if (binary.operator == BinaryExpression.Operator.Concat) {
+                auto left = getArrayBytes(binary.left);
+                auto right = getArrayBytes(binary.right);
+                return left ~ right;
+            }
+        }
+        
+        throw new CTFEError("Cannot get array bytes from expression");
+    }
+    
+    /**
+     * Get the values of an array expression (for display).
+     */
+    long[] getArrayValues(Expression expr) {
+        // Array literal
+        if (auto arrayLit = cast(ArrayLiteralExpression)expr) {
+            long[] values;
+            foreach (elem; arrayLit.elements) {
+                values ~= evaluateSimpleExpression(elem);
+            }
+            return values;
+        }
+        
+        // Manifest constant reference
+        if (auto ident = cast(IdentifierExpression)expr) {
+            foreach (decl; allDeclarations) {
+                if (auto manifest = cast(ManifestConstantDecl)decl) {
+                    if (manifest.name == ident.name && manifest.ctfeComplete && manifest.isArrayType) {
+                        return manifest.ctfeArrayValue;
+                    }
+                }
+            }
+        }
+        
+        // Nested concat
+        if (auto binary = cast(BinaryExpression)expr) {
+            if (binary.operator == BinaryExpression.Operator.Concat) {
+                return getArrayValues(binary.left) ~ getArrayValues(binary.right);
+            }
+        }
+        
+        return [];
     }
     
     /**

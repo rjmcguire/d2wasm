@@ -285,6 +285,10 @@ class LiteralExpression : Expression {
         return new LiteralExpression(loc, Variant(null));
     }
     
+    static LiteralExpression char_(SourceLocation loc, char value) {
+        return new LiteralExpression(loc, Variant(value));
+    }
+    
     override bool isConstant() const {
         return true;  // Literals are always constant
     }
@@ -303,6 +307,37 @@ class LiteralExpression : Expression {
             return (cast(Variant)value).toString();
         }
         return "null";
+    }
+}
+
+/**
+ * Array literal expression: [1, 2, 3]
+ */
+class ArrayLiteralExpression : Expression {
+    Expression[] elements;
+    Type elementType;  // Inferred from elements, or null if empty
+    
+    this(SourceLocation loc, Expression[] elements) {
+        super(loc);
+        this.elements = elements;
+    }
+    
+    override bool isConstant() const {
+        foreach (elem; elements) {
+            if (!elem.isConstant()) return false;
+        }
+        return true;
+    }
+    
+    override bool hasLValue() const {
+        return false;  // Array literals are rvalues
+    }
+    
+    override string toString() const {
+        import std.algorithm : map;
+        import std.array : array, join;
+        string[] parts = elements.map!(e => e.toString()).array;
+        return "[" ~ parts.join(", ") ~ "]";
     }
 }
 
