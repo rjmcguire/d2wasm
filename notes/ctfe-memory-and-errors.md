@@ -490,3 +490,94 @@ unittest {
 | **Testing** | Unit tests for each error type, integration tests for traces |
 
 The goal: when CTFE fails, the developer knows exactly what happened and where, without having to understand WASM internals.
+
+---
+
+## Implementation Boundary Errors
+
+When we hit the edges of what the compiler supports, errors must be:
+1. **Explicit** — never silent failure or wrong codegen
+2. **Informative** — what construct, what parameters, why it failed
+3. **Actionable** — workaround suggestions, or how to report for improvement
+
+### Example: Unsupported Template
+
+```
+internal: template not found for construct
+  construct: for_loop
+  index_type: i128
+  counter_local: $big_counter (index 254)
+  
+  --> src/heavy.d:142:5
+   |
+142|     for (cent i = 0; i < limit; i++) {
+   |     ^^^
+   
+hint: i128/cent loops not yet implemented
+      consider using i64 if value range permits
+      
+note: this is a compiler limitation, not a D language error
+      report at: https://github.com/...
+```
+
+### Example: Local Index Overflow
+
+```
+internal: local index exceeds template capacity
+  template: binary_op_i32
+  local_index: 203
+  template_capacity: 127 (1-byte LEB128)
+  
+  --> src/huge_function.d:891:12
+   |
+891|     result = tempVar + other;
+   |              ^^^^^^^
+   
+note: function has 203 locals, exceeding fast-path template limit
+      falling back to direct emission (slower but correct)
+      
+hint: consider refactoring to reduce local variable count
+      or this may indicate a compiler optimization opportunity
+```
+
+### Boundary Handling Strategy
+
+```d
+Result!WasmBytes emitConstruct(Construct c, SourceLocation loc) {
+    // Try to find a matching template
+    auto tpl = findTemplate(c.kind, c.types);
+    
+    if (tpl is null) {
+        // No template - explicit error with guidance
+        return Result.error(TemplateNotFound(
+            construct: c.kind,
+            types: c.types,
+            location: loc,
+            hint: suggestWorkaround(c),
+            reportUrl: ISSUE_TRACKER_URL
+        ));
+    }
+    
+    // Check if parameters fit template constraints
+    if (!tpl.canHandle(c.params)) {
+        // Parameters exceed template capacity
+        if (ALLOW_FALLBACK) {
+            // Emit warning, fall back to direct emission
+            warn(TemplateFallback(tpl, c, loc));
+            return emitDirect(c, loc);
+        } else {
+            return Result.error(TemplateOverflow(tpl, c, loc));
+        }
+    }
+    
+    // Happy path - use template
+    return emitFromTemplate(tpl, c, loc);
+}
+```
+
+### Why This Matters
+
+1. **For development**: When we hit boundaries, we know exactly what to implement next
+2. **For users**: Clear guidance instead of mysterious failures
+3. **For prioritization**: Error frequency tells us which templates to add
+4. **For correctness**: Never silently produce wrong code — fail loud or fall back safely
