@@ -1,0 +1,2 @@
+error: CTFE evaluation failed: integer division by zero
+  --> test.d:6

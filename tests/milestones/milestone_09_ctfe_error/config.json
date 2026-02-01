@@ -1,0 +1,6 @@
+{
+  "name": "ctfe_error",
+  "description": "CTFE error: division by zero should show source location",
+  "type": "compile_error",
+  "capability": "CTFE error handling, stack traces, source mapping"
+}

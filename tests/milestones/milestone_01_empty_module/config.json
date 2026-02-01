@@ -1,0 +1,6 @@
+{
+  "name": "empty_module",
+  "description": "Emit a minimal valid WASM module with no functions",
+  "type": "compile_only",
+  "capability": "Binary WASM emission basics"
+}

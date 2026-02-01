@@ -1,0 +1,8 @@
+{
+  "name": "parameters",
+  "description": "Function with parameters that returns one of them",
+  "type": "wasm_exec",
+  "entry": "identity",
+  "args": ["7"],
+  "capability": "Function parameters, local.get"
+}

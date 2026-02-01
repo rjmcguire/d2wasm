@@ -1,0 +1,7 @@
+{
+  "name": "string_constant",
+  "description": "String constant in WASM memory",
+  "type": "wasm_exec",
+  "entry": "getLength",
+  "capability": "Data section, string literals, memory access"
+}

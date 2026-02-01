@@ -1,0 +1,8 @@
+{
+  "name": "loop",
+  "description": "Function with a for loop",
+  "type": "wasm_exec",
+  "entry": "sum_to",
+  "args": ["5"],
+  "capability": "Loops (loop/br/br_if), local variables"
+}

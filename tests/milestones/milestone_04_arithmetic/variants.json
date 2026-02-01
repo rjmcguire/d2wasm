@@ -1,0 +1,26 @@
+{
+  "description": "Additional test cases for generalization verification",
+  "variants": [
+    {
+      "name": "different_values",
+      "args": ["100", "200"],
+      "expected": "300"
+    },
+    {
+      "name": "negative_values",
+      "args": ["-5", "10"],
+      "expected": "5"
+    },
+    {
+      "name": "zero",
+      "args": ["0", "42"],
+      "expected": "42"
+    },
+    {
+      "name": "large_values",
+      "args": ["1000000", "2000000"],
+      "expected": "3000000"
+    }
+  ],
+  "note": "Main test passes with args [2,3]→5. These variants verify generalization."
+}
