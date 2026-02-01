@@ -26,7 +26,7 @@ import parser.tree_sitter_c;
 import semantic.feature_validator;
 import semantic.symbol_table;
 import semantic.type_checker;
-import codegen.wasm_generator;
+// TODO: import codegen.binary_emitter;
 
 struct CompilerOptions {
     string inputFile;
@@ -192,45 +192,23 @@ int compileFile(CompilerOptions options) {
             writeln("Type checking passed");
         }
         
-        // 6. Code generation
+        // 6. Code generation (binary WASM emission)
         if (!options.dryRun) {
             if (options.verbose) {
-                writeln("Generating WASM code...");
+                writeln("Code generation not yet implemented");
+                writeln("Frontend phases (parse, validate, typecheck) completed successfully");
             }
             
-            auto wasmGenerator = new WasmGenerator(symbolTable);
-            auto wasmModule = wasmGenerator.generateModule(ast);
+            // TODO: Implement binary WASM emission
+            // auto emitter = new BinaryEmitter(symbolTable);
+            // ubyte[] wasm = emitter.emit(ast);
+            // std.file.write(options.outputFile, wasm);
             
-            // Write WAT file
-            string watFile = setExtension(options.outputFile, ".wat");
-            std.file.write(watFile, wasmModule.toWAT());
-            
-            if (options.verbose) {
-                writeln("Generated WAT: ", watFile);
-                writeln("Functions: ", wasmModule.functions.length);
-            }
-            
-            // Try to generate binary WASM if wat2wasm is available
-            try {
-                import std.process;
-                auto result = execute(["wat2wasm", watFile, "-o", options.outputFile]);
-                if (result.status == 0) {
-                    if (options.verbose) {
-                        writeln("Generated binary WASM: ", options.outputFile);
-                    }
-                } else {
-                    writeln("Warning: wat2wasm failed - only WAT file generated");
-                }
-            } catch (Exception e) {
-                writeln("Warning: wat2wasm not found - only WAT file generated");
-            }
-            
-            writeln("Successfully compiled to ", watFile);
-            if (exists(options.outputFile)) {
-                writeln("Binary WASM: ", options.outputFile);
-            }
+            writeln("ERROR: Binary WASM codegen not implemented yet");
+            writeln("Frontend OK - AST has ", ast.length, " declarations");
+            return 1;
         } else {
-            writeln("Dry run complete - all phases successful");
+            writeln("Dry run complete - frontend phases successful");
         }
         
         return 0;
@@ -246,9 +224,6 @@ int compileFile(CompilerOptions options) {
         return 1;
     } catch (TypeError e) {
         writeln("Type Error: ", e.msg);
-        return 1;
-    } catch (CodeGenError e) {
-        writeln("Code Generation Error: ", e.msg);
         return 1;
     } catch (Exception e) {
         writeln("Internal Error: ", e.msg);
