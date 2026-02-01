@@ -510,9 +510,11 @@ class WasmGenerator {
         string conditionCode = generateExpression(stmt.condition);
         string thenBody = generateStatement(stmt.thenStatement);
         string elseClause = "";
+        string elseBody = "";
         
         if (stmt.elseStatement) {
-            elseClause = "else\n  " ~ generateStatement(stmt.elseStatement);
+            elseBody = generateStatement(stmt.elseStatement);
+            elseClause = "else\n  " ~ elseBody;
         }
         
         string[string] params;
@@ -520,7 +522,42 @@ class WasmGenerator {
         params["THEN_BODY"] = thenBody;
         params["ELSE_CLAUSE"] = elseClause;
         
-        return templateEngine.substitute("control_flow/if_statement", params);
+        string result = templateEngine.substitute("control_flow/if_statement", params);
+        
+        // If both branches contain return statements, the code after 'end' is unreachable.
+        // We need to add 'unreachable' to satisfy WASM type validation for functions
+        // that expect a return value.
+        bool thenReturns = branchContainsReturn(stmt.thenStatement);
+        bool elseReturns = stmt.elseStatement !is null && branchContainsReturn(stmt.elseStatement);
+        
+        if (thenReturns && elseReturns) {
+            result ~= "\nunreachable";
+        }
+        
+        return result;
+    }
+    
+    /**
+     * Check if a statement (or its children) contains a return statement.
+     * This is used to determine if code after an if/else is reachable.
+     */
+    private bool branchContainsReturn(Statement stmt) {
+        if (auto returnStmt = cast(ReturnStatement)stmt) {
+            return true;
+        } else if (auto compound = cast(CompoundStatement)stmt) {
+            // Check if any statement in the compound is a return
+            foreach (s; compound.statements) {
+                if (branchContainsReturn(s)) {
+                    return true;
+                }
+            }
+        } else if (auto ifStmt = cast(IfStatement)stmt) {
+            // Nested if: only "returns" if both branches return
+            bool thenRet = branchContainsReturn(ifStmt.thenStatement);
+            bool elseRet = ifStmt.elseStatement !is null && branchContainsReturn(ifStmt.elseStatement);
+            return thenRet && elseRet;
+        }
+        return false;
     }
     
     /**

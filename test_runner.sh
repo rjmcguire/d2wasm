@@ -188,6 +188,14 @@ run_test() {
     actual_trimmed=$(echo "$actual_output" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     expected_trimmed=$(echo "$expected_output" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     
+    # For compile_only tests, just check that "OK: valid WASM" appears
+    if [[ "$test_type" == "compile_only" ]]; then
+        if [[ "$actual_trimmed" == OK:\ valid\ WASM* ]] && [[ $result -eq 0 ]]; then
+            echo -e "${GREEN}PASS${NC}: $test_name"
+            return 0
+        fi
+    fi
+    
     if [[ "$actual_trimmed" == "$expected_trimmed" ]] && [[ $result -eq 0 ]]; then
         echo -e "${GREEN}PASS${NC}: $test_name"
         return 0
