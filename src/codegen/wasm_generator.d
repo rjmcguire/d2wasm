@@ -146,6 +146,7 @@ class CodeGenContext {
     WasmFunction currentFunction;
     string[] expressionStack;  // Track expression evaluation stack
     uint nextLocalId = 0;
+    uint nextLoopId = 0;
     uint[string] localVariableIds;  // Map variable names to local IDs
     
     this(SymbolTable symbolTable, TemplateEngine templateEngine) {
@@ -420,10 +421,6 @@ class WasmGenerator {
     }
     
     /**
-     * Generate while statement
-     */
-    
-    /**
      * Generate return statement
      */
     string generateReturnStatement(ReturnStatement stmt) {
@@ -437,10 +434,44 @@ class WasmGenerator {
         
         return templateEngine.substitute("control_flow/return_statement", params);
     }
+
+    /**
+     * Generate while statement
+     */
+    string generateWhileStatement(WhileStatement stmt) {
+        string conditionCode = generateExpression(stmt.condition);
+        string bodyCode = generateStatement(stmt.body_);
+        
+        string[string] params;
+        params["CONDITION_EXPRESSION"] = conditionCode;
+        params["BODY_CODE"] = bodyCode;
+        params["LOOP_ID"] = to!string(context.nextLoopId++);
+        
+        return templateEngine.substitute("control_flow/while_statement", params);
+    }
     
-    // Placeholder loops - can be implemented with templates too
-    string generateWhileStatement(WhileStatement stmt) { return ";; while placeholder"; }
-    string generateForStatement(ForStatement stmt) { return ";; for placeholder"; }
+    /**
+     * Generate for statement
+     */
+    string generateForStatement(ForStatement stmt) {
+        string initCode = stmt.init ? generateStatement(stmt.init) : "";
+        string conditionCode = stmt.condition ? generateExpression(stmt.condition) : "i32.const 1";
+        string bodyCode = generateStatement(stmt.body_);
+        string updateCode = "";
+        
+        if (stmt.update) {
+            updateCode = generateExpression(stmt.update) ~ "\ndrop";
+        }
+        
+        string[string] params;
+        params["INIT_CODE"] = initCode;
+        params["CONDITION_EXPRESSION"] = conditionCode;
+        params["BODY_CODE"] = bodyCode;
+        params["UPDATE_CODE"] = updateCode;
+        params["LOOP_ID"] = to!string(context.nextLoopId++);
+        
+        return templateEngine.substitute("control_flow/for_statement", params);
+    }
     
     /**
      * Generate expression and leave result on stack
