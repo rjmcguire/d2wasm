@@ -1,0 +1,5 @@
+{
+    "type": "ctfe_output",
+    "description": "Multi-step string concatenation via WASM",
+    "expected_output": "Hello World"
+}

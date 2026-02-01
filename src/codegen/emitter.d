@@ -103,6 +103,11 @@ class BinaryEmitter {
         FuncInfo[] functions;
         uint[string] funcIndex;
         
+        // Built-in functions
+        bool hasBuiltins = false;
+        uint allocFuncIndex;
+        uint concatFuncIndex;
+        
         // State
         EmitPhase phase = EmitPhase.init;
         string lastError;
@@ -114,17 +119,39 @@ class BinaryEmitter {
         bool needsMemory = false;
         uint memoryPages = 1;
         
+        // Globals (heap_ptr, etc.)
+        struct GlobalInfo {
+            ValType type;
+            bool mutable;
+            long initValue;
+            string name;
+        }
+        GlobalInfo[] globals;
+        uint heapPtrGlobal;  // Index of $heap_ptr global
+        
         // Data section
         struct DataEntry {
             uint offset;
             ubyte[] data;
         }
         DataEntry[] dataEntries;
-        uint nextDataOffset = 16;  // Start after iovec space
+        uint nextDataOffset;  // Set after reserved area
+        
+        // String literals: maps string content to struct address
+        struct StringLiteralInfo {
+            uint structOffset;   // Where the String struct is in memory
+            uint dataOffset;     // Where the character data is
+            uint length;
+        }
+        StringLiteralInfo[string] stringLiterals;
+        
+        // Whether we need string support (allocator, etc.)
+        bool needsStringSupport = false;
     }
     
     this(SymbolTable symbolTable) {
         this.symbolTable = symbolTable;
+        this.nextDataOffset = MEMORY_RESERVED;  // Start after reserved area
     }
     
     //==========================================================================
@@ -140,6 +167,12 @@ class BinaryEmitter {
             phase = EmitPhase.collecting;
             collect(decls);
             
+            // If string operations are needed, add built-ins
+            if (needsStringSupport) {
+                addStringBuiltins();
+                finalizeHeapPtr();  // Set heap_ptr to after data section
+            }
+            
             phase = EmitPhase.init;
             emitHeader();
             
@@ -151,6 +184,9 @@ class BinaryEmitter {
             
             phase = EmitPhase.emittingMemory;
             emitMemorySection();
+            
+            // Emit globals section (for heap_ptr)
+            emitGlobalSection();
             
             phase = EmitPhase.emittingExports;
             emitExportSection();
@@ -181,6 +217,125 @@ class BinaryEmitter {
     string error() const {
         return lastError;
     }
+    
+    //==========================================================================
+    // Expression Evaluator (for CTFE)
+    //==========================================================================
+    
+    /**
+     * Emit a module that evaluates a string expression and returns the result pointer.
+     * Used by CTFE to evaluate string operations via the same codegen as final output.
+     * 
+     * The module exports:
+     * - __eval(): i32  - evaluates expression, returns pointer to String struct
+     * - memory         - for reading the result
+     * - __heap_ptr     - for debugging
+     */
+    ubyte[] emitStringExpressionModule(Expression expr) {
+        try {
+            // Reset state for a fresh module
+            output.clear();
+            types.length = 0;
+            typeIndex.clear();
+            functions.length = 0;
+            funcIndex.clear();
+            globals.length = 0;
+            dataEntries.length = 0;
+            stringLiterals.clear();
+            nextDataOffset = MEMORY_RESERVED;
+            needsStringSupport = true;  // We're evaluating strings
+            hasBuiltins = false;
+            
+            // Collect string literals from the expression
+            collectStringLiterals(expr);
+            
+            // Add built-ins (__alloc, __string_concat)
+            addStringBuiltins();
+            
+            // Add the __eval function
+            addEvalFunction(expr);
+            
+            // Finalize heap pointer
+            finalizeHeapPtr();
+            
+            // Emit the module
+            emitHeader();
+            emitTypeSection();
+            emitFunctionSection();
+            emitMemorySection();
+            emitGlobalSection();
+            emitExportSection();
+            emitCodeSection();
+            emitDataSection();
+            
+            return output.data.dup;
+            
+        } catch (EmitError e) {
+            lastError = e.msg;
+            return null;
+        } catch (Exception e) {
+            lastError = "Internal error: " ~ e.msg;
+            return null;
+        }
+    }
+    
+    /**
+     * Recursively collect string literals from an expression.
+     */
+    private void collectStringLiterals(Expression expr) {
+        if (auto literal = cast(LiteralExpression)expr) {
+            if (literal.value.type == typeid(string)) {
+                registerStringLiteral(literal.value.get!string());
+            }
+        } else if (auto binary = cast(BinaryExpression)expr) {
+            collectStringLiterals(binary.left);
+            collectStringLiterals(binary.right);
+        } else if (auto ident = cast(IdentifierExpression)expr) {
+            // If it's a manifest constant string, register it
+            auto symbol = symbolTable.lookupSymbol(ident.name);
+            if (symbol && symbol.isConstant) {
+                if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
+                    if (manifest.ctfeComplete && manifest.isStringType) {
+                        registerStringLiteral(manifest.ctfeStringValue);
+                    }
+                }
+            }
+        }
+    }
+    
+    /**
+     * Add the __eval function that evaluates the expression.
+     */
+    private void addEvalFunction(Expression expr) {
+        // Type: () -> i32
+        FuncSig evalSig;
+        evalSig.params = [];
+        evalSig.results = [ValType.i32];
+        
+        uint evalTypeIdx;
+        if (auto existing = evalSig in typeIndex) {
+            evalTypeIdx = *existing;
+        } else {
+            evalTypeIdx = cast(uint)types.length;
+            types ~= evalSig;
+            typeIndex[evalSig] = evalTypeIdx;
+        }
+        
+        // Create a dummy FuncInfo for __eval
+        FuncInfo evalFunc;
+        evalFunc.name = "__eval";
+        evalFunc.typeIndex = evalTypeIdx;
+        evalFunc.decl = null;  // Built-in
+        evalFunc.exported = true;
+        funcIndex["__eval"] = cast(uint)functions.length;
+        functions ~= evalFunc;
+        
+        // Store the expression for emitBuiltinBody to use
+        evalExpression = expr;
+    }
+    
+    // Expression to evaluate (for __eval function)
+    private Expression evalExpression;
     
     //==========================================================================
     // Phase 0: Collection
@@ -307,6 +462,88 @@ class BinaryEmitter {
     }
     
     //==========================================================================
+    // String Support Built-ins
+    //==========================================================================
+    
+    /**
+     * Add built-in functions for string support:
+     * - $heap_ptr global (mutable i32)
+     * - $alloc(size: i32) -> i32: bump allocator
+     * - $string_concat(s1: i32, s2: i32) -> i32: concatenate two strings
+     */
+    private void addStringBuiltins() {
+        // Add heap_ptr global - initialized after data section is complete
+        heapPtrGlobal = cast(uint)globals.length;
+        GlobalInfo heapPtr;
+        heapPtr.type = ValType.i32;
+        heapPtr.mutable = true;
+        heapPtr.initValue = 0;  // Will be updated after data section layout
+        heapPtr.name = "__heap_ptr";
+        globals ~= heapPtr;
+        
+        // Add $alloc function type: (i32) -> i32
+        FuncSig allocSig;
+        allocSig.params = [ValType.i32];
+        allocSig.results = [ValType.i32];
+        
+        uint allocTypeIdx;
+        if (auto existing = allocSig in typeIndex) {
+            allocTypeIdx = *existing;
+        } else {
+            allocTypeIdx = cast(uint)types.length;
+            types ~= allocSig;
+            typeIndex[allocSig] = allocTypeIdx;
+        }
+        
+        // Add $alloc function
+        allocFuncIndex = cast(uint)functions.length;
+        FuncInfo allocFunc;
+        allocFunc.name = "__alloc";
+        allocFunc.typeIndex = allocTypeIdx;
+        allocFunc.decl = null;  // Built-in, no decl
+        allocFunc.exported = true;  // Export for debugging
+        funcIndex["__alloc"] = allocFuncIndex;
+        functions ~= allocFunc;
+        
+        // Add $string_concat function type: (i32, i32) -> i32
+        FuncSig concatSig;
+        concatSig.params = [ValType.i32, ValType.i32];
+        concatSig.results = [ValType.i32];
+        
+        uint concatTypeIdx;
+        if (auto existing = concatSig in typeIndex) {
+            concatTypeIdx = *existing;
+        } else {
+            concatTypeIdx = cast(uint)types.length;
+            types ~= concatSig;
+            typeIndex[concatSig] = concatTypeIdx;
+        }
+        
+        // Add $string_concat function
+        concatFuncIndex = cast(uint)functions.length;
+        FuncInfo concatFunc;
+        concatFunc.name = "__string_concat";
+        concatFunc.typeIndex = concatTypeIdx;
+        concatFunc.decl = null;  // Built-in
+        concatFunc.exported = true;
+        funcIndex["__string_concat"] = concatFuncIndex;
+        functions ~= concatFunc;
+        
+        hasBuiltins = true;
+    }
+    
+    /**
+     * Finalize the heap pointer after data section is laid out
+     */
+    private void finalizeHeapPtr() {
+        if (needsStringSupport) {
+            // Align to 8 bytes
+            uint heapStart = (nextDataOffset + MEMORY_ALIGNMENT - 1) & ~(MEMORY_ALIGNMENT - 1);
+            globals[heapPtrGlobal].initValue = heapStart;
+        }
+    }
+    
+    //==========================================================================
     // Header
     //==========================================================================
     
@@ -398,18 +635,53 @@ class BinaryEmitter {
     }
     
     //==========================================================================
+    // Global Section
+    //==========================================================================
+    
+    private void emitGlobalSection() {
+        if (globals.length == 0) return;
+        
+        Appender!(ubyte[]) section;
+        
+        // Global count
+        leb128u(section, globals.length);
+        
+        foreach (g; globals) {
+            // Type
+            section ~= cast(ubyte)g.type;
+            // Mutability: 0 = const, 1 = mutable
+            section ~= cast(ubyte)(g.mutable ? 1 : 0);
+            
+            // Init expression
+            if (g.type == ValType.i32) {
+                section ~= Op.i32_const;
+                leb128s(section, g.initValue);
+            } else if (g.type == ValType.i64) {
+                section ~= Op.i64_const;
+                leb128s(section, g.initValue);
+            }
+            section ~= Op.end;
+        }
+        
+        emitSection(Section.global, section.data);
+    }
+    
+    //==========================================================================
     // Export Section
     //==========================================================================
     
     private void emitExportSection() {
         Appender!(ubyte[]) section;
         
-        // Count exports (functions + memory)
+        // Count exports (functions + memory + globals we want to export)
         uint exportCount = 0;
         foreach (f; functions) {
             if (f.exported) exportCount++;
         }
         exportCount++;  // Memory export
+        if (needsStringSupport) {
+            exportCount++;  // Export heap_ptr for debugging
+        }
         
         leb128u(section, exportCount);
         
@@ -435,6 +707,15 @@ class BinaryEmitter {
             section ~= cast(ubyte[])memName;
             section ~= cast(ubyte)ExportKind.memory;
             leb128u(section, 0);  // Memory index 0
+        }
+        
+        // Export heap_ptr global (for CTFE debugging)
+        if (needsStringSupport) {
+            string hpName = "__heap_ptr";
+            leb128u(section, hpName.length);
+            section ~= cast(ubyte[])hpName;
+            section ~= cast(ubyte)ExportKind.global;
+            leb128u(section, heapPtrGlobal);
         }
         
         emitSection(Section.export_, section.data);
@@ -464,6 +745,11 @@ class BinaryEmitter {
     }
     
     private ubyte[] emitFunctionBody(FuncInfo f) {
+        // Handle built-in functions
+        if (f.decl is null) {
+            return emitBuiltinBody(f);
+        }
+        
         Appender!(ubyte[]) body_;
         
         // Create context for this function
@@ -484,6 +770,224 @@ class BinaryEmitter {
         
         // End opcode
         body_ ~= Op.end;
+        
+        return body_.data;
+    }
+    
+    /**
+     * Emit body for built-in functions ($alloc, $string_concat)
+     */
+    private ubyte[] emitBuiltinBody(FuncInfo f) {
+        Appender!(ubyte[]) body_;
+        
+        if (f.name == "__alloc") {
+            // $alloc(size: i32) -> i32
+            // Bump allocator: returns current heap_ptr, then advances it
+            //
+            // local 0 = size (parameter)
+            // local 1 = result (current heap_ptr)
+            //
+            // result = heap_ptr
+            // heap_ptr = heap_ptr + align(size, 8)
+            // return result
+            
+            leb128u(body_, 1);  // 1 local group
+            leb128u(body_, 1);  // 1 local
+            body_ ~= cast(ubyte)ValType.i32;  // of type i32
+            
+            // result = global.get $heap_ptr
+            body_ ~= Op.global_get;
+            leb128u(body_, heapPtrGlobal);
+            body_ ~= Op.local_set;
+            leb128u(body_, 1);  // local 1 = result
+            
+            // heap_ptr = heap_ptr + ((size + 7) & ~7)  // align to 8
+            body_ ~= Op.global_get;
+            leb128u(body_, heapPtrGlobal);
+            
+            // (size + 7) & ~7
+            body_ ~= Op.local_get;
+            leb128u(body_, 0);  // size
+            body_ ~= Op.i32_const;
+            leb128s(body_, 7);
+            body_ ~= Op.i32_add;
+            body_ ~= Op.i32_const;
+            leb128s(body_, ~7);
+            body_ ~= Op.i32_and;
+            
+            body_ ~= Op.i32_add;
+            body_ ~= Op.global_set;
+            leb128u(body_, heapPtrGlobal);
+            
+            // return result
+            body_ ~= Op.local_get;
+            leb128u(body_, 1);
+            body_ ~= Op.end;
+            
+        } else if (f.name == "__string_concat") {
+            // $string_concat(s1: i32, s2: i32) -> i32
+            // s1, s2 are pointers to String structs
+            //
+            // String struct: { ptr: i32, len: i32, cap: i32 }
+            //
+            // new_len = s1.len + s2.len
+            // buffer = alloc(new_len)
+            // result = alloc(12)  // String struct
+            // memory.copy(buffer, s1.ptr, s1.len)
+            // memory.copy(buffer + s1.len, s2.ptr, s2.len)
+            // result.ptr = buffer
+            // result.len = new_len
+            // result.cap = new_len
+            // return result
+            
+            // Locals:
+            // 0 = s1 (param)
+            // 1 = s2 (param)
+            // 2 = s1_ptr
+            // 3 = s1_len
+            // 4 = s2_ptr
+            // 5 = s2_len
+            // 6 = new_len
+            // 7 = buffer
+            // 8 = result
+            
+            leb128u(body_, 1);  // 1 local group
+            leb128u(body_, 7);  // 7 locals (indices 2-8)
+            body_ ~= cast(ubyte)ValType.i32;
+            
+            // Load s1.ptr and s1.len
+            body_ ~= Op.local_get;
+            leb128u(body_, 0);  // s1
+            body_ ~= Op.i32_load;
+            leb128u(body_, 2);  // align
+            leb128u(body_, STRING_PTR_OFFSET);
+            body_ ~= Op.local_set;
+            leb128u(body_, 2);  // s1_ptr
+            
+            body_ ~= Op.local_get;
+            leb128u(body_, 0);  // s1
+            body_ ~= Op.i32_load;
+            leb128u(body_, 2);  // align
+            leb128u(body_, STRING_LEN_OFFSET);
+            body_ ~= Op.local_set;
+            leb128u(body_, 3);  // s1_len
+            
+            // Load s2.ptr and s2.len
+            body_ ~= Op.local_get;
+            leb128u(body_, 1);  // s2
+            body_ ~= Op.i32_load;
+            leb128u(body_, 2);  // align
+            leb128u(body_, STRING_PTR_OFFSET);
+            body_ ~= Op.local_set;
+            leb128u(body_, 4);  // s2_ptr
+            
+            body_ ~= Op.local_get;
+            leb128u(body_, 1);  // s2
+            body_ ~= Op.i32_load;
+            leb128u(body_, 2);  // align
+            leb128u(body_, STRING_LEN_OFFSET);
+            body_ ~= Op.local_set;
+            leb128u(body_, 5);  // s2_len
+            
+            // new_len = s1_len + s2_len
+            body_ ~= Op.local_get;
+            leb128u(body_, 3);
+            body_ ~= Op.local_get;
+            leb128u(body_, 5);
+            body_ ~= Op.i32_add;
+            body_ ~= Op.local_set;
+            leb128u(body_, 6);  // new_len
+            
+            // buffer = alloc(new_len)
+            body_ ~= Op.local_get;
+            leb128u(body_, 6);
+            body_ ~= Op.call;
+            leb128u(body_, allocFuncIndex);
+            body_ ~= Op.local_set;
+            leb128u(body_, 7);  // buffer
+            
+            // result = alloc(12)  // String struct size
+            body_ ~= Op.i32_const;
+            leb128s(body_, STRING_STRUCT_SIZE);
+            body_ ~= Op.call;
+            leb128u(body_, allocFuncIndex);
+            body_ ~= Op.local_set;
+            leb128u(body_, 8);  // result
+            
+            // memory.copy(buffer, s1_ptr, s1_len)
+            body_ ~= Op.local_get;
+            leb128u(body_, 7);  // dest = buffer
+            body_ ~= Op.local_get;
+            leb128u(body_, 2);  // src = s1_ptr
+            body_ ~= Op.local_get;
+            leb128u(body_, 3);  // len = s1_len
+            body_ ~= cast(ubyte)0xFC;  // memory.copy prefix
+            body_ ~= cast(ubyte)0x0A;  // memory.copy opcode
+            leb128u(body_, 0);  // dest memory
+            leb128u(body_, 0);  // src memory
+            
+            // memory.copy(buffer + s1_len, s2_ptr, s2_len)
+            body_ ~= Op.local_get;
+            leb128u(body_, 7);  // buffer
+            body_ ~= Op.local_get;
+            leb128u(body_, 3);  // s1_len
+            body_ ~= Op.i32_add;  // dest = buffer + s1_len
+            body_ ~= Op.local_get;
+            leb128u(body_, 4);  // src = s2_ptr
+            body_ ~= Op.local_get;
+            leb128u(body_, 5);  // len = s2_len
+            body_ ~= cast(ubyte)0xFC;
+            body_ ~= cast(ubyte)0x0A;
+            leb128u(body_, 0);
+            leb128u(body_, 0);
+            
+            // result.ptr = buffer
+            body_ ~= Op.local_get;
+            leb128u(body_, 8);  // result
+            body_ ~= Op.local_get;
+            leb128u(body_, 7);  // buffer
+            body_ ~= Op.i32_store;
+            leb128u(body_, 2);  // align
+            leb128u(body_, STRING_PTR_OFFSET);
+            
+            // result.len = new_len
+            body_ ~= Op.local_get;
+            leb128u(body_, 8);  // result
+            body_ ~= Op.local_get;
+            leb128u(body_, 6);  // new_len
+            body_ ~= Op.i32_store;
+            leb128u(body_, 2);  // align
+            leb128u(body_, STRING_LEN_OFFSET);
+            
+            // result.cap = new_len
+            body_ ~= Op.local_get;
+            leb128u(body_, 8);  // result
+            body_ ~= Op.local_get;
+            leb128u(body_, 6);  // new_len
+            body_ ~= Op.i32_store;
+            leb128u(body_, 2);  // align
+            leb128u(body_, STRING_CAP_OFFSET);
+            
+            // return result
+            body_ ~= Op.local_get;
+            leb128u(body_, 8);
+            body_ ~= Op.end;
+            
+        } else if (f.name == "__eval") {
+            // __eval() -> i32
+            // Evaluates the stored expression and returns the result pointer
+            
+            leb128u(body_, 0);  // No locals
+            
+            // Create a context to emit the expression
+            auto ctx = new EvalContext(this);
+            ctx.emitExpression(body_, evalExpression);
+            
+            body_ ~= Op.end;
+            
+        } else {
+            throw new EmitError("Unknown built-in function: " ~ f.name);
+        }
         
         return body_.data;
     }
@@ -538,6 +1042,43 @@ class BinaryEmitter {
             return *idx;
         }
         throw new EmitError("Unknown function: " ~ name);
+    }
+    
+    /**
+     * Register a string literal and get its struct address.
+     * Creates both the character data and the String struct in the data section.
+     */
+    uint registerStringLiteral(string s) {
+        // Check if we already have this string
+        if (auto existing = s in stringLiterals) {
+            return existing.structOffset;
+        }
+        
+        needsStringSupport = true;
+        
+        // Add the character data
+        uint dataOffset = addData(cast(ubyte[])s);
+        uint len = cast(uint)s.length;
+        
+        // Create the String struct: { ptr, len, cap }
+        ubyte[STRING_STRUCT_SIZE] structData;
+        // Little-endian i32 values
+        *cast(uint*)&structData[STRING_PTR_OFFSET] = dataOffset;
+        *cast(uint*)&structData[STRING_LEN_OFFSET] = len;
+        *cast(uint*)&structData[STRING_CAP_OFFSET] = len;
+        
+        uint structOffset = addData(structData[]);
+        
+        stringLiterals[s] = StringLiteralInfo(structOffset, dataOffset, len);
+        
+        return structOffset;
+    }
+    
+    /**
+     * Check if string support is needed (exposes for CTFE)
+     */
+    bool hasStringSupport() const {
+        return needsStringSupport;
     }
 }
 
@@ -851,6 +1392,12 @@ private class FuncContext {
             out_ ~= Op.f64_const;
             double val = expr.value.get!double();
             out_ ~= (cast(ubyte*)&val)[0..8];
+        } else if (expr.value.type == typeid(string)) {
+            // String literal: emit pointer to String struct
+            string s = expr.value.get!string();
+            uint structAddr = emitter.registerStringLiteral(s);
+            out_ ~= Op.i32_const;
+            leb128s(out_, structAddr);
         } else {
             throw new EmitError("Unsupported literal type");
         }
@@ -869,9 +1416,16 @@ private class FuncContext {
         if (symbol && symbol.isConstant) {
             if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
                 if (manifest.ctfeComplete) {
-                    // Emit the CTFE-evaluated value directly
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, manifest.ctfeValue);
+                    if (manifest.isStringType) {
+                        // String constant: register and emit struct pointer
+                        uint structAddr = emitter.registerStringLiteral(manifest.ctfeStringValue);
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, structAddr);
+                    } else {
+                        // Numeric constant: emit value directly
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, manifest.ctfeValue);
+                    }
                     return;
                 }
             }
@@ -881,6 +1435,12 @@ private class FuncContext {
     }
     
     void emitBinary(ref Appender!(ubyte[]) out_, BinaryExpression expr) {
+        // Handle string concatenation specially
+        if (expr.operator == BinaryExpression.Operator.Concat) {
+            emitStringConcat(out_, expr);
+            return;
+        }
+        
         // Emit operands
         emitExpression(out_, expr.left);
         emitExpression(out_, expr.right);
@@ -913,9 +1473,21 @@ private class FuncContext {
             case BinaryExpression.Operator.ShiftLeft: op = Op.i32_shl; break;
             case BinaryExpression.Operator.ShiftRight: op = Op.i32_shr_s; break;
             case BinaryExpression.Operator.Concat:
-                throw new EmitError("String concatenation not supported in runtime code (use CTFE)");
+                assert(false, "Concat should be handled above");
         }
         out_ ~= op;
+    }
+    
+    void emitStringConcat(ref Appender!(ubyte[]) out_, BinaryExpression expr) {
+        // Emit left operand (pushes string struct pointer)
+        emitExpression(out_, expr.left);
+        
+        // Emit right operand (pushes string struct pointer)
+        emitExpression(out_, expr.right);
+        
+        // Call __string_concat(s1, s2) -> result_ptr
+        out_ ~= Op.call;
+        leb128u(out_, emitter.concatFuncIndex);
     }
     
     void emitUnary(ref Appender!(ubyte[]) out_, UnaryExpression expr) {
@@ -1043,5 +1615,85 @@ private class FuncContext {
             return true;  // Assume has value if unknown
         }
         return true;  // Most expressions have values
+    }
+}
+
+//==============================================================================
+// Eval Context - For expression evaluation in __eval (no locals, no params)
+//==============================================================================
+
+private class EvalContext {
+    BinaryEmitter emitter;
+    
+    this(BinaryEmitter e) {
+        this.emitter = e;
+    }
+    
+    void emitExpression(ref Appender!(ubyte[]) out_, Expression expr) {
+        if (auto literal = cast(LiteralExpression)expr) {
+            emitLiteral(out_, literal);
+        } else if (auto ident = cast(IdentifierExpression)expr) {
+            emitIdentifier(out_, ident);
+        } else if (auto binary = cast(BinaryExpression)expr) {
+            emitBinary(out_, binary);
+        } else {
+            throw new EmitError("Unsupported expression in __eval: " ~ expr.toString());
+        }
+    }
+    
+    void emitLiteral(ref Appender!(ubyte[]) out_, LiteralExpression expr) {
+        if (expr.value.type == typeid(string)) {
+            // String literal: emit pointer to String struct
+            string s = expr.value.get!string();
+            uint structAddr = emitter.registerStringLiteral(s);
+            out_ ~= Op.i32_const;
+            leb128s(out_, structAddr);
+        } else if (expr.value.type == typeid(long)) {
+            out_ ~= Op.i32_const;
+            leb128s(out_, expr.value.get!long());
+        } else {
+            throw new EmitError("Unsupported literal type in __eval");
+        }
+    }
+    
+    void emitIdentifier(ref Appender!(ubyte[]) out_, IdentifierExpression expr) {
+        // Must be a manifest constant
+        auto symbol = emitter.symbolTable.lookupSymbol(expr.name);
+        if (symbol && symbol.isConstant) {
+            if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
+                if (manifest.ctfeComplete) {
+                    if (manifest.isStringType) {
+                        uint structAddr = emitter.registerStringLiteral(manifest.ctfeStringValue);
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, structAddr);
+                    } else {
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, manifest.ctfeValue);
+                    }
+                    return;
+                }
+            }
+        }
+        throw new EmitError("Unknown identifier in __eval: " ~ expr.name);
+    }
+    
+    void emitBinary(ref Appender!(ubyte[]) out_, BinaryExpression expr) {
+        if (expr.operator == BinaryExpression.Operator.Concat) {
+            emitStringConcat(out_, expr);
+        } else {
+            throw new EmitError("Unsupported binary operator in __eval");
+        }
+    }
+    
+    void emitStringConcat(ref Appender!(ubyte[]) out_, BinaryExpression expr) {
+        // Emit left operand (string pointer)
+        emitExpression(out_, expr.left);
+        
+        // Emit right operand (string pointer)
+        emitExpression(out_, expr.right);
+        
+        // Call __string_concat
+        out_ ~= Op.call;
+        leb128u(out_, emitter.concatFuncIndex);
     }
 }

@@ -147,10 +147,34 @@ run_test() {
             return 0
             ;;
             
-        ctfe_eval|ctfe_output)
-            # TODO: Implement CTFE tests
-            echo -e "${YELLOW}SKIP${NC} $test_name (CTFE not implemented)"
-            return 0
+        ctfe_eval)
+            # CTFE evaluation test - check compile output for expected value
+            local expected_value=$(jq -r '.expected_value' "$config_file")
+            if echo "$compile_output" | grep -qF "CTFE:.*= $expected_value"; then
+                echo -e "${GREEN}PASS${NC} $test_name (value: $expected_value)"
+                return 0
+            else
+                echo -e "${RED}FAIL${NC} $test_name"
+                echo "  Expected CTFE value: $expected_value"
+                echo "  Compile output:"
+                echo "$compile_output" | sed 's/^/    /'
+                return 1
+            fi
+            ;;
+            
+        ctfe_output)
+            # CTFE output test - check stdout during compilation
+            local expected_output=$(jq -r '.expected_output' "$config_file")
+            if echo "$compile_output" | grep -qF "$expected_output"; then
+                echo -e "${GREEN}PASS${NC} $test_name (output: $expected_output)"
+                return 0
+            else
+                echo -e "${RED}FAIL${NC} $test_name"
+                echo "  Expected output: $expected_output"
+                echo "  Compile output:"
+                echo "$compile_output" | sed 's/^/    /'
+                return 1
+            fi
             ;;
             
         *)

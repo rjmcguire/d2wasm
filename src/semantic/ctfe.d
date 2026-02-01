@@ -108,70 +108,82 @@ class CTFEEvaluator {
     }
     
     /**
-     * Evaluate string concatenation at compile time.
+     * Evaluate string concatenation at compile time via WASM execution.
      * 
-     * For cases where both operands are known strings (literals or manifest constants),
-     * we simply concatenate in D. No WASM needed.
+     * Uses the same BinaryEmitter codegen as final output:
+     * 1. Emit a module with __eval function that evaluates the concat expression
+     * 2. Execute in wasm3
+     * 3. Read result string from memory
      * 
-     * When we need WASM execution for computed strings (e.g., function returning string),
-     * we'll use BinaryEmitter + CTFERuntime — the same codegen path as everything else.
+     * This ensures CTFE uses identical code paths to runtime.
      */
     string evaluateStringConcat(BinaryExpression expr) {
-        string left = evaluateStringExpression(expr.left);
-        string right = evaluateStringExpression(expr.right);
+        import semantic.ctfe_runtime : CTFERuntime, CTFERuntimeError;
+        import codegen.wasm : STRING_PTR_OFFSET, STRING_LEN_OFFSET;
         
-        string result = left ~ right;
-        writeln("CTFE: \"", left, "\" ~ \"", right, "\" = \"", result, "\"");
+        writeln("CTFE: Evaluating string concat via WASM");
         
-        return result;
+        // First, ensure any manifest constants referenced are already evaluated
+        ensureDependenciesEvaluated(expr);
+        
+        // Emit a WASM module that evaluates this expression
+        auto emitter = new BinaryEmitter(symbolTable);
+        ubyte[] wasmBytes = emitter.emitStringExpressionModule(expr);
+        
+        if (wasmBytes is null) {
+            throw new CTFEError("CTFE: Failed to compile string expression: " ~ emitter.error());
+        }
+        
+        // Debug: show the generated WASM size
+        writeln("CTFE: Generated ", wasmBytes.length, " bytes of WASM");
+        
+        // Execute in wasm3
+        auto runtime = new CTFERuntime();
+        scope(exit) destroy(runtime);
+        
+        try {
+            runtime.loadModule(wasmBytes);
+            
+            // Call __eval() to get the result string pointer
+            auto result = runtime.callI32("__eval");
+            uint structPtr = result.asInt();
+            
+            writeln("CTFE: __eval returned struct at ", structPtr);
+            
+            // Read the String struct from memory
+            uint dataPtr = runtime.readU32(structPtr + STRING_PTR_OFFSET);
+            uint len = runtime.readU32(structPtr + STRING_LEN_OFFSET);
+            
+            writeln("CTFE: String data at ", dataPtr, ", len=", len);
+            
+            // Read the string data
+            string resultStr = runtime.readString(dataPtr, len);
+            
+            writeln("CTFE: Result = \"", resultStr, "\"");
+            
+            return resultStr;
+            
+        } catch (CTFERuntimeError e) {
+            throw new CTFEError("CTFE: wasm3 execution failed: " ~ e.msg);
+        }
     }
     
     /**
-     * Evaluate a string expression recursively.
-     * Handles: literals, manifest constants, nested concatenation.
+     * Ensure all manifest constants referenced in an expression are evaluated.
      */
-    string evaluateStringExpression(Expression expr) {
-        // String literal
-        if (auto literal = cast(LiteralExpression)expr) {
-            if (literal.value.type == typeid(string)) {
-                return literal.value.get!string();
-            }
-            throw new CTFEError("CTFE: Expected string literal, got other literal type");
-        }
-        
-        // Identifier (manifest constant reference)
+    private void ensureDependenciesEvaluated(Expression expr) {
         if (auto ident = cast(IdentifierExpression)expr) {
             foreach (decl; allDeclarations) {
                 if (auto manifest = cast(ManifestConstantDecl)decl) {
-                    if (manifest.name == ident.name) {
-                        if (!manifest.ctfeComplete) {
-                            // Evaluate it first (handles forward references)
-                            evaluateManifestConstant(manifest);
-                        }
-                        if (manifest.isStringType) {
-                            return manifest.ctfeStringValue;
-                        }
-                        throw new CTFEError("CTFE: '" ~ ident.name ~ "' is not a string");
+                    if (manifest.name == ident.name && !manifest.ctfeComplete) {
+                        evaluateManifestConstant(manifest);
                     }
                 }
             }
-            throw new CTFEError("CTFE: Unknown identifier '" ~ ident.name ~ "'");
+        } else if (auto binary = cast(BinaryExpression)expr) {
+            ensureDependenciesEvaluated(binary.left);
+            ensureDependenciesEvaluated(binary.right);
         }
-        
-        // Nested concatenation: A ~ B ~ C parses as (A ~ B) ~ C
-        if (auto binary = cast(BinaryExpression)expr) {
-            if (binary.operator == BinaryExpression.Operator.Concat) {
-                return evaluateStringConcat(binary);
-            }
-            throw new CTFEError("CTFE: Unsupported binary operator in string context");
-        }
-        
-        // TODO: Function calls returning strings would go through BinaryEmitter here
-        // if (auto call = cast(CallExpression)expr) {
-        //     return evaluateStringReturningCall(call);
-        // }
-        
-        throw new CTFEError("CTFE: Cannot evaluate expression as string");
     }
     
     /**

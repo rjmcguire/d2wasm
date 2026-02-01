@@ -273,6 +273,22 @@ class CTFERuntime {
     }
     
     /**
+     * Read an unsigned 32-bit integer from memory (little-endian)
+     */
+    uint readU32(uint offset) {
+        auto bytes = readMemory(offset, 4);
+        return *cast(uint*)bytes.ptr;
+    }
+    
+    /**
+     * Read a signed 32-bit integer from memory (little-endian)
+     */
+    int readI32(uint offset) {
+        auto bytes = readMemory(offset, 4);
+        return *cast(int*)bytes.ptr;
+    }
+    
+    /**
      * Get memory size
      */
     uint getMemorySize() {
