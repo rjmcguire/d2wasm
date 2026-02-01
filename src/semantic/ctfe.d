@@ -73,6 +73,14 @@ class CTFEEvaluator {
                 writeln("CTFE: ", manifest.name, " = ", manifest.ctfeValue, " (literal)");
                 return;
             }
+            if (literal.value.type == typeid(string)) {
+                manifest.ctfeStringValue = literal.value.get!string();
+                manifest.ctfeComplete = true;
+                manifest.isStringType = true;
+                // TODO: proper string type
+                writeln("CTFE: ", manifest.name, " = \"", manifest.ctfeStringValue, "\" (string literal)");
+                return;
+            }
         }
         
         // Need to evaluate via WASM execution
@@ -232,6 +240,10 @@ class CTFEEvaluator {
                 else if (literal.value.type == typeid(bool)) {
                     write(literal.value.get!bool() ? "true" : "false");
                 }
+            } else if (auto ident = cast(IdentifierExpression)arg) {
+                // Look up identifier - might be a manifest constant
+                auto value = lookupCtfeValue(ident.name);
+                write(value);
             } else {
                 // Try to evaluate as simple expression (numbers)
                 try {
@@ -245,6 +257,27 @@ class CTFEEvaluator {
         writeln();  // Newline after all arguments
         
         return 0;  // __writeln returns void (0)
+    }
+    
+    /**
+     * Look up a CTFE value by name (manifest constant)
+     */
+    string lookupCtfeValue(string name) {
+        // Search manifest constants
+        foreach (decl; allDeclarations) {
+            if (auto manifest = cast(ManifestConstantDecl)decl) {
+                if (manifest.name == name && manifest.ctfeComplete) {
+                    if (manifest.isStringType) {
+                        return manifest.ctfeStringValue;
+                    } else {
+                        return to!string(manifest.ctfeValue);
+                    }
+                }
+            }
+        }
+        
+        // Not found
+        return "<undefined:" ~ name ~ ">";
     }
     
     /**

@@ -8,6 +8,10 @@
     "sourcePaths": ["src"],
     "importPaths": ["src"],
     
+    "dependencies": {
+        "wasm3-d": "~>0.3.0"
+    },
+    
     "libs": ["tree-sitter"],
     "lflags": ["-L/opt/homebrew/lib", "./grammar/tree-sitter-d/libtree-sitter-d.a"],
     

@@ -1,0 +1,7 @@
+{
+  "name": "manifest_string",
+  "description": "CTFE with manifest constant string passed to __writeln",
+  "type": "compile_output",
+  "expected_output": "hello from manifest constant",
+  "capability": "String manifest constants, CTFE value lookup"
+}

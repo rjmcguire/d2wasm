@@ -262,17 +262,23 @@ class ManifestConstantDecl : Declaration {
     Expression initializer;  // The expression to evaluate at compile time
     Type inferredType;       // Type inferred after CTFE (null before)
     long ctfeValue;          // Value after CTFE evaluation (for integral types)
+    string ctfeStringValue;  // Value for string types
     bool ctfeComplete;       // Whether CTFE has been performed
+    bool isStringType;       // True if this is a string constant
     
     this(SourceLocation loc, string name, Expression initializer) {
         super(loc, name, true);  // Manifest constants are always "public" in their scope
         this.initializer = initializer;
         this.inferredType = null;
         this.ctfeComplete = false;
+        this.isStringType = false;
     }
     
     override string toString() const {
         if (ctfeComplete) {
+            if (isStringType) {
+                return format("ManifestConstant(%s = \"%s\")", name, ctfeStringValue);
+            }
             return format("ManifestConstant(%s = %d)", name, ctfeValue);
         }
         return format("ManifestConstant(%s = %s)", name, initializer.toString());
