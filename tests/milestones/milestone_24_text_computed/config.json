@@ -1,0 +1,8 @@
+{
+  "name": "text_computed",
+  "description": "__text with computed expression in mixin",
+  "type": "wasm_exec",
+  "expected_result": 22,
+  "entry": "result",
+  "capability": "__text(expression) evaluates then converts"
+}

@@ -1,0 +1,7 @@
+{
+  "name": "text_intrinsic",
+  "description": "Basic __text intrinsic - converts int to string",
+  "type": "compile_output",
+  "expected_output": "value: 42",
+  "capability": "__text(int) returns string representation"
+}

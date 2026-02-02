@@ -1,0 +1,8 @@
+{
+  "name": "text_mixin",
+  "description": "__text result used in mixin string",
+  "type": "wasm_exec",
+  "expected_result": 7,
+  "entry": "result",
+  "capability": "__text in mixin code generation"
+}
