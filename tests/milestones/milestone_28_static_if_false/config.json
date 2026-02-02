@@ -1,0 +1,8 @@
+{
+  "name": "static_if_false",
+  "description": "Static if with false condition takes else branch",
+  "type": "wasm_exec",
+  "expected_result": 2,
+  "entry": "result",
+  "capability": "static if else branch selection"
+}

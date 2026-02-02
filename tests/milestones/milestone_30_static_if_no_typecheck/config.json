@@ -1,0 +1,8 @@
+{
+  "name": "static_if_no_typecheck",
+  "description": "Excluded branch not type-checked - contains invalid code",
+  "type": "wasm_exec",
+  "expected_result": 42,
+  "entry": "result",
+  "capability": "static if branch exclusion before type checking"
+}

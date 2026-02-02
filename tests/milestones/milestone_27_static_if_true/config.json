@@ -1,0 +1,8 @@
+{
+  "name": "static_if_true",
+  "description": "Basic static if with true condition",
+  "type": "wasm_exec",
+  "expected_result": 1,
+  "entry": "result",
+  "capability": "static if parsing, compile-time condition evaluation"
+}

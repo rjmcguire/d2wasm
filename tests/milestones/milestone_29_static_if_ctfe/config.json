@@ -1,0 +1,8 @@
+{
+  "name": "static_if_ctfe",
+  "description": "Static if with CTFE-evaluated condition",
+  "type": "wasm_exec",
+  "expected_result": 10,
+  "entry": "result",
+  "capability": "static if with manifest constant comparison"
+}
