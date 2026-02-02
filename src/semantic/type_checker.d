@@ -223,11 +223,11 @@ class TypeChecker {
                 checkStatement(s);
             }
         } else if (auto ifStmt = cast(IfStatement)stmt) {
-            // Check condition is boolean-convertible
+            // Check condition must be bool (strict D semantics)
             Type condType = checkExpression(ifStmt.condition);
             if (!isBooleanConvertible(condType)) {
                 throw new TypeError(
-                    format("If condition must be boolean-convertible, got '%s'", condType.toString()),
+                    format("If condition must be bool, got '%s'", condType.toString()),
                     ifStmt.condition.location
                 );
             }
@@ -240,7 +240,7 @@ class TypeChecker {
             Type condType = checkExpression(whileStmt.condition);
             if (!isBooleanConvertible(condType)) {
                 throw new TypeError(
-                    format("While condition must be boolean-convertible, got '%s'", condType.toString()),
+                    format("While condition must be bool, got '%s'", condType.toString()),
                     whileStmt.condition.location
                 );
             }
@@ -257,7 +257,7 @@ class TypeChecker {
                 Type condType = checkExpression(forStmt.condition);
                 if (!isBooleanConvertible(condType)) {
                     throw new TypeError(
-                        format("For condition must be boolean-convertible, got '%s'", condType.toString()),
+                        format("For condition must be bool, got '%s'", condType.toString()),
                         forStmt.condition.location
                     );
                 }
@@ -739,13 +739,11 @@ class TypeChecker {
     }
     
     bool isBooleanConvertible(Type type) {
-        // Numbers, pointers, etc. can be converted to boolean
+        // D requires strict bool - no implicit conversion from int/float
         auto basic = cast(BasicType)type;
         if (basic) {
-            return basic.kind != BasicType.Kind.Void;
+            return basic.kind == BasicType.Kind.Bool;
         }
-        
-        // TODO: Pointers, arrays are also boolean-convertible
         return false;
     }
     

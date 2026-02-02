@@ -1,0 +1,8 @@
+{
+  "name": "strict_bool",
+  "description": "Proper boolean expressions in conditions",
+  "type": "wasm_exec",
+  "expected_result": 1,
+  "entry": "result",
+  "capability": "bool type, comparison returns bool, bool in conditions"
+}

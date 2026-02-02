@@ -1,0 +1,7 @@
+{
+  "name": "bool_error",
+  "description": "Rejects non-boolean in condition - strict D semantics",
+  "type": "compile_error",
+  "expected_error": "must be bool",
+  "capability": "enforce bool-only conditions"
+}
