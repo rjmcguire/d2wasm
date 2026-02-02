@@ -1,0 +1,8 @@
+{
+  "name": "basic_mixin",
+  "description": "Basic mixin - string literal parsed and spliced into AST",
+  "type": "wasm_exec",
+  "expected_result": 42,
+  "entry_point": "result",
+  "capability": "mixin(string) with manifest constant, tree-sitter parse, AST splice"
+}

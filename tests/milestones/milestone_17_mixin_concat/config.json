@@ -1,0 +1,8 @@
+{
+  "name": "mixin_concat",
+  "description": "Mixin with concatenated string - ensures CTFE string eval",
+  "type": "wasm_exec",
+  "expected_result": 42,
+  "entry_point": "result",
+  "capability": "mixin with string concatenation, CTFE string evaluation"
+}
