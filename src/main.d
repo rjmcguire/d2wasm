@@ -143,7 +143,31 @@ int compileFile(CompilerOptions options) {
         }
         
         if (options.printAst) {
-            writeln("\n=== AST ===");
+            writeln("\n=== AST (before mixin expansion) ===");
+            printAST(ast);
+            writeln();
+        }
+        
+        // 2b. Mixin expansion - must happen before symbol collection
+        if (options.verbose) {
+            writeln("Expanding mixins...");
+        }
+        
+        import semantic.mixin_expander;
+        auto mixinExpander = new MixinExpander();
+        try {
+            ast = mixinExpander.expandMixins(ast);
+        } catch (MixinError e) {
+            writeln("Mixin Error: ", e.msg);
+            return 1;
+        }
+        
+        if (options.verbose) {
+            writeln("Mixin expansion complete. ", ast.length, " declarations after expansion");
+        }
+        
+        if (options.printAst) {
+            writeln("\n=== AST (after mixin expansion) ===");
             printAST(ast);
             writeln();
         }

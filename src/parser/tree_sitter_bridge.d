@@ -108,6 +108,8 @@ class TreeSitterBridge {
                         declarations ~= parseEnumDeclaration(child);
                     } else if (nodeType == "manifest_constant") {
                         declarations ~= parseManifestConstant(child);
+                    } else if (nodeType == "mixin_declaration") {
+                        declarations ~= parseMixinDeclaration(child);
                     } else if (nodeType != "comment" && nodeType.length > 0) {
                         writeln("Warning: Skipping unknown top-level node: ", nodeType);
                     }
@@ -343,13 +345,52 @@ class TreeSitterBridge {
     
     /**
      * Parse variable declaration
+     * 
+     * Tree-sitter structure:
+     *   variable_declaration
+     *     type (contains int/float/etc)
+     *     declarator (contains identifier and optional initializer)
      */
     VariableDecl parseVariableDeclaration(TSNode node) {
         SourceLocation loc = makeSourceLocation(node);
         
+        // Try field-based access first
         TSNode typeNode = TreeSitterParser.getChildByFieldName(node, "type");
         TSNode nameNode = TreeSitterParser.getChildByFieldName(node, "name");
         TSNode initNode = TreeSitterParser.getChildByFieldName(node, "initializer");
+        
+        // If field-based access fails, iterate children
+        if (!TreeSitterParser.isValid(typeNode)) {
+            TSNode declaratorNode;
+            uint childCount = TreeSitterParser.getChildCount(node);
+            for (uint i = 0; i < childCount; i++) {
+                TSNode child = TreeSitterParser.getChild(node, i);
+                string childType = TreeSitterParser.getNodeType(child);
+                
+                if (childType == "type") {
+                    typeNode = child;
+                } else if (childType == "declarator") {
+                    declaratorNode = child;
+                }
+            }
+            
+            // Parse name and initializer from declarator
+            if (TreeSitterParser.isValid(declaratorNode)) {
+                uint declChildCount = TreeSitterParser.getChildCount(declaratorNode);
+                for (uint i = 0; i < declChildCount; i++) {
+                    TSNode child = TreeSitterParser.getChild(declaratorNode, i);
+                    string childType = TreeSitterParser.getNodeType(child);
+                    
+                    if (childType == "identifier" && !TreeSitterParser.isValid(nameNode)) {
+                        nameNode = child;
+                    } else if (childType != "=" && childType != "identifier" && 
+                               TreeSitterParser.isValid(nameNode) && !TreeSitterParser.isValid(initNode)) {
+                        // This should be the initializer expression
+                        initNode = child;
+                    }
+                }
+            }
+        }
         
         if (!TreeSitterParser.isValid(typeNode) || !TreeSitterParser.isValid(nameNode)) {
             throw new ParseError("Variable declaration missing type or name", loc);
@@ -439,6 +480,60 @@ class TreeSitterBridge {
     }
     
     /**
+     * Parse mixin declaration: mixin(expression);
+     * 
+     * Tree-sitter structure:
+     *   mixin_declaration
+     *     mixin_expression
+     *       mixin
+     *       expression (contains the identifier or string expr)
+     */
+    MixinDecl parseMixinDeclaration(TSNode node) {
+        SourceLocation loc = makeSourceLocation(node);
+        
+        // Find the mixin_expression child
+        TSNode mixinExprNode;
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            if (childType == "mixin_expression") {
+                mixinExprNode = child;
+                break;
+            }
+        }
+        
+        if (!TreeSitterParser.isValid(mixinExprNode)) {
+            throw new ParseError("Mixin declaration missing mixin_expression", loc);
+        }
+        
+        // Find the expression inside mixin_expression
+        // Structure: mixin_expression has children: mixin, (, expression, )
+        TSNode exprNode;
+        uint mixinChildCount = TreeSitterParser.getChildCount(mixinExprNode);
+        for (uint i = 0; i < mixinChildCount; i++) {
+            TSNode child = TreeSitterParser.getChild(mixinExprNode, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            if (childType == "expression" || childType == "identifier" || 
+                childType == "string_literal" || childType.endsWith("_expression")) {
+                exprNode = child;
+                break;
+            }
+        }
+        
+        if (!TreeSitterParser.isValid(exprNode)) {
+            throw new ParseError("Mixin expression missing argument", loc);
+        }
+        
+        // Parse the expression
+        Expression mixinArg = parseExpression(exprNode);
+        
+        writeln("Parsed mixin declaration: mixin(", mixinArg.toString(), ")");
+        
+        return new MixinDecl(loc, mixinArg);
+    }
+    
+    /**
      * Parse type from tree-sitter node
      */
     Type parseType(TSNode node) {
@@ -447,12 +542,17 @@ class TreeSitterBridge {
         
         // Handle different type node structures
         if (nodeType == "type") {
-            // Look for the actual type inside the type node
+            // Look for the actual type inside the type node, skipping type_ctor
             uint childCount = TreeSitterParser.getChildCount(node);
             for (uint i = 0; i < childCount; i++) {
                 TSNode child = TreeSitterParser.getChild(node, i);
-                return parseType(child);
+                string childType = TreeSitterParser.getNodeType(child);
+                // Skip type constructors like 'immutable', 'const', 'shared'
+                if (childType != "type_ctor") {
+                    return parseType(child);
+                }
             }
+            // If only type_ctor found, fall through to default
         }
         
         switch (nodeType) {
@@ -482,6 +582,9 @@ class TreeSitterBridge {
                 return new BasicType(loc, BasicType.Kind.Float64);
             case "char":
                 return new BasicType(loc, BasicType.Kind.Char);
+            case "string":
+                // String is represented as a user-defined type for now
+                return new UserType(loc, "string");
             case "array_type":
                 return parseArrayType(node, loc);
             case "pointer_type":

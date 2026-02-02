@@ -462,3 +462,29 @@ class UserType : Type {
         return name;
     }
 }
+
+/**
+ * Mixin declaration: mixin(expression);
+ * 
+ * A compile-time string mixin that expands to D code.
+ * The expression must evaluate to a string at compile time.
+ * This is a placeholder that gets expanded during semantic analysis.
+ */
+class MixinDecl : Declaration {
+    Expression mixinExpr;  // The expression that produces the string to mix in
+    Declaration[] expandedDeclarations;  // Filled after CTFE expansion
+    bool isExpanded;  // Whether expansion has been performed
+    
+    this(SourceLocation loc, Expression mixinExpr) {
+        super(loc, "<mixin>", true);  // Mixins don't have a name
+        this.mixinExpr = mixinExpr;
+        this.isExpanded = false;
+    }
+    
+    override string toString() const {
+        if (isExpanded) {
+            return format("MixinDecl(expanded: %d declarations)", expandedDeclarations.length);
+        }
+        return format("MixinDecl(%s)", mixinExpr.toString());
+    }
+}

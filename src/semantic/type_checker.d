@@ -785,8 +785,8 @@ class TypeChecker {
             // Boolean literal
             return new BasicType(literal.location, BasicType.Kind.Bool);
         } else if (literal.value.type == typeid(string)) {
-            // String literal
-            return new BasicType(literal.location, BasicType.Kind.Char);  // TODO: Proper string type
+            // String literal - return as UserType "string" for now
+            return new UserType(literal.location, "string");
         } else if (literal.value.type == typeid(typeof(null))) {
             // Null literal
             return new BasicType(literal.location, BasicType.Kind.Void);  // TODO: Proper null type

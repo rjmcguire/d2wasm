@@ -3,6 +3,6 @@
   "description": "Mixin with fully computed string from multiple manifest constants",
   "type": "wasm_exec",
   "expected_result": 42,
-  "entry_point": "result",
+  "entry": "result",
   "capability": "mixin with composed string from multiple enums"
 }
