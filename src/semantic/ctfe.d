@@ -231,6 +231,11 @@ class CTFEEvaluator {
         } else if (auto binary = cast(BinaryExpression)expr) {
             ensureDependenciesEvaluated(binary.left);
             ensureDependenciesEvaluated(binary.right);
+        } else if (auto call = cast(CallExpression)expr) {
+            // Evaluate dependencies in call arguments (e.g., __text(n))
+            foreach (arg; call.arguments) {
+                ensureDependenciesEvaluated(arg);
+            }
         }
     }
     

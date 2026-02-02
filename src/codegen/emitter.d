@@ -300,7 +300,66 @@ class BinaryEmitter {
                     }
                 }
             }
+        } else if (auto call = cast(CallExpression)expr) {
+            // Handle __text intrinsic - evaluate and pre-register the result string
+            auto ident = cast(IdentifierExpression)call.function_;
+            if (ident && ident.name == "__text" && call.arguments.length == 1) {
+                long value = evaluateConstantIntExpr(call.arguments[0]);
+                string strValue = to!string(value);
+                registerArrayLiteral(strValue);
+            }
         }
+    }
+    
+    /**
+     * Evaluate an integer expression from manifest constants (for collectArrayLiterals).
+     */
+    private long evaluateConstantIntExpr(Expression expr) {
+        if (auto literal = cast(LiteralExpression)expr) {
+            if (literal.value.type == typeid(long)) {
+                return literal.value.get!long();
+            }
+        }
+        
+        if (auto ident = cast(IdentifierExpression)expr) {
+            auto symbol = symbolTable.lookupSymbol(ident.name);
+            if (symbol && symbol.isConstant) {
+                if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
+                    if (manifest.ctfeComplete && !manifest.isStringType) {
+                        return manifest.ctfeValue;
+                    }
+                }
+            }
+        }
+        
+        if (auto binary = cast(BinaryExpression)expr) {
+            long left = evaluateConstantIntExpr(binary.left);
+            long right = evaluateConstantIntExpr(binary.right);
+            
+            final switch (binary.operator) {
+                case BinaryExpression.Operator.Add: return left + right;
+                case BinaryExpression.Operator.Subtract: return left - right;
+                case BinaryExpression.Operator.Multiply: return left * right;
+                case BinaryExpression.Operator.Divide: return left / right;
+                case BinaryExpression.Operator.Modulo: return left % right;
+                case BinaryExpression.Operator.Equal: return left == right ? 1 : 0;
+                case BinaryExpression.Operator.NotEqual: return left != right ? 1 : 0;
+                case BinaryExpression.Operator.Less: return left < right ? 1 : 0;
+                case BinaryExpression.Operator.LessEqual: return left <= right ? 1 : 0;
+                case BinaryExpression.Operator.Greater: return left > right ? 1 : 0;
+                case BinaryExpression.Operator.GreaterEqual: return left >= right ? 1 : 0;
+                case BinaryExpression.Operator.LogicalAnd: return (left != 0 && right != 0) ? 1 : 0;
+                case BinaryExpression.Operator.LogicalOr: return (left != 0 || right != 0) ? 1 : 0;
+                case BinaryExpression.Operator.BitwiseAnd: return left & right;
+                case BinaryExpression.Operator.BitwiseOr: return left | right;
+                case BinaryExpression.Operator.BitwiseXor: return left ^ right;
+                case BinaryExpression.Operator.ShiftLeft: return left << right;
+                case BinaryExpression.Operator.ShiftRight: return left >> right;
+                case BinaryExpression.Operator.Concat: return 0;  // Not applicable
+            }
+        }
+        
+        return 0;  // Default for unknown expressions
     }
     
     /**
@@ -1659,9 +1718,92 @@ private class EvalContext {
             emitIdentifier(out_, ident);
         } else if (auto binary = cast(BinaryExpression)expr) {
             emitBinary(out_, binary);
+        } else if (auto call = cast(CallExpression)expr) {
+            emitCallExpr(out_, call);
         } else {
             throw new EmitError("Unsupported expression in __eval: " ~ expr.toString());
         }
+    }
+    
+    void emitCallExpr(ref Appender!(ubyte[]) out_, CallExpression expr) {
+        auto ident = cast(IdentifierExpression)expr.function_;
+        if (!ident) {
+            throw new EmitError("Unsupported call expression in __eval");
+        }
+        
+        if (ident.name == "__text") {
+            // __text(expr) - convert integer expression to string at compile time
+            if (expr.arguments.length != 1) {
+                throw new EmitError("__text requires exactly one argument");
+            }
+            
+            // Evaluate the argument to get an integer value
+            long value = evaluateIntExpr(expr.arguments[0]);
+            
+            // Convert to string
+            string strValue = to!string(value);
+            
+            // Register as a string literal and emit pointer
+            uint structAddr = emitter.registerArrayLiteral(strValue);
+            out_ ~= Op.i32_const;
+            leb128s(out_, structAddr);
+        } else {
+            throw new EmitError("Unknown intrinsic in __eval: " ~ ident.name);
+        }
+    }
+    
+    /**
+     * Evaluate an integer expression at compile time (for __text argument)
+     */
+    long evaluateIntExpr(Expression expr) {
+        if (auto literal = cast(LiteralExpression)expr) {
+            if (literal.value.type == typeid(long)) {
+                return literal.value.get!long();
+            }
+            throw new EmitError("Expected integer in __text argument");
+        }
+        
+        if (auto ident = cast(IdentifierExpression)expr) {
+            auto symbol = emitter.symbolTable.lookupSymbol(ident.name);
+            if (symbol && symbol.isConstant) {
+                if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
+                    if (manifest.ctfeComplete && !manifest.isStringType) {
+                        return manifest.ctfeValue;
+                    }
+                }
+            }
+            throw new EmitError("Unknown or non-integer identifier in __text: " ~ ident.name);
+        }
+        
+        if (auto binary = cast(BinaryExpression)expr) {
+            long left = evaluateIntExpr(binary.left);
+            long right = evaluateIntExpr(binary.right);
+            
+            final switch (binary.operator) {
+                case BinaryExpression.Operator.Add: return left + right;
+                case BinaryExpression.Operator.Subtract: return left - right;
+                case BinaryExpression.Operator.Multiply: return left * right;
+                case BinaryExpression.Operator.Divide: return left / right;
+                case BinaryExpression.Operator.Modulo: return left % right;
+                case BinaryExpression.Operator.Equal: return left == right ? 1 : 0;
+                case BinaryExpression.Operator.NotEqual: return left != right ? 1 : 0;
+                case BinaryExpression.Operator.Less: return left < right ? 1 : 0;
+                case BinaryExpression.Operator.LessEqual: return left <= right ? 1 : 0;
+                case BinaryExpression.Operator.Greater: return left > right ? 1 : 0;
+                case BinaryExpression.Operator.GreaterEqual: return left >= right ? 1 : 0;
+                case BinaryExpression.Operator.LogicalAnd: return (left != 0 && right != 0) ? 1 : 0;
+                case BinaryExpression.Operator.LogicalOr: return (left != 0 || right != 0) ? 1 : 0;
+                case BinaryExpression.Operator.BitwiseAnd: return left & right;
+                case BinaryExpression.Operator.BitwiseOr: return left | right;
+                case BinaryExpression.Operator.BitwiseXor: return left ^ right;
+                case BinaryExpression.Operator.ShiftLeft: return left << right;
+                case BinaryExpression.Operator.ShiftRight: return left >> right;
+                case BinaryExpression.Operator.Concat: 
+                    throw new EmitError("Concat not supported in __text argument");
+            }
+        }
+        
+        throw new EmitError("Cannot evaluate __text argument: " ~ expr.toString());
     }
     
     void emitLiteral(ref Appender!(ubyte[]) out_, LiteralExpression expr) {
