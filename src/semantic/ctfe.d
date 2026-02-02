@@ -113,6 +113,34 @@ class CTFEEvaluator {
                 writeln("CTFE: ", manifest.name, " = '", literal.value.get!char(), "' (char literal)");
                 return;
             }
+            if (literal.value.type == typeid(bool)) {
+                manifest.ctfeValue = literal.value.get!bool() ? 1 : 0;
+                manifest.ctfeComplete = true;
+                manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Bool);
+                writeln("CTFE: ", manifest.name, " = ", manifest.ctfeValue ? "true" : "false", " (bool literal)");
+                return;
+            }
+        }
+        
+        // Check for unary expression (e.g., -42)
+        if (auto unaryExpr = cast(UnaryExpression)manifest.initializer) {
+            if (unaryExpr.operator == UnaryExpression.Operator.Minus) {
+                // Evaluate the operand
+                long operand = evaluateSimpleExpression(unaryExpr.operand);
+                long value = -operand;
+                // Check for i32 overflow
+                if (value > int.max || value < int.min) {
+                    throw new CTFEError(
+                        format("Integer value %d exceeds i32 range [%d, %d] for '%s'",
+                               value, int.min, int.max, manifest.name)
+                    );
+                }
+                manifest.ctfeValue = value;
+                manifest.ctfeComplete = true;
+                manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Int32);
+                writeln("CTFE: ", manifest.name, " = ", manifest.ctfeValue, " (unary minus)");
+                return;
+            }
         }
         
         // Check for binary expression (e.g., array/string concatenation)

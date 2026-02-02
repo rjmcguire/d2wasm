@@ -152,7 +152,72 @@ class TypeChecker {
         if (decl.body_) {
             writeln("Checking body for ", decl.name);
             checkStatement(decl.body_);
+            
+            // Check that non-void functions return on all paths
+            // Skip this check if the body is empty (likely due to parse errors)
+            if (!isVoidType(decl.returnType)) {
+                if (!isEmptyBody(decl.body_) && !allPathsReturn(decl.body_)) {
+                    throw new TypeError(
+                        format("Function '%s' does not return a value on all control flow paths", decl.name),
+                        decl.location
+                    );
+                }
+            }
         }
+    }
+    
+    /**
+     * Check if a function body is effectively empty (no statements).
+     * This can happen due to parse errors dropping statements.
+     */
+    private bool isEmptyBody(Statement stmt) {
+        if (!stmt) return true;
+        if (auto compound = cast(CompoundStatement)stmt) {
+            return compound.statements.length == 0;
+        }
+        return false;
+    }
+    
+    /**
+     * Check if all control flow paths in a statement return a value.
+     * Returns true if the statement always returns (or terminates).
+     */
+    private bool allPathsReturn(Statement stmt) {
+        if (!stmt) return false;
+        
+        if (auto compound = cast(CompoundStatement)stmt) {
+            // A compound statement returns if any of its statements always returns
+            foreach (s; compound.statements) {
+                if (allPathsReturn(s)) return true;
+            }
+            return false;
+        }
+        
+        if (auto returnStmt = cast(ReturnStatement)stmt) {
+            // A return statement with or without a value always terminates
+            return true;
+        }
+        
+        if (auto ifStmt = cast(IfStatement)stmt) {
+            // An if statement returns only if BOTH branches exist and BOTH return
+            if (ifStmt.elseStatement is null) {
+                return false;  // No else branch, so the if might not return
+            }
+            return allPathsReturn(ifStmt.thenStatement) && allPathsReturn(ifStmt.elseStatement);
+        }
+        
+        if (auto whileStmt = cast(WhileStatement)stmt) {
+            // While loops might not execute at all, so they don't guarantee return
+            return false;
+        }
+        
+        if (auto forStmt = cast(ForStatement)stmt) {
+            // For loops might not execute at all, so they don't guarantee return
+            return false;
+        }
+        
+        // Other statements (expression, variable declaration) don't return
+        return false;
     }
     
     /**

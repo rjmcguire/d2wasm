@@ -379,12 +379,19 @@ class SymbolCollector {
     }
     
     private void collectManifestConstant(ManifestConstantDecl decl) {
-        // For now, assume i32 type until CTFE resolves it
-        // TODO: Infer type from CTFE result
+        // Use the inferred type if CTFE has already evaluated it, 
+        // otherwise default to Int32 (will be updated later if needed)
+        Type symbolType;
+        if (decl.ctfeComplete && decl.inferredType !is null) {
+            symbolType = decl.inferredType;
+        } else {
+            symbolType = new BasicType(decl.location, BasicType.Kind.Int32);
+        }
+        
         auto symbol = new Symbol(
             decl.name,
             SymbolKind.Variable,  // Manifest constants are like compile-time variables
-            new BasicType(decl.location, BasicType.Kind.Int32),
+            symbolType,
             decl,
             decl.location,
             symbolTable.inGlobalScope()
