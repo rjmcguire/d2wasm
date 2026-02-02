@@ -1465,8 +1465,16 @@ private class FuncContext {
     
     void emitLiteral(ref Appender!(ubyte[]) out_, LiteralExpression expr) {
         if (expr.value.type == typeid(long)) {
+            long value = expr.value.get!long();
+            // Check for i32 overflow
+            if (value > int.max || value < int.min) {
+                throw new EmitError(
+                    format("Integer literal %d exceeds i32 range [%d, %d]", value, int.min, int.max),
+                    "literal emission"
+                );
+            }
             out_ ~= Op.i32_const;
-            leb128s(out_, expr.value.get!long());
+            leb128s(out_, value);
         } else if (expr.value.type == typeid(bool)) {
             out_ ~= Op.i32_const;
             leb128s(out_, expr.value.get!bool() ? 1 : 0);

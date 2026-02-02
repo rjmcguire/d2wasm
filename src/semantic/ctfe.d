@@ -83,7 +83,15 @@ class CTFEEvaluator {
         // Check if it's a simple literal (no CTFE needed)
         if (auto literal = cast(LiteralExpression)manifest.initializer) {
             if (literal.value.type == typeid(long)) {
-                manifest.ctfeValue = literal.value.get!long();
+                long value = literal.value.get!long();
+                // Check for i32 overflow
+                if (value > int.max || value < int.min) {
+                    throw new CTFEError(
+                        format("Integer literal %d exceeds i32 range [%d, %d] for '%s'",
+                               value, int.min, int.max, manifest.name)
+                    );
+                }
+                manifest.ctfeValue = value;
                 manifest.ctfeComplete = true;
                 manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Int32);
                 writeln("CTFE: ", manifest.name, " = ", manifest.ctfeValue, " (literal)");
