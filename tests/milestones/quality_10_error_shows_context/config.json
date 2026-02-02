@@ -1,0 +1,6 @@
+{
+  "name": "error_shows_context",
+  "description": "Error messages show the offending line of code",
+  "type": "compile_error",
+  "capability": "Error message quality - code context"
+}

@@ -1,0 +1,6 @@
+{
+  "name": "mixin_dual_location",
+  "description": "Mixin error shows both mixin site AND generated code location",
+  "type": "compile_error",
+  "capability": "Error message quality - mixin error attribution"
+}

@@ -1,0 +1,6 @@
+{
+  "name": "int_overflow",
+  "description": "Integer literal exceeding i32 range should error",
+  "type": "compile_error",
+  "capability": "CTFE safety - integer overflow detection"
+}

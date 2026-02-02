@@ -1,0 +1,6 @@
+{
+  "name": "missing_return",
+  "description": "Non-void function without return on all paths should error",
+  "type": "compile_error",
+  "capability": "Control flow analysis - return path validation"
+}

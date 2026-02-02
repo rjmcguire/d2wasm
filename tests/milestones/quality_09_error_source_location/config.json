@@ -1,0 +1,6 @@
+{
+  "name": "error_source_location",
+  "description": "Error messages include correct file:line:column",
+  "type": "compile_error",
+  "capability": "Error message quality - source location"
+}

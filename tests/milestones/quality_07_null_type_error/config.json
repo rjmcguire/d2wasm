@@ -1,0 +1,6 @@
+{
+  "name": "null_type_error",
+  "description": "Graceful error when type cannot be determined, not crash",
+  "type": "compile_error",
+  "capability": "Error propagation - null type handling"
+}

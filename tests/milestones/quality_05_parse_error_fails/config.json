@@ -1,0 +1,6 @@
+{
+  "name": "parse_error_fails",
+  "description": "Invalid syntax should fail compilation with non-zero exit",
+  "type": "compile_error",
+  "capability": "Error propagation - parse errors not swallowed"
+}

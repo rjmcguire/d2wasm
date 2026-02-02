@@ -1,0 +1,6 @@
+{
+  "name": "ctfe_stack_trace",
+  "description": "CTFE error shows call chain back to enum/mixin trigger",
+  "type": "compile_error",
+  "capability": "Error message quality - CTFE stack trace"
+}

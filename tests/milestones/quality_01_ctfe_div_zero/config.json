@@ -1,0 +1,6 @@
+{
+  "name": "ctfe_div_zero",
+  "description": "CTFE division by zero should error gracefully, not crash",
+  "type": "compile_error",
+  "capability": "CTFE safety - division by zero detection"
+}

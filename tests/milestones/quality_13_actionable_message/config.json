@@ -1,0 +1,6 @@
+{
+  "name": "actionable_message",
+  "description": "Error suggests fix (e.g., 'expected bool - did you mean x != 0?')",
+  "type": "compile_error",
+  "capability": "Error message quality - actionable hints"
+}

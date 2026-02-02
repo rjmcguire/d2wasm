@@ -199,7 +199,7 @@ passed=0
 failed=0
 skipped=0
 
-for test_dir in $(ls -d "$TESTS_DIR"/milestone_* 2>/dev/null | sort); do
+for test_dir in $(ls -d "$TESTS_DIR"/milestone_* "$TESTS_DIR"/quality_* 2>/dev/null | sort); do
     if run_test "$test_dir"; then
         ((passed++)) || true
     else

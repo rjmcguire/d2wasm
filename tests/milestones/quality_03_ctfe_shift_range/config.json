@@ -1,0 +1,6 @@
+{
+  "name": "ctfe_shift_range",
+  "description": "CTFE shift by amount >= 64 should error",
+  "type": "compile_error",
+  "capability": "CTFE safety - shift amount bounds checking"
+}

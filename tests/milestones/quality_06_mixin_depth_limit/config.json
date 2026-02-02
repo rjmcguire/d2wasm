@@ -1,0 +1,6 @@
+{
+  "name": "mixin_depth_limit",
+  "description": "Deeply recursive mixin should error with depth limit, not stack overflow",
+  "type": "compile_error",
+  "capability": "Error propagation - mixin recursion protection"
+}

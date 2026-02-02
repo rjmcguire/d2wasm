@@ -1,0 +1,6 @@
+{
+  "name": "ctfe_mod_zero",
+  "description": "CTFE modulo by zero should error gracefully, not crash",
+  "type": "compile_error",
+  "capability": "CTFE safety - modulo by zero detection"
+}
