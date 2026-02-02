@@ -58,9 +58,106 @@ class CTFEEvaluator {
     private SymbolTable symbolTable;
     private Declaration[] allDeclarations;
     
+    // CTFE Arena for __ctfe_runtime memory allocation
+    private static struct CTFEArena {
+        enum MEMORY_RESERVED = 1024;  // First 1KB reserved for future use
+        uint offset = MEMORY_RESERVED;
+        uint[] savedOffsets;  // Stack for push/pop
+        
+        int alloc(int size) {
+            // 8-byte align
+            uint aligned = (offset + 7) & ~7;
+            offset = aligned + size;
+            return cast(int)aligned;
+        }
+        
+        void push() {
+            savedOffsets ~= offset;
+        }
+        
+        void pop() {
+            if (savedOffsets.length == 0) {
+                throw new Exception("CTFE: Arena pop without matching push");
+            }
+            offset = savedOffsets[$-1];
+            savedOffsets = savedOffsets[0..$-1];
+        }
+        
+        int remaining() {
+            // Assume 64KB WASM memory limit for CTFE
+            enum MEMORY_SIZE = 64 * 1024;
+            return MEMORY_SIZE - offset;
+        }
+        
+        void reset() {
+            offset = MEMORY_RESERVED;
+            savedOffsets = [];
+        }
+    }
+    private CTFEArena arena;
+    
     this(SymbolTable symbolTable, Declaration[] declarations) {
         this.symbolTable = symbolTable;
         this.allDeclarations = declarations;
+    }
+    
+    /**
+     * Evaluate a member call like __ctfe_runtime.alloc(100)
+     */
+    private CTFEResult evaluateMemberCall(MemberExpression memberExpr, Expression[] arguments) {
+        // Check if this is a __ctfe_runtime call
+        if (auto objIdent = cast(IdentifierExpression)memberExpr.object) {
+            if (objIdent.name == "__ctfe_runtime") {
+                return evaluateCTFERuntimeCall(memberExpr.memberName, arguments);
+            }
+        }
+        
+        throw new CTFEError("CTFE: Member calls not supported except for magic modules");
+    }
+    
+    /**
+     * Evaluate a __ctfe_runtime function call
+     */
+    private CTFEResult evaluateCTFERuntimeCall(string funcName, Expression[] arguments) {
+        writeln("CTFE: __ctfe_runtime.", funcName, " called");
+        
+        switch (funcName) {
+            case "alloc":
+                if (arguments.length != 1) {
+                    throw new CTFEError("CTFE: __ctfe_runtime.alloc requires 1 argument");
+                }
+                int size = cast(int)evaluateSimpleExpression(arguments[0]);
+                int ptr = arena.alloc(size);
+                writeln("CTFE: __ctfe_runtime.alloc(", size, ") = ", ptr);
+                return CTFEResult.fromInt(ptr);
+                
+            case "push":
+                if (arguments.length != 0) {
+                    throw new CTFEError("CTFE: __ctfe_runtime.push takes no arguments");
+                }
+                arena.push();
+                writeln("CTFE: __ctfe_runtime.push()");
+                return CTFEResult.fromInt(0);
+                
+            case "pop":
+                if (arguments.length != 0) {
+                    throw new CTFEError("CTFE: __ctfe_runtime.pop takes no arguments");
+                }
+                arena.pop();
+                writeln("CTFE: __ctfe_runtime.pop()");
+                return CTFEResult.fromInt(0);
+                
+            case "remaining":
+                if (arguments.length != 0) {
+                    throw new CTFEError("CTFE: __ctfe_runtime.remaining takes no arguments");
+                }
+                int rem = arena.remaining();
+                writeln("CTFE: __ctfe_runtime.remaining() = ", rem);
+                return CTFEResult.fromInt(rem);
+                
+            default:
+                throw new CTFEError("CTFE: Unknown __ctfe_runtime function: " ~ funcName);
+        }
     }
     
     /**
@@ -468,6 +565,11 @@ class CTFEEvaluator {
      * Evaluate a function call at compile time, supporting both integer and string returns.
      */
     CTFEResult evaluateCallExpressionString(CallExpression callExpr) {
+        // Check for member expression calls like __ctfe_runtime.alloc()
+        if (auto memberExpr = cast(MemberExpression)callExpr.function_) {
+            return evaluateMemberCall(memberExpr, callExpr.arguments);
+        }
+        
         // Get the function name
         auto identExpr = cast(IdentifierExpression)callExpr.function_;
         if (!identExpr) {
@@ -514,6 +616,12 @@ class CTFEEvaluator {
         if (canInterpretDirectly(funcDecl)) {
             writeln("CTFE: Interpreting ", funcName, " directly");
             return CTFEResult.fromInt(interpretFunction(funcDecl));
+        }
+        
+        // Check if function uses __ctfe_runtime - if so, interpret it
+        if (usesCTFERuntime(funcDecl)) {
+            writeln("CTFE: Function uses __ctfe_runtime, interpreting directly");
+            return interpretIntFunction(funcDecl);
         }
         
         // Evaluate arguments (must be literals or simple expressions)
@@ -743,6 +851,206 @@ class CTFEEvaluator {
         }
         
         throw new CTFEError("CTFE: Cannot evaluate expression as string");
+    }
+    
+    /**
+     * Check if a function uses __ctfe_runtime calls.
+     */
+    private bool usesCTFERuntime(FunctionDecl funcDecl) {
+        if (!funcDecl.body_) return false;
+        return statementUsesCTFERuntime(funcDecl.body_);
+    }
+    
+    private bool statementUsesCTFERuntime(Statement stmt) {
+        if (auto compound = cast(CompoundStatement)stmt) {
+            foreach (s; compound.statements) {
+                if (statementUsesCTFERuntime(s)) return true;
+            }
+            return false;
+        }
+        
+        if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
+            if (varDecl.initializer && expressionUsesCTFERuntime(varDecl.initializer)) {
+                return true;
+            }
+            return false;
+        }
+        
+        if (auto exprStmt = cast(ExpressionStatement)stmt) {
+            return expressionUsesCTFERuntime(exprStmt.expression);
+        }
+        
+        if (auto returnStmt = cast(ReturnStatement)stmt) {
+            if (returnStmt.value) {
+                return expressionUsesCTFERuntime(returnStmt.value);
+            }
+            return false;
+        }
+        
+        return false;
+    }
+    
+    private bool expressionUsesCTFERuntime(Expression expr) {
+        if (auto call = cast(CallExpression)expr) {
+            if (auto member = cast(MemberExpression)call.function_) {
+                if (auto obj = cast(IdentifierExpression)member.object) {
+                    if (obj.name == "__ctfe_runtime") {
+                        return true;
+                    }
+                }
+            }
+            // Check arguments too
+            foreach (arg; call.arguments) {
+                if (expressionUsesCTFERuntime(arg)) return true;
+            }
+        }
+        
+        if (auto member = cast(MemberExpression)expr) {
+            return expressionUsesCTFERuntime(member.object);
+        }
+        
+        if (auto binary = cast(BinaryExpression)expr) {
+            return expressionUsesCTFERuntime(binary.left) || expressionUsesCTFERuntime(binary.right);
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Interpret a function that returns an integer and may use __ctfe_runtime.
+     */
+    private CTFEResult interpretIntFunction(FunctionDecl funcDecl) {
+        writeln("CTFE: Interpreting int function ", funcDecl.name);
+        
+        if (!funcDecl.body_) {
+            throw new CTFEError("CTFE: Function '" ~ funcDecl.name ~ "' has no body");
+        }
+        
+        // Create local variable scope
+        long[string] localInts;
+        
+        // Execute statements
+        if (auto compound = cast(CompoundStatement)funcDecl.body_) {
+            auto result = executeStatementsForInt(compound.statements, localInts);
+            if (result.hasReturn) {
+                return CTFEResult.fromInt(result.value);
+            }
+        }
+        
+        throw new CTFEError("CTFE: Function '" ~ funcDecl.name ~ "' did not return a value");
+    }
+    
+    /**
+     * Result of executing statements for int return
+     */
+    private struct IntStatementResult {
+        bool hasReturn;
+        long value;
+    }
+    
+    /**
+     * Execute statements and return an integer result.
+     */
+    private IntStatementResult executeStatementsForInt(Statement[] statements, ref long[string] localInts) {
+        foreach (stmt; statements) {
+            // Handle variable declarations
+            if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
+                if (varDecl.initializer) {
+                    long value = evaluateIntExpressionWithLocals(varDecl.initializer, localInts);
+                    localInts[varDecl.name] = value;
+                    writeln("CTFE: Local '", varDecl.name, "' = ", value);
+                }
+                continue;
+            }
+            
+            // Handle expression statements (e.g., __ctfe_runtime.push())
+            if (auto exprStmt = cast(ExpressionStatement)stmt) {
+                evaluateIntExpressionWithLocals(exprStmt.expression, localInts);
+                continue;
+            }
+            
+            // Handle return statement
+            if (auto returnStmt = cast(ReturnStatement)stmt) {
+                if (returnStmt.value) {
+                    long result = evaluateIntExpressionWithLocals(returnStmt.value, localInts);
+                    return IntStatementResult(true, result);
+                }
+                return IntStatementResult(true, 0);
+            }
+        }
+        
+        return IntStatementResult(false, 0);
+    }
+    
+    /**
+     * Evaluate an expression that produces an integer, with local variables and __ctfe_runtime support.
+     */
+    private long evaluateIntExpressionWithLocals(Expression expr, ref long[string] localInts) {
+        // Literal
+        if (auto literal = cast(LiteralExpression)expr) {
+            if (literal.value.type == typeid(long)) {
+                return literal.value.get!long();
+            }
+            if (literal.value.type == typeid(bool)) {
+                return literal.value.get!bool() ? 1 : 0;
+            }
+        }
+        
+        // Identifier
+        if (auto ident = cast(IdentifierExpression)expr) {
+            if (auto val = ident.name in localInts) {
+                return *val;
+            }
+            // Try manifest constants
+            foreach (decl; allDeclarations) {
+                if (auto manifest = cast(ManifestConstantDecl)decl) {
+                    if (manifest.name == ident.name && manifest.ctfeComplete && !manifest.isStringType) {
+                        return manifest.ctfeValue;
+                    }
+                }
+            }
+            throw new CTFEError("CTFE: Undefined identifier '" ~ ident.name ~ "'");
+        }
+        
+        // Call expression (including __ctfe_runtime calls)
+        if (auto call = cast(CallExpression)expr) {
+            auto result = evaluateCallExpressionString(call);
+            if (result.isString) {
+                throw new CTFEError("CTFE: Expected integer but got string");
+            }
+            return result.intValue;
+        }
+        
+        // Binary expression
+        if (auto binary = cast(BinaryExpression)expr) {
+            long left = evaluateIntExpressionWithLocals(binary.left, localInts);
+            long right = evaluateIntExpressionWithLocals(binary.right, localInts);
+            
+            final switch (binary.operator) {
+                case BinaryExpression.Operator.Add: return left + right;
+                case BinaryExpression.Operator.Subtract: return left - right;
+                case BinaryExpression.Operator.Multiply: return left * right;
+                case BinaryExpression.Operator.Divide: return left / right;
+                case BinaryExpression.Operator.Modulo: return left % right;
+                case BinaryExpression.Operator.Equal: return left == right ? 1 : 0;
+                case BinaryExpression.Operator.NotEqual: return left != right ? 1 : 0;
+                case BinaryExpression.Operator.Less: return left < right ? 1 : 0;
+                case BinaryExpression.Operator.LessEqual: return left <= right ? 1 : 0;
+                case BinaryExpression.Operator.Greater: return left > right ? 1 : 0;
+                case BinaryExpression.Operator.GreaterEqual: return left >= right ? 1 : 0;
+                case BinaryExpression.Operator.LogicalAnd: return (left != 0 && right != 0) ? 1 : 0;
+                case BinaryExpression.Operator.LogicalOr: return (left != 0 || right != 0) ? 1 : 0;
+                case BinaryExpression.Operator.BitwiseAnd: return left & right;
+                case BinaryExpression.Operator.BitwiseOr: return left | right;
+                case BinaryExpression.Operator.BitwiseXor: return left ^ right;
+                case BinaryExpression.Operator.ShiftLeft: return left << right;
+                case BinaryExpression.Operator.ShiftRight: return left >> right;
+                case BinaryExpression.Operator.Concat: 
+                    throw new CTFEError("CTFE: String concat not supported in numeric context");
+            }
+        }
+        
+        throw new CTFEError("CTFE: Cannot evaluate expression at compile time: " ~ expr.toString());
     }
     
     /**

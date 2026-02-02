@@ -503,7 +503,56 @@ class TypeChecker {
     /**
      * Type check call expression
      */
+    /**
+     * Type check a __ctfe_runtime magic module call.
+     */
+    private Type checkCTFERuntimeCall(string funcName, Expression[] arguments, SourceLocation loc) {
+        auto intType = new BasicType(loc, BasicType.Kind.Int32);
+        auto voidType = new BasicType(loc, BasicType.Kind.Void);
+        
+        switch (funcName) {
+            case "alloc":
+                if (arguments.length != 1) {
+                    throw new TypeError("__ctfe_runtime.alloc requires 1 argument", loc);
+                }
+                Type argType = checkExpression(arguments[0]);
+                if (!isNumericType(argType)) {
+                    throw new TypeError(
+                        format("__ctfe_runtime.alloc requires int argument, got '%s'",
+                               argType.toString()), loc);
+                }
+                return intType;  // alloc returns int (pointer)
+                
+            case "push":
+            case "pop":
+                if (arguments.length != 0) {
+                    throw new TypeError(
+                        format("__ctfe_runtime.%s takes no arguments", funcName), loc);
+                }
+                return voidType;
+                
+            case "remaining":
+                if (arguments.length != 0) {
+                    throw new TypeError("__ctfe_runtime.remaining takes no arguments", loc);
+                }
+                return intType;
+                
+            default:
+                throw new TypeError(
+                    format("Unknown __ctfe_runtime function: %s", funcName), loc);
+        }
+    }
+    
     Type checkCallExpression(CallExpression expr) {
+        // Handle __ctfe_runtime magic module calls
+        if (auto memberExpr = cast(MemberExpression)expr.function_) {
+            if (auto objIdent = cast(IdentifierExpression)memberExpr.object) {
+                if (objIdent.name == "__ctfe_runtime") {
+                    return checkCTFERuntimeCall(memberExpr.memberName, expr.arguments, expr.location);
+                }
+            }
+        }
+        
         Type funcType = checkExpression(expr.function_);
         
         auto functionType = cast(FunctionType)funcType;

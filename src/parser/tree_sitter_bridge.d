@@ -128,6 +128,12 @@ class TreeSitterBridge {
                         auto decl = parseFunctionDeclaration(child);
                         declarations ~= decl;
                         writeln("Successfully parsed function declaration");
+                    } else if (nodeType == "import_declaration") {
+                        auto importDecl = parseImportDeclaration(child);
+                        if (importDecl !is null) {
+                            declarations ~= importDecl;
+                        }
+                        // Note: magic modules like __ctfe_runtime return null
                     } else if (nodeType == "class_declaration") {
                         declarations ~= parseClassDeclaration(child);
                     } else if (nodeType == "struct_declaration") {
@@ -277,6 +283,92 @@ class TreeSitterBridge {
         if (text.length >= 2 && text[0] == '"' && text[$-1] == '"') {
             return text[1..$-1];
         }
+        return text;
+    }
+    
+    /**
+     * List of magic modules that are provided by the compiler.
+     * These don't need actual source files.
+     */
+    private static immutable string[] MAGIC_MODULES = [
+        "__ctfe_runtime",
+    ];
+    
+    /**
+     * Parse import declaration: import modulename;
+     * Returns null for magic modules (they're handled specially in CTFE).
+     */
+    Declaration parseImportDeclaration(TSNode node) {
+        SourceLocation loc = makeSourceLocation(node);
+        
+        // Extract module name from import declaration
+        // Structure varies by tree-sitter D grammar:
+        // - Could be: import_declaration -> import, module_fqn, ;
+        // - Or: import_declaration -> import, single_import, ;
+        // - Or: import_declaration containing just the module name
+        string moduleName;
+        
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string nodeType = TreeSitterParser.getNodeType(child);
+            string text = TreeSitterParser.getNodeText(child, sourceText);
+            
+            // Try various possible node types for module name
+            if (nodeType == "module_fqn" || nodeType == "identifier" || 
+                nodeType == "single_import" || nodeType == "module_name" ||
+                nodeType == "imported" || nodeType == "type") {
+                // For wrapper nodes, might need to go deeper
+                if (nodeType == "single_import" || nodeType == "module_name" || nodeType == "imported") {
+                    moduleName = extractModuleName(child);
+                } else {
+                    moduleName = text;
+                }
+                if (moduleName.length > 0 && moduleName != "import") {
+                    break;
+                }
+            }
+        }
+        
+        if (moduleName.length == 0) {
+            throw new ParseError("Import declaration missing module name", loc);
+        }
+        
+        // Check if this is a magic module
+        foreach (magic; MAGIC_MODULES) {
+            if (moduleName == magic) {
+                return null;  // Magic modules don't create declarations
+            }
+        }
+        
+        // For regular imports, we'd need to load and parse the module
+        // For now, just warn and return null
+        throw new ParseError(
+            "Cannot import module '" ~ moduleName ~ "': module imports not yet implemented",
+            loc,
+            "only magic modules like __ctfe_runtime are supported"
+        );
+    }
+    
+    /**
+     * Extract module name from a single_import or module_name node by walking children.
+     */
+    private string extractModuleName(TSNode node) {
+        // First try to get text directly
+        string text = TreeSitterParser.getNodeText(node, sourceText);
+        
+        // Look for identifier children
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string nodeType = TreeSitterParser.getNodeType(child);
+            
+            if (nodeType == "identifier" || nodeType == "module_fqn") {
+                return TreeSitterParser.getNodeText(child, sourceText);
+            }
+        }
+        
+        // Return the node text if no identifier found
         return text;
     }
     
@@ -1511,7 +1603,17 @@ class TreeSitterBridge {
             throw new ParseError("Call expression missing function", loc);
         }
         
-        Expression function_ = parseExpression(functionNode);
+        Expression function_;
+        string funcNodeType = TreeSitterParser.getNodeType(functionNode);
+        
+        // Handle "type" node which tree-sitter uses for qualified identifiers like "module.func"
+        if (funcNodeType == "type") {
+            string qualifiedName = TreeSitterParser.getNodeText(functionNode, sourceText);
+            function_ = parseQualifiedIdentifier(qualifiedName, loc);
+        } else {
+            function_ = parseExpression(functionNode);
+        }
+        
         Expression[] arguments;
         
         if (!TreeSitterParser.isValid(argumentsNode)) {
@@ -1662,6 +1764,29 @@ class TreeSitterBridge {
             default:
                 throw new ParseError("Unknown assignment operator: " ~ opStr, SourceLocation());
         }
+    }
+    
+    /**
+     * Parse a qualified identifier like "module.func" into a MemberExpression chain.
+     * For "a.b.c", produces MemberExpression(MemberExpression(IdentifierExpression("a"), "b"), "c")
+     */
+    Expression parseQualifiedIdentifier(string qualifiedName, SourceLocation loc) {
+        import std.array : split;
+        
+        auto parts = qualifiedName.split(".");
+        if (parts.length == 0) {
+            throw new ParseError("Empty qualified identifier", loc);
+        }
+        
+        // Start with the first part as an identifier
+        Expression result = new IdentifierExpression(loc, parts[0]);
+        
+        // Chain member accesses for remaining parts
+        foreach (part; parts[1..$]) {
+            result = new MemberExpression(loc, result, part);
+        }
+        
+        return result;
     }
     
     /**

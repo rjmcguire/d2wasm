@@ -537,7 +537,70 @@ class BinaryEmitter {
      */
     private bool isCtfeOnlyFunction(FunctionDecl decl) {
         if (!decl.body_) return false;
+        // Functions using __ctfe_runtime are CTFE-only
+        if (usesCTFERuntime(decl.body_)) return true;
         return containsOnlyCtfeIntrinsics(decl.body_);
+    }
+    
+    /**
+     * Check if a statement uses __ctfe_runtime calls.
+     */
+    private bool usesCTFERuntime(Statement stmt) {
+        if (auto compound = cast(CompoundStatement)stmt) {
+            foreach (s; compound.statements) {
+                if (usesCTFERuntime(s)) return true;
+            }
+            return false;
+        }
+        
+        if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
+            if (varDecl.initializer && expressionUsesCTFERuntime(varDecl.initializer)) {
+                return true;
+            }
+            return false;
+        }
+        
+        if (auto exprStmt = cast(ExpressionStatement)stmt) {
+            return expressionUsesCTFERuntime(exprStmt.expression);
+        }
+        
+        if (auto returnStmt = cast(ReturnStatement)stmt) {
+            if (returnStmt.value) {
+                return expressionUsesCTFERuntime(returnStmt.value);
+            }
+            return false;
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Check if an expression uses __ctfe_runtime.
+     */
+    private bool expressionUsesCTFERuntime(Expression expr) {
+        if (auto call = cast(CallExpression)expr) {
+            if (auto member = cast(MemberExpression)call.function_) {
+                if (auto obj = cast(IdentifierExpression)member.object) {
+                    if (obj.name == "__ctfe_runtime") {
+                        return true;
+                    }
+                }
+            }
+            // Check arguments too
+            foreach (arg; call.arguments) {
+                if (expressionUsesCTFERuntime(arg)) return true;
+            }
+        }
+        
+        if (auto member = cast(MemberExpression)expr) {
+            return expressionUsesCTFERuntime(member.object);
+        }
+        
+        if (auto binary = cast(BinaryExpression)expr) {
+            return expressionUsesCTFERuntime(binary.left) || expressionUsesCTFERuntime(binary.right);
+        }
+        
+        return false;
     }
     
     private bool containsOnlyCtfeIntrinsics(Statement stmt) {
