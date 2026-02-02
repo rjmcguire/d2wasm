@@ -4,6 +4,10 @@
  * This module handles the expansion of mixin declarations.
  * It evaluates mixin expressions at compile time and parses
  * the resulting strings as D code.
+ * 
+ * Supports both:
+ * - Module-level mixins (expand to declarations)
+ * - Function-level mixins (expand to statements)
  */
 module semantic.mixin_expander;
 
@@ -62,7 +66,7 @@ class MixinExpander {
         // and evaluate them
         collectAndEvaluateManifests();
         
-        // Second pass: expand mixins
+        // Second pass: expand module-level mixins
         Declaration[] result;
         foreach (decl; declarations) {
             if (auto mixinDecl = cast(MixinDecl)decl) {
@@ -75,7 +79,129 @@ class MixinExpander {
             }
         }
         
+        // Third pass: expand function-level mixins
+        foreach (decl; result) {
+            if (auto funcDecl = cast(FunctionDecl)decl) {
+                if (funcDecl.body_) {
+                    funcDecl.body_ = expandMixinsInStatement(funcDecl.body_);
+                }
+            }
+        }
+        
         return result;
+    }
+    
+    /**
+     * Expand mixins inside a statement (for function-level mixins).
+     * Returns the statement with mixins expanded.
+     */
+    private Statement expandMixinsInStatement(Statement stmt) {
+        if (auto compound = cast(CompoundStatement)stmt) {
+            return expandMixinsInCompound(compound);
+        } else if (auto ifStmt = cast(IfStatement)stmt) {
+            ifStmt.thenStatement = expandMixinsInStatement(ifStmt.thenStatement);
+            if (ifStmt.elseStatement) {
+                ifStmt.elseStatement = expandMixinsInStatement(ifStmt.elseStatement);
+            }
+            return ifStmt;
+        } else if (auto whileStmt = cast(WhileStatement)stmt) {
+            whileStmt.body_ = expandMixinsInStatement(whileStmt.body_);
+            return whileStmt;
+        } else if (auto forStmt = cast(ForStatement)stmt) {
+            if (forStmt.init) {
+                forStmt.init = expandMixinsInStatement(forStmt.init);
+            }
+            forStmt.body_ = expandMixinsInStatement(forStmt.body_);
+            return forStmt;
+        }
+        // Other statements (return, expression, var decl) don't contain mixins
+        return stmt;
+    }
+    
+    /**
+     * Expand mixins inside a compound statement.
+     * MixinStatements are replaced with their expanded statements.
+     */
+    private CompoundStatement expandMixinsInCompound(CompoundStatement compound) {
+        Statement[] newStatements;
+        
+        foreach (stmt; compound.statements) {
+            if (auto mixinStmt = cast(MixinStatement)stmt) {
+                // Expand the mixin
+                auto expanded = expandMixinStatement(mixinStmt);
+                newStatements ~= expanded;
+            } else {
+                // Recursively expand nested compound statements
+                newStatements ~= expandMixinsInStatement(stmt);
+            }
+        }
+        
+        return new CompoundStatement(compound.location, newStatements);
+    }
+    
+    /**
+     * Expand a single mixin statement.
+     * Returns the statements that the mixin expands to.
+     */
+    private Statement[] expandMixinStatement(MixinStatement mixinStmt) {
+        writeln("Expanding mixin statement: ", mixinStmt.mixinExpr.toString());
+        
+        // Evaluate the mixin expression to get a string
+        string mixinString = evaluateMixinExpression(mixinStmt.mixinExpr, mixinStmt.location);
+        
+        writeln("Mixin statement evaluates to: \"", mixinString, "\"");
+        
+        // Parse the string as D statements
+        Statement[] parsed = parseMixinStatementString(mixinString, mixinStmt.location);
+        
+        writeln("Mixin statement parsed into ", parsed.length, " statements");
+        
+        // Store the expanded statements
+        mixinStmt.expandedStatements = parsed;
+        mixinStmt.isExpanded = true;
+        
+        return parsed;
+    }
+    
+    /**
+     * Parse a string as D statements (for function-level mixins).
+     * Wraps the code in a dummy function to parse it.
+     */
+    private Statement[] parseMixinStatementString(string code, SourceLocation mixinLoc) {
+        // Create a synthetic filename for error messages
+        string filename = mixinLoc.filename ~ "(mixin)";
+        
+        // Wrap the code in a dummy function so we can parse it as statements
+        string wrappedCode = "void __mixin_wrapper() { " ~ code ~ " }";
+        
+        try {
+            auto bridge = new TreeSitterBridge(filename, wrappedCode);
+            Declaration[] parsed = bridge.parseSourceFile();
+            
+            // Extract the statements from the wrapper function
+            if (parsed.length > 0) {
+                if (auto funcDecl = cast(FunctionDecl)parsed[0]) {
+                    if (auto compound = cast(CompoundStatement)funcDecl.body_) {
+                        return compound.statements;
+                    }
+                }
+            }
+            
+            throw new MixinError(
+                "Failed to parse mixin statements: empty result\nCode: \"" ~ code ~ "\"",
+                mixinLoc
+            );
+        } catch (ParseError e) {
+            throw new MixinError(
+                "Failed to parse mixin code: " ~ e.msg ~ "\nCode: \"" ~ code ~ "\"",
+                mixinLoc
+            );
+        } catch (Exception e) {
+            throw new MixinError(
+                "Unexpected error parsing mixin: " ~ e.msg,
+                mixinLoc
+            );
+        }
     }
     
     /**

@@ -92,6 +92,15 @@ class TypeChecker {
     void checkFunctionDeclaration(FunctionDecl decl) {
         writeln("Type checking function: ", decl.name);
         
+        // Skip CTFE-only functions (functions that return string type)
+        // These are only used at compile time for mixin expansion
+        if (auto userType = cast(UserType)decl.returnType) {
+            if (userType.name == "string") {
+                writeln("Skipping type check for CTFE-only function: ", decl.name);
+                return;
+            }
+        }
+        
         // Enter function scope
         if (!symbolTable) { writeln("Error: symbolTable is null!"); return; }
         symbolTable.enterScope("function:" ~ decl.name);

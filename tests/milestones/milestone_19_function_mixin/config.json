@@ -3,6 +3,6 @@
   "description": "Mixin inside function body - generates local declaration",
   "type": "wasm_exec",
   "expected_result": 42,
-  "entry_point": "result",
+  "entry": "result",
   "capability": "mixin as statement inside function scope"
 }

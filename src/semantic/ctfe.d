@@ -14,6 +14,7 @@ import ast.expressions;
 import semantic.symbol_table;
 import codegen.emitter;
 import codegen.wasm;
+import parser.tree_sitter_bridge : TreeSitterBridge;
 
 import std.stdio;
 import std.path;
@@ -28,6 +29,23 @@ import std.string;
 class CTFEError : Exception {
     this(string msg, string file = __FILE__, size_t line = __LINE__) {
         super(msg, file, line);
+    }
+}
+
+/**
+ * Result of a CTFE evaluation that can be either a string or integer.
+ */
+struct CTFEResult {
+    bool isString;
+    string stringValue;
+    long intValue;
+    
+    static CTFEResult fromString(string s) {
+        return CTFEResult(true, s, 0);
+    }
+    
+    static CTFEResult fromInt(long v) {
+        return CTFEResult(false, "", v);
     }
 }
 
@@ -106,21 +124,32 @@ class CTFEEvaluator {
             }
         }
         
+        // Check for function call that might return a string
+        if (auto callExpr = cast(CallExpression)manifest.initializer) {
+            auto result = evaluateCallExpressionString(callExpr);
+            if (result.isString) {
+                manifest.ctfeStringValue = result.stringValue;
+                manifest.ctfeComplete = true;
+                manifest.isStringType = true;
+                writeln("CTFE: ", manifest.name, " = \"", result.stringValue, "\" (function call)");
+                return;
+            } else {
+                manifest.ctfeValue = result.intValue;
+                manifest.ctfeComplete = true;
+                manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Int32);
+                writeln("CTFE: ", manifest.name, " = ", manifest.ctfeValue, " (evaluated)");
+                return;
+            }
+        }
+        
         // Check for array literal
         if (auto arrayLit = cast(ArrayLiteralExpression)manifest.initializer) {
             evaluateArrayLiteral(manifest, arrayLit);
             return;
         }
         
-        // Need to evaluate via WASM execution
-        if (auto callExpr = cast(CallExpression)manifest.initializer) {
-            long result = evaluateCallExpression(callExpr);
-            manifest.ctfeValue = result;
-            manifest.ctfeComplete = true;
-            manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Int32);
-            writeln("CTFE: ", manifest.name, " = ", manifest.ctfeValue, " (evaluated)");
-            return;
-        }
+        // Shouldn't reach here - call expressions are handled above
+        // This is legacy code for non-call expressions that need WASM evaluation
         
         throw new CTFEError("Cannot evaluate manifest constant '" ~ manifest.name ~ 
                            "': unsupported initializer type");
@@ -395,10 +424,9 @@ class CTFEEvaluator {
     }
     
     /**
-     * Evaluate a function call at compile time
-     * Returns 0 for void functions
+     * Evaluate a function call at compile time, supporting both integer and string returns.
      */
-    long evaluateCallExpression(CallExpression callExpr) {
+    CTFEResult evaluateCallExpressionString(CallExpression callExpr) {
         // Get the function name
         auto identExpr = cast(IdentifierExpression)callExpr.function_;
         if (!identExpr) {
@@ -407,7 +435,7 @@ class CTFEEvaluator {
         
         // Handle CTFE intrinsics
         if (identExpr.name == "__writeln") {
-            return evaluateCtfeWriteln(callExpr);
+            return CTFEResult.fromInt(evaluateCtfeWriteln(callExpr));
         }
         string funcName = identExpr.name;
         
@@ -426,11 +454,25 @@ class CTFEEvaluator {
             throw new CTFEError("CTFE: Function '" ~ funcName ~ "' not found");
         }
         
+        // Check if function returns a string
+        bool returnsString = false;
+        if (auto userType = cast(UserType)funcDecl.returnType) {
+            if (userType.name == "string") {
+                returnsString = true;
+            }
+        }
+        
+        writeln("CTFE: Calling ", funcName, " (returns string: ", returnsString, ")");
+        
+        // For string-returning functions, interpret directly
+        if (returnsString) {
+            return CTFEResult.fromString(interpretStringFunction(funcDecl));
+        }
+        
         // Check if this is a simple function that only contains CTFE intrinsics
-        // If so, interpret it directly instead of compiling to WASM
         if (canInterpretDirectly(funcDecl)) {
             writeln("CTFE: Interpreting ", funcName, " directly");
-            return interpretFunction(funcDecl);
+            return CTFEResult.fromInt(interpretFunction(funcDecl));
         }
         
         // Evaluate arguments (must be literals or simple expressions)
@@ -451,7 +493,224 @@ class CTFEEvaluator {
         // Execute with wasm3
         long result = executeWasm(wasmBytes, funcName, args);
         
-        return result;
+        return CTFEResult.fromInt(result);
+    }
+    
+    /**
+     * Evaluate a function call at compile time
+     * Returns 0 for void functions (legacy - use evaluateCallExpressionString for new code)
+     */
+    long evaluateCallExpression(CallExpression callExpr) {
+        auto result = evaluateCallExpressionString(callExpr);
+        if (result.isString) {
+            throw new CTFEError("CTFE: Expected integer result but got string");
+        }
+        return result.intValue;
+    }
+    
+    /**
+     * Interpret a function that returns a string.
+     * Handles functions with mixins, local variables, and return statements.
+     */
+    string interpretStringFunction(FunctionDecl funcDecl) {
+        writeln("CTFE: Interpreting string function ", funcDecl.name);
+        
+        if (!funcDecl.body_) {
+            throw new CTFEError("CTFE: Function '" ~ funcDecl.name ~ "' has no body");
+        }
+        
+        // Create a local variable scope for this function
+        string[string] localStrings;
+        long[string] localInts;
+        
+        // Execute statements
+        if (auto compound = cast(CompoundStatement)funcDecl.body_) {
+            auto result = executeStatementsForString(compound.statements, localStrings, localInts);
+            if (result.hasReturn) {
+                return result.value;
+            }
+        }
+        
+        throw new CTFEError("CTFE: Function '" ~ funcDecl.name ~ "' did not return a value");
+    }
+    
+    /**
+     * Result of executing statements during CTFE
+     */
+    private struct StatementResult {
+        bool hasReturn;
+        string value;
+    }
+    
+    /**
+     * Execute a list of statements, handling mixins and returns.
+     */
+    private StatementResult executeStatementsForString(Statement[] statements, 
+                                                       ref string[string] localStrings,
+                                                       ref long[string] localInts) {
+        foreach (stmt; statements) {
+            // Handle mixin statements - expand and execute them
+            if (auto mixinStmt = cast(MixinStatement)stmt) {
+                auto expanded = executeMixinStatement(mixinStmt, localStrings, localInts);
+                if (expanded.hasReturn) {
+                    return expanded;
+                }
+                continue;
+            }
+            
+            // Handle variable declarations (local strings/ints)
+            if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
+                executeVarDecl(varDecl, localStrings, localInts);
+                continue;
+            }
+            
+            // Handle return statement
+            if (auto returnStmt = cast(ReturnStatement)stmt) {
+                if (returnStmt.value) {
+                    string result = evaluateStringExpressionWithLocals(returnStmt.value, localStrings, localInts);
+                    return StatementResult(true, result);
+                }
+            }
+        }
+        
+        return StatementResult(false, "");
+    }
+    
+    /**
+     * Execute a mixin statement during CTFE - expand it and execute the resulting statements.
+     */
+    private StatementResult executeMixinStatement(MixinStatement mixinStmt,
+                                                  ref string[string] localStrings,
+                                                  ref long[string] localInts) {
+        writeln("CTFE: Expanding mixin inside function: ", mixinStmt.mixinExpr.toString());
+        
+        // Evaluate the mixin expression to get the code string
+        string code = evaluateStringExpressionWithLocals(mixinStmt.mixinExpr, localStrings, localInts);
+        writeln("CTFE: Mixin expands to: \"", code, "\"");
+        
+        // Parse the code as statements
+        string wrappedCode = "void __mixin_wrapper() { " ~ code ~ " }";
+        auto bridge = new TreeSitterBridge("(ctfe-mixin)", wrappedCode);
+        Declaration[] parsed = bridge.parseSourceFile();
+        
+        if (parsed.length > 0) {
+            if (auto funcDecl = cast(FunctionDecl)parsed[0]) {
+                if (auto compound = cast(CompoundStatement)funcDecl.body_) {
+                    // Execute the expanded statements
+                    return executeStatementsForString(compound.statements, localStrings, localInts);
+                }
+            }
+        }
+        
+        return StatementResult(false, "");
+    }
+    
+    /**
+     * Execute a variable declaration during CTFE.
+     */
+    private void executeVarDecl(VariableDeclarationStatement varDecl,
+                                ref string[string] localStrings,
+                                ref long[string] localInts) {
+        // Check if this is a string variable
+        bool isString = false;
+        if (auto userType = cast(UserType)varDecl.type) {
+            if (userType.name == "string") {
+                isString = true;
+            }
+        }
+        
+        if (isString && varDecl.initializer) {
+            string value = evaluateStringExpressionWithLocals(varDecl.initializer, localStrings, localInts);
+            localStrings[varDecl.name] = value;
+            writeln("CTFE: Local string '", varDecl.name, "' = \"", value, "\"");
+        } else if (varDecl.initializer) {
+            // Assume integer
+            long value = evaluateSimpleExpressionWithLocals(varDecl.initializer, localInts);
+            localInts[varDecl.name] = value;
+            writeln("CTFE: Local int '", varDecl.name, "' = ", value);
+        }
+    }
+    
+    /**
+     * Evaluate a simple (integer) expression with local variables.
+     */
+    private long evaluateSimpleExpressionWithLocals(Expression expr, long[string] localInts) {
+        if (auto literal = cast(LiteralExpression)expr) {
+            if (literal.value.type == typeid(long)) {
+                return literal.value.get!long();
+            }
+            if (literal.value.type == typeid(bool)) {
+                return literal.value.get!bool() ? 1 : 0;
+            }
+        }
+        
+        if (auto ident = cast(IdentifierExpression)expr) {
+            if (auto val = ident.name in localInts) {
+                return *val;
+            }
+            // Try manifest constants
+            foreach (decl; allDeclarations) {
+                if (auto manifest = cast(ManifestConstantDecl)decl) {
+                    if (manifest.name == ident.name && manifest.ctfeComplete && !manifest.isStringType) {
+                        return manifest.ctfeValue;
+                    }
+                }
+            }
+        }
+        
+        return evaluateSimpleExpression(expr);
+    }
+    
+    /**
+     * Evaluate an expression that produces a string, including local variables.
+     */
+    string evaluateStringExpressionWithLocals(Expression expr, 
+                                              string[string] localStrings,
+                                              long[string] localInts) {
+        // String literal
+        if (auto literal = cast(LiteralExpression)expr) {
+            if (literal.value.type == typeid(string)) {
+                return literal.value.get!string();
+            }
+            throw new CTFEError("CTFE: Expected string literal");
+        }
+        
+        // Identifier - check local variables first, then manifest constants
+        if (auto ident = cast(IdentifierExpression)expr) {
+            // Check local strings
+            if (auto val = ident.name in localStrings) {
+                return *val;
+            }
+            
+            // Check manifest constants
+            foreach (decl; allDeclarations) {
+                if (auto manifest = cast(ManifestConstantDecl)decl) {
+                    if (manifest.name == ident.name && manifest.ctfeComplete && manifest.isStringType) {
+                        return manifest.ctfeStringValue;
+                    }
+                }
+            }
+            throw new CTFEError("CTFE: Undefined string identifier '" ~ ident.name ~ "'");
+        }
+        
+        // String concatenation
+        if (auto binary = cast(BinaryExpression)expr) {
+            if (binary.operator == BinaryExpression.Operator.Concat) {
+                return evaluateStringExpressionWithLocals(binary.left, localStrings, localInts) ~ 
+                       evaluateStringExpressionWithLocals(binary.right, localStrings, localInts);
+            }
+        }
+        
+        throw new CTFEError("CTFE: Cannot evaluate expression as string");
+    }
+    
+    /**
+     * Evaluate an expression that produces a string (legacy - no locals).
+     */
+    string evaluateStringExpression(Expression expr) {
+        string[string] emptyStrings;
+        long[string] emptyInts;
+        return evaluateStringExpressionWithLocals(expr, emptyStrings, emptyInts);
     }
     
     /**

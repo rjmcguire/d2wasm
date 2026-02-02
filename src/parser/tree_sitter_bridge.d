@@ -17,6 +17,38 @@ import std.stdio;
 import std.algorithm;
 
 /**
+ * Unescape a D string literal (handle \n, \t, \", \\, etc.)
+ */
+private string unescapeString(string s) {
+    import std.array : Appender;
+    
+    Appender!string result;
+    bool inEscape = false;
+    
+    foreach (c; s) {
+        if (inEscape) {
+            switch (c) {
+                case 'n': result ~= '\n'; break;
+                case 't': result ~= '\t'; break;
+                case 'r': result ~= '\r'; break;
+                case '0': result ~= '\0'; break;
+                case '\\': result ~= '\\'; break;
+                case '"': result ~= '"'; break;
+                case '\'': result ~= '\''; break;
+                default: result ~= c; break;
+            }
+            inEscape = false;
+        } else if (c == '\\') {
+            inEscape = true;
+        } else {
+            result ~= c;
+        }
+    }
+    
+    return result.data;
+}
+
+/**
  * Parser error with location information
  */
 class ParseError : Exception {
@@ -711,9 +743,57 @@ class TreeSitterBridge {
                 return parseExpressionStatement(node, loc);
             case "variable_declaration":
                 return parseVariableDeclarationStatement(node, loc);
+            case "mixin_declaration":
+                return parseMixinStatement(node, loc);
             default:
                 throw new ParseError("Unknown statement node: " ~ nodeType, loc);
         }
+    }
+    
+    /**
+     * Parse mixin statement: mixin(expression);
+     * Returns a MixinStatement that will be expanded during semantic analysis.
+     */
+    MixinStatement parseMixinStatement(TSNode node, SourceLocation loc) {
+        // Find the mixin_expression child
+        TSNode mixinExprNode;
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            if (childType == "mixin_expression") {
+                mixinExprNode = child;
+                break;
+            }
+        }
+        
+        if (!TreeSitterParser.isValid(mixinExprNode)) {
+            throw new ParseError("Mixin statement missing mixin_expression", loc);
+        }
+        
+        // Find the expression inside mixin_expression
+        TSNode exprNode;
+        uint mixinChildCount = TreeSitterParser.getChildCount(mixinExprNode);
+        for (uint i = 0; i < mixinChildCount; i++) {
+            TSNode child = TreeSitterParser.getChild(mixinExprNode, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            if (childType == "expression" || childType == "identifier" || 
+                childType == "string_literal" || childType.endsWith("_expression")) {
+                exprNode = child;
+                break;
+            }
+        }
+        
+        if (!TreeSitterParser.isValid(exprNode)) {
+            throw new ParseError("Mixin expression missing argument", loc);
+        }
+        
+        // Parse the expression
+        Expression mixinArg = parseExpression(exprNode);
+        
+        writeln("Parsed mixin statement: mixin(", mixinArg.toString(), ")");
+        
+        return new MixinStatement(loc, mixinArg);
     }
     
     /**
@@ -997,7 +1077,9 @@ class TreeSitterBridge {
                 return LiteralExpression.floating(loc, to!double(TreeSitterParser.getNodeText(node, sourceText)));
             case "string_literal": {
                 string text = TreeSitterParser.getNodeText(node, sourceText);
-                return LiteralExpression.string_(loc, text[1..$-1]); // Remove quotes
+                // Remove quotes and unescape the string
+                string unescaped = unescapeString(text[1..$-1]);
+                return LiteralExpression.string_(loc, unescaped);
             }
             case "bool_literal":
             case "true":

@@ -356,6 +356,11 @@ class BinaryEmitter {
             return;
         }
         
+        // Skip functions that return non-basic types (e.g., string-returning CTFE functions)
+        if (!canEmitType(decl.returnType)) {
+            return;
+        }
+        
         // Build signature
         FuncSig sig;
         sig.params = decl.parameters.map!(p => dTypeToValType(p.type)).array;
@@ -387,6 +392,24 @@ class BinaryEmitter {
         
         funcIndex[decl.name] = cast(uint)functions.length;
         functions ~= info;
+    }
+    
+    /**
+     * Check if a type can be emitted to WASM (basic types only for now)
+     */
+    private bool canEmitType(Type t) {
+        // Void is OK
+        if (isVoidType(t)) return true;
+        
+        // Basic types are OK
+        if (cast(BasicType)t) return true;
+        
+        // UserType "string" is NOT OK (CTFE-only)
+        if (auto userType = cast(UserType)t) {
+            return false;  // String and other user types can't be emitted yet
+        }
+        
+        return false;
     }
     
     private bool isVoidType(Type t) {

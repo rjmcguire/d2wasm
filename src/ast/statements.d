@@ -154,3 +154,28 @@ class VariableDeclarationStatement : Statement {
         return format("VariableDeclarationStatement(%s %s)", type.toString(), name);
     }
 }
+
+/**
+ * Mixin statement: mixin(expression);
+ * Used for mixins inside function bodies.
+ * The expression must evaluate to a string at compile time.
+ * After expansion, expandedStatements contains the parsed statements.
+ */
+class MixinStatement : Statement {
+    Expression mixinExpr;          // The expression that produces the string
+    Statement[] expandedStatements; // Filled after expansion
+    bool isExpanded;               // Whether expansion has been performed
+    
+    this(SourceLocation loc, Expression mixinExpr) {
+        super(loc);
+        this.mixinExpr = mixinExpr;
+        this.isExpanded = false;
+    }
+    
+    override string toString() const {
+        if (isExpanded) {
+            return format("MixinStatement(expanded: %d statements)", expandedStatements.length);
+        }
+        return format("MixinStatement(%s)", mixinExpr.toString());
+    }
+}
