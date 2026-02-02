@@ -1,0 +1,14 @@
+{
+  "name": "wasm_import_void",
+  "description": "WASM import with void return and host state",
+  "type": "wasm_import_exec",
+  "expected_result": 42,
+  "entry": "result",
+  "imports": {
+    "test": {
+      "set_value": {"params": ["i32"], "result": null, "behavior": "set_state"},
+      "get_value": {"params": [], "result": "i32", "behavior": "get_state"}
+    }
+  },
+  "capability": "Void imports, host state roundtrip"
+}

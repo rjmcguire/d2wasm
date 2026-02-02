@@ -1,0 +1,6 @@
+{
+  "name": "ctfe_import_error",
+  "description": "Runtime import during CTFE should error",
+  "type": "compile_error",
+  "capability": "CTFE boundary enforcement for runtime imports"
+}

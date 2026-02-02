@@ -1,0 +1,13 @@
+{
+  "name": "wasm_import_basic",
+  "description": "Basic WASM import - no params, returns int",
+  "type": "wasm_import_exec",
+  "expected_result": 42,
+  "entry": "result",
+  "imports": {
+    "test": {
+      "get_value": {"params": [], "result": "i32", "returns": 42}
+    }
+  },
+  "capability": "extern(WASM) declaration, import section emission, call generation"
+}

@@ -1,0 +1,13 @@
+{
+  "name": "wasm_import_params",
+  "description": "WASM import with parameters",
+  "type": "wasm_import_exec",
+  "expected_result": 42,
+  "entry": "result",
+  "imports": {
+    "test": {
+      "add": {"params": ["i32", "i32"], "result": "i32", "behavior": "add"}
+    }
+  },
+  "capability": "Import with parameter passing"
+}

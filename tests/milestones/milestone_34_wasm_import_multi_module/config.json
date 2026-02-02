@@ -1,0 +1,17 @@
+{
+  "name": "wasm_import_multi_module",
+  "description": "WASM imports from multiple modules",
+  "type": "wasm_import_exec",
+  "expected_result": 42,
+  "entry": "result",
+  "imports": {
+    "math": {
+      "add": {"params": ["i32", "i32"], "result": "i32", "behavior": "add"}
+    },
+    "constants": {
+      "get_forty": {"params": [], "result": "i32", "returns": 40},
+      "get_two": {"params": [], "result": "i32", "returns": 2}
+    }
+  },
+  "capability": "Multiple import modules"
+}

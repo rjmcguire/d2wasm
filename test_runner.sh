@@ -147,6 +147,42 @@ run_test() {
             return 0
             ;;
             
+        wasm_import_exec)
+            # Test with host function imports - uses import_test_harness
+            local harness="$SCRIPT_DIR/tests/import_test_harness"
+            if [ ! -x "$harness" ]; then
+                # Try to build it
+                if [ -f "$harness.d" ]; then
+                    echo "Building import test harness..."
+                    if ! dub build --single "$harness.d" --compiler=dmd 2>/dev/null; then
+                        echo -e "${YELLOW}SKIP${NC} $test_name (harness build failed)"
+                        return 0
+                    fi
+                else
+                    echo -e "${YELLOW}SKIP${NC} $test_name (harness not found)"
+                    return 0
+                fi
+            fi
+            
+            local result
+            if ! result=$("$harness" "$wasm_file" "$config_file" 2>&1); then
+                echo -e "${RED}FAIL${NC} $test_name"
+                echo "  Import test failed:"
+                echo "$result" | sed 's/^/    /'
+                return 1
+            fi
+            
+            if echo "$result" | grep -q "^PASS"; then
+                local actual=$(echo "$result" | grep -oE 'result = -?[0-9]+' | grep -oE '\-?[0-9]+')
+                echo -e "${GREEN}PASS${NC} $test_name (result: $actual)"
+                return 0
+            else
+                echo -e "${RED}FAIL${NC} $test_name"
+                echo "$result" | sed 's/^/    /'
+                return 1
+            fi
+            ;;
+            
         ctfe_eval)
             # CTFE evaluation test - check compile output for expected value
             local expected_value=$(jq -r '.expected_value' "$config_file")
