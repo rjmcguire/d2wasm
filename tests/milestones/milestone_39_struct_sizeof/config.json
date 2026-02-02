@@ -1,0 +1,6 @@
+{
+  "name": "struct_sizeof",
+  "description": "Struct .sizeof returns correct size with alignment",
+  "type": "wasm_exec",
+  "entry": "main"
+}

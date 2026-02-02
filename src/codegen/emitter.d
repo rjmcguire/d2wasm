@@ -1619,9 +1619,37 @@ private class FuncContext {
             emitCall(out_, call);
         } else if (auto assign = cast(AssignmentExpression)expr) {
             emitAssignment(out_, assign);
+        } else if (auto member = cast(MemberExpression)expr) {
+            emitMember(out_, member);
         } else {
             throw new EmitError("Unsupported expression type", expr.toString());
         }
+    }
+    
+    void emitMember(ref Appender!(ubyte[]) out_, MemberExpression expr) {
+        // Check if this is a Type.sizeof or Type.alignof
+        if (auto ident = cast(IdentifierExpression)expr.object) {
+            auto symbol = emitter.symbolTable.lookupSymbol(ident.name);
+            if (symbol && symbol.kind == SymbolKind.Type) {
+                if (expr.memberName == "sizeof") {
+                    // Emit the type's size as a constant
+                    size_t size = symbol.type.size();
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, cast(int)size);
+                    return;
+                } else if (expr.memberName == "alignof") {
+                    // Emit the type's alignment as a constant
+                    size_t align_ = symbol.type.alignment();
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, cast(int)align_);
+                    return;
+                }
+            }
+        }
+        
+        // TODO: Handle struct field access (instance.field)
+        // For now, throw an error for other member accesses
+        throw new EmitError("Member access not yet fully implemented", expr.toString());
     }
     
     void emitLiteral(ref Appender!(ubyte[]) out_, LiteralExpression expr) {

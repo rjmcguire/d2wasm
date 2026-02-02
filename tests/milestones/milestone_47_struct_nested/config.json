@@ -1,0 +1,6 @@
+{
+  "name": "struct_nested",
+  "description": "Nested struct access with flattened offset",
+  "type": "wasm_exec",
+  "entry": "main"
+}

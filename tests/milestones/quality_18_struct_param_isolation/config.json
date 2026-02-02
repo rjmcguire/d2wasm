@@ -1,0 +1,6 @@
+{
+  "name": "struct_param_isolation",
+  "description": "Struct parameter mutations don't affect caller's original",
+  "type": "wasm_exec",
+  "entry": "main"
+}

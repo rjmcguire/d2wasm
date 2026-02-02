@@ -1,0 +1,6 @@
+{
+  "name": "struct_alignment",
+  "description": "Struct size includes alignment padding (bool + int = 8, not 5)",
+  "type": "wasm_exec",
+  "entry": "main"
+}

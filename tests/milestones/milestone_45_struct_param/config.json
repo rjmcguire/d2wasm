@@ -1,0 +1,6 @@
+{
+  "name": "struct_param",
+  "description": "Pass struct to function by value (pointer to copy)",
+  "type": "wasm_exec",
+  "entry": "main"
+}

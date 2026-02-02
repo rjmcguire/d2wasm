@@ -1,0 +1,6 @@
+{
+  "name": "struct_local",
+  "description": "Local struct variable on shadow stack",
+  "type": "wasm_exec",
+  "entry": "main"
+}

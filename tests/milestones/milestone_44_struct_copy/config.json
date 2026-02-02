@@ -1,0 +1,6 @@
+{
+  "name": "struct_copy",
+  "description": "Struct assignment creates independent copy",
+  "type": "wasm_exec",
+  "entry": "main"
+}

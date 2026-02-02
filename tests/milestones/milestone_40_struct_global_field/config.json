@@ -1,0 +1,6 @@
+{
+  "name": "struct_global_field",
+  "description": "Global struct literal in data section, read first field",
+  "type": "wasm_exec",
+  "entry": "main"
+}

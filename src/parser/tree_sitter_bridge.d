@@ -494,17 +494,48 @@ class TreeSitterBridge {
     StructDecl parseStructDeclaration(TSNode node) {
         SourceLocation loc = makeSourceLocation(node);
         
-        TSNode nameNode = TreeSitterParser.getChildByFieldName(node, "name");
-        if (!TreeSitterParser.isValid(nameNode)) {
+        string name;
+        Declaration[] members;
+        
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            
+            if (childType == "identifier") {
+                name = TreeSitterParser.getNodeText(child, sourceText);
+            } else if (childType == "aggregate_body") {
+                members = parseAggregateBody(child);
+            }
+        }
+        
+        if (name.length == 0) {
             throw new ParseError("Struct declaration missing name", loc);
         }
         
-        string name = TreeSitterParser.getNodeText(nameNode, sourceText);
-        
-        // TODO: Parse struct members
+        return new StructDecl(loc, name, members);
+    }
+    
+    /**
+     * Parse aggregate body (struct/class body with member declarations)
+     */
+    Declaration[] parseAggregateBody(TSNode node) {
         Declaration[] members;
         
-        return new StructDecl(loc, name, members);
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            
+            if (childType == "variable_declaration" || childType == "field_declaration") {
+                members ~= parseVariableDeclaration(child);
+            } else if (childType == "function_declaration") {
+                members ~= parseFunctionDeclaration(child);
+            }
+            // Skip braces, semicolons, etc.
+        }
+        
+        return members;
     }
     
     /**
@@ -1430,6 +1461,8 @@ class TreeSitterBridge {
                 return parseCastExpression(node, loc);
             case "assignment_expression":
                 return parseAssignmentExpression(node, loc);
+            case "property_expression":
+                return parsePropertyExpression(node, loc);
             default:
                 throw new ParseError("Unknown expression node: " ~ nodeType, loc);
         }
@@ -1787,6 +1820,50 @@ class TreeSitterBridge {
         }
         
         return result;
+    }
+    
+    /**
+     * Parse property expression (e.g., Type.sizeof, var.length)
+     * This handles both type properties and value properties
+     */
+    Expression parsePropertyExpression(TSNode node, SourceLocation loc) {
+        // Property expression structure: object "." property
+        uint childCount = TreeSitterParser.getChildCount(node);
+        
+        Expression object;
+        string propertyName;
+        
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            
+            if (childType == "identifier") {
+                if (object is null) {
+                    // First identifier is the object/type
+                    object = new IdentifierExpression(loc, TreeSitterParser.getNodeText(child, sourceText));
+                } else {
+                    // Second identifier is the property name
+                    propertyName = TreeSitterParser.getNodeText(child, sourceText);
+                }
+            } else if (childType == "." || childType == "property_identifier") {
+                // Skip dot, but property_identifier is the property name
+                if (childType == "property_identifier") {
+                    propertyName = TreeSitterParser.getNodeText(child, sourceText);
+                }
+            } else if (childType != ".") {
+                // Some other expression as the object
+                object = parseExpression(child);
+            }
+        }
+        
+        if (object is null) {
+            throw new ParseError("Property expression missing object", loc);
+        }
+        if (propertyName.length == 0) {
+            throw new ParseError("Property expression missing property name", loc);
+        }
+        
+        return new MemberExpression(loc, object, propertyName);
     }
     
     /**

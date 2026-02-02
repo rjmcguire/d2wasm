@@ -75,6 +75,11 @@ abstract class Type : ASTNode {
     abstract bool isArray() const;
     abstract bool isFunction() const;
     abstract size_t size() const;
+    
+    /// Get alignment of this type (default: same as size for basic types)
+    size_t alignment() const {
+        return size();
+    }
 }
 
 /**
@@ -190,19 +195,45 @@ class ClassDecl : Declaration {
 }
 
 /**
+ * Struct field layout information
+ */
+struct StructField {
+    string name;
+    Type type;
+    size_t offset;
+    size_t size;
+    size_t alignment;
+}
+
+/**
  * Struct declaration: struct Name { members }
  */
 class StructDecl : Declaration {
     Declaration[] members;
+    
+    // Layout info (populated during semantic analysis)
+    StructField[] fields;
+    size_t structSize;
+    size_t structAlign;
+    bool layoutComputed;
     
     this(SourceLocation loc, string name, Declaration[] members, bool isPublic = false) {
         super(loc, name, isPublic);
         this.members = members;
     }
     
+    /**
+     * Get field by name, returns null if not found
+     */
+    StructField* getField(string fieldName) {
+        foreach (ref field; fields) {
+            if (field.name == fieldName) return &field;
+        }
+        return null;
+    }
     
     override string toString() const {
-        return format("StructDecl(%s)", name);
+        return format("StructDecl(%s, size=%d, align=%d)", name, structSize, structAlign);
     }
 }
 
@@ -477,10 +508,26 @@ class UserType : Type {
     override bool isFunction() const { return false; }
     
     override size_t size() const {
-        // TODO: Calculate size from declaration during semantic analysis
-        return 8;  // Placeholder
+        if (declaration) {
+            if (auto structDecl = cast(StructDecl)declaration) {
+                if (structDecl.layoutComputed) {
+                    return structDecl.structSize;
+                }
+            }
+        }
+        return 0;  // Layout not yet computed
     }
     
+    override size_t alignment() const {
+        if (declaration) {
+            if (auto structDecl = cast(StructDecl)declaration) {
+                if (structDecl.layoutComputed) {
+                    return structDecl.structAlign;
+                }
+            }
+        }
+        return 1;  // Default alignment
+    }
     
     override string toString() const {
         return name;

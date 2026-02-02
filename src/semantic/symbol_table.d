@@ -357,15 +357,65 @@ class SymbolCollector {
     }
     
     private void collectStructSymbol(StructDecl decl) {
+        // Compute struct layout
+        computeStructLayout(decl);
+        
+        auto userType = new UserType(decl.location, decl.name);
+        userType.declaration = decl;  // Link type to declaration for size lookup
+        
         auto symbol = new Symbol(
             decl.name,
             SymbolKind.Type,
-            new UserType(decl.location, decl.name),
+            userType,
             decl,
             decl.location,
             symbolTable.inGlobalScope()
         );
         symbolTable.addSymbol(symbol);
+    }
+    
+    /**
+     * Compute struct layout: field offsets, alignment, and total size
+     */
+    private void computeStructLayout(StructDecl decl) {
+        size_t currentOffset = 0;
+        size_t maxAlign = 1;
+        
+        foreach (member; decl.members) {
+            if (auto varDecl = cast(VariableDecl)member) {
+                size_t fieldSize = varDecl.type ? varDecl.type.size() : 4;
+                size_t fieldAlign = varDecl.type ? varDecl.type.alignment() : 4;
+                
+                // Align current offset to field's alignment requirement
+                if (fieldAlign > 0) {
+                    currentOffset = (currentOffset + fieldAlign - 1) & ~(fieldAlign - 1);
+                }
+                
+                // Record field info
+                StructField field;
+                field.name = varDecl.name;
+                field.type = varDecl.type;
+                field.offset = currentOffset;
+                field.size = fieldSize;
+                field.alignment = fieldAlign;
+                decl.fields ~= field;
+                
+                // Track max alignment for struct alignment
+                if (fieldAlign > maxAlign) maxAlign = fieldAlign;
+                
+                // Advance offset
+                currentOffset += fieldSize;
+            }
+        }
+        
+        // Pad struct size to alignment
+        if (maxAlign > 0) {
+            currentOffset = (currentOffset + maxAlign - 1) & ~(maxAlign - 1);
+        }
+        
+        decl.structSize = currentOffset;
+        decl.structAlign = maxAlign;
+        decl.layoutComputed = true;
     }
     
     private void collectVariableSymbol(VariableDecl decl) {

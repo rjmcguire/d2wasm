@@ -1,0 +1,6 @@
+{
+  "name": "struct_declaration",
+  "description": "Parse struct declaration and register type",
+  "type": "wasm_exec",
+  "entry": "main"
+}

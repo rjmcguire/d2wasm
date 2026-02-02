@@ -1,0 +1,6 @@
+{
+  "name": "struct_return",
+  "description": "Return struct from function via hidden pointer parameter",
+  "type": "wasm_exec",
+  "entry": "main"
+}

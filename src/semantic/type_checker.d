@@ -681,7 +681,53 @@ class TypeChecker {
     }
     
     Type checkMemberExpression(MemberExpression expr) {
-        throw new TypeError("Member expressions not yet implemented", expr.location);
+        // Check if the object is a type name (for Type.sizeof, Type.alignof, etc.)
+        if (auto ident = cast(IdentifierExpression)expr.object) {
+            auto symbol = symbolTable.lookupSymbol(ident.name);
+            if (symbol && symbol.kind == SymbolKind.Type) {
+                // It's a type property access
+                if (expr.memberName == "sizeof") {
+                    // Type.sizeof returns a compile-time integer
+                    return new BasicType(expr.location, BasicType.Kind.Int32);
+                } else if (expr.memberName == "alignof") {
+                    // Type.alignof returns a compile-time integer
+                    return new BasicType(expr.location, BasicType.Kind.Int32);
+                } else {
+                    throw new TypeError(
+                        format("Type '%s' has no property '%s'", ident.name, expr.memberName),
+                        expr.location);
+                }
+            }
+        }
+        
+        // Check the object expression
+        Type objectType = checkExpression(expr.object);
+        
+        // Handle struct field access
+        if (auto userType = cast(UserType)objectType) {
+            if (auto structDecl = cast(StructDecl)userType.declaration) {
+                auto field = structDecl.getField(expr.memberName);
+                if (field) {
+                    return field.type;
+                }
+                throw new TypeError(
+                    format("Struct '%s' has no field '%s'", userType.name, expr.memberName),
+                    expr.location);
+            }
+        }
+        
+        // Handle array/string .length and .ptr
+        if (auto arrayType = cast(ArrayType)objectType) {
+            if (expr.memberName == "length") {
+                return new BasicType(expr.location, BasicType.Kind.Int32);
+            } else if (expr.memberName == "ptr") {
+                return new PointerType(expr.location, arrayType.elementType);
+            }
+        }
+        
+        throw new TypeError(
+            format("Cannot access member '%s' on type '%s'", expr.memberName, objectType.toString()),
+            expr.location);
     }
     
     Type checkCastExpression(CastExpression expr) {
