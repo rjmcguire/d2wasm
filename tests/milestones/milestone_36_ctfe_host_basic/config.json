@@ -2,7 +2,7 @@
   "name": "ctfe_host_basic",
   "description": "Basic CTFE host function via magic module",
   "type": "wasm_exec",
-  "expected_result": 1,
+  "expected_result": 1024,
   "entry": "result",
   "capability": "__ctfe_runtime magic module, CTFE host function binding"
 }
