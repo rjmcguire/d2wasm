@@ -144,6 +144,30 @@ struct Parameter {
 }
 
 /**
+ * Imported function declaration: extern(WASM, "module") returnType name(params);
+ * 
+ * Represents a function imported from a WASM host environment.
+ * No body - the implementation is provided by the host.
+ */
+class ImportedFunctionDecl : Declaration {
+    Type returnType;
+    Parameter[] parameters;
+    string moduleName;  // WASM module name (e.g., "console", "env")
+    
+    this(SourceLocation loc, string name, Type returnType, 
+         Parameter[] parameters, string moduleName) {
+        super(loc, name, true);  // Always public
+        this.returnType = returnType;
+        this.parameters = parameters;
+        this.moduleName = moduleName;
+    }
+    
+    override string toString() const {
+        return format("ImportedFunctionDecl(%s.%s)", moduleName, name);
+    }
+}
+
+/**
  * Class declaration: class Name : BaseClass, Interface { members }
  */
 class ClassDecl : Declaration {

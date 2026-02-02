@@ -305,6 +305,8 @@ class SymbolCollector {
     void collectSymbol(Declaration decl) {
         if (auto funcDecl = cast(FunctionDecl)decl) {
             collectFunctionSymbol(funcDecl);
+        } else if (auto importedFunc = cast(ImportedFunctionDecl)decl) {
+            collectImportedFunctionSymbol(importedFunc);
         } else if (auto classDecl = cast(ClassDecl)decl) {
             collectClassSymbol(classDecl);
         } else if (auto structDecl = cast(StructDecl)decl) {
@@ -326,6 +328,18 @@ class SymbolCollector {
             decl,
             decl.location,
             symbolTable.inGlobalScope()
+        );
+        symbolTable.addSymbol(symbol);
+    }
+    
+    private void collectImportedFunctionSymbol(ImportedFunctionDecl decl) {
+        auto symbol = new Symbol(
+            decl.name,
+            SymbolKind.Function,
+            new FunctionType(decl.location, decl.returnType, getImportedFunctionParameterTypes(decl)),
+            decl,
+            decl.location,
+            true  // Imported functions are always global
         );
         symbolTable.addSymbol(symbol);
     }
@@ -401,6 +415,14 @@ class SymbolCollector {
     }
     
     private Type[] getFunctionParameterTypes(FunctionDecl decl) {
+        Type[] types;
+        foreach (param; decl.parameters) {
+            types ~= param.type;
+        }
+        return types;
+    }
+    
+    private Type[] getImportedFunctionParameterTypes(ImportedFunctionDecl decl) {
         Type[] types;
         foreach (param; decl.parameters) {
             types ~= param.type;

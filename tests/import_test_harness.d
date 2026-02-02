@@ -1,3 +1,7 @@
+/++ dub.sdl:
+    name "import_test_harness"
+    dependency "wasm3-d" version="~>0.3.0"
++/
 /**
  * Test harness for WASM import tests.
  * 
@@ -20,48 +24,53 @@ import std.string;
 import wasm3;
 
 /// Global state for stateful host functions
-private int g_stateValue = 0;
+private __gshared int g_stateValue = 0;
 
-/// Host function implementations
-extern(C) {
-    /// Returns a constant value
-    const(void)* host_get_value(wasm3.IM3Runtime runtime, wasm3.IM3ImportContext ctx, ulong* stack, void* mem) {
-        // Return value is stored at stack[0]
-        *stack = 42;
+/// Configured return values (for constant-returning functions)
+private __gshared int[string] g_returnValues;
+
+/// Host function implementations - must match M3RawCall signature exactly
+extern(C) nothrow @nogc @system {
+    /// Returns a constant value (42)
+    const(void)* host_get_value(IM3Runtime runtime, IM3ImportContext ctx, ulong* sp, void* mem) {
+        // Return value is stored at sp[0]
+        sp[0] = 42;
         return null;  // null = no error
     }
     
     /// Adds two i32 values
-    const(void)* host_add(wasm3.IM3Runtime runtime, wasm3.IM3ImportContext ctx, ulong* stack, void* mem) {
-        int a = cast(int)stack[0];
-        int b = cast(int)stack[1];
-        stack[0] = a + b;
+    const(void)* host_add(IM3Runtime runtime, IM3ImportContext ctx, ulong* sp, void* mem) {
+        // wasm3 raw call: sp[0] = return slot, args at sp[1], sp[2], ...
+        int a = cast(int)(sp[1] & 0xFFFFFFFF);
+        int b = cast(int)(sp[2] & 0xFFFFFFFF);
+        sp[0] = cast(ulong)(a + b);
         return null;
     }
     
     /// Sets global state
-    const(void)* host_set_state(wasm3.IM3Runtime runtime, wasm3.IM3ImportContext ctx, ulong* stack, void* mem) {
-        g_stateValue = cast(int)stack[0];
+    const(void)* host_set_state(IM3Runtime runtime, IM3ImportContext ctx, ulong* sp, void* mem) {
+        // For void functions: sp[0] = first arg (no return slot)
+        g_stateValue = cast(int)(sp[0] & 0xFFFFFFFF);
         return null;
     }
     
     /// Gets global state
-    const(void)* host_get_state(wasm3.IM3Runtime runtime, wasm3.IM3ImportContext ctx, ulong* stack, void* mem) {
-        stack[0] = g_stateValue;
+    const(void)* host_get_state(IM3Runtime runtime, IM3ImportContext ctx, ulong* sp, void* mem) {
+        sp[0] = cast(uint)g_stateValue;
         return null;
     }
     
-    /// Returns a configured constant
-    const(void)* host_return_constant(wasm3.IM3Runtime runtime, wasm3.IM3ImportContext ctx, ulong* stack, void* mem) {
+    /// Returns a configured constant (from userdata)
+    const(void)* host_return_constant(IM3Runtime runtime, IM3ImportContext ctx, ulong* sp, void* mem) {
         // The constant is passed via the user data pointer
         int value = cast(int)cast(size_t)ctx.userdata;
-        stack[0] = value;
+        sp[0] = cast(uint)value;
         return null;
     }
 }
 
 /// Bind a host function based on its behavior
-bool bindHostFunction(wasm3.IM3Module mod, string moduleName, string funcName, JSONValue funcDef) {
+bool bindHostFunction(IM3Module mod, string moduleName, string funcName, JSONValue funcDef) {
     string behavior = "behavior" in funcDef ? funcDef["behavior"].str : "";
     string result = "result" in funcDef ? (funcDef["result"].type == JSONType.null_ ? "" : funcDef["result"].str) : "";
     
@@ -79,24 +88,26 @@ bool bindHostFunction(wasm3.IM3Module mod, string moduleName, string funcName, J
     sig ~= ")";
     
     // Select handler based on behavior
-    wasm3.M3RawCall handler;
+    M3RawCall handler;
     void* userdata = null;
     
+    // Note: wasm3-d binding declares M3RawCall with uint* but actual wasm3 uses uint64_t*
+    // We use ulong* in our handlers and cast here
     if (behavior == "add") {
-        handler = &host_add;
+        handler = cast(M3RawCall)&host_add;
     } else if (behavior == "set_state") {
-        handler = &host_set_state;
+        handler = cast(M3RawCall)&host_set_state;
     } else if (behavior == "get_state") {
-        handler = &host_get_state;
+        handler = cast(M3RawCall)&host_get_state;
     } else if ("returns" in funcDef) {
         // Constant return value
-        handler = &host_return_constant;
+        handler = cast(M3RawCall)&host_return_constant;
         userdata = cast(void*)cast(size_t)funcDef["returns"].integer;
     } else {
-        handler = &host_get_value;  // Default: return 42
+        handler = cast(M3RawCall)&host_get_value;  // Default: return 42
     }
     
-    auto err = wasm3.m3_LinkRawFunctionEx(mod, moduleName.toStringz, funcName.toStringz, sig.toStringz, handler, userdata);
+    auto err = m3_LinkRawFunctionEx(mod, moduleName.toStringz, funcName.toStringz, sig.toStringz, handler, userdata);
     if (err) {
         writeln("Warning: Failed to link ", moduleName, ".", funcName, ": ", err.fromStringz);
         return false;
@@ -132,29 +143,36 @@ int main(string[] args) {
     }
     
     // Initialize wasm3
-    auto env = wasm3.m3_NewEnvironment();
+    auto env = m3_NewEnvironment();
     if (!env) {
         writeln("Failed to create wasm3 environment");
         return 1;
     }
-    scope(exit) wasm3.m3_FreeEnvironment(env);
+    scope(exit) m3_FreeEnvironment(env);
     
-    auto runtime = wasm3.m3_NewRuntime(env, 64 * 1024, null);
+    auto runtime = m3_NewRuntime(env, 64 * 1024, null);
     if (!runtime) {
         writeln("Failed to create wasm3 runtime");
         return 1;
     }
-    scope(exit) wasm3.m3_FreeRuntime(runtime);
+    scope(exit) m3_FreeRuntime(runtime);
     
     // Parse module
-    wasm3.IM3Module mod;
-    auto err = wasm3.m3_ParseModule(env, &mod, wasmBytes.ptr, cast(uint)wasmBytes.length);
+    IM3Module mod;
+    auto err = m3_ParseModule(env, &mod, wasmBytes.ptr, cast(uint)wasmBytes.length);
     if (err) {
         writeln("Failed to parse WASM: ", err.fromStringz);
         return 1;
     }
     
-    // Bind host functions BEFORE loading module
+    // Load module first
+    err = m3_LoadModule(runtime, mod);
+    if (err) {
+        writeln("Failed to load WASM module: ", err.fromStringz);
+        return 1;
+    }
+    
+    // Then bind host functions AFTER loading module
     if ("imports" in config) {
         foreach (moduleName, funcs; config["imports"].object) {
             foreach (funcName, funcDef; funcs.object) {
@@ -163,24 +181,17 @@ int main(string[] args) {
         }
     }
     
-    // Load module
-    err = wasm3.m3_LoadModule(runtime, mod);
-    if (err) {
-        writeln("Failed to load WASM module: ", err.fromStringz);
-        return 1;
-    }
-    
     // Find entry function
     string entryName = "entry" in config ? config["entry"].str : "result";
-    wasm3.IM3Function func;
-    err = wasm3.m3_FindFunction(&func, runtime, entryName.toStringz);
+    IM3Function func;
+    err = m3_FindFunction(&func, runtime, entryName.toStringz);
     if (err) {
         writeln("Failed to find function '", entryName, "': ", err.fromStringz);
         return 1;
     }
     
-    // Call function
-    err = wasm3.m3_Call(func, 0, null);
+    // Call function (no arguments)
+    err = m3_CallV(func);
     if (err) {
         writeln("Execution error: ", err.fromStringz);
         return 1;
@@ -188,7 +199,7 @@ int main(string[] args) {
     
     // Get result
     int result;
-    err = wasm3.m3_GetResultsV(func, &result);
+    err = m3_GetResultsV(func, &result);
     if (err) {
         writeln("Failed to get result: ", err.fromStringz);
         return 1;

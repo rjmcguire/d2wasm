@@ -166,24 +166,28 @@ class TreeSitterBridge {
     
     /**
      * Convert function declaration node
+     * Returns either FunctionDecl or ImportedFunctionDecl depending on linkage
      */
-    FunctionDecl parseFunctionDeclaration(TSNode node) {
+    Declaration parseFunctionDeclaration(TSNode node) {
         SourceLocation loc = makeSourceLocation(node);
         
         // Parse function declaration by examining children in order:
-        // 1. type (return type)
-        // 2. identifier (function name) 
-        // 3. parameters
-        // 4. function_body
+        // - linkage_attribute (optional, for extern(WASM, "module"))
+        // - type (return type)
+        // - identifier (function name) 
+        // - parameters
+        // - function_body
         
-        TSNode returnTypeNode, nameNode, parametersNode, bodyNode;
+        TSNode linkageNode, returnTypeNode, nameNode, parametersNode, bodyNode;
         
         uint childCount = TreeSitterParser.getChildCount(node);
         for (uint i = 0; i < childCount; i++) {
             TSNode child = TreeSitterParser.getChild(node, i);
             string nodeType = TreeSitterParser.getNodeType(child);
             
-            if (nodeType == "type" && !TreeSitterParser.isValid(returnTypeNode)) {
+            if (nodeType == "linkage_attribute") {
+                linkageNode = child;
+            } else if (nodeType == "type" && !TreeSitterParser.isValid(returnTypeNode)) {
                 returnTypeNode = child;
             } else if (nodeType == "identifier" && !TreeSitterParser.isValid(nameNode)) {
                 nameNode = child;
@@ -208,6 +212,17 @@ class TreeSitterBridge {
             parameters = parseParameterList(parametersNode);
         }
         
+        // Check for WASM import linkage
+        if (TreeSitterParser.isValid(linkageNode)) {
+            string moduleName = parseWasmLinkage(linkageNode);
+            if (moduleName !is null) {
+                // This is a WASM import declaration
+                writeln("Parsed WASM import: ", moduleName, ".", name);
+                return new ImportedFunctionDecl(loc, name, returnType, parameters, moduleName);
+            }
+        }
+        
+        // Regular function - parse body
         Statement body_;
         if (TreeSitterParser.isValid(bodyNode)) {
             body_ = parseFunctionBody(bodyNode);
@@ -220,6 +235,49 @@ class TreeSitterBridge {
         string[] attributes;
         
         return new FunctionDecl(loc, name, returnType, parameters, body_, attributes);
+    }
+    
+    /**
+     * Parse a linkage_attribute and return the WASM module name if it's a WASM linkage.
+     * Returns null if it's not a WASM linkage (e.g., extern(C)).
+     */
+    private string parseWasmLinkage(TSNode linkageNode) {
+        // Structure: linkage_attribute -> extern, "(", "WASM", ",", string_literal, ")"
+        // We need to find the string_literal child and extract its content
+        
+        bool hasWasm = false;
+        string moduleName = null;
+        
+        uint childCount = TreeSitterParser.getChildCount(linkageNode);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(linkageNode, i);
+            string nodeType = TreeSitterParser.getNodeType(child);
+            string text = TreeSitterParser.getNodeText(child, sourceText);
+            
+            if (text == "WASM") {
+                hasWasm = true;
+            } else if (nodeType == "string_literal" && hasWasm) {
+                // Extract module name from string literal (remove quotes)
+                moduleName = extractStringLiteral(child);
+            }
+        }
+        
+        return hasWasm ? moduleName : null;
+    }
+    
+    /**
+     * Extract the string content from a string_literal node (handles quoted_string child)
+     */
+    private string extractStringLiteral(TSNode stringLitNode) {
+        // String literal structure: string_literal -> quoted_string
+        // The text includes quotes, so we need to strip them
+        string text = TreeSitterParser.getNodeText(stringLitNode, sourceText);
+        
+        // Remove surrounding quotes
+        if (text.length >= 2 && text[0] == '"' && text[$-1] == '"') {
+            return text[1..$-1];
+        }
+        return text;
     }
     
     /**

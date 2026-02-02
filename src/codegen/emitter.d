@@ -72,6 +72,16 @@ struct FuncInfo {
 }
 
 //==============================================================================
+// Imported Function Info
+//==============================================================================
+
+struct ImportInfo {
+    string moduleName;   // WASM module (e.g., "env", "console")
+    string fieldName;    // Function name
+    uint typeIndex;      // Index into type section
+}
+
+//==============================================================================
 // Emitter State
 //==============================================================================
 
@@ -102,6 +112,10 @@ class BinaryEmitter {
         uint[FuncSig] typeIndex;
         FuncInfo[] functions;
         uint[string] funcIndex;
+        
+        // Imported functions (from WASM host)
+        ImportInfo[] imports;
+        uint[string] importIndex;  // Maps function name to import index
         
         // Built-in functions
         bool hasBuiltins = false;
@@ -178,6 +192,9 @@ class BinaryEmitter {
             
             phase = EmitPhase.emittingTypes;
             emitTypeSection();
+            
+            // Import section must come before function section
+            emitImportSection();
             
             phase = EmitPhase.emittingFunctions;
             emitFunctionSection();
@@ -401,12 +418,50 @@ class BinaryEmitter {
     //==========================================================================
     
     private void collect(Declaration[] decls) {
+        // First pass: collect imported functions (they need to come first in indices)
+        foreach (decl; decls) {
+            if (auto importedFunc = cast(ImportedFunctionDecl)decl) {
+                collectImportedFunction(importedFunc);
+            }
+        }
+        
+        // Second pass: collect local functions
         foreach (decl; decls) {
             if (auto funcDecl = cast(FunctionDecl)decl) {
                 collectFunction(funcDecl);
             }
-            // TODO: globals, imports
+            // TODO: globals
         }
+    }
+    
+    private void collectImportedFunction(ImportedFunctionDecl decl) {
+        // Build signature
+        FuncSig sig;
+        sig.params = decl.parameters.map!(p => dTypeToValType(p.type)).array;
+        
+        if (!isVoidType(decl.returnType)) {
+            sig.results = [dTypeToValType(decl.returnType)];
+        }
+        
+        // Get or create type index
+        uint tIdx;
+        if (auto existing = sig in typeIndex) {
+            tIdx = *existing;
+        } else {
+            tIdx = cast(uint)types.length;
+            types ~= sig;
+            typeIndex[sig] = tIdx;
+        }
+        
+        // Add import
+        ImportInfo info;
+        info.moduleName = decl.moduleName;
+        info.fieldName = decl.name;
+        info.typeIndex = tIdx;
+        
+        // Imported functions occupy the first N function indices
+        importIndex[decl.name] = cast(uint)imports.length;
+        imports ~= info;
     }
     
     private void collectFunction(FunctionDecl decl) {
@@ -680,6 +735,37 @@ class BinaryEmitter {
     }
     
     //==========================================================================
+    // Import Section
+    //==========================================================================
+    
+    private void emitImportSection() {
+        if (imports.length == 0) return;
+        
+        Appender!(ubyte[]) section;
+        
+        // Import count
+        leb128u(section, imports.length);
+        
+        foreach (imp; imports) {
+            // Module name (length-prefixed string)
+            leb128u(section, imp.moduleName.length);
+            section ~= cast(ubyte[])imp.moduleName;
+            
+            // Field name (length-prefixed string)
+            leb128u(section, imp.fieldName.length);
+            section ~= cast(ubyte[])imp.fieldName;
+            
+            // Import kind: 0x00 = function
+            section ~= cast(ubyte)0x00;
+            
+            // Type index
+            leb128u(section, imp.typeIndex);
+        }
+        
+        emitSection(Section.import_, section.data);
+    }
+    
+    //==========================================================================
     // Function Section
     //==========================================================================
     
@@ -778,8 +864,8 @@ class BinaryEmitter {
             // Kind: function
             section ~= cast(ubyte)ExportKind.func;
             
-            // Index
-            leb128u(section, i);
+            // Index: local functions start after imports
+            leb128u(section, cast(uint)imports.length + cast(uint)i);
         }
         
         // Export memory
@@ -1118,11 +1204,23 @@ class BinaryEmitter {
     
     /**
      * Get function index by name
+     * 
+     * In WASM, function indices are:
+     *   0..N-1: imported functions
+     *   N..:    local functions
      */
     uint getFuncIndex(string name) {
-        if (auto idx = name in funcIndex) {
-            return *idx;
+        // Check if it's an imported function
+        if (auto idx = name in importIndex) {
+            return *idx;  // Import indices start at 0
         }
+        
+        // Check if it's a local function
+        if (auto idx = name in funcIndex) {
+            // Local function index + number of imports
+            return cast(uint)imports.length + *idx;
+        }
+        
         throw new EmitError("Unknown function: " ~ name);
     }
     
@@ -1696,9 +1794,16 @@ private class FuncContext {
             // Check if function returns void
             auto ident = cast(IdentifierExpression)call.function_;
             if (ident) {
+                // Check local functions
                 if (auto idx = ident.name in emitter.funcIndex) {
                     auto f = emitter.functions[*idx];
                     auto sig = emitter.types[f.typeIndex];
+                    return sig.results.length > 0;
+                }
+                // Check imported functions
+                if (auto idx = ident.name in emitter.importIndex) {
+                    auto imp = emitter.imports[*idx];
+                    auto sig = emitter.types[imp.typeIndex];
                     return sig.results.length > 0;
                 }
             }
