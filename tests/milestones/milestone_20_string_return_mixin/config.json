@@ -1,0 +1,8 @@
+{
+  "name": "string_return_mixin",
+  "description": "CTFE function returns string, used in module-level mixin",
+  "type": "wasm_exec",
+  "expected_result": 42,
+  "entry_point": "result",
+  "capability": "string-returning function via CTFE, result used in mixin"
+}

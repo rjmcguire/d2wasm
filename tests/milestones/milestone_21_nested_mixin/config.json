@@ -1,0 +1,8 @@
+{
+  "name": "nested_mixin",
+  "description": "Full hall of mirrors - mixin inside CTFE function, result used as mixin",
+  "type": "wasm_exec",
+  "expected_result": 42,
+  "entry_point": "result",
+  "capability": "nested mixin evaluation, CTFE with internal mixin expansion"
+}
