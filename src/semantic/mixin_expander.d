@@ -21,6 +21,7 @@ import semantic.ctfe;
 import std.stdio;
 import std.array;
 import std.algorithm;
+import std.conv : to;
 
 /**
  * Mixin expansion error
@@ -49,6 +50,10 @@ class MixinError : Exception {
 class MixinExpander {
     private Declaration[] allDeclarations;
     private SymbolTable tempSymbolTable;
+    private uint currentDepth = 0;
+    
+    /// Maximum mixin expansion depth to prevent infinite recursion
+    enum MAX_EXPANSION_DEPTH = 100;
     
     this() {
         tempSymbolTable = new SymbolTable();
@@ -229,7 +234,19 @@ class MixinExpander {
      * Expand a single mixin declaration.
      */
     private Declaration[] expandMixin(MixinDecl mixinDecl) {
-        writeln("Expanding mixin: ", mixinDecl.mixinExpr.toString());
+        // Check depth limit to prevent infinite recursion
+        if (currentDepth >= MAX_EXPANSION_DEPTH) {
+            throw new MixinError(
+                "Mixin expansion depth limit exceeded (max " ~ 
+                to!string(MAX_EXPANSION_DEPTH) ~ "). Possible infinite recursion in mixin.",
+                mixinDecl.location
+            );
+        }
+        
+        currentDepth++;
+        scope(exit) currentDepth--;
+        
+        writeln("Expanding mixin (depth ", currentDepth, "): ", mixinDecl.mixinExpr.toString());
         
         // Evaluate the mixin expression to get a string
         string mixinString = evaluateMixinExpression(mixinDecl.mixinExpr, mixinDecl.location);
@@ -241,9 +258,21 @@ class MixinExpander {
         
         // Convert simple variable declarations with constant initializers to manifest constants
         // This allows them to be used in CTFE and codegen
-        Declaration[] result;
+        Declaration[] converted;
         foreach (decl; parsed) {
-            result ~= maybeConvertToManifest(decl);
+            converted ~= maybeConvertToManifest(decl);
+        }
+        
+        // Recursively expand any nested mixins in the result
+        Declaration[] result;
+        foreach (decl; converted) {
+            if (auto nestedMixin = cast(MixinDecl)decl) {
+                result ~= expandMixin(nestedMixin);
+            } else if (auto nestedStaticIf = cast(StaticIfDecl)decl) {
+                result ~= expandStaticIf(nestedStaticIf);
+            } else {
+                result ~= decl;
+            }
         }
         
         writeln("Mixin parsed into ", result.length, " declarations");
