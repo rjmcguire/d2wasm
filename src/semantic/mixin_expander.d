@@ -1,13 +1,13 @@
 /**
- * Mixin Expansion for D-to-WASM Compiler
+ * Mixin and Static If Expansion for D-to-WASM Compiler
  * 
- * This module handles the expansion of mixin declarations.
- * It evaluates mixin expressions at compile time and parses
- * the resulting strings as D code.
+ * This module handles the expansion of mixin declarations and static if.
+ * It evaluates expressions at compile time and manipulates the AST.
  * 
- * Supports both:
+ * Supports:
  * - Module-level mixins (expand to declarations)
  * - Function-level mixins (expand to statements)
+ * - Static if (compile-time conditional compilation)
  */
 module semantic.mixin_expander;
 
@@ -56,25 +56,29 @@ class MixinExpander {
     }
     
     /**
-     * Expand all mixins in the declaration list.
-     * Returns a new list with mixins replaced by their expansions.
+     * Expand all mixins and static ifs in the declaration list.
+     * Returns a new list with mixins/static ifs replaced by their expansions.
      */
     Declaration[] expandMixins(Declaration[] declarations) {
         allDeclarations = declarations;
         
         // First pass: collect manifest constants into temporary symbol table
-        // and evaluate them
+        // and evaluate them (needed for static if conditions that reference them)
         collectAndEvaluateManifests();
         
-        // Second pass: expand module-level mixins
+        // Second pass: expand module-level mixins and static ifs
         Declaration[] result;
         foreach (decl; declarations) {
             if (auto mixinDecl = cast(MixinDecl)decl) {
                 // Expand this mixin
                 auto expanded = expandMixin(mixinDecl);
                 result ~= expanded;
+            } else if (auto staticIfDecl = cast(StaticIfDecl)decl) {
+                // Expand this static if
+                auto expanded = expandStaticIf(staticIfDecl);
+                result ~= expanded;
             } else {
-                // Keep non-mixin declarations as-is
+                // Keep other declarations as-is
                 result ~= decl;
             }
         }
@@ -249,6 +253,168 @@ class MixinExpander {
         mixinDecl.isExpanded = true;
         
         return result;
+    }
+    
+    /**
+     * Expand a static if declaration.
+     * Evaluates the condition at compile time and returns only the appropriate branch.
+     */
+    private Declaration[] expandStaticIf(StaticIfDecl staticIfDecl) {
+        writeln("Expanding static if: ", staticIfDecl.condition.toString());
+        
+        // Evaluate the condition at compile time
+        bool conditionResult = evaluateStaticIfCondition(staticIfDecl.condition, staticIfDecl.location);
+        
+        writeln("Static if condition evaluates to: ", conditionResult);
+        
+        // Select the appropriate branch
+        Declaration[] selectedBranch;
+        if (conditionResult) {
+            selectedBranch = staticIfDecl.thenDeclarations;
+            writeln("Taking then branch with ", selectedBranch.length, " declarations");
+        } else {
+            selectedBranch = staticIfDecl.elseDeclarations;
+            writeln("Taking else branch with ", selectedBranch.length, " declarations");
+        }
+        
+        // Recursively expand any nested static ifs or mixins in the selected branch
+        Declaration[] result;
+        foreach (decl; selectedBranch) {
+            if (auto nestedStaticIf = cast(StaticIfDecl)decl) {
+                result ~= expandStaticIf(nestedStaticIf);
+            } else if (auto nestedMixin = cast(MixinDecl)decl) {
+                result ~= expandMixin(nestedMixin);
+            } else {
+                result ~= decl;
+            }
+        }
+        
+        // Store the expanded declarations in the node (for debugging)
+        staticIfDecl.expandedDeclarations = result;
+        staticIfDecl.isExpanded = true;
+        
+        return result;
+    }
+    
+    /**
+     * Evaluate a static if condition at compile time.
+     * Returns true or false.
+     */
+    private bool evaluateStaticIfCondition(Expression expr, SourceLocation loc) {
+        // Handle boolean literals directly
+        if (auto literal = cast(LiteralExpression)expr) {
+            if (literal.value.type == typeid(bool)) {
+                return literal.value.get!bool();
+            }
+            if (literal.value.type == typeid(long)) {
+                // Integer literal: 0 is false, anything else is true
+                return literal.value.get!long() != 0;
+            }
+            throw new MixinError("Static if condition must be a boolean expression", loc);
+        }
+        
+        // Handle identifier (reference to manifest constant)
+        if (auto ident = cast(IdentifierExpression)expr) {
+            // Look up the manifest constant
+            foreach (decl; allDeclarations) {
+                if (auto manifest = cast(ManifestConstantDecl)decl) {
+                    if (manifest.name == ident.name) {
+                        if (!manifest.ctfeComplete) {
+                            throw new MixinError(
+                                "Manifest constant '" ~ ident.name ~ "' not yet evaluated for static if",
+                                loc
+                            );
+                        }
+                        // Return the value as bool (non-zero is true)
+                        return manifest.ctfeValue != 0;
+                    }
+                }
+            }
+            throw new MixinError("Undefined identifier '" ~ ident.name ~ "' in static if condition", loc);
+        }
+        
+        // Handle comparison expressions (e.g., val > 3)
+        if (auto binary = cast(BinaryExpression)expr) {
+            long left = evaluateIntegerExpression(binary.left, loc);
+            long right = evaluateIntegerExpression(binary.right, loc);
+            
+            final switch (binary.operator) {
+                case BinaryExpression.Operator.Equal:
+                    return left == right;
+                case BinaryExpression.Operator.NotEqual:
+                    return left != right;
+                case BinaryExpression.Operator.Less:
+                    return left < right;
+                case BinaryExpression.Operator.LessEqual:
+                    return left <= right;
+                case BinaryExpression.Operator.Greater:
+                    return left > right;
+                case BinaryExpression.Operator.GreaterEqual:
+                    return left >= right;
+                case BinaryExpression.Operator.LogicalAnd:
+                    return (left != 0) && (right != 0);
+                case BinaryExpression.Operator.LogicalOr:
+                    return (left != 0) || (right != 0);
+                // Arithmetic operators - result is true if non-zero
+                case BinaryExpression.Operator.Add:
+                case BinaryExpression.Operator.Subtract:
+                case BinaryExpression.Operator.Multiply:
+                case BinaryExpression.Operator.Divide:
+                case BinaryExpression.Operator.Modulo:
+                case BinaryExpression.Operator.BitwiseAnd:
+                case BinaryExpression.Operator.BitwiseOr:
+                case BinaryExpression.Operator.BitwiseXor:
+                case BinaryExpression.Operator.ShiftLeft:
+                case BinaryExpression.Operator.ShiftRight:
+                case BinaryExpression.Operator.Concat:
+                    throw new MixinError("Non-comparison operator in static if condition", loc);
+            }
+        }
+        
+        throw new MixinError(
+            "Unsupported expression type in static if condition: " ~ typeid(expr).toString(),
+            loc
+        );
+    }
+    
+    /**
+     * Evaluate an expression to an integer value for static if conditions.
+     */
+    private long evaluateIntegerExpression(Expression expr, SourceLocation loc) {
+        // Handle integer literals
+        if (auto literal = cast(LiteralExpression)expr) {
+            if (literal.value.type == typeid(long)) {
+                return literal.value.get!long();
+            }
+            if (literal.value.type == typeid(bool)) {
+                return literal.value.get!bool() ? 1 : 0;
+            }
+            throw new MixinError("Expected integer in static if condition", loc);
+        }
+        
+        // Handle identifier (reference to manifest constant)
+        if (auto ident = cast(IdentifierExpression)expr) {
+            // Look up the manifest constant
+            foreach (decl; allDeclarations) {
+                if (auto manifest = cast(ManifestConstantDecl)decl) {
+                    if (manifest.name == ident.name) {
+                        if (!manifest.ctfeComplete) {
+                            throw new MixinError(
+                                "Manifest constant '" ~ ident.name ~ "' not yet evaluated",
+                                loc
+                            );
+                        }
+                        return manifest.ctfeValue;
+                    }
+                }
+            }
+            throw new MixinError("Undefined identifier '" ~ ident.name ~ "' in static if condition", loc);
+        }
+        
+        throw new MixinError(
+            "Unsupported expression type in static if integer evaluation: " ~ typeid(expr).toString(),
+            loc
+        );
     }
     
     /**

@@ -142,6 +142,8 @@ class TreeSitterBridge {
                         declarations ~= parseManifestConstant(child);
                     } else if (nodeType == "mixin_declaration") {
                         declarations ~= parseMixinDeclaration(child);
+                    } else if (nodeType == "conditional_declaration") {
+                        declarations ~= parseConditionalDeclaration(child);
                     } else if (nodeType != "comment" && nodeType.length > 0) {
                         writeln("Warning: Skipping unknown top-level node: ", nodeType);
                     }
@@ -563,6 +565,168 @@ class TreeSitterBridge {
         writeln("Parsed mixin declaration: mixin(", mixinArg.toString(), ")");
         
         return new MixinDecl(loc, mixinArg);
+    }
+    
+    /**
+     * Parse conditional declaration: static if (condition) { ... } else { ... }
+     * 
+     * Tree-sitter structure:
+     *   conditional_declaration
+     *     condition (contains static_if_condition, version_condition, or debug_condition)
+     *       static_if_condition
+     *         static
+     *         if
+     *         (
+     *         expression
+     *         )
+     *     { or _declaration
+     *     _declarations...
+     *     } (if braced)
+     *     else (optional)
+     *     { or _declaration
+     *     _declarations...
+     *     } (if braced)
+     */
+    StaticIfDecl parseConditionalDeclaration(TSNode node) {
+        SourceLocation loc = makeSourceLocation(node);
+        
+        // Debug: print the tree structure
+        writeln("Parsing conditional_declaration with ", TreeSitterParser.getChildCount(node), " children:");
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            writeln("  Child ", i, ": ", childType);
+        }
+        
+        // Find the condition node (first child that is 'condition')
+        TSNode conditionNode;
+        Expression conditionExpr;
+        Declaration[] thenDecls;
+        Declaration[] elseDecls;
+        
+        bool foundElse = false;
+        bool inThenBranch = false;
+        
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            
+            if (childType == "condition") {
+                // Parse the condition - find static_if_condition inside
+                conditionExpr = parseCondition(child);
+                inThenBranch = true;
+            } else if (childType == "else") {
+                foundElse = true;
+                inThenBranch = false;
+            } else if (childType == "{" || childType == "}") {
+                // Skip braces
+                continue;
+            } else if (childType == ":") {
+                // Skip colons (used in some forms)
+                continue;
+            } else if (inThenBranch && !foundElse) {
+                // This is a declaration in the then branch
+                auto decls = parseDeclarationNode(child);
+                thenDecls ~= decls;
+            } else if (foundElse) {
+                // This is a declaration in the else branch
+                auto decls = parseDeclarationNode(child);
+                elseDecls ~= decls;
+            }
+        }
+        
+        if (conditionExpr is null) {
+            throw new ParseError("Conditional declaration missing condition", loc);
+        }
+        
+        writeln("Parsed static if: condition=", conditionExpr.toString(), 
+                ", then=", thenDecls.length, " decls, else=", elseDecls.length, " decls");
+        
+        return new StaticIfDecl(loc, conditionExpr, thenDecls, elseDecls);
+    }
+    
+    /**
+     * Parse the condition from a condition node (static if, version, or debug)
+     */
+    private Expression parseCondition(TSNode conditionNode) {
+        uint childCount = TreeSitterParser.getChildCount(conditionNode);
+        
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(conditionNode, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            
+            if (childType == "static_if_condition") {
+                return parseStaticIfCondition(child);
+            }
+            // TODO: Handle version_condition and debug_condition
+        }
+        
+        throw new ParseError("Unsupported condition type in conditional declaration", 
+                           makeSourceLocation(conditionNode));
+    }
+    
+    /**
+     * Parse static_if_condition: static if ( expression )
+     */
+    private Expression parseStaticIfCondition(TSNode node) {
+        uint childCount = TreeSitterParser.getChildCount(node);
+        
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            
+            // Skip 'static', 'if', '(', ')'
+            if (childType != "static" && childType != "if" && 
+                childType != "(" && childType != ")") {
+                // This should be the expression
+                return parseExpression(child);
+            }
+        }
+        
+        throw new ParseError("static if condition missing expression", makeSourceLocation(node));
+    }
+    
+    /**
+     * Parse a single declaration node, returning an array (some nodes expand to multiple decls)
+     */
+    private Declaration[] parseDeclarationNode(TSNode node) {
+        string nodeType = TreeSitterParser.getNodeType(node);
+        SourceLocation loc = makeSourceLocation(node);
+        
+        writeln("  Parsing declaration node of type: ", nodeType);
+        
+        if (nodeType == "function_declaration") {
+            return [parseFunctionDeclaration(node)];
+        } else if (nodeType == "class_declaration") {
+            return [parseClassDeclaration(node)];
+        } else if (nodeType == "struct_declaration") {
+            return [parseStructDeclaration(node)];
+        } else if (nodeType == "interface_declaration") {
+            return [parseInterfaceDeclaration(node)];
+        } else if (nodeType == "variable_declaration") {
+            return [parseVariableDeclaration(node)];
+        } else if (nodeType == "enum_declaration") {
+            return [parseEnumDeclaration(node)];
+        } else if (nodeType == "manifest_constant") {
+            return [parseManifestConstant(node)];
+        } else if (nodeType == "mixin_declaration") {
+            return [parseMixinDeclaration(node)];
+        } else if (nodeType == "conditional_declaration") {
+            return [parseConditionalDeclaration(node)];
+        } else if (nodeType == "declaration_or_statement") {
+            // Some grammar variants use this wrapper
+            uint childCount = TreeSitterParser.getChildCount(node);
+            for (uint i = 0; i < childCount; i++) {
+                TSNode child = TreeSitterParser.getChild(node, i);
+                auto decls = parseDeclarationNode(child);
+                if (decls.length > 0) return decls;
+            }
+        }
+        
+        // Unknown node type - return empty
+        writeln("  Warning: Unknown declaration node type: ", nodeType);
+        return [];
     }
     
     /**

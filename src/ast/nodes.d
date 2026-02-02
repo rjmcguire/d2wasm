@@ -488,3 +488,36 @@ class MixinDecl : Declaration {
         return format("MixinDecl(%s)", mixinExpr.toString());
     }
 }
+
+/**
+ * Static if declaration: static if (condition) { ... } else { ... }
+ * 
+ * A compile-time conditional that selects which declarations to include.
+ * The condition is evaluated at compile time.
+ * Unlike runtime if, the excluded branch is NOT type-checked.
+ * This is a placeholder that gets expanded during semantic analysis.
+ */
+class StaticIfDecl : Declaration {
+    Expression condition;          // The condition to evaluate at compile time
+    Declaration[] thenDeclarations;  // Declarations in the then branch
+    Declaration[] elseDeclarations;  // Declarations in the else branch (may be empty)
+    Declaration[] expandedDeclarations;  // The selected declarations after expansion
+    bool isExpanded;               // Whether expansion has been performed
+    
+    this(SourceLocation loc, Expression condition, 
+         Declaration[] thenDecls, Declaration[] elseDecls = []) {
+        super(loc, "<static if>", true);  // Static ifs don't have a name
+        this.condition = condition;
+        this.thenDeclarations = thenDecls;
+        this.elseDeclarations = elseDecls;
+        this.isExpanded = false;
+    }
+    
+    override string toString() const {
+        if (isExpanded) {
+            return format("StaticIfDecl(expanded: %d declarations)", expandedDeclarations.length);
+        }
+        return format("StaticIfDecl(%s, then: %d decls, else: %d decls)", 
+            condition.toString(), thenDeclarations.length, elseDeclarations.length);
+    }
+}
