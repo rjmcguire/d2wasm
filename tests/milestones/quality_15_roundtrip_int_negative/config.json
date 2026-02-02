@@ -1,0 +1,8 @@
+{
+  "name": "roundtrip_int_negative",
+  "description": "Negative integers preserved through compilation",
+  "type": "wasm_exec",
+  "expected_result": -42,
+  "entry": "result",
+  "capability": "Negative integer preservation"
+}

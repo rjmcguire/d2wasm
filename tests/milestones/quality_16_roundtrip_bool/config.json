@@ -1,0 +1,8 @@
+{
+  "name": "roundtrip_bool",
+  "description": "Boolean true/false preserved through compilation",
+  "type": "wasm_exec",
+  "expected_result": 1,
+  "entry": "result",
+  "capability": "Boolean value preservation"
+}

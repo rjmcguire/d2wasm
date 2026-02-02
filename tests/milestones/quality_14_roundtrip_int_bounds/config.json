@@ -1,0 +1,8 @@
+{
+  "name": "roundtrip_int_bounds",
+  "description": "INT_MAX and INT_MIN preserved through compilation",
+  "type": "wasm_exec",
+  "expected_result": 2147483647,
+  "entry": "test_max",
+  "capability": "Integer bounds preservation"
+}
