@@ -1,0 +1,6 @@
+{
+  "name": "struct_method_params",
+  "description": "Method with parameters",
+  "type": "wasm_exec",
+  "entry": "main"
+}
