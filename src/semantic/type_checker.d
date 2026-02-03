@@ -414,6 +414,8 @@ class TypeChecker {
             return checkCastExpression(cast_);
         } else if (auto assign = cast(AssignmentExpression)expr) {
             return checkAssignmentExpression(assign);
+        } else if (auto arrayLit = cast(ArrayLiteralExpression)expr) {
+            return checkArrayLiteralExpression(arrayLit);
         }
         
         throw new TypeError("Unknown expression type", expr.location);
@@ -947,6 +949,40 @@ class TypeChecker {
         }
         
         return leftType;  // Assignment expression has type of left-hand side
+    }
+    
+    /**
+     * Type check array literal expression [1, 2, 3]
+     * Returns a dynamic array (slice) type.
+     */
+    Type checkArrayLiteralExpression(ArrayLiteralExpression expr) {
+        if (expr.elements.length == 0) {
+            // Empty array literal - can't infer type without context
+            // For now, default to int[]
+            return new ArrayType(expr.location, new BasicType(expr.location, BasicType.Kind.Int32));
+        }
+        
+        // Infer element type from first element
+        Type elementType = checkExpression(expr.elements[0]);
+        
+        // Check all elements have compatible types
+        for (size_t i = 1; i < expr.elements.length; i++) {
+            Type elemType = checkExpression(expr.elements[i]);
+            auto compat = checkTypeCompatibility(elemType, elementType);
+            if (!compat.isCompatible) {
+                throw new TypeError(
+                    format("Array literal element %d has type '%s', expected '%s'",
+                           i, elemType.toString(), elementType.toString()),
+                    expr.elements[i].location
+                );
+            }
+        }
+        
+        // Store inferred type in the expression
+        expr.elementType = elementType;
+        
+        // Return dynamic array type (slice)
+        return new ArrayType(expr.location, elementType);
     }
     
     /**

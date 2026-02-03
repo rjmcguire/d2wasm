@@ -744,6 +744,11 @@ class BinaryEmitter {
             return ValType.i32;  // Pointer to struct
         }
         
+        // Array/slice types are also passed as i32 pointers (to the slice struct)
+        if (auto arrayType = cast(ArrayType)t) {
+            return ValType.i32;  // Pointer to slice struct
+        }
+        
         auto basic = cast(BasicType)t;
         if (!basic) {
             throw new EmitError("Non-basic types not yet supported", t.toString());
@@ -1499,7 +1504,17 @@ private class FuncContext {
         StructDecl structDecl; // The struct type
     }
     StructLocalInfo[string] structLocals;
-    uint frameSize = 0;        // Total size of struct locals on shadow stack
+    
+    // Shadow stack for slice locals (ptr, length, capacity = 12 bytes)
+    struct SliceLocalInfo {
+        uint frameOffset;      // Offset from frame pointer (FP) for the slice struct
+        uint dataOffset;       // Offset for the backing data (if literal initializer)
+        uint dataSize;         // Size of backing data in bytes
+        Type elementType;      // Element type of the slice
+    }
+    SliceLocalInfo[string] sliceLocals;
+    
+    uint frameSize = 0;        // Total size of struct/slice locals on shadow stack
     uint savedSpLocal;         // Local index to store saved SP (for epilogue restore)
     uint fpLocal;              // Local index for frame pointer (stable, never changes)
     
@@ -1593,6 +1608,35 @@ private class FuncContext {
                     frameSize += structDecl.structSize;
                     return;
                 }
+            }
+            
+            // Check if it's a slice/array type
+            if (auto arrayType = cast(ArrayType)varDecl.type) {
+                // Slice local - allocate 12 bytes for slice struct (ptr, length, capacity)
+                frameSize = (frameSize + 3) & ~3;  // Align to 4 bytes
+                
+                SliceLocalInfo info;
+                info.frameOffset = frameSize;
+                info.elementType = arrayType.elementType;
+                
+                // Slice struct is 12 bytes (ptr: i32, length: i32, capacity: i32)
+                frameSize += 12;
+                
+                // If initialized with array literal, also allocate space for data
+                if (auto arrayLit = cast(ArrayLiteralExpression)varDecl.initializer) {
+                    frameSize = (frameSize + 3) & ~3;  // Align data
+                    info.dataOffset = frameSize;
+                    
+                    // Calculate data size based on element type and count
+                    size_t elemSize = arrayType.elementType.size();
+                    if (elemSize == 0) elemSize = 4;  // Default to 4 for i32
+                    info.dataSize = cast(uint)(elemSize * arrayLit.elements.length);
+                    
+                    frameSize += info.dataSize;
+                }
+                
+                sliceLocals[varDecl.name] = info;
+                return;
             }
             
             // Regular local - add to WASM locals
@@ -1732,6 +1776,8 @@ private class FuncContext {
             // Check if this is a struct local
             if (varDecl.name in structLocals) {
                 emitStructVarDecl(out_, varDecl);
+            } else if (varDecl.name in sliceLocals) {
+                emitSliceVarDecl(out_, varDecl);
             } else {
                 emitVarDecl(out_, varDecl);
             }
@@ -1980,6 +2026,106 @@ private class FuncContext {
         throw new EmitError("Unsupported struct initializer", stmt.initializer.toString());
     }
     
+    /**
+     * Emit slice local variable declaration
+     * Slice struct layout: { ptr: i32, length: i32, capacity: i32 } = 12 bytes
+     */
+    void emitSliceVarDecl(ref Appender!(ubyte[]) out_, VariableDeclarationStatement stmt) {
+        auto info = sliceLocals[stmt.name];
+        
+        if (!stmt.initializer) {
+            // Zero-initialize the slice struct (ptr=0, length=0, capacity=0)
+            for (int offset = 0; offset < 12; offset += 4) {
+                out_ ~= Op.local_get;
+                leb128u(out_, fpLocal);
+                out_ ~= Op.i32_const;
+                leb128s(out_, info.frameOffset + offset);
+                out_ ~= Op.i32_add;
+                out_ ~= Op.i32_const;
+                leb128s(out_, 0);
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+            }
+            return;
+        }
+        
+        // Array literal initializer: [1, 2, 3]
+        if (auto arrayLit = cast(ArrayLiteralExpression)stmt.initializer) {
+            uint elemCount = cast(uint)arrayLit.elements.length;
+            size_t elemSize = info.elementType ? info.elementType.size() : 4;
+            if (elemSize == 0) elemSize = 4;
+            
+            // First, store the data elements at FP + dataOffset
+            for (uint i = 0; i < elemCount; i++) {
+                // Address: FP + dataOffset + i * elemSize
+                out_ ~= Op.local_get;
+                leb128u(out_, fpLocal);
+                out_ ~= Op.i32_const;
+                leb128s(out_, info.dataOffset + cast(int)(i * elemSize));
+                out_ ~= Op.i32_add;
+                
+                // Value: the element expression
+                emitExpression(out_, arrayLit.elements[i]);
+                
+                // Store
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+            }
+            
+            // Now initialize the slice struct:
+            // ptr = FP + dataOffset
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset);  // slice.ptr offset = 0
+            out_ ~= Op.i32_add;
+            
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.dataOffset);
+            out_ ~= Op.i32_add;  // ptr value = FP + dataOffset
+            
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            
+            // length = elemCount
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset + 4);  // slice.length offset = 4
+            out_ ~= Op.i32_add;
+            
+            out_ ~= Op.i32_const;
+            leb128s(out_, elemCount);
+            
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            
+            // capacity = elemCount
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset + 8);  // slice.capacity offset = 8
+            out_ ~= Op.i32_add;
+            
+            out_ ~= Op.i32_const;
+            leb128s(out_, elemCount);
+            
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            
+            return;
+        }
+        
+        throw new EmitError("Unsupported slice initializer", stmt.initializer.toString());
+    }
+    
     //==========================================================================
     // Expression Emission
     //==========================================================================
@@ -2127,6 +2273,31 @@ private class FuncContext {
                     leb128u(out_, 0);
                     return;
                 }
+            }
+            
+            // Check if it's a slice local (arr.length, arr.ptr, arr.capacity)
+            if (auto info = ident.name in sliceLocals) {
+                int fieldOffset;
+                if (expr.memberName == "ptr") {
+                    fieldOffset = 0;
+                } else if (expr.memberName == "length") {
+                    fieldOffset = 4;
+                } else if (expr.memberName == "capacity") {
+                    fieldOffset = 8;
+                } else {
+                    throw new EmitError("Slice has no field '" ~ expr.memberName ~ "'");
+                }
+                
+                // Load from FP + frameOffset + fieldOffset
+                out_ ~= Op.local_get;
+                leb128u(out_, fpLocal);
+                out_ ~= Op.i32_const;
+                leb128s(out_, info.frameOffset + fieldOffset);
+                out_ ~= Op.i32_add;
+                out_ ~= Op.i32_load;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+                return;
             }
         }
         

@@ -929,8 +929,25 @@ class TreeSitterBridge {
         
         // Handle different type node structures
         if (nodeType == "type") {
-            // Look for the actual type inside the type node, skipping type_ctor
             uint childCount = TreeSitterParser.getChildCount(node);
+            
+            // Check for array type pattern: baseType '[' ']'
+            // Tree-sitter gives us children like: int, [, ]
+            if (childCount >= 3) {
+                TSNode lastChild = TreeSitterParser.getChild(node, childCount - 1);
+                TSNode secondLast = TreeSitterParser.getChild(node, childCount - 2);
+                if (TreeSitterParser.getNodeType(lastChild) == "]" &&
+                    TreeSitterParser.getNodeType(secondLast) == "[") {
+                    // This is an array type - parse the base type (everything before '[')
+                    TSNode baseTypeNode = TreeSitterParser.getChild(node, 0);
+                    Type baseType = parseType(baseTypeNode);
+                    // Check if there's a size expression between [ and ]
+                    // For now, assume dynamic array (no size)
+                    return new ArrayType(loc, baseType, null);
+                }
+            }
+            
+            // Look for the actual type inside the type node, skipping type_ctor
             for (uint i = 0; i < childCount; i++) {
                 TSNode child = TreeSitterParser.getChild(node, i);
                 string childType = TreeSitterParser.getNodeType(child);

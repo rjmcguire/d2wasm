@@ -1,0 +1,6 @@
+{
+  "name": "slice_literal",
+  "description": "Array literal creates slice struct, .length works",
+  "type": "wasm_exec",
+  "entry": "main"
+}
