@@ -1739,8 +1739,9 @@ class TreeSitterBridge {
     /**
      * Parse index expression (placeholder implementation)
      */
-    IndexExpression parseIndexExpression(TSNode node, SourceLocation loc) {
+    Expression parseIndexExpression(TSNode node, SourceLocation loc) {
         // Structure: array '[' index ']' (4 children)
+        // OR for slices: array '[' start '..' end ']' where index contains 'start..end'
         uint childCount = TreeSitterParser.getChildCount(node);
         
         if (childCount < 4) {
@@ -1751,8 +1752,30 @@ class TreeSitterBridge {
         TSNode indexNode = TreeSitterParser.getChild(node, 2);  // child 1 is '[', child 2 is index
         
         Expression array = parseExpression(arrayNode);
-        Expression index = parseExpression(indexNode);
         
+        // Check if this is a slice expression by looking for '..' in the index text
+        string indexText = TreeSitterParser.getNodeText(indexNode, sourceText);
+        import std.string : indexOf;
+        auto dotdotPos = indexOf(indexText, "..");
+        
+        if (dotdotPos >= 0) {
+            // This is a slice expression: arr[start..end]
+            // Parse start and end from the text
+            import std.conv : to;
+            import std.string : strip;
+            
+            string startText = indexText[0..dotdotPos].strip();
+            string endText = indexText[dotdotPos+2..$].strip();
+            
+            // Parse start and end as expressions (for now, just integers)
+            Expression startExpr = LiteralExpression.integer(loc, to!long(startText));
+            Expression endExpr = LiteralExpression.integer(loc, to!long(endText));
+            
+            return new SliceExpression(loc, array, startExpr, endExpr);
+        }
+        
+        // Regular index expression
+        Expression index = parseExpression(indexNode);
         return new IndexExpression(loc, array, index);
     }
     
@@ -1867,6 +1890,7 @@ class TreeSitterBridge {
             case "^=": return AssignmentExpression.Operator.XorAssign;
             case "<<=": return AssignmentExpression.Operator.ShiftLeftAssign;
             case ">>=": return AssignmentExpression.Operator.ShiftRightAssign;
+            case "~=": return AssignmentExpression.Operator.ConcatAssign;
             default:
                 throw new ParseError("Unknown assignment operator: " ~ opStr, SourceLocation());
         }

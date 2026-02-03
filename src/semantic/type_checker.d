@@ -416,6 +416,8 @@ class TypeChecker {
             return checkAssignmentExpression(assign);
         } else if (auto arrayLit = cast(ArrayLiteralExpression)expr) {
             return checkArrayLiteralExpression(arrayLit);
+        } else if (auto slice = cast(SliceExpression)expr) {
+            return checkSliceExpression(slice);
         }
         
         throw new TypeError("Unknown expression type", expr.location);
@@ -929,6 +931,37 @@ class TypeChecker {
             expr.location);
     }
     
+    /**
+     * Type check slice expression arr[start..end]
+     * Returns the same array type (a view into the original array)
+     */
+    Type checkSliceExpression(SliceExpression expr) {
+        Type arrayType = checkExpression(expr.array);
+        Type startType = checkExpression(expr.start);
+        Type endType = checkExpression(expr.end);
+        
+        // Check that start and end are integers
+        if (!isIntegerType(cast(BasicType)startType)) {
+            throw new TypeError(
+                format("Slice start must be integer type, got '%s'", startType.toString()),
+                expr.start.location);
+        }
+        if (!isIntegerType(cast(BasicType)endType)) {
+            throw new TypeError(
+                format("Slice end must be integer type, got '%s'", endType.toString()),
+                expr.end.location);
+        }
+        
+        // Array slicing returns the same array type (a view)
+        if (auto arrType = cast(ArrayType)arrayType) {
+            return arrType;  // Same type - it's a view
+        }
+        
+        throw new TypeError(
+            format("Cannot slice non-array type '%s'", arrayType.toString()),
+            expr.location);
+    }
+    
     Type checkMemberExpression(MemberExpression expr) {
         // Check if the object is a type name (for Type.sizeof, Type.alignof, etc.)
         if (auto ident = cast(IdentifierExpression)expr.object) {
@@ -1006,6 +1039,26 @@ class TypeChecker {
     Type checkAssignmentExpression(AssignmentExpression expr) {
         Type leftType = checkExpression(expr.left);
         Type rightType = checkExpression(expr.right);
+        
+        // Special case: ~= on arrays appends an element
+        if (expr.operator == AssignmentExpression.Operator.ConcatAssign) {
+            if (auto arrayType = cast(ArrayType)leftType) {
+                // Right side should be compatible with element type
+                auto compat = checkTypeCompatibility(rightType, arrayType.elementType);
+                if (!compat.isCompatible) {
+                    throw new TypeError(
+                        format("Cannot append type '%s' to array of '%s'",
+                               rightType.toString(), arrayType.elementType.toString()),
+                        expr.location
+                    );
+                }
+                return leftType;  // ~= returns the array
+            }
+            throw new TypeError(
+                format("Cannot use ~= on non-array type '%s'", leftType.toString()),
+                expr.location
+            );
+        }
         
         auto compat = checkTypeCompatibility(rightType, leftType);
         if (!compat.isCompatible) {

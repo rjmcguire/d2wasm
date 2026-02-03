@@ -1,0 +1,4 @@
+{
+  "description": "Writable slice .length to grow/shrink array",
+  "expected_result": 5
+}

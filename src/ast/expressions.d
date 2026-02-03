@@ -205,6 +205,35 @@ class IndexExpression : Expression {
 }
 
 /**
+ * Slice expression: array[start..end]
+ * Creates a view into the array without copying.
+ */
+class SliceExpression : Expression {
+    Expression array;
+    Expression start;
+    Expression end;
+    
+    this(SourceLocation loc, Expression array, Expression start, Expression end) {
+        super(loc);
+        this.array = array;
+        this.start = start;
+        this.end = end;
+    }
+    
+    override bool isConstant() const {
+        return false;
+    }
+    
+    override bool hasLValue() const {
+        return false;  // Slice creates a new value (though it's a view)
+    }
+    
+    override string toString() const {
+        return format("%s[%s..%s]", array.toString(), start.toString(), end.toString());
+    }
+}
+
+/**
  * Member access: object.member
  */
 class MemberExpression : Expression {
@@ -388,7 +417,8 @@ class AssignmentExpression : Expression {
         OrAssign,         // |=
         XorAssign,        // ^=
         ShiftLeftAssign,  // <<=
-        ShiftRightAssign  // >>=
+        ShiftRightAssign, // >>=
+        ConcatAssign      // ~=
     }
     
     Expression left;
@@ -428,6 +458,7 @@ class AssignmentExpression : Expression {
             case Operator.XorAssign: return "^=";
             case Operator.ShiftLeftAssign: return "<<=";
             case Operator.ShiftRightAssign: return ">>=";
+            case Operator.ConcatAssign: return "~=";
         }
     }
 }

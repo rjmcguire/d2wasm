@@ -2159,6 +2159,81 @@ private class FuncContext {
             return;
         }
         
+        // Slice expression initializer: arr[1..3]
+        if (auto sliceExpr = cast(SliceExpression)stmt.initializer) {
+            auto sourceIdent = cast(IdentifierExpression)sliceExpr.array;
+            if (!sourceIdent) {
+                throw new EmitError("Complex slice source not supported");
+            }
+            
+            auto sourceInfo = sourceIdent.name in sliceLocals;
+            if (!sourceInfo) {
+                throw new EmitError("Can only slice local arrays for now");
+            }
+            
+            // Calculate ptr = source.ptr + start * elemSize
+            // Store at FP + frameOffset (slice.ptr)
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset);
+            out_ ~= Op.i32_add;
+            
+            // Load source.ptr
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, sourceInfo.frameOffset);  // source.ptr at offset 0
+            out_ ~= Op.i32_add;
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            
+            // Add start * 4
+            emitExpression(out_, sliceExpr.start);
+            out_ ~= Op.i32_const;
+            leb128s(out_, 4);  // sizeof(int)
+            out_ ~= Op.i32_mul;
+            out_ ~= Op.i32_add;
+            
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            
+            // Calculate length = end - start
+            // Store at FP + frameOffset + 4 (slice.length)
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset + 4);
+            out_ ~= Op.i32_add;
+            
+            emitExpression(out_, sliceExpr.end);
+            emitExpression(out_, sliceExpr.start);
+            out_ ~= Op.i32_sub;
+            
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            
+            // Set capacity = length (can't safely grow a view)
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset + 8);
+            out_ ~= Op.i32_add;
+            
+            emitExpression(out_, sliceExpr.end);
+            emitExpression(out_, sliceExpr.start);
+            out_ ~= Op.i32_sub;
+            
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            
+            return;
+        }
+        
         throw new EmitError("Unsupported slice initializer", stmt.initializer.toString());
     }
     
@@ -2185,6 +2260,10 @@ private class FuncContext {
             emitCast(out_, castExpr);
         } else if (auto indexExpr = cast(IndexExpression)expr) {
             emitIndex(out_, indexExpr);
+        } else if (auto sliceExpr = cast(SliceExpression)expr) {
+            // Slice expressions as standalone expressions are complex
+            // For now, we only support them as initializers (handled in emitSliceVarDecl)
+            throw new EmitError("Slice expressions only supported as initializers for now");
         } else {
             throw new EmitError("Unsupported expression type", expr.toString());
         }
@@ -2560,6 +2639,342 @@ private class FuncContext {
         out_ ~= Op.end;  // end if
         
         // reserve() returns void, so no value on stack
+    }
+    
+    /**
+     * Emit arr ~= value (slice append)
+     * 
+     * If length >= capacity, grow to capacity * 2 (min 4)
+     * Store value at ptr[length]
+     * Increment length
+     */
+    void emitSliceAppend(ref Appender!(ubyte[]) out_, string sliceName,
+                         SliceLocalInfo* sliceInfo, Expression value) {
+        int sliceAddr = sliceInfo.frameOffset;
+        
+        // Store value at SP-4 (we need it later)
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_sub;
+        emitExpression(out_, value);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // Check if length >= capacity
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr + 4);  // length
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr + 8);  // capacity
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.i32_ge_u;  // length >= capacity
+        
+        out_ ~= Op.if_;
+        out_ ~= cast(ubyte)0x40;
+        
+        // Need to grow: newCapacity = max(capacity * 2, 4)
+        // Calculate capacity * 2
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr + 8);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 2);
+        out_ ~= Op.i32_mul;
+        
+        // Compare with 4, take max
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        
+        // if (capacity*2 < 4) use 4 else use capacity*2
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr + 8);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 2);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_lt_u;
+        out_ ~= Op.select;  // picks 4 if capacity*2 < 4, else capacity*2
+        
+        // Store newCapacity at SP-8
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 8);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // Allocate new buffer
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 8);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_mul;
+        uint allocIdx = emitter.getFuncIndex("__alloc");
+        out_ ~= Op.call;
+        leb128u(out_, allocIdx);
+        
+        // Store newBuffer at SP-12
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 12);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // Copy loop
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 16);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_const;
+        leb128s(out_, 0);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.block;
+        out_ ~= cast(ubyte)0x40;
+        out_ ~= Op.loop;
+        out_ ~= cast(ubyte)0x40;
+        
+        // if i >= length break
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 16);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr + 4);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_ge_u;
+        out_ ~= Op.br_if;
+        leb128u(out_, 1);
+        
+        // newBuffer[i] = oldPtr[i]
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 12);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 16);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_add;
+        
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 16);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // i++
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 16);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 16);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 1);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.br;
+        leb128u(out_, 0);
+        out_ ~= Op.end;
+        out_ ~= Op.end;
+        
+        // Update ptr
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 12);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // Update capacity
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr + 8);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 8);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.end;  // end if (need grow)
+        
+        // Store value at ptr[length]
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr + 4);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_add;
+        
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // Increment length
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr + 4);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr + 4);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 1);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // ~= expression result is the slice itself (return new length for testing)
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr + 4);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
     }
     
     void emitCast(ref Appender!(ubyte[]) out_, CastExpression expr) {
@@ -3380,6 +3795,18 @@ private class FuncContext {
     }
     
     void emitAssignment(ref Appender!(ubyte[]) out_, AssignmentExpression expr) {
+        // Check for slice append (arr ~= value)
+        if (expr.operator == AssignmentExpression.Operator.ConcatAssign) {
+            auto ident = cast(IdentifierExpression)expr.left;
+            if (ident) {
+                if (auto sliceInfo = ident.name in sliceLocals) {
+                    emitSliceAppend(out_, ident.name, sliceInfo, expr.right);
+                    return;
+                }
+            }
+            throw new EmitError("Concat-assign (~=) only supported on slice locals");
+        }
+        
         // Check for struct field assignment (p.x = value)
         if (auto member = cast(MemberExpression)expr.left) {
             emitMemberAssignment(out_, member, expr.right);
@@ -3536,7 +3963,399 @@ private class FuncContext {
             return;
         }
         
+        // Check if it's a slice .length assignment
+        if (auto sliceInfo = objIdent.name in sliceLocals) {
+            if (member.memberName == "length") {
+                emitSliceLengthAssignment(out_, objIdent.name, sliceInfo, value);
+                return;
+            }
+        }
+        
         throw new EmitError("Unsupported member assignment target", member.toString());
+    }
+    
+    /**
+     * Emit arr.length = newLength
+     * 
+     * If newLength > capacity: reserve(newLength) first
+     * If newLength > oldLength: zero-initialize new elements
+     * Update length field
+     * 
+     * Uses temp storage at SP-4 (newLength), SP-8 (newBuffer), SP-12 (loop counter)
+     */
+    void emitSliceLengthAssignment(ref Appender!(ubyte[]) out_, string sliceName,
+                                    SliceLocalInfo* sliceInfo, Expression newLengthExpr) {
+        int sliceAddr = sliceInfo.frameOffset;
+        
+        // Store newLength at SP-4
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_sub;
+        emitExpression(out_, newLengthExpr);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // Load current capacity
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr + 8);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // Load newLength for comparison
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // if (capacity < newLength) - need to reserve
+        out_ ~= Op.i32_lt_u;
+        
+        out_ ~= Op.if_;
+        out_ ~= cast(ubyte)0x40;
+        
+        // Allocate new buffer: __alloc(newLength * 4)
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_mul;
+        uint allocIdx = emitter.getFuncIndex("__alloc");
+        out_ ~= Op.call;
+        leb128u(out_, allocIdx);
+        
+        // Store newBuffer at SP-8
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 8);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // Copy loop: for i = 0 to oldLength-1
+        // Init counter at SP-12
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 12);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_const;
+        leb128s(out_, 0);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.block;
+        out_ ~= cast(ubyte)0x40;
+        out_ ~= Op.loop;
+        out_ ~= cast(ubyte)0x40;
+        
+        // if (i >= oldLength) break
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 12);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr + 4);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.i32_ge_u;
+        out_ ~= Op.br_if;
+        leb128u(out_, 1);
+        
+        // newBuffer[i] = oldPtr[i]
+        // dest addr
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 8);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 12);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_add;
+        
+        // src value
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 12);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // i++
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 12);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 12);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 1);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.br;
+        leb128u(out_, 0);
+        out_ ~= Op.end;
+        out_ ~= Op.end;
+        
+        // Update ptr = newBuffer
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 8);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // Update capacity = newLength
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr + 8);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.end;  // end if (need reserve)
+        
+        // Zero-init from oldLength to newLength if growing
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr + 4);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.i32_lt_u;  // oldLength < newLength
+        
+        out_ ~= Op.if_;
+        out_ ~= cast(ubyte)0x40;
+        
+        // Init counter = oldLength
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 12);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr + 4);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.block;
+        out_ ~= cast(ubyte)0x40;
+        out_ ~= Op.loop;
+        out_ ~= cast(ubyte)0x40;
+        
+        // if (i >= newLength) break
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 12);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_ge_u;
+        out_ ~= Op.br_if;
+        leb128u(out_, 1);
+        
+        // ptr[i] = 0
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 12);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_const;
+        leb128s(out_, 0);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // i++
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 12);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 12);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 1);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.br;
+        leb128u(out_, 0);
+        out_ ~= Op.end;
+        out_ ~= Op.end;
+        out_ ~= Op.end;  // end if (need zero init)
+        
+        // Update length = newLength
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr + 4);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // Leave newLength on stack for expression result
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
     }
     
     //==========================================================================
