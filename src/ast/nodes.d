@@ -119,12 +119,13 @@ class FunctionDecl : Declaration {
     
     // Function kind flags (packed into a single byte)
     mixin(bitfields!(
-        bool, "isMethod",    1,  // belongs to struct/class, has implicit `this`
-        bool, "isStatic",    1,  // belongs to aggregate but no `this`
-        bool, "isProperty",  1,  // @property, called without parens
-        bool, "isCTFE",      1,  // CTFE-only function
-        bool, "isIntrinsic", 1,  // compiler emits inline code instead of call
-        uint, "",            3,  // padding to byte boundary
+        bool, "isMethod",      1,  // belongs to struct/class, has implicit `this`
+        bool, "isStatic",      1,  // belongs to aggregate but no `this`
+        bool, "isProperty",    1,  // @property, called without parens
+        bool, "isCTFE",        1,  // CTFE-only function
+        bool, "isIntrinsic",   1,  // compiler emits inline code instead of call
+        bool, "isTypeChecked", 1,  // already type-checked (avoid redundant passes)
+        uint, "",              2,  // padding to byte boundary
     ));
     
     Declaration parent;  // enclosing struct/class, null for free functions

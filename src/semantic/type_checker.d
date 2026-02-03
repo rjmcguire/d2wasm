@@ -91,6 +91,11 @@ class TypeChecker {
      * Type check function declaration
      */
     void checkFunctionDeclaration(FunctionDecl decl) {
+        // Skip if already type-checked (CTFE may have triggered early check)
+        if (decl.isTypeChecked) {
+            return;
+        }
+        
         writeln("Type checking function: ", decl.name);
         
         // Skip CTFE-only functions (functions that return string type)
@@ -172,6 +177,9 @@ class TypeChecker {
                 }
             }
         }
+        
+        // Mark as type-checked to avoid redundant passes
+        decl.isTypeChecked = true;
     }
     
     /**
