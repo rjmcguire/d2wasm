@@ -1435,12 +1435,13 @@ private class FuncContext {
     
     // Shadow stack for struct locals
     struct StructLocalInfo {
-        uint frameOffset;      // Offset from frame base (SP after prologue)
+        uint frameOffset;      // Offset from frame pointer (FP)
         StructDecl structDecl; // The struct type
     }
     StructLocalInfo[string] structLocals;
     uint frameSize = 0;        // Total size of struct locals on shadow stack
-    uint savedSpLocal;         // Local index to store saved SP (set if frameSize > 0)
+    uint savedSpLocal;         // Local index to store saved SP (for epilogue restore)
+    uint fpLocal;              // Local index for frame pointer (stable, never changes)
     
     // Struct parameters (passed as pointers)
     struct StructParamInfo {
@@ -1534,12 +1535,14 @@ private class FuncContext {
     }
     
     /**
-     * Finalize locals after collection - add saved SP local if needed
+     * Finalize locals after collection - add saved SP and FP locals if needed
      */
     void finalizeLocals() {
         if (frameSize > 0) {
-            // Need a local to save the old SP for restoration
+            // Need locals for saved SP (epilogue restore) and FP (stable frame access)
             savedSpLocal = cast(uint)localTypes.length;
+            localTypes ~= ValType.i32;
+            fpLocal = cast(uint)localTypes.length;
             localTypes ~= ValType.i32;
         }
     }
@@ -1549,6 +1552,7 @@ private class FuncContext {
      * 
      * savedSp = $sp
      * $sp = $sp - frameSize
+     * FP = $sp   (frame pointer - stable reference for locals)
      */
     void emitPrologue(ref Appender!(ubyte[]) out_) {
         if (frameSize == 0) return;
@@ -1567,6 +1571,12 @@ private class FuncContext {
         out_ ~= Op.i32_sub;
         out_ ~= Op.global_set;
         leb128u(out_, emitter.spGlobal);
+        
+        // FP = $sp (frame pointer for stable local access)
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.local_set;
+        leb128u(out_, fpLocal);
     }
     
     /**
@@ -1826,9 +1836,9 @@ private class FuncContext {
         if (!stmt.initializer) {
             // Zero-initialize the struct
             foreach (field; structDecl.fields) {
-                // Address: SP + frameOffset + fieldOffset
-                out_ ~= Op.global_get;
-                leb128u(out_, emitter.spGlobal);
+                // Address: FP + frameOffset + fieldOffset
+                out_ ~= Op.local_get;
+                leb128u(out_, fpLocal);
                 out_ ~= Op.i32_const;
                 leb128s(out_, info.frameOffset + cast(int)field.offset);
                 out_ ~= Op.i32_add;
@@ -1849,7 +1859,7 @@ private class FuncContext {
         if (auto callExpr = cast(CallExpression)stmt.initializer) {
             // Use unified struct init that handles nested structs
             emitStructFieldsInit(out_, structDecl, callExpr.arguments, 
-                                EmitAddrMode.fromSP, info.frameOffset);
+                                EmitAddrMode.fromFP, info.frameOffset);
             return;
         }
         
@@ -1861,16 +1871,16 @@ private class FuncContext {
                 for (size_t i = 0; i < structDecl.fields.length; i++) {
                     auto field = structDecl.fields[i];
                     
-                    // Destination address: SP + destOffset + fieldOffset
-                    out_ ~= Op.global_get;
-                    leb128u(out_, emitter.spGlobal);
+                    // Destination address: FP + destOffset + fieldOffset
+                    out_ ~= Op.local_get;
+                    leb128u(out_, fpLocal);
                     out_ ~= Op.i32_const;
                     leb128s(out_, info.frameOffset + cast(int)field.offset);
                     out_ ~= Op.i32_add;
                     
-                    // Source value: load from SP + srcOffset + fieldOffset
-                    out_ ~= Op.global_get;
-                    leb128u(out_, emitter.spGlobal);
+                    // Source value: load from FP + srcOffset + fieldOffset
+                    out_ ~= Op.local_get;
+                    leb128u(out_, fpLocal);
                     out_ ~= Op.i32_const;
                     leb128s(out_, srcInfo.frameOffset + cast(int)field.offset);
                     out_ ~= Op.i32_add;
@@ -2010,9 +2020,9 @@ private class FuncContext {
                 auto structDecl = info.structDecl;
                 auto field = structDecl.getField(expr.memberName);
                 if (field) {
-                    // Load i32 from shadow stack at SP + frameOffset + fieldOffset
-                    out_ ~= Op.global_get;
-                    leb128u(out_, emitter.spGlobal);
+                    // Load i32 from frame at FP + frameOffset + fieldOffset
+                    out_ ~= Op.local_get;
+                    leb128u(out_, fpLocal);
                     out_ ~= Op.i32_const;
                     leb128s(out_, info.frameOffset + cast(int)field.offset);
                     out_ ~= Op.i32_add;
@@ -2088,9 +2098,9 @@ private class FuncContext {
                 auto structDecl = info.structDecl;
                 auto field = structDecl.getField(expr.memberName);
                 if (field) {
-                    // Emit address: SP + frameOffset + fieldOffset
-                    out_ ~= Op.global_get;
-                    leb128u(out_, emitter.spGlobal);
+                    // Emit address: FP + frameOffset + fieldOffset
+                    out_ ~= Op.local_get;
+                    leb128u(out_, fpLocal);
                     out_ ~= Op.i32_const;
                     leb128s(out_, info.frameOffset + cast(int)field.offset);
                     out_ ~= Op.i32_add;
@@ -2187,9 +2197,9 @@ private class FuncContext {
         
         // Check if it's a struct local - emit address
         if (auto info = expr.name in structLocals) {
-            // Emit address: SP + frameOffset
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.spGlobal);
+            // Emit address: FP + frameOffset
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
             out_ ~= Op.i32_const;
             leb128s(out_, info.frameOffset);
             out_ ~= Op.i32_add;
@@ -2373,8 +2383,113 @@ private class FuncContext {
             }
         }
         
-        // Emit arguments
+        // Emit arguments (copy structs for pass-by-value semantics)
+        uint totalCopySize = 0;
         foreach (arg; expr.arguments) {
+            // Check if argument is a struct local that needs copying
+            if (auto argIdent = cast(IdentifierExpression)arg) {
+                if (auto localInfo = argIdent.name in structLocals) {
+                    // Struct local - copy to temp, pass temp address
+                    auto structDecl = localInfo.structDecl;
+                    uint structSize = cast(uint)structDecl.structSize;
+                    
+                    // Allocate temp: SP = SP - structSize
+                    out_ ~= Op.global_get;
+                    leb128u(out_, emitter.spGlobal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, structSize);
+                    out_ ~= Op.i32_sub;
+                    out_ ~= Op.global_set;
+                    leb128u(out_, emitter.spGlobal);
+                    
+                    // Copy from FP+offset to SP
+                    foreach (field; structDecl.fields) {
+                        // Dest: SP + fieldOffset
+                        out_ ~= Op.global_get;
+                        leb128u(out_, emitter.spGlobal);
+                        if (field.offset > 0) {
+                            out_ ~= Op.i32_const;
+                            leb128s(out_, cast(int)field.offset);
+                            out_ ~= Op.i32_add;
+                        }
+                        
+                        // Src: FP + srcOffset + fieldOffset
+                        out_ ~= Op.local_get;
+                        leb128u(out_, fpLocal);
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, localInfo.frameOffset + cast(int)field.offset);
+                        out_ ~= Op.i32_add;
+                        out_ ~= Op.i32_load;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                        
+                        // Store
+                        out_ ~= Op.i32_store;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                    }
+                    
+                    // Push SP (address of copy) as argument
+                    out_ ~= Op.global_get;
+                    leb128u(out_, emitter.spGlobal);
+                    
+                    totalCopySize += structSize;
+                    continue;
+                }
+                
+                if (auto paramInfo = argIdent.name in structParams) {
+                    // Struct param - already a pointer, copy from it
+                    auto structDecl = paramInfo.structDecl;
+                    uint structSize = cast(uint)structDecl.structSize;
+                    
+                    // Allocate temp
+                    out_ ~= Op.global_get;
+                    leb128u(out_, emitter.spGlobal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, structSize);
+                    out_ ~= Op.i32_sub;
+                    out_ ~= Op.global_set;
+                    leb128u(out_, emitter.spGlobal);
+                    
+                    // Copy from param pointer to SP
+                    foreach (field; structDecl.fields) {
+                        // Dest: SP + fieldOffset
+                        out_ ~= Op.global_get;
+                        leb128u(out_, emitter.spGlobal);
+                        if (field.offset > 0) {
+                            out_ ~= Op.i32_const;
+                            leb128s(out_, cast(int)field.offset);
+                            out_ ~= Op.i32_add;
+                        }
+                        
+                        // Src: paramPtr + fieldOffset
+                        out_ ~= Op.local_get;
+                        leb128u(out_, paramInfo.localIndex);
+                        if (field.offset > 0) {
+                            out_ ~= Op.i32_const;
+                            leb128s(out_, cast(int)field.offset);
+                            out_ ~= Op.i32_add;
+                        }
+                        out_ ~= Op.i32_load;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                        
+                        // Store
+                        out_ ~= Op.i32_store;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                    }
+                    
+                    // Push SP as argument
+                    out_ ~= Op.global_get;
+                    leb128u(out_, emitter.spGlobal);
+                    
+                    totalCopySize += structSize;
+                    continue;
+                }
+            }
+            
+            // Non-struct argument
             emitExpression(out_, arg);
         }
         
@@ -2382,6 +2497,17 @@ private class FuncContext {
         uint funcIdx = emitter.getFuncIndex(ident.name);
         out_ ~= Op.call;
         leb128u(out_, funcIdx);
+        
+        // Restore SP after call (deallocate copies)
+        if (totalCopySize > 0) {
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.spGlobal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, totalCopySize);
+            out_ ~= Op.i32_add;
+            out_ ~= Op.global_set;
+            leb128u(out_, emitter.spGlobal);
+        }
     }
     
     /**
@@ -2409,7 +2535,7 @@ private class FuncContext {
     }
     
     // How to compute the destination address for a field
-    enum EmitAddrMode { fromSP, fromSPWithFrameOffset }
+    enum EmitAddrMode { fromSP, fromFP }
     
     /**
      * Initialize struct fields at a base address.
@@ -2442,9 +2568,14 @@ private class FuncContext {
                 }
             }
             
-            // Emit destination address
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.spGlobal);
+            // Emit destination address based on mode
+            if (baseMode == EmitAddrMode.fromFP) {
+                out_ ~= Op.local_get;
+                leb128u(out_, fpLocal);
+            } else {
+                out_ ~= Op.global_get;
+                leb128u(out_, emitter.spGlobal);
+            }
             if (fieldAddr != 0) {
                 out_ ~= Op.i32_const;
                 leb128s(out_, fieldAddr);
@@ -2501,9 +2632,9 @@ private class FuncContext {
                                           member.memberName, structDecl.name));
             }
             
-            // Calculate address: SP + frameOffset + fieldOffset
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.spGlobal);
+            // Calculate address: FP + frameOffset + fieldOffset
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
             out_ ~= Op.i32_const;
             leb128s(out_, info.frameOffset + cast(int)field.offset);
             out_ ~= Op.i32_add;
@@ -2518,8 +2649,8 @@ private class FuncContext {
             
             // Assignment is an expression - need to leave value on stack
             // Re-load the value we just stored
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.spGlobal);
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
             out_ ~= Op.i32_const;
             leb128s(out_, info.frameOffset + cast(int)field.offset);
             out_ ~= Op.i32_add;
