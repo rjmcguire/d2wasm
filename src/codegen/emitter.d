@@ -2155,6 +2155,22 @@ private class FuncContext {
     }
     
     void emitIndex(ref Appender!(ubyte[]) out_, IndexExpression expr) {
+        // Check if this uses the intrinsic opIndex path
+        if (expr.usesOpIndex && expr.opIndexMethod && expr.opIndexMethod.isIntrinsic) {
+            emitIntrinsicOpIndex(out_, expr);
+            return;
+        }
+        
+        // Non-intrinsic opIndex would emit a method call here
+        // (not yet implemented - would call user-defined opIndex)
+        
+        throw new EmitError("Non-intrinsic indexing not yet supported");
+    }
+    
+    /**
+     * Emit intrinsic opIndex for arrays - direct memory access
+     */
+    void emitIntrinsicOpIndex(ref Appender!(ubyte[]) out_, IndexExpression expr) {
         // Get the array identifier
         auto arrayIdent = cast(IdentifierExpression)expr.array;
         if (!arrayIdent) {
