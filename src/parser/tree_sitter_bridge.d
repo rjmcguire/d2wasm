@@ -1432,6 +1432,8 @@ class TreeSitterBridge {
                 return parseMemberExpression(node, loc);
             case "identifier":
                 return new IdentifierExpression(loc, TreeSitterParser.getNodeText(node, sourceText));
+            case "this":
+                return new IdentifierExpression(loc, "this");
             case "int_literal":
                 return LiteralExpression.integer(loc, to!long(TreeSitterParser.getNodeText(node, sourceText)));
             case "float_literal":

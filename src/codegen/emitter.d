@@ -1513,14 +1513,32 @@ private class FuncContext {
     // Block depth for br instructions
     uint blockDepth = 0;
     
+    // Method info: non-null structParent means we're in a method with hidden 'this'
+    uint thisLocalIndex;  // Local index of hidden 'this' parameter (for methods)
+    
     this(FuncInfo f, BinaryEmitter e) {
         this.func = f;
         this.emitter = e;
         
-        // Parameters are the first locals
+        uint localOffset = 0;
+        
+        // For methods, add hidden 'this' pointer as first parameter
+        if (f.structParent !is null) {
+            localTypes ~= ValType.i32;  // 'this' is a pointer (i32)
+            thisLocalIndex = 0;
+            localOffset = 1;
+            
+            // Register 'this' as a struct param so this.x works
+            StructParamInfo info;
+            info.localIndex = 0;
+            info.structDecl = f.structParent;
+            structParams["this"] = info;
+        }
+        
+        // Parameters are the next locals
         foreach (i, p; f.decl.parameters) {
             auto vt = e.dTypeToValType(p.type);
-            localIndex[p.name] = cast(uint)i;
+            localIndex[p.name] = cast(uint)(i + localOffset);
             localTypes ~= vt;
             
             // Track struct parameters
@@ -1534,13 +1552,13 @@ private class FuncContext {
                 }
                 if (auto structDecl = cast(StructDecl)userType.declaration) {
                     StructParamInfo info;
-                    info.localIndex = cast(uint)i;
+                    info.localIndex = cast(uint)(i + localOffset);
                     info.structDecl = structDecl;
                     structParams[p.name] = info;
                 }
             }
         }
-        paramCount = cast(uint)f.decl.parameters.length;
+        paramCount = cast(uint)(f.decl.parameters.length + localOffset);
     }
     
     /**

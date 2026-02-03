@@ -1,0 +1,6 @@
+{
+  "name": "struct_method_this_explicit",
+  "description": "Method accesses field via explicit this.x",
+  "type": "wasm_exec",
+  "entry": "main"
+}

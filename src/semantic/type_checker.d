@@ -55,6 +55,7 @@ struct TypeCompatibility {
 class TypeChecker {
     private SymbolTable symbolTable;
     private Type currentFunctionReturnType;
+    private StructDecl currentStructDecl;  // Non-null when inside a method
     
     this(SymbolTable symbolTable) {
         this.symbolTable = symbolTable;
@@ -110,6 +111,13 @@ class TypeChecker {
         Type oldReturnType = currentFunctionReturnType;
         currentFunctionReturnType = decl.returnType;
         scope(exit) currentFunctionReturnType = oldReturnType;
+        
+        // Set current struct if this is a method
+        StructDecl oldStructDecl = currentStructDecl;
+        if (decl.isMethod) {
+            currentStructDecl = cast(StructDecl)decl.parent;
+        }
+        scope(exit) currentStructDecl = oldStructDecl;
         
         // Add parameters to scope
         writeln("Checking parameters for ", decl.name);
@@ -489,6 +497,17 @@ class TypeChecker {
      * Type check identifier expression
      */
     Type checkIdentifierExpression(IdentifierExpression expr) {
+        // Handle 'this' keyword inside methods
+        if (expr.name == "this") {
+            if (!currentStructDecl) {
+                throw new TypeError("'this' can only be used inside a method", expr.location);
+            }
+            // 'this' has the type of the enclosing struct
+            auto thisType = new UserType(expr.location, currentStructDecl.name);
+            thisType.declaration = currentStructDecl;
+            return thisType;
+        }
+        
         Symbol symbol = symbolTable.lookupSymbol(expr.name);
         if (!symbol) {
             throw new TypeError(
