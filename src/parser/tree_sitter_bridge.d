@@ -1445,6 +1445,13 @@ class TreeSitterBridge {
                 return parseCallExpression(node, loc);
             case "index_expression":
                 return parseIndexExpression(node, loc);
+            case "index":
+                // "index" is the index value within an index_expression, not a full expression
+                // Just parse its child
+                if (TreeSitterParser.getChildCount(node) > 0) {
+                    return parseExpression(TreeSitterParser.getChild(node, 0));
+                }
+                throw new ParseError("Empty index node", loc);
             case "member_expression":
                 return parseMemberExpression(node, loc);
             case "identifier":
@@ -1733,12 +1740,15 @@ class TreeSitterBridge {
      * Parse index expression (placeholder implementation)
      */
     IndexExpression parseIndexExpression(TSNode node, SourceLocation loc) {
-        TSNode arrayNode = TreeSitterParser.getChildByFieldName(node, "array");
-        TSNode indexNode = TreeSitterParser.getChildByFieldName(node, "index");
+        // Structure: array '[' index ']' (4 children)
+        uint childCount = TreeSitterParser.getChildCount(node);
         
-        if (!TreeSitterParser.isValid(arrayNode) || !TreeSitterParser.isValid(indexNode)) {
-            throw new ParseError("Index expression missing array or index", loc);
+        if (childCount < 4) {
+            throw new ParseError("Index expression has wrong structure", loc);
         }
+        
+        TSNode arrayNode = TreeSitterParser.getChild(node, 0);
+        TSNode indexNode = TreeSitterParser.getChild(node, 2);  // child 1 is '[', child 2 is index
         
         Expression array = parseExpression(arrayNode);
         Expression index = parseExpression(indexNode);

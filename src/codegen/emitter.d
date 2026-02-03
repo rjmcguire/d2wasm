@@ -2147,9 +2147,48 @@ private class FuncContext {
             emitMember(out_, member);
         } else if (auto castExpr = cast(CastExpression)expr) {
             emitCast(out_, castExpr);
+        } else if (auto indexExpr = cast(IndexExpression)expr) {
+            emitIndex(out_, indexExpr);
         } else {
             throw new EmitError("Unsupported expression type", expr.toString());
         }
+    }
+    
+    void emitIndex(ref Appender!(ubyte[]) out_, IndexExpression expr) {
+        // Get the array identifier
+        auto arrayIdent = cast(IdentifierExpression)expr.array;
+        if (!arrayIdent) {
+            throw new EmitError("Complex array indexing not yet supported");
+        }
+        
+        // Check if it's a slice local
+        if (auto info = arrayIdent.name in sliceLocals) {
+            // Load ptr from slice struct (offset 0)
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset);  // ptr is at offset 0
+            out_ ~= Op.i32_add;
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            
+            // Calculate address: ptr + index * elemSize
+            // For now assume i32 elements (4 bytes)
+            emitExpression(out_, expr.index);
+            out_ ~= Op.i32_const;
+            leb128s(out_, 4);  // sizeof(int) = 4
+            out_ ~= Op.i32_mul;
+            out_ ~= Op.i32_add;
+            
+            // Load the element
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            return;
+        }
+        
+        throw new EmitError("Unsupported array indexing on " ~ arrayIdent.name);
     }
     
     void emitCast(ref Appender!(ubyte[]) out_, CastExpression expr) {

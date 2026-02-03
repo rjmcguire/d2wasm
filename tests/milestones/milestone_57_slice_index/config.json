@@ -1,0 +1,6 @@
+{
+  "name": "slice_index",
+  "description": "Slice indexing with arr[i]",
+  "type": "wasm_exec",
+  "entry": "main"
+}

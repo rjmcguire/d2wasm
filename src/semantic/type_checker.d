@@ -860,7 +860,25 @@ class TypeChecker {
     }
     
     Type checkIndexExpression(IndexExpression expr) {
-        throw new TypeError("Index expressions not yet implemented", expr.location);
+        Type arrayType = checkExpression(expr.array);
+        Type indexType = checkExpression(expr.index);
+        
+        // Check that index is an integer type
+        auto basicIndexType = cast(BasicType)indexType;
+        if (!basicIndexType || !isIntegerType(basicIndexType)) {
+            throw new TypeError(
+                format("Array index must be integer type, got '%s'", indexType.toString()),
+                expr.index.location);
+        }
+        
+        // Get element type from array
+        if (auto arrType = cast(ArrayType)arrayType) {
+            return arrType.elementType;
+        }
+        
+        throw new TypeError(
+            format("Cannot index non-array type '%s'", arrayType.toString()),
+            expr.location);
     }
     
     Type checkMemberExpression(MemberExpression expr) {
@@ -916,12 +934,14 @@ class TypeChecker {
             }
         }
         
-        // Handle array/string .length and .ptr
+        // Handle array/slice .length, .ptr, .capacity
         if (auto arrayType = cast(ArrayType)objectType) {
             if (expr.memberName == "length") {
                 return new BasicType(expr.location, BasicType.Kind.Int32);
             } else if (expr.memberName == "ptr") {
                 return new PointerType(expr.location, arrayType.elementType);
+            } else if (expr.memberName == "capacity") {
+                return new BasicType(expr.location, BasicType.Kind.Int32);
             }
         }
         
