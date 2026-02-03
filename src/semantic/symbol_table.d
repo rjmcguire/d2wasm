@@ -38,6 +38,7 @@ class Symbol {
     bool isGlobal;
     bool isConstant;  // True for manifest constants (enum X = ...)
     bool isCTFEOnly;  // True for compile-time-only functions (__writeln, __traits, etc.)
+    bool isVariadic;  // True for variadic functions (__writeln, etc.)
     
     this(string name, SymbolKind kind, Type type, Declaration decl, SourceLocation location, bool isGlobal = false) {
         this.name = name;
@@ -254,10 +255,18 @@ class SymbolTable {
         addBuiltinType("char", BasicType.Kind.Char, loc);
         
         // Builtin functions
-        addBuiltinFunction("writeln", loc);
+        addBuiltinFunction("writeln", loc, false, true);  // Runtime, variadic
         
         // CTFE-only builtins (only available at compile time)
-        addBuiltinFunction("__writeln", loc, true);  // CTFE output during compilation
+        addBuiltinFunction("__writeln", loc, true, true);  // CTFE-only, variadic
+        
+        // __ctfe_print_i32: void(int) - single i32 parameter
+        auto i32Type = new BasicType(loc, BasicType.Kind.Int32);
+        auto voidType = new BasicType(loc, BasicType.Kind.Void);
+        auto printI32Type = new FunctionType(loc, voidType, [i32Type]);
+        auto printI32Symbol = new Symbol("__ctfe_print_i32", SymbolKind.Function, printI32Type, null, loc, true);
+        printI32Symbol.isCTFEOnly = true;
+        globalScope.addSymbol(printI32Symbol);
         
         // Register built-in methods for array/slice types
         registerArrayBuiltinMethods(loc);
@@ -301,7 +310,7 @@ class SymbolTable {
     /**
      * Helper to add built-in function
      */
-    private void addBuiltinFunction(string name, SourceLocation loc, bool isCTFEOnly = false) {
+    private void addBuiltinFunction(string name, SourceLocation loc, bool isCTFEOnly = false, bool isVariadic = false) {
         // Create a function type for writeln - it's variadic but we'll simplify it
         // Parameters: variadic (accepts any number of arguments)
         // Return type: void
@@ -313,6 +322,7 @@ class SymbolTable {
         auto funcType = new FunctionType(loc, returnType, paramTypes);
         auto symbol = new Symbol(name, SymbolKind.Function, funcType, null, loc, true);
         symbol.isCTFEOnly = isCTFEOnly;
+        symbol.isVariadic = isVariadic;
         globalScope.addSymbol(symbol);
     }
     

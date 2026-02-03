@@ -116,6 +116,21 @@ struct CTFEValue {
     }
 }
 
+//==============================================================================
+// CTFE Host Functions
+// These are called from WASM via imports from the "ctfe" module
+//==============================================================================
+
+/**
+ * Host implementation of __ctfe_print_i32
+ * Prints a single i32 value during compile time.
+ */
+extern(C) const(void)* hostPrintI32(IM3Runtime runtime, IM3ImportContext ctx, uint* stack, void* mem) {
+    int value = cast(int)(*stack);
+    writeln("CTFE: ", value);
+    return null;  // No error
+}
+
 /**
  * CTFE Runtime Error
  */
@@ -174,7 +189,25 @@ class CTFERuntime {
             throw new CTFERuntimeError("Failed to load WASM: " ~ fromStringz(result).idup);
         }
         
+        // Link CTFE host functions
+        linkCTFEHostFunctions();
+        
         initialized = true;
+    }
+    
+    /**
+     * Link host functions for CTFE intrinsics.
+     * These are called from WASM via imports from the "ctfe" module.
+     */
+    private void linkCTFEHostFunctions() {
+        // Link __ctfe_print_i32 - simple single-value print for testing
+        auto result = m3_LinkRawFunction(mod, "ctfe".ptr, "__ctfe_print_i32".ptr, "v(i)".ptr, &hostPrintI32);
+        // Ignore "function not found" - the module may not use this import
+        if (result !is null && result != m3Err_functionLookupFailed) {
+            throw new CTFERuntimeError("Failed to link __ctfe_print_i32: " ~ fromStringz(result).idup);
+        }
+        
+        // Future: link __writeln and other CTFE intrinsics here
     }
     
     /**

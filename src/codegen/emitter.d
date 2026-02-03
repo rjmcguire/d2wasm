@@ -165,6 +165,7 @@ class BinaryEmitter {
         
         // Whether we need array support (allocator, etc.)
         bool needsArraySupport = false;
+        bool[string] neededCTFEImports;  // CTFE-only functions that need to be imported
     }
     
     this(SymbolTable symbolTable) {
@@ -193,6 +194,9 @@ class BinaryEmitter {
             
             // Always add shadow stack for struct locals
             addShadowStackGlobal();
+            
+            // Add imports for CTFE-only functions that are called
+            addCTFEImports();
             
             phase = EmitPhase.init;
             emitHeader();
@@ -574,9 +578,14 @@ class BinaryEmitter {
     }
     
     private void collectFunction(FunctionDecl decl) {
-        // Skip CTFE-only functions (those containing CTFE intrinsics like __writeln)
+        // Skip CTFE-only functions that use:
+        // - variadic intrinsics (like __writeln) - until we implement variadic args struct
+        // - __ctfe_runtime module - until we implement host linking for it
+        // Non-variadic CTFE calls (like __ctfe_print_i32) become imports.
         if (isCtfeOnlyFunction(decl)) {
-            return;
+            if (usesVariadicCTFE(decl) || usesCTFERuntime(decl.body_)) {
+                return;
+            }
         }
         
         // Skip functions that return non-basic types (e.g., string-returning CTFE functions)
@@ -670,6 +679,33 @@ class BinaryEmitter {
         } else if (auto forStmt = cast(ForStatement)stmt) {
             if (forStmt.init) scanStatementForSliceTypes(forStmt.init);
             if (forStmt.body_) scanStatementForSliceTypes(forStmt.body_);
+        } else if (auto exprStmt = cast(ExpressionStatement)stmt) {
+            scanExpressionForCTFECalls(exprStmt.expression);
+        } else if (auto returnStmt = cast(ReturnStatement)stmt) {
+            if (returnStmt.value) scanExpressionForCTFECalls(returnStmt.value);
+        }
+    }
+    
+    /**
+     * Scan an expression for calls to CTFE-only functions
+     */
+    private void scanExpressionForCTFECalls(Expression expr) {
+        if (auto call = cast(CallExpression)expr) {
+            if (auto ident = cast(IdentifierExpression)call.function_) {
+                auto symbol = symbolTable.lookupSymbol(ident.name);
+                if (symbol && symbol.isCTFEOnly) {
+                    neededCTFEImports[ident.name] = true;
+                }
+            }
+            // Also scan arguments
+            foreach (arg; call.arguments) {
+                scanExpressionForCTFECalls(arg);
+            }
+        } else if (auto binary = cast(BinaryExpression)expr) {
+            scanExpressionForCTFECalls(binary.left);
+            scanExpressionForCTFECalls(binary.right);
+        } else if (auto unary = cast(UnaryExpression)expr) {
+            scanExpressionForCTFECalls(unary.operand);
         }
     }
     
@@ -682,6 +718,43 @@ class BinaryEmitter {
         // Functions using __ctfe_runtime are CTFE-only
         if (usesCTFERuntime(decl.body_)) return true;
         return containsOnlyCtfeIntrinsics(decl.body_);
+    }
+    
+    /**
+     * Check if a function uses variadic CTFE functions (like __writeln)
+     * These require special handling and are still interpreted for now.
+     */
+    private bool usesVariadicCTFE(FunctionDecl decl) {
+        if (!decl.body_) return false;
+        return statementUsesVariadicCTFE(decl.body_);
+    }
+    
+    private bool statementUsesVariadicCTFE(Statement stmt) {
+        if (auto compound = cast(CompoundStatement)stmt) {
+            foreach (s; compound.statements) {
+                if (statementUsesVariadicCTFE(s)) return true;
+            }
+            return false;
+        }
+        if (auto exprStmt = cast(ExpressionStatement)stmt) {
+            return expressionUsesVariadicCTFE(exprStmt.expression);
+        }
+        if (auto returnStmt = cast(ReturnStatement)stmt) {
+            if (returnStmt.value) return expressionUsesVariadicCTFE(returnStmt.value);
+        }
+        return false;
+    }
+    
+    private bool expressionUsesVariadicCTFE(Expression expr) {
+        if (auto call = cast(CallExpression)expr) {
+            if (auto ident = cast(IdentifierExpression)call.function_) {
+                auto symbol = symbolTable.lookupSymbol(ident.name);
+                if (symbol && symbol.isCTFEOnly && symbol.isVariadic) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
     
     /**
@@ -909,6 +982,48 @@ class BinaryEmitter {
         sp.initValue = 65536;  // Top of first memory page (stack grows down)
         sp.name = "__sp";
         globals ~= sp;
+    }
+    
+    /**
+     * Add imports for CTFE-only functions.
+     * These are imported from the "ctfe" module and linked by the CTFE runtime.
+     */
+    private void addCTFEImports() {
+        foreach (name; neededCTFEImports.byKey()) {
+            // Look up the builtin to get its signature
+            auto symbol = symbolTable.lookupSymbol(name);
+            if (!symbol) continue;
+            
+            // Build signature based on the function
+            FuncSig sig;
+            if (name == "__ctfe_print_i32") {
+                sig.params = [ValType.i32];
+                // void return
+            } else if (name == "__writeln") {
+                // Variadic - will be handled differently later
+                // For now skip
+                continue;
+            }
+            
+            // Get or create type index
+            uint tIdx;
+            if (auto existing = sig in typeIndex) {
+                tIdx = *existing;
+            } else {
+                tIdx = cast(uint)types.length;
+                types ~= sig;
+                typeIndex[sig] = tIdx;
+            }
+            
+            // Add as import from "ctfe" module
+            ImportInfo info;
+            info.moduleName = "ctfe";
+            info.fieldName = name;
+            info.typeIndex = tIdx;
+            
+            importIndex[name] = cast(uint)imports.length;
+            imports ~= info;
+        }
     }
     
     //==========================================================================

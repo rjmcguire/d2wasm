@@ -1,0 +1,6 @@
+{
+  "name": "ctfe_host_print",
+  "description": "CTFE calls host function __ctfe_print_i32 via WASM import",
+  "type": "compile_output",
+  "expected_output": "CTFE: 42"
+}
