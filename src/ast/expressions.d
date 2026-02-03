@@ -180,6 +180,10 @@ class IndexExpression : Expression {
     Expression array;
     Expression index;
     
+    // Set by type checker when indexing goes through opIndex
+    bool usesOpIndex = false;
+    FunctionDecl opIndexMethod;
+    
     this(SourceLocation loc, Expression array, Expression index) {
         super(loc);
         this.array = array;

@@ -912,8 +912,15 @@ class TypeChecker {
                 expr.index.location);
         }
         
-        // Get element type from array
+        // For array types, indexing goes through opIndex (built-in intrinsic)
         if (auto arrType = cast(ArrayType)arrayType) {
+            // Look up the built-in opIndex method
+            auto opIndex = symbolTable.lookupBuiltinMethod("array", "opIndex");
+            if (opIndex) {
+                // Mark this expression as using opIndex for the emitter
+                expr.usesOpIndex = true;
+                expr.opIndexMethod = opIndex;
+            }
             return arrType.elementType;
         }
         
