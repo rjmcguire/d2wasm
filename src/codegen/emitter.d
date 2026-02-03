@@ -2284,6 +2284,28 @@ private class FuncContext {
             return;
         }
         
+        // In a method, check if it's an implicit field access (field without 'this.')
+        if (func.structParent !is null) {
+            auto field = func.structParent.getField(expr.name);
+            if (field) {
+                // Implicit this.fieldName - load from this pointer + field offset
+                // 'this' is at local index thisLocalIndex (registered in structParams as "this")
+                if (auto thisInfo = "this" in structParams) {
+                    out_ ~= Op.local_get;
+                    leb128u(out_, thisInfo.localIndex);
+                    if (field.offset > 0) {
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, cast(int)field.offset);
+                        out_ ~= Op.i32_add;
+                    }
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;  // alignment log2(4)
+                    leb128u(out_, 0);          // offset
+                    return;
+                }
+            }
+        }
+        
         // Check if it's a manifest constant (CTFE-evaluated)
         auto symbol = emitter.symbolTable.lookupSymbol(expr.name);
         if (symbol && symbol.isConstant) {

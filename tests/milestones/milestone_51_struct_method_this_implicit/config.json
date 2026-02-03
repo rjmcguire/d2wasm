@@ -1,0 +1,6 @@
+{
+  "name": "struct_method_this_implicit",
+  "description": "Method accesses field via implicit this (just 'x' not 'this.x')",
+  "type": "wasm_exec",
+  "entry": "main"
+}

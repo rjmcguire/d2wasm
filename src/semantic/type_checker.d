@@ -510,6 +510,13 @@ class TypeChecker {
         
         Symbol symbol = symbolTable.lookupSymbol(expr.name);
         if (!symbol) {
+            // Inside a method, check if it's a field of the current struct (implicit this)
+            if (currentStructDecl) {
+                auto field = currentStructDecl.getField(expr.name);
+                if (field) {
+                    return field.type;
+                }
+            }
             throw new TypeError(
                 format("Undefined identifier '%s'", expr.name),
                 expr.location
