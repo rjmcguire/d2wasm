@@ -37,6 +37,7 @@ class Symbol {
     SourceLocation location;
     bool isGlobal;
     bool isConstant;  // True for manifest constants (enum X = ...)
+    bool isCTFEOnly;  // True for compile-time-only functions (__writeln, __traits, etc.)
     
     this(string name, SymbolKind kind, Type type, Declaration decl, SourceLocation location, bool isGlobal = false) {
         this.name = name;
@@ -255,8 +256,8 @@ class SymbolTable {
         // Builtin functions
         addBuiltinFunction("writeln", loc);
         
-        // CTFE-specific builtins
-        addBuiltinFunction("__writeln", loc);  // CTFE output during compilation
+        // CTFE-only builtins (only available at compile time)
+        addBuiltinFunction("__writeln", loc, true);  // CTFE output during compilation
         
         // Register built-in methods for array/slice types
         registerArrayBuiltinMethods(loc);
@@ -300,7 +301,7 @@ class SymbolTable {
     /**
      * Helper to add built-in function
      */
-    private void addBuiltinFunction(string name, SourceLocation loc) {
+    private void addBuiltinFunction(string name, SourceLocation loc, bool isCTFEOnly = false) {
         // Create a function type for writeln - it's variadic but we'll simplify it
         // Parameters: variadic (accepts any number of arguments)
         // Return type: void
@@ -311,6 +312,7 @@ class SymbolTable {
         Type[] paramTypes = []; // Empty parameter list - writeln is variadic
         auto funcType = new FunctionType(loc, returnType, paramTypes);
         auto symbol = new Symbol(name, SymbolKind.Function, funcType, null, loc, true);
+        symbol.isCTFEOnly = isCTFEOnly;
         globalScope.addSymbol(symbol);
     }
     

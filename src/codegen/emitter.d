@@ -756,8 +756,9 @@ class BinaryEmitter {
         if (auto exprStmt = cast(ExpressionStatement)stmt) {
             if (auto call = cast(CallExpression)exprStmt.expression) {
                 if (auto ident = cast(IdentifierExpression)call.function_) {
-                    // __writeln is a CTFE-only intrinsic
-                    if (ident.name == "__writeln") return true;
+                    // Check if calling a CTFE-only function
+                    auto symbol = symbolTable.lookupSymbol(ident.name);
+                    if (symbol && symbol.isCTFEOnly) return true;
                 }
             }
             return false;  // Other expressions need WASM
