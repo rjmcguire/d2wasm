@@ -749,6 +749,15 @@ class TypeChecker {
         
         // Handle struct field access
         if (auto userType = cast(UserType)objectType) {
+            // Special handling for string type (.length, .ptr)
+            if (userType.name == "string") {
+                if (expr.memberName == "length") {
+                    return new BasicType(expr.location, BasicType.Kind.UInt64);
+                } else if (expr.memberName == "ptr") {
+                    return new PointerType(expr.location, new BasicType(expr.location, BasicType.Kind.Char));
+                }
+            }
+            
             // Resolve the UserType's declaration if not already linked
             if (!userType.declaration) {
                 auto typeSymbol = symbolTable.lookupSymbol(userType.name);

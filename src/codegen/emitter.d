@@ -1911,9 +1911,17 @@ private class FuncContext {
             emitAssignment(out_, assign);
         } else if (auto member = cast(MemberExpression)expr) {
             emitMember(out_, member);
+        } else if (auto castExpr = cast(CastExpression)expr) {
+            emitCast(out_, castExpr);
         } else {
             throw new EmitError("Unsupported expression type", expr.toString());
         }
+    }
+    
+    void emitCast(ref Appender!(ubyte[]) out_, CastExpression expr) {
+        // Emit the expression being cast
+        emitExpression(out_, expr.expression);
+        // For now, most casts are no-ops at WASM level (everything is i32)
     }
     
     void emitMember(ref Appender!(ubyte[]) out_, MemberExpression expr) {
@@ -1933,6 +1941,39 @@ private class FuncContext {
                     out_ ~= Op.i32_const;
                     leb128s(out_, cast(int)align_);
                     return;
+                }
+            }
+            
+            // Check if it's a string constant (MSG.length, MSG.ptr)
+            if (symbol && symbol.kind == SymbolKind.Variable) {
+                if (auto varDecl = cast(VariableDecl)symbol.declaration) {
+                    if (auto userType = cast(UserType)varDecl.type) {
+                        if (userType.name == "string" && varDecl.initializer) {
+                            if (auto lit = cast(LiteralExpression)varDecl.initializer) {
+                                if (lit.value.type == typeid(string)) {
+                                    string strValue = lit.value.get!string();
+                                    uint structAddr = emitter.registerArrayLiteral(strValue);
+                                    
+                                    if (expr.memberName == "length") {
+                                        // Length is at offset 4 in Array struct
+                                        out_ ~= Op.i32_const;
+                                        leb128s(out_, structAddr + 4);
+                                        out_ ~= Op.i32_load;
+                                        out_ ~= cast(ubyte)0x02;
+                                        leb128u(out_, 0);
+                                        return;
+                                    } else if (expr.memberName == "ptr") {
+                                        out_ ~= Op.i32_const;
+                                        leb128s(out_, structAddr);
+                                        out_ ~= Op.i32_load;
+                                        out_ ~= cast(ubyte)0x02;
+                                        leb128u(out_, 0);
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             
@@ -2482,6 +2523,46 @@ private class FuncContext {
             out_ ~= Op.i32_const;
             leb128s(out_, info.frameOffset + cast(int)field.offset);
             out_ ~= Op.i32_add;
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            return;
+        }
+        
+        // Check if it's a struct parameter
+        if (auto info = objIdent.name in structParams) {
+            auto structDecl = info.structDecl;
+            auto field = structDecl.getField(member.memberName);
+            if (!field) {
+                throw new EmitError(format("Unknown field '%s' in struct '%s'",
+                                          member.memberName, structDecl.name));
+            }
+            
+            // Calculate address: local[paramIdx] + fieldOffset
+            out_ ~= Op.local_get;
+            leb128u(out_, info.localIndex);
+            if (field.offset > 0) {
+                out_ ~= Op.i32_const;
+                leb128s(out_, cast(int)field.offset);
+                out_ ~= Op.i32_add;
+            }
+            
+            // Emit value
+            emitExpression(out_, value);
+            
+            // Store
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            
+            // Re-load for expression value
+            out_ ~= Op.local_get;
+            leb128u(out_, info.localIndex);
+            if (field.offset > 0) {
+                out_ ~= Op.i32_const;
+                leb128s(out_, cast(int)field.offset);
+                out_ ~= Op.i32_add;
+            }
             out_ ~= Op.i32_load;
             out_ ~= cast(ubyte)0x02;
             leb128u(out_, 0);

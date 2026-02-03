@@ -1735,14 +1735,42 @@ class TreeSitterBridge {
     }
     
     /**
-     * Parse cast expression (placeholder implementation)
+     * Parse cast expression: cast(Type)expression
      */
     CastExpression parseCastExpression(TSNode node, SourceLocation loc) {
+        uint childCount = TreeSitterParser.getChildCount(node);
+        
+        // Try field-based access first
         TSNode typeNode = TreeSitterParser.getChildByFieldName(node, "type");
         TSNode exprNode = TreeSitterParser.getChildByFieldName(node, "expression");
         
         if (!TreeSitterParser.isValid(typeNode) || !TreeSitterParser.isValid(exprNode)) {
-            throw new ParseError("Cast expression missing type or expression", loc);
+            // Fall back to positional: cast ( type ) expression
+            // Typically: child 0 = "cast", child 1 = "(", child 2 = type, child 3 = ")", child 4 = expression
+            Type targetType;
+            Expression expression;
+            
+            for (uint i = 0; i < childCount; i++) {
+                TSNode child = TreeSitterParser.getChild(node, i);
+                string childType = TreeSitterParser.getNodeType(child);
+                
+                if (childType == "type" || childType == "primitive_type" || childType == "identifier") {
+                    if (targetType is null) {
+                        targetType = parseType(child);
+                    }
+                } else if (childType != "cast" && childType != "(" && childType != ")") {
+                    // Likely the expression
+                    if (expression is null && targetType !is null) {
+                        expression = parseExpression(child);
+                    }
+                }
+            }
+            
+            if (targetType is null || expression is null) {
+                throw new ParseError("Cast expression missing type or expression", loc);
+            }
+            
+            return new CastExpression(loc, targetType, expression);
         }
         
         Type targetType = parseType(typeNode);
