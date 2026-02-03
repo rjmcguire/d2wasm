@@ -1,0 +1,6 @@
+{
+  "name": "slice_param",
+  "description": "Pass slice as function parameter",
+  "type": "wasm_exec",
+  "entry": "main"
+}

@@ -1,0 +1,6 @@
+{
+  "name": "slice_mutate_param",
+  "description": "Mutate slice element via function parameter",
+  "type": "wasm_exec",
+  "entry": "main"
+}

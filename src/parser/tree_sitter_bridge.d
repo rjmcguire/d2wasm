@@ -1233,14 +1233,34 @@ class TreeSitterBridge {
      * Parse while statement
      */
     WhileStatement parseWhileStatement(TSNode node, SourceLocation loc) {
-        TSNode conditionNode = TreeSitterParser.getChildByFieldName(node, "condition");
+        // tree-sitter-d uses different field names
+        // while_statement children: "while", if_condition, scope_statement (field: body)
+        TSNode conditionNode;
         TSNode bodyNode = TreeSitterParser.getChildByFieldName(node, "body");
+        
+        // Find the condition node by type (if_condition)
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            if (childType == "if_condition") {
+                conditionNode = child;
+                break;
+            }
+        }
         
         if (!TreeSitterParser.isValid(conditionNode) || !TreeSitterParser.isValid(bodyNode)) {
             throw new ParseError("While statement missing condition or body", loc);
         }
         
-        Expression condition = parseExpression(conditionNode);
+        // The if_condition wraps the actual expression, need to get the inner expression
+        TSNode innerExpr = TreeSitterParser.getChild(conditionNode, 1);  // Skip "("
+        if (!TreeSitterParser.isValid(innerExpr)) {
+            // Try direct child if structure is different
+            innerExpr = conditionNode;
+        }
+        
+        Expression condition = parseExpression(innerExpr);
         Statement body_ = parseStatement(bodyNode);
         
         return new WhileStatement(loc, condition, body_);

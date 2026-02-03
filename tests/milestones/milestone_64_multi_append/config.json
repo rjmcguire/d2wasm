@@ -1,0 +1,6 @@
+{
+  "name": "multi_append",
+  "description": "Multiple appends trigger reallocation cascade",
+  "type": "wasm_exec",
+  "entry": "main"
+}

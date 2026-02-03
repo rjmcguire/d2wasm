@@ -1,4 +1,6 @@
 {
+  "name": "slice_slice",
   "description": "Slice slicing arr[start..end] creates a view",
-  "expected_result": 23
+  "type": "wasm_exec",
+  "entry": "main"
 }

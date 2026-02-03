@@ -1,4 +1,6 @@
 {
+  "name": "slice_append",
   "description": "Slice append operator ~=",
-  "expected_result": 42
+  "type": "wasm_exec",
+  "entry": "main"
 }

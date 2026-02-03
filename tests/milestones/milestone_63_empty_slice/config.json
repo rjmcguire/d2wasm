@@ -1,0 +1,6 @@
+{
+  "name": "empty_slice",
+  "description": "Empty/uninitialized slice has length 0",
+  "type": "wasm_exec",
+  "entry": "main"
+}

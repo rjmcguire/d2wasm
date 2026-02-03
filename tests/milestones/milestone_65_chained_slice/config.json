@@ -1,0 +1,6 @@
+{
+  "name": "chained_slice",
+  "description": "Slice of a slice (chained slicing)",
+  "type": "wasm_exec",
+  "entry": "main"
+}

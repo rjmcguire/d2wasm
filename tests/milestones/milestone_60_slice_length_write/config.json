@@ -1,4 +1,6 @@
 {
+  "name": "slice_length_write",
   "description": "Writable slice .length to grow/shrink array",
-  "expected_result": 5
+  "type": "wasm_exec",
+  "entry": "main"
 }

@@ -1558,6 +1558,13 @@ private class FuncContext {
     }
     StructParamInfo[string] structParams;
     
+    // Slice parameters (passed as pointers to slice struct)
+    struct SliceParamInfo {
+        uint localIndex;       // WASM local index holding the pointer to slice struct
+        Type elementType;      // Element type of the slice
+    }
+    SliceParamInfo[string] sliceParams;
+    
     // Block depth for br instructions
     uint blockDepth = 0;
     
@@ -1603,6 +1610,16 @@ private class FuncContext {
                     info.localIndex = cast(uint)(i + localOffset);
                     info.structDecl = structDecl;
                     structParams[p.name] = info;
+                }
+            }
+            
+            // Track slice/array parameters
+            if (auto arrayType = cast(ArrayType)p.type) {
+                if (arrayType.arraySize is null) {  // Dynamic array (slice)
+                    SliceParamInfo info;
+                    info.localIndex = cast(uint)(i + localOffset);
+                    info.elementType = arrayType.elementType;
+                    sliceParams[p.name] = info;
                 }
             }
         }
@@ -2319,6 +2336,31 @@ private class FuncContext {
             return;
         }
         
+        // Check if it's a slice parameter
+        if (auto info = arrayIdent.name in sliceParams) {
+            // The parameter contains a pointer to the slice struct
+            // Load ptr from slice struct (offset 0)
+            out_ ~= Op.local_get;
+            leb128u(out_, info.localIndex);
+            out_ ~= Op.i32_load;  // Load ptr field (at offset 0 of slice struct)
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            
+            // Calculate address: ptr + index * elemSize
+            // For now assume i32 elements (4 bytes)
+            emitExpression(out_, expr.index);
+            out_ ~= Op.i32_const;
+            leb128s(out_, 4);  // sizeof(int) = 4
+            out_ ~= Op.i32_mul;
+            out_ ~= Op.i32_add;
+            
+            // Load the element
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            return;
+        }
+        
         throw new EmitError("Unsupported array indexing on " ~ arrayIdent.name);
     }
     
@@ -2362,6 +2404,37 @@ private class FuncContext {
             
             // Assignment is an expression - emit value again for result
             // (This re-evaluates, but works for simple cases)
+            emitExpression(out_, value);
+            return;
+        }
+        
+        // Check if it's a slice parameter
+        if (auto info = arrayIdent.name in sliceParams) {
+            // The parameter contains a pointer to the slice struct
+            // Load ptr from slice struct (offset 0)
+            out_ ~= Op.local_get;
+            leb128u(out_, info.localIndex);
+            out_ ~= Op.i32_load;  // Load ptr field (at offset 0 of slice struct)
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            
+            // Calculate address: ptr + index * elemSize
+            // For now assume i32 elements (4 bytes)
+            emitExpression(out_, indexExpr.index);
+            out_ ~= Op.i32_const;
+            leb128s(out_, 4);  // sizeof(int) = 4
+            out_ ~= Op.i32_mul;
+            out_ ~= Op.i32_add;
+            
+            // Emit value
+            emitExpression(out_, value);
+            
+            // Store the element
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            
+            // Assignment is an expression - emit value again for result
             emitExpression(out_, value);
             return;
         }
@@ -2688,6 +2761,14 @@ private class FuncContext {
         out_ ~= cast(ubyte)0x40;
         
         // Need to grow: newCapacity = max(capacity * 2, 4)
+        // Store newCapacity at SP-8
+        // First push the destination address
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 8);
+        out_ ~= Op.i32_sub;
+        
         // Calculate capacity * 2
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
@@ -2722,12 +2803,7 @@ private class FuncContext {
         out_ ~= Op.i32_lt_u;
         out_ ~= Op.select;  // picks 4 if capacity*2 < 4, else capacity*2
         
-        // Store newCapacity at SP-8
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 8);
-        out_ ~= Op.i32_sub;
+        // Now stack has [SP-8, newCapacity], store
         out_ ~= Op.i32_store;
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);
@@ -3119,6 +3195,34 @@ private class FuncContext {
                 out_ ~= Op.i32_const;
                 leb128s(out_, info.frameOffset + fieldOffset);
                 out_ ~= Op.i32_add;
+                out_ ~= Op.i32_load;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+                return;
+            }
+            
+            // Check if it's a slice parameter (arr.length, arr.ptr, arr.capacity)
+            if (auto info = ident.name in sliceParams) {
+                int fieldOffset;
+                if (expr.memberName == "ptr") {
+                    fieldOffset = 0;
+                } else if (expr.memberName == "length") {
+                    fieldOffset = 4;
+                } else if (expr.memberName == "capacity") {
+                    fieldOffset = 8;
+                } else {
+                    throw new EmitError("Slice has no field '" ~ expr.memberName ~ "'");
+                }
+                
+                // The parameter contains a pointer to the slice struct
+                // Load from slicePtr + fieldOffset
+                out_ ~= Op.local_get;
+                leb128u(out_, info.localIndex);
+                if (fieldOffset > 0) {
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, fieldOffset);
+                    out_ ~= Op.i32_add;
+                }
                 out_ ~= Op.i32_load;
                 out_ ~= cast(ubyte)0x02;
                 leb128u(out_, 0);
@@ -3592,6 +3696,55 @@ private class FuncContext {
                     leb128u(out_, emitter.spGlobal);
                     
                     totalCopySize += structSize;
+                    continue;
+                }
+                
+                // Check if argument is a slice local
+                if (auto sliceInfo = argIdent.name in sliceLocals) {
+                    // Slice local - copy 12-byte slice struct to temp, pass temp address
+                    uint sliceSize = 12;  // ptr, length, capacity
+                    
+                    // Allocate temp: SP = SP - 12
+                    out_ ~= Op.global_get;
+                    leb128u(out_, emitter.spGlobal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, sliceSize);
+                    out_ ~= Op.i32_sub;
+                    out_ ~= Op.global_set;
+                    leb128u(out_, emitter.spGlobal);
+                    
+                    // Copy 3 fields (ptr, length, capacity) from FP+offset to SP
+                    foreach (fieldOffset; [0, 4, 8]) {
+                        // Dest: SP + fieldOffset
+                        out_ ~= Op.global_get;
+                        leb128u(out_, emitter.spGlobal);
+                        if (fieldOffset > 0) {
+                            out_ ~= Op.i32_const;
+                            leb128s(out_, fieldOffset);
+                            out_ ~= Op.i32_add;
+                        }
+                        
+                        // Src: FP + srcOffset + fieldOffset
+                        out_ ~= Op.local_get;
+                        leb128u(out_, fpLocal);
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, sliceInfo.frameOffset + fieldOffset);
+                        out_ ~= Op.i32_add;
+                        out_ ~= Op.i32_load;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                        
+                        // Store
+                        out_ ~= Op.i32_store;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                    }
+                    
+                    // Push SP (address of copy) as argument
+                    out_ ~= Op.global_get;
+                    leb128u(out_, emitter.spGlobal);
+                    
+                    totalCopySize += sliceSize;
                     continue;
                 }
             }

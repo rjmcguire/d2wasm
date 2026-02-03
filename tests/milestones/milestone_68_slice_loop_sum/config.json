@@ -1,0 +1,6 @@
+{
+  "name": "slice_loop_sum",
+  "description": "Build slice with appends, sum elements in loop",
+  "type": "wasm_exec",
+  "entry": "main"
+}

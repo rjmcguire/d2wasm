@@ -1,4 +1,6 @@
 {
+  "name": "slice_reserve",
   "description": "Slice reserve() to pre-allocate capacity",
-  "expected_result": 10
+  "type": "wasm_exec",
+  "entry": "main"
 }
