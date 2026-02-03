@@ -2459,8 +2459,13 @@ private class FuncContext {
     }
     
     void emitCall(ref Appender!(ubyte[]) out_, CallExpression expr) {
-        // Handle method calls (obj.method())
+        // Handle method calls (obj.method()) - but not UFCS calls
         if (auto memberExpr = cast(MemberExpression)expr.function_) {
+            if (expr.isUFCS) {
+                // UFCS: obj.func(args...) -> func(obj, args...)
+                emitUFCSCall(out_, memberExpr, expr.arguments);
+                return;
+            }
             emitMethodCall(out_, memberExpr, expr.arguments);
             return;
         }
@@ -2682,6 +2687,25 @@ private class FuncContext {
         
         // Call the method
         uint funcIdx = emitter.getFuncIndex(mangledName);
+        out_ ~= Op.call;
+        leb128u(out_, funcIdx);
+    }
+    
+    /**
+     * Emit a UFCS call (obj.func(args...) -> func(obj, args...)).
+     * The object is passed as the first argument to the free function.
+     */
+    void emitUFCSCall(ref Appender!(ubyte[]) out_, MemberExpression memberExpr, Expression[] args) {
+        // Emit the object as the first argument
+        emitExpression(out_, memberExpr.object);
+        
+        // Emit the remaining arguments
+        foreach (arg; args) {
+            emitExpression(out_, arg);
+        }
+        
+        // Call the free function by name
+        uint funcIdx = emitter.getFuncIndex(memberExpr.memberName);
         out_ ~= Op.call;
         leb128u(out_, funcIdx);
     }

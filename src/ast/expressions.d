@@ -146,6 +146,7 @@ class UnaryExpression : Expression {
 class CallExpression : Expression {
     Expression function_;
     Expression[] arguments;
+    bool isUFCS = false;  // Set by type checker for UFCS calls (obj.func() -> func(obj))
     
     this(SourceLocation loc, Expression function_, Expression[] arguments) {
         super(loc);

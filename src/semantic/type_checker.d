@@ -592,9 +592,11 @@ class TypeChecker {
             }
         }
         
-        // Handle struct method calls (obj.method())
+        // Handle struct method calls (obj.method()) or UFCS (obj.func() -> func(obj))
         if (auto memberExpr = cast(MemberExpression)expr.function_) {
             Type objectType = checkExpression(memberExpr.object);
+            bool foundMethod = false;
+            
             if (auto userType = cast(UserType)objectType) {
                 // Resolve the UserType's declaration if not already linked
                 if (!userType.declaration) {
@@ -608,6 +610,7 @@ class TypeChecker {
                     // Look for a method with this name
                     auto method = getStructMethod(structDecl, memberExpr.memberName);
                     if (method) {
+                        foundMethod = true;
                         // Check argument types (method has no explicit 'this' parameter)
                         if (expr.arguments.length != method.parameters.length) {
                             throw new TypeError(
@@ -632,6 +635,55 @@ class TypeChecker {
                         }
                         
                         return method.returnType;
+                    }
+                }
+            }
+            
+            // UFCS: If not a method, try to find a free function with that name
+            // obj.func(args...) becomes func(obj, args...)
+            if (!foundMethod) {
+                auto funcSymbol = symbolTable.lookupSymbol(memberExpr.memberName);
+                if (funcSymbol && funcSymbol.kind == SymbolKind.Function) {
+                    auto funcType = cast(FunctionType)funcSymbol.type;
+                    if (funcType) {
+                        // UFCS requires at least one parameter (the implicit first arg)
+                        if (funcType.parameterTypes.length >= 1) {
+                            // Check that object type matches first parameter
+                            auto firstParamType = funcType.parameterTypes[0];
+                            auto compat = checkTypeCompatibility(objectType, firstParamType);
+                            if (compat.isCompatible) {
+                                // Check argument count (obj is first arg, rest are explicit)
+                                if (expr.arguments.length != funcType.parameterTypes.length - 1) {
+                                    throw new TypeError(
+                                        format("UFCS call to '%s' expects %d arguments, got %d",
+                                               memberExpr.memberName, 
+                                               funcType.parameterTypes.length - 1, 
+                                               expr.arguments.length),
+                                        expr.location
+                                    );
+                                }
+                                
+                                // Check remaining argument types
+                                for (size_t i = 0; i < expr.arguments.length; i++) {
+                                    Type argType = checkExpression(expr.arguments[i]);
+                                    Type paramType = funcType.parameterTypes[i + 1];  // +1 to skip first param
+                                    
+                                    auto argCompat = checkTypeCompatibility(argType, paramType);
+                                    if (!argCompat.isCompatible) {
+                                        throw new TypeError(
+                                            format("Argument %d: expected type '%s', got '%s'",
+                                                   i + 1, paramType.toString(), argType.toString()),
+                                            expr.arguments[i].location
+                                        );
+                                    }
+                                }
+                                
+                                // Mark this as a UFCS call for the emitter
+                                expr.isUFCS = true;
+                                
+                                return funcType.returnType;
+                            }
+                        }
                     }
                 }
             }

@@ -1,0 +1,6 @@
+{
+  "name": "ufcs_basic",
+  "description": "UFCS: 21.doubled() calls doubled(21)",
+  "type": "wasm_exec",
+  "entry": "main"
+}
