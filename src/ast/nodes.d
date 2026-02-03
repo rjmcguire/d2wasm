@@ -123,7 +123,8 @@ class FunctionDecl : Declaration {
         bool, "isStatic",    1,  // belongs to aggregate but no `this`
         bool, "isProperty",  1,  // @property, called without parens
         bool, "isCTFE",      1,  // CTFE-only function
-        uint, "",            4,  // padding to byte boundary
+        bool, "isIntrinsic", 1,  // compiler emits inline code instead of call
+        uint, "",            3,  // padding to byte boundary
     ));
     
     Declaration parent;  // enclosing struct/class, null for free functions
