@@ -513,7 +513,17 @@ class TreeSitterBridge {
             throw new ParseError("Struct declaration missing name", loc);
         }
         
-        return new StructDecl(loc, name, members);
+        auto structDecl = new StructDecl(loc, name, members);
+        
+        // Mark any FunctionDecl members as methods and set their parent
+        foreach (member; members) {
+            if (auto funcDecl = cast(FunctionDecl)member) {
+                funcDecl.isMethod = true;
+                funcDecl.parent = structDecl;
+            }
+        }
+        
+        return structDecl;
     }
     
     /**

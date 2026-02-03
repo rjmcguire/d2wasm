@@ -14,6 +14,7 @@ module ast.nodes;
 
 import std.string;
 import std.conv;
+import std.bitmanip : bitfields;
 
 // Source location for error reporting
 struct SourceLocation {
@@ -116,6 +117,17 @@ class FunctionDecl : Declaration {
     Statement body_;
     string[] attributes;  // @safe, @pure, etc.
     
+    // Function kind flags (packed into a single byte)
+    mixin(bitfields!(
+        bool, "isMethod",    1,  // belongs to struct/class, has implicit `this`
+        bool, "isStatic",    1,  // belongs to aggregate but no `this`
+        bool, "isProperty",  1,  // @property, called without parens
+        bool, "isCTFE",      1,  // CTFE-only function
+        uint, "",            4,  // padding to byte boundary
+    ));
+    
+    Declaration parent;  // enclosing struct/class, null for free functions
+    
     this(SourceLocation loc, string name, Type returnType, 
          Parameter[] parameters, Statement body_, 
          string[] attributes = [], bool isPublic = false) {
@@ -124,6 +136,7 @@ class FunctionDecl : Declaration {
         this.parameters = parameters;
         this.body_ = body_;
         this.attributes = attributes;
+        this.parent = null;
     }
     
     

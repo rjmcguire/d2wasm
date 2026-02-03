@@ -1,0 +1,6 @@
+{
+  "name": "struct_method_call",
+  "description": "Basic struct method call",
+  "type": "wasm_exec",
+  "entry": "main"
+}

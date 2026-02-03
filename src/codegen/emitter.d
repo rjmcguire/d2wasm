@@ -69,6 +69,8 @@ struct FuncInfo {
     uint typeIndex;
     FunctionDecl decl;
     bool exported;
+    bool isImport;
+    StructDecl structParent;  // Non-null for methods
 }
 
 //==============================================================================
@@ -430,14 +432,72 @@ class BinaryEmitter {
             }
         }
         
-        // Second pass: collect local functions and global variables
+        // Second pass: collect local functions, global variables, and struct methods
         foreach (decl; decls) {
             if (auto funcDecl = cast(FunctionDecl)decl) {
                 collectFunction(funcDecl);
             } else if (auto varDecl = cast(VariableDecl)decl) {
                 collectGlobalVariable(varDecl);
+            } else if (auto structDecl = cast(StructDecl)decl) {
+                // Collect methods from struct declarations
+                collectStructMethods(structDecl);
             }
         }
+    }
+    
+    /**
+     * Collect methods from a struct declaration.
+     * Methods are registered with mangled names: StructName_methodName
+     */
+    private void collectStructMethods(StructDecl structDecl) {
+        foreach (member; structDecl.members) {
+            if (auto funcDecl = cast(FunctionDecl)member) {
+                if (funcDecl.isMethod) {
+                    collectMethod(structDecl, funcDecl);
+                }
+            }
+        }
+    }
+    
+    /**
+     * Collect a struct method, adding hidden 'this' parameter.
+     */
+    private void collectMethod(StructDecl structDecl, FunctionDecl method) {
+        // Build signature with hidden 'this' pointer as first parameter
+        FuncSig sig;
+        
+        // 'this' is an i32 (pointer to struct)
+        sig.params = [ValType.i32];
+        
+        // Add the declared parameters
+        sig.params ~= method.parameters.map!(p => dTypeToValType(p.type)).array;
+        
+        if (!isVoidType(method.returnType)) {
+            sig.results = [dTypeToValType(method.returnType)];
+        }
+        
+        // Get or create type index
+        uint tIdx;
+        if (auto existing = sig in typeIndex) {
+            tIdx = *existing;
+        } else {
+            tIdx = cast(uint)types.length;
+            types ~= sig;
+            typeIndex[sig] = tIdx;
+        }
+        
+        // Generate mangled name
+        string mangledName = structDecl.name ~ "_" ~ method.name;
+        
+        // Create function info
+        FuncInfo info;
+        info.decl = method;
+        info.typeIndex = tIdx;
+        info.isImport = false;
+        info.structParent = structDecl;  // Track parent struct for codegen
+        
+        funcIndex[mangledName] = cast(uint)functions.length;
+        functions ~= info;
     }
     
     /**
@@ -2359,6 +2419,12 @@ private class FuncContext {
     }
     
     void emitCall(ref Appender!(ubyte[]) out_, CallExpression expr) {
+        // Handle method calls (obj.method())
+        if (auto memberExpr = cast(MemberExpression)expr.function_) {
+            emitMethodCall(out_, memberExpr, expr.arguments);
+            return;
+        }
+        
         auto ident = cast(IdentifierExpression)expr.function_;
         if (!ident) {
             throw new EmitError("Indirect calls not yet supported");
@@ -2508,6 +2574,76 @@ private class FuncContext {
             out_ ~= Op.global_set;
             leb128u(out_, emitter.spGlobal);
         }
+    }
+    
+    /**
+     * Emit a method call (obj.method(args)).
+     * The hidden 'this' pointer is passed as the first argument.
+     */
+    void emitMethodCall(ref Appender!(ubyte[]) out_, MemberExpression memberExpr, Expression[] args) {
+        // Get the struct type from the object
+        auto objIdent = cast(IdentifierExpression)memberExpr.object;
+        if (!objIdent) {
+            throw new EmitError("Method call on non-identifier object not yet supported");
+        }
+        
+        // Find the struct declaration to look up the method
+        StructDecl structDecl = null;
+        
+        // Check if it's a struct local
+        if (auto localInfo = objIdent.name in structLocals) {
+            structDecl = localInfo.structDecl;
+        }
+        // Check if it's a struct parameter
+        else if (auto paramInfo = objIdent.name in structParams) {
+            structDecl = paramInfo.structDecl;
+        }
+        
+        if (!structDecl) {
+            throw new EmitError("Cannot determine struct type for method call on " ~ objIdent.name);
+        }
+        
+        // Find the method
+        FunctionDecl method = null;
+        foreach (member; structDecl.members) {
+            if (auto funcDecl = cast(FunctionDecl)member) {
+                if (funcDecl.name == memberExpr.memberName && funcDecl.isMethod) {
+                    method = funcDecl;
+                    break;
+                }
+            }
+        }
+        
+        if (!method) {
+            throw new EmitError("Struct '" ~ structDecl.name ~ "' has no method '" ~ memberExpr.memberName ~ "'");
+        }
+        
+        // Emit 'this' pointer as first argument (address of the struct instance)
+        // For a local struct: FP + frameOffset
+        // For a param struct: the param value itself (already a pointer)
+        if (auto localInfo = objIdent.name in structLocals) {
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, localInfo.frameOffset);
+            out_ ~= Op.i32_add;
+        } else if (auto paramInfo = objIdent.name in structParams) {
+            out_ ~= Op.local_get;
+            leb128u(out_, paramInfo.localIndex);
+        }
+        
+        // Emit the other arguments
+        foreach (arg; args) {
+            emitExpression(out_, arg);
+        }
+        
+        // Generate the mangled method name: StructName_methodName
+        string mangledName = structDecl.name ~ "_" ~ method.name;
+        
+        // Call the method
+        uint funcIdx = emitter.getFuncIndex(mangledName);
+        out_ ~= Op.call;
+        leb128u(out_, funcIdx);
     }
     
     /**

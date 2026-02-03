@@ -566,6 +566,51 @@ class TypeChecker {
             }
         }
         
+        // Handle struct method calls (obj.method())
+        if (auto memberExpr = cast(MemberExpression)expr.function_) {
+            Type objectType = checkExpression(memberExpr.object);
+            if (auto userType = cast(UserType)objectType) {
+                // Resolve the UserType's declaration if not already linked
+                if (!userType.declaration) {
+                    auto typeSymbol = symbolTable.lookupSymbol(userType.name);
+                    if (typeSymbol && typeSymbol.kind == SymbolKind.Type) {
+                        userType.declaration = typeSymbol.declaration;
+                    }
+                }
+                
+                if (auto structDecl = cast(StructDecl)userType.declaration) {
+                    // Look for a method with this name
+                    auto method = getStructMethod(structDecl, memberExpr.memberName);
+                    if (method) {
+                        // Check argument types (method has no explicit 'this' parameter)
+                        if (expr.arguments.length != method.parameters.length) {
+                            throw new TypeError(
+                                format("Method '%s' expects %d arguments, got %d",
+                                       memberExpr.memberName, method.parameters.length, expr.arguments.length),
+                                expr.location
+                            );
+                        }
+                        
+                        for (size_t i = 0; i < expr.arguments.length; i++) {
+                            Type argType = checkExpression(expr.arguments[i]);
+                            Type paramType = method.parameters[i].type;
+                            
+                            auto compat = checkTypeCompatibility(argType, paramType);
+                            if (!compat.isCompatible) {
+                                throw new TypeError(
+                                    format("Argument %d: expected type '%s', got '%s'",
+                                           i + 1, paramType.toString(), argType.toString()),
+                                    expr.arguments[i].location
+                                );
+                            }
+                        }
+                        
+                        return method.returnType;
+                    }
+                }
+            }
+        }
+        
         Type funcType = checkExpression(expr.function_);
         
         auto functionType = cast(FunctionType)funcType;
@@ -618,6 +663,20 @@ class TypeChecker {
         }
         
         return functionType.returnType;
+    }
+    
+    /**
+     * Get a method from a struct by name, returns null if not found
+     */
+    FunctionDecl getStructMethod(StructDecl structDecl, string methodName) {
+        foreach (member; structDecl.members) {
+            if (auto funcDecl = cast(FunctionDecl)member) {
+                if (funcDecl.name == methodName && funcDecl.isMethod) {
+                    return funcDecl;
+                }
+            }
+        }
+        return null;
     }
     
     /**
