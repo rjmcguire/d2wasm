@@ -553,6 +553,19 @@ class TypeChecker {
             }
         }
         
+        // Check if this is a struct construction (TypeName(args...))
+        if (auto identExpr = cast(IdentifierExpression)expr.function_) {
+            auto symbol = symbolTable.lookupSymbol(identExpr.name);
+            if (symbol && symbol.kind == SymbolKind.Type) {
+                if (auto userType = cast(UserType)symbol.type) {
+                    if (auto structDecl = cast(StructDecl)userType.declaration) {
+                        // This is struct construction
+                        return checkStructConstruction(structDecl, userType, expr.arguments, expr.location);
+                    }
+                }
+            }
+        }
+        
         Type funcType = checkExpression(expr.function_);
         
         auto functionType = cast(FunctionType)funcType;
@@ -605,6 +618,37 @@ class TypeChecker {
         }
         
         return functionType.returnType;
+    }
+    
+    /**
+     * Check struct construction expression (TypeName(args...))
+     */
+    Type checkStructConstruction(StructDecl structDecl, UserType userType, Expression[] arguments, SourceLocation loc) {
+        // Check argument count matches field count
+        if (arguments.length != structDecl.fields.length) {
+            throw new TypeError(
+                format("Struct '%s' has %d fields, got %d arguments",
+                       structDecl.name, structDecl.fields.length, arguments.length),
+                loc);
+        }
+        
+        // Check each argument type matches the corresponding field type
+        for (size_t i = 0; i < arguments.length; i++) {
+            Type argType = checkExpression(arguments[i]);
+            Type fieldType = structDecl.fields[i].type;
+            
+            if (fieldType) {
+                auto compat = checkTypeCompatibility(argType, fieldType);
+                if (!compat.isCompatible) {
+                    throw new TypeError(
+                        format("Cannot initialize field '%s' of type '%s' with value of type '%s'",
+                               structDecl.fields[i].name, fieldType.toString(), argType.toString()),
+                        arguments[i].location);
+                }
+            }
+        }
+        
+        return userType;
     }
     
     /**
@@ -705,6 +749,14 @@ class TypeChecker {
         
         // Handle struct field access
         if (auto userType = cast(UserType)objectType) {
+            // Resolve the UserType's declaration if not already linked
+            if (!userType.declaration) {
+                auto typeSymbol = symbolTable.lookupSymbol(userType.name);
+                if (typeSymbol && typeSymbol.kind == SymbolKind.Type) {
+                    userType.declaration = typeSymbol.declaration;
+                }
+            }
+            
             if (auto structDecl = cast(StructDecl)userType.declaration) {
                 auto field = structDecl.getField(expr.memberName);
                 if (field) {

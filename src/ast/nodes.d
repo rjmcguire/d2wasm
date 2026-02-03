@@ -264,6 +264,10 @@ class VariableDecl : Declaration {
     Type type;
     Expression initializer;  // null if no initializer
     
+    // CTFE-evaluated struct data (for global immutable structs)
+    bool ctfeComplete;
+    uint ctfeStructAddress;  // Address in data section where struct is stored
+    
     this(SourceLocation loc, string name, Type type, 
          Expression initializer = null, bool isPublic = false) {
         super(loc, name, isPublic);

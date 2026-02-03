@@ -425,12 +425,56 @@ class BinaryEmitter {
             }
         }
         
-        // Second pass: collect local functions
+        // Second pass: collect local functions and global variables
         foreach (decl; decls) {
             if (auto funcDecl = cast(FunctionDecl)decl) {
                 collectFunction(funcDecl);
+            } else if (auto varDecl = cast(VariableDecl)decl) {
+                collectGlobalVariable(varDecl);
             }
-            // TODO: globals
+        }
+    }
+    
+    /**
+     * Collect a global variable, evaluating struct initializers to data section
+     */
+    private void collectGlobalVariable(VariableDecl decl) {
+        // Check if it's a struct type with an initializer
+        if (auto userType = cast(UserType)decl.type) {
+            // Resolve declaration if needed
+            if (!userType.declaration) {
+                auto typeSymbol = symbolTable.lookupSymbol(userType.name);
+                if (typeSymbol && typeSymbol.kind == SymbolKind.Type) {
+                    userType.declaration = typeSymbol.declaration;
+                }
+            }
+            
+            if (auto structDecl = cast(StructDecl)userType.declaration) {
+                if (decl.initializer) {
+                    // Try to evaluate the initializer as a struct literal
+                    if (auto callExpr = cast(CallExpression)decl.initializer) {
+                        // Point(42, 10) looks like a call
+                        int[] fieldValues;
+                        foreach (arg; callExpr.arguments) {
+                            if (auto lit = cast(LiteralExpression)arg) {
+                                if (lit.value.type == typeid(long)) {
+                                    fieldValues ~= cast(int)lit.value.get!long();
+                                } else if (lit.value.type == typeid(bool)) {
+                                    fieldValues ~= lit.value.get!bool() ? 1 : 0;
+                                }
+                            } else {
+                                // Complex expression - try CTFE evaluation
+                                fieldValues ~= cast(int)evaluateConstantIntExpr(arg);
+                            }
+                        }
+                        
+                        if (fieldValues.length == structDecl.fields.length) {
+                            decl.ctfeStructAddress = registerStructLiteral(structDecl, fieldValues);
+                            decl.ctfeComplete = true;
+                        }
+                    }
+                }
+            }
         }
     }
     
@@ -1323,6 +1367,23 @@ class BinaryEmitter {
     bool hasStringSupport() const {
         return needsArraySupport;
     }
+    
+    /**
+     * Register a struct literal and get its address in the data section.
+     * The struct fields are stored contiguously.
+     */
+    uint registerStructLiteral(StructDecl structDecl, int[] fieldValues) {
+        // Build the struct data based on field layout
+        ubyte[] structData = new ubyte[structDecl.structSize];
+        
+        for (size_t i = 0; i < structDecl.fields.length && i < fieldValues.length; i++) {
+            auto field = structDecl.fields[i];
+            // For now, assume all fields are i32
+            *cast(int*)&structData[field.offset] = fieldValues[i];
+        }
+        
+        return addData(structData);
+    }
 }
 
 //==============================================================================
@@ -1645,10 +1706,36 @@ private class FuncContext {
                     return;
                 }
             }
+            
+            // Check if it's a variable with struct type (e.g., P.x where P is a global struct)
+            if (symbol && symbol.kind == SymbolKind.Variable) {
+                if (auto varDecl = cast(VariableDecl)symbol.declaration) {
+                    if (varDecl.ctfeComplete) {
+                        // Global struct variable - load field from data section
+                        if (auto userType = cast(UserType)varDecl.type) {
+                            if (!userType.declaration) {
+                                auto typeSymbol = emitter.symbolTable.lookupSymbol(userType.name);
+                                if (typeSymbol) userType.declaration = typeSymbol.declaration;
+                            }
+                            if (auto structDecl = cast(StructDecl)userType.declaration) {
+                                auto field = structDecl.getField(expr.memberName);
+                                if (field) {
+                                    // Load i32 from data section at struct address + field offset
+                                    uint address = varDecl.ctfeStructAddress + cast(uint)field.offset;
+                                    out_ ~= Op.i32_const;
+                                    leb128s(out_, address);
+                                    out_ ~= Op.i32_load;
+                                    out_ ~= cast(ubyte)0x02;  // alignment (log2 of 4 bytes)
+                                    leb128u(out_, 0);  // offset
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         
-        // TODO: Handle struct field access (instance.field)
-        // For now, throw an error for other member accesses
         throw new EmitError("Member access not yet fully implemented", expr.toString());
     }
     
