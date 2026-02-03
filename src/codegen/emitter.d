@@ -584,6 +584,9 @@ class BinaryEmitter {
             return;
         }
         
+        // Scan for slice types to enable array support (__alloc, etc.)
+        scanForSliceTypes(decl);
+        
         // Build signature
         FuncSig sig;
         sig.params = decl.parameters.map!(p => dTypeToValType(p.type)).array;
@@ -638,6 +641,36 @@ class BinaryEmitter {
     private bool isVoidType(Type t) {
         auto basic = cast(BasicType)t;
         return basic && basic.kind == BasicType.Kind.Void;
+    }
+    
+    /**
+     * Scan a function for slice/array types to enable array support
+     */
+    private void scanForSliceTypes(FunctionDecl decl) {
+        if (!decl.body_) return;
+        scanStatementForSliceTypes(decl.body_);
+    }
+    
+    private void scanStatementForSliceTypes(Statement stmt) {
+        if (auto compound = cast(CompoundStatement)stmt) {
+            foreach (s; compound.statements) {
+                scanStatementForSliceTypes(s);
+            }
+        } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
+            if (cast(ArrayType)varDecl.type) {
+                needsArraySupport = true;
+            }
+        } else if (auto ifStmt = cast(IfStatement)stmt) {
+            scanStatementForSliceTypes(ifStmt.thenStatement);
+            if (ifStmt.elseStatement) {
+                scanStatementForSliceTypes(ifStmt.elseStatement);
+            }
+        } else if (auto whileStmt = cast(WhileStatement)stmt) {
+            scanStatementForSliceTypes(whileStmt.body_);
+        } else if (auto forStmt = cast(ForStatement)stmt) {
+            if (forStmt.init) scanStatementForSliceTypes(forStmt.init);
+            if (forStmt.body_) scanStatementForSliceTypes(forStmt.body_);
+        }
     }
     
     /**
@@ -1615,6 +1648,9 @@ private class FuncContext {
                 // Slice local - allocate 12 bytes for slice struct (ptr, length, capacity)
                 frameSize = (frameSize + 3) & ~3;  // Align to 4 bytes
                 
+                // Enable array support for __alloc, etc.
+                emitter.needsArraySupport = true;
+                
                 SliceLocalInfo info;
                 info.frameOffset = frameSize;
                 info.elementType = arrayType.elementType;
@@ -2252,6 +2288,278 @@ private class FuncContext {
         }
         
         throw new EmitError("Unsupported array index assignment on " ~ arrayIdent.name);
+    }
+    
+    /**
+     * Emit a built-in method call on a slice (reserve, etc.)
+     */
+    void emitSliceBuiltinMethod(ref Appender!(ubyte[]) out_, string sliceName, 
+                                 SliceLocalInfo* sliceInfo, string methodName, Expression[] args) {
+        if (methodName == "reserve") {
+            emitSliceReserve(out_, sliceName, sliceInfo, args);
+            return;
+        }
+        
+        throw new EmitError("Unknown slice method: " ~ methodName);
+    }
+    
+    /**
+     * Emit arr.reserve(newCapacity)
+     * 
+     * If newCapacity > current capacity:
+     *   1. Allocate new buffer via __alloc
+     *   2. Copy existing elements
+     *   3. Update slice ptr and capacity
+     */
+    void emitSliceReserve(ref Appender!(ubyte[]) out_, string sliceName,
+                          SliceLocalInfo* sliceInfo, Expression[] args) {
+        if (args.length != 1) {
+            throw new EmitError("reserve() requires exactly 1 argument");
+        }
+        
+        // We need several locals for this operation:
+        // - newCapacity (from args[0])
+        // - oldCapacity (from slice struct)
+        // - newBuffer (from __alloc)
+        // - copyIdx (loop counter)
+        //
+        // For simplicity, we'll use the stack and avoid extra locals.
+        // 
+        // Algorithm:
+        // if (newCapacity > slice.capacity) {
+        //     newBuffer = __alloc(newCapacity * 4);
+        //     for (i = 0; i < slice.length; i++) {
+        //         newBuffer[i] = slice.ptr[i];
+        //     }
+        //     slice.ptr = newBuffer;
+        //     slice.capacity = newCapacity;
+        // }
+        
+        // Slice struct layout: ptr @ 0, length @ 4, capacity @ 8
+        int sliceAddr = sliceInfo.frameOffset;
+        
+        // First, evaluate newCapacity and compare with current capacity
+        // Stack: [newCapacity]
+        emitExpression(out_, args[0]);
+        
+        // Load current capacity
+        // Stack: [newCapacity, oldCapacity]
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr + 8);  // capacity offset
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // if (newCapacity > oldCapacity)
+        // Stack: [newCapacity > oldCapacity]
+        out_ ~= Op.i32_gt_u;
+        
+        // if block
+        out_ ~= Op.if_;
+        out_ ~= cast(ubyte)0x40;  // void block type
+        
+        // --- Inside the if block ---
+        
+        // Allocate new buffer: __alloc(newCapacity * 4)
+        // First, re-evaluate newCapacity (we consumed it in comparison)
+        emitExpression(out_, args[0]);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);  // sizeof(int)
+        out_ ~= Op.i32_mul;
+        
+        // Call __alloc
+        uint allocIdx = emitter.getFuncIndex("__alloc");
+        out_ ~= Op.call;
+        leb128u(out_, allocIdx);
+        // Stack: [newBuffer]
+        
+        // Store newBuffer in a temp location (use SP - 4)
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_sub;
+        // Stack: [newBuffer, tempAddr]
+        // Swap and store
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // Copy loop: for i = 0 to length-1, copy element
+        // We'll use a simple loop with block/loop/br_if
+        
+        // Initialize loop counter at SP-8
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 8);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_const;
+        leb128s(out_, 0);  // i = 0
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // block $break
+        out_ ~= Op.block;
+        out_ ~= cast(ubyte)0x40;  // void
+        
+        // loop $continue
+        out_ ~= Op.loop;
+        out_ ~= cast(ubyte)0x40;  // void
+        
+        // Check: if (i >= length) break
+        // Load i
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 8);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // Load length
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr + 4);  // length offset
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // if i >= length, break
+        out_ ~= Op.i32_ge_u;
+        out_ ~= Op.br_if;
+        leb128u(out_, 1);  // break to outer block
+        
+        // Copy element: newBuffer[i] = oldPtr[i]
+        // Dest address: newBuffer + i * 4
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;  // newBuffer
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 8);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;  // i
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_add;  // newBuffer + i*4
+        
+        // Load from old ptr[i]
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr);  // ptr offset = 0
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;  // oldPtr
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 8);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;  // i
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_add;  // oldPtr + i*4
+        
+        out_ ~= Op.i32_load;  // load oldPtr[i]
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // Store to newBuffer[i]
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // Increment i
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 8);
+        out_ ~= Op.i32_sub;
+        // Load i, add 1, store back
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 8);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 1);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // Continue loop
+        out_ ~= Op.br;
+        leb128u(out_, 0);  // back to loop
+        
+        out_ ~= Op.end;  // end loop
+        out_ ~= Op.end;  // end block
+        
+        // Update slice.ptr = newBuffer
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr);  // ptr offset
+        out_ ~= Op.i32_add;
+        
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;  // newBuffer
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // Update slice.capacity = newCapacity
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceAddr + 8);  // capacity offset
+        out_ ~= Op.i32_add;
+        
+        emitExpression(out_, args[0]);  // newCapacity
+        
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        out_ ~= Op.end;  // end if
+        
+        // reserve() returns void, so no value on stack
     }
     
     void emitCast(ref Appender!(ubyte[]) out_, CastExpression expr) {
@@ -2905,6 +3213,12 @@ private class FuncContext {
             throw new EmitError("Method call on non-identifier object not yet supported");
         }
         
+        // Check if this is a slice built-in method (reserve, etc.)
+        if (auto sliceInfo = objIdent.name in sliceLocals) {
+            emitSliceBuiltinMethod(out_, objIdent.name, sliceInfo, memberExpr.memberName, args);
+            return;
+        }
+        
         // Find the struct declaration to look up the method
         StructDecl structDecl = null;
         
@@ -3253,6 +3567,15 @@ private class FuncContext {
             if (auto memberExpr = cast(MemberExpression)call.function_) {
                 auto objIdent = cast(IdentifierExpression)memberExpr.object;
                 if (objIdent) {
+                    // Check if it's a slice built-in method
+                    if (objIdent.name in sliceLocals) {
+                        // Slice built-in methods
+                        if (memberExpr.memberName == "reserve") {
+                            return false;  // reserve() returns void
+                        }
+                        // Other slice methods could be added here
+                    }
+                    
                     // Find the struct type
                     StructDecl structDecl = null;
                     if (auto info = objIdent.name in structLocals) {

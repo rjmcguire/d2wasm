@@ -266,17 +266,26 @@ class SymbolTable {
      * Register built-in methods for array/slice types
      */
     private void registerArrayBuiltinMethods(SourceLocation loc) {
+        auto intType = new BasicType(loc, BasicType.Kind.Int32);
+        auto voidType = new BasicType(loc, BasicType.Kind.Void);
+        
         // opIndex: (size_t index) -> elementType
         // For now, we use int for index and return type (element type is dynamic)
-        auto indexType = new BasicType(loc, BasicType.Kind.Int32);
         auto elementType = new BasicType(loc, BasicType.Kind.Int32);  // Generic, actual type determined at call site
         
-        Parameter[] params = [Parameter(indexType, "index", null)];
-        auto opIndex = new FunctionDecl(loc, "opIndex", elementType, params, null);
+        Parameter[] indexParams = [Parameter(intType, "index", null)];
+        auto opIndex = new FunctionDecl(loc, "opIndex", elementType, indexParams, null);
         opIndex.isMethod = true;
         opIndex.isIntrinsic = true;
-        
         registerBuiltinMethod("array", "opIndex", opIndex);
+        
+        // reserve: (size_t newCapacity) -> void
+        // Ensures the array has at least newCapacity capacity
+        Parameter[] reserveParams = [Parameter(intType, "newCapacity", null)];
+        auto reserve = new FunctionDecl(loc, "reserve", voidType, reserveParams, null);
+        reserve.isMethod = true;
+        reserve.isIntrinsic = true;
+        registerBuiltinMethod("array", "reserve", reserve);
     }
     
     /**

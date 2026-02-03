@@ -1,0 +1,4 @@
+{
+  "description": "Slice reserve() to pre-allocate capacity",
+  "expected_result": 10
+}
