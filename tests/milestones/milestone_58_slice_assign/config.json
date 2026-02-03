@@ -1,0 +1,4 @@
+{
+  "description": "Slice element assignment via indexing",
+  "expected_result": 99
+}

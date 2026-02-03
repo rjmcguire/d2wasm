@@ -2207,6 +2207,53 @@ private class FuncContext {
         throw new EmitError("Unsupported array indexing on " ~ arrayIdent.name);
     }
     
+    /**
+     * Emit index assignment for arrays - arr[i] = value
+     */
+    void emitIndexAssignment(ref Appender!(ubyte[]) out_, IndexExpression indexExpr, Expression value) {
+        // Get the array identifier
+        auto arrayIdent = cast(IdentifierExpression)indexExpr.array;
+        if (!arrayIdent) {
+            throw new EmitError("Complex array index assignment not yet supported");
+        }
+        
+        // Check if it's a slice local
+        if (auto info = arrayIdent.name in sliceLocals) {
+            // Load ptr from slice struct (offset 0)
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset);  // ptr is at offset 0
+            out_ ~= Op.i32_add;
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            
+            // Calculate address: ptr + index * elemSize
+            // For now assume i32 elements (4 bytes)
+            emitExpression(out_, indexExpr.index);
+            out_ ~= Op.i32_const;
+            leb128s(out_, 4);  // sizeof(int) = 4
+            out_ ~= Op.i32_mul;
+            out_ ~= Op.i32_add;
+            
+            // Emit value
+            emitExpression(out_, value);
+            
+            // Store the element
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            
+            // Assignment is an expression - emit value again for result
+            // (This re-evaluates, but works for simple cases)
+            emitExpression(out_, value);
+            return;
+        }
+        
+        throw new EmitError("Unsupported array index assignment on " ~ arrayIdent.name);
+    }
+    
     void emitCast(ref Appender!(ubyte[]) out_, CastExpression expr) {
         // Emit the expression being cast
         emitExpression(out_, expr.expression);
@@ -3022,6 +3069,12 @@ private class FuncContext {
         // Check for struct field assignment (p.x = value)
         if (auto member = cast(MemberExpression)expr.left) {
             emitMemberAssignment(out_, member, expr.right);
+            return;
+        }
+        
+        // Check for index assignment (arr[i] = value)
+        if (auto indexExpr = cast(IndexExpression)expr.left) {
+            emitIndexAssignment(out_, indexExpr, expr.right);
             return;
         }
         
