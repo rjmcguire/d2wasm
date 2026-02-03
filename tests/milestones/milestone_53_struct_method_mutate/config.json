@@ -1,0 +1,6 @@
+{
+  "name": "struct_method_mutate",
+  "description": "Method that modifies struct field",
+  "type": "wasm_exec",
+  "entry": "main"
+}
