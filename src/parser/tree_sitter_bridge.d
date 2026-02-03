@@ -1276,25 +1276,31 @@ class TreeSitterBridge {
         
         // Parse the declarator - it may contain just a name, or name = initializer
         // Structure varies: could be just identifier, or identifier = expression
+        // Pattern: [identifier] [=] [expression]
+        //   - First identifier is the variable name
+        //   - After =, anything (including identifier) is the initializer
         string name;
         Expression initializer = null;
+        bool sawEquals = false;
         
         uint declChildCount = TreeSitterParser.getChildCount(declaratorNode);
+        
         if (declChildCount == 0) {
             // The declarator itself is the identifier
             name = TreeSitterParser.getNodeText(declaratorNode, sourceText);
         } else {
-            // Look for identifier and initializer in children
+            // Look for identifier, =, and initializer in children
             for (uint i = 0; i < declChildCount; i++) {
                 TSNode child = TreeSitterParser.getChild(declaratorNode, i);
                 string childType = TreeSitterParser.getNodeType(child);
                 
-                if (childType == "identifier") {
+                if (childType == "=") {
+                    sawEquals = true;
+                } else if (!sawEquals && childType == "identifier" && name.length == 0) {
+                    // First identifier before = is the variable name
                     name = TreeSitterParser.getNodeText(child, sourceText);
-                } else if (childType == "=" || childType == "initializer") {
-                    // Skip the equals sign, next meaningful child is the value
-                } else if (name.length > 0 && childType != "=") {
-                    // This should be the initializer expression
+                } else if (sawEquals) {
+                    // Everything after = is the initializer expression
                     initializer = parseExpression(child);
                 }
             }

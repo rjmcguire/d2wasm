@@ -142,6 +142,8 @@ class BinaryEmitter {
         }
         GlobalInfo[] globals;
         uint heapPtrGlobal;  // Index of $heap_ptr global
+        uint spGlobal;       // Index of $sp (shadow stack pointer) global
+        bool needsShadowStack = false;  // Set when any function has struct locals
         
         // Data section
         struct DataEntry {
@@ -186,6 +188,9 @@ class BinaryEmitter {
                 addArrayBuiltins();
                 finalizeHeapPtr();  // Set heap_ptr to after data section
             }
+            
+            // Always add shadow stack for struct locals
+            addShadowStackGlobal();
             
             phase = EmitPhase.init;
             emitHeader();
@@ -674,6 +679,11 @@ class BinaryEmitter {
     }
     
     private ValType dTypeToValType(Type t) {
+        // Struct types are passed as i32 pointers
+        if (auto userType = cast(UserType)t) {
+            return ValType.i32;  // Pointer to struct
+        }
+        
         auto basic = cast(BasicType)t;
         if (!basic) {
             throw new EmitError("Non-basic types not yet supported", t.toString());
@@ -785,6 +795,21 @@ class BinaryEmitter {
             uint heapStart = (nextDataOffset + MEMORY_ALIGNMENT - 1) & ~(MEMORY_ALIGNMENT - 1);
             globals[heapPtrGlobal].initValue = heapStart;
         }
+    }
+    
+    /**
+     * Add shadow stack pointer global.
+     * The shadow stack grows downward from top of memory (64KB for 1 page).
+     * Used for struct locals that can't fit in WASM locals.
+     */
+    private void addShadowStackGlobal() {
+        spGlobal = cast(uint)globals.length;
+        GlobalInfo sp;
+        sp.type = ValType.i32;
+        sp.mutable = true;
+        sp.initValue = 65536;  // Top of first memory page (stack grows down)
+        sp.name = "__sp";
+        globals ~= sp;
     }
     
     //==========================================================================
@@ -1035,13 +1060,22 @@ class BinaryEmitter {
             ctx.collectLocals(f.decl.body_);
         }
         
+        // Finalize locals (adds savedSpLocal if struct locals exist)
+        ctx.finalizeLocals();
+        
         // Emit local declarations
         ctx.emitLocalDecls(body_);
+        
+        // Emit shadow stack prologue if needed
+        ctx.emitPrologue(body_);
         
         // Emit body
         if (f.decl.body_) {
             ctx.emitStatement(body_, f.decl.body_);
         }
+        
+        // Emit shadow stack epilogue if needed (for implicit return)
+        ctx.emitEpilogue(body_);
         
         // End opcode
         body_ ~= Op.end;
@@ -1399,6 +1433,22 @@ private class FuncContext {
     uint[string] localIndex;
     uint paramCount;
     
+    // Shadow stack for struct locals
+    struct StructLocalInfo {
+        uint frameOffset;      // Offset from frame base (SP after prologue)
+        StructDecl structDecl; // The struct type
+    }
+    StructLocalInfo[string] structLocals;
+    uint frameSize = 0;        // Total size of struct locals on shadow stack
+    uint savedSpLocal;         // Local index to store saved SP (set if frameSize > 0)
+    
+    // Struct parameters (passed as pointers)
+    struct StructParamInfo {
+        uint localIndex;       // WASM local index holding the pointer
+        StructDecl structDecl; // The struct type
+    }
+    StructParamInfo[string] structParams;
+    
     // Block depth for br instructions
     uint blockDepth = 0;
     
@@ -1411,6 +1461,23 @@ private class FuncContext {
             auto vt = e.dTypeToValType(p.type);
             localIndex[p.name] = cast(uint)i;
             localTypes ~= vt;
+            
+            // Track struct parameters
+            if (auto userType = cast(UserType)p.type) {
+                // Resolve struct declaration
+                if (!userType.declaration) {
+                    auto typeSymbol = e.symbolTable.lookupSymbol(userType.name);
+                    if (typeSymbol && typeSymbol.kind == SymbolKind.Type) {
+                        userType.declaration = typeSymbol.declaration;
+                    }
+                }
+                if (auto structDecl = cast(StructDecl)userType.declaration) {
+                    StructParamInfo info;
+                    info.localIndex = cast(uint)i;
+                    info.structDecl = structDecl;
+                    structParams[p.name] = info;
+                }
+            }
         }
         paramCount = cast(uint)f.decl.parameters.length;
     }
@@ -1424,6 +1491,32 @@ private class FuncContext {
                 collectLocals(s);
             }
         } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
+            // Check if it's a struct type
+            if (auto userType = cast(UserType)varDecl.type) {
+                // Resolve the struct declaration
+                if (!userType.declaration) {
+                    auto typeSymbol = emitter.symbolTable.lookupSymbol(userType.name);
+                    if (typeSymbol && typeSymbol.kind == SymbolKind.Type) {
+                        userType.declaration = typeSymbol.declaration;
+                    }
+                }
+                
+                if (auto structDecl = cast(StructDecl)userType.declaration) {
+                    // Struct local - allocate on shadow stack
+                    // Align frameSize to struct's alignment (assume 4 for now)
+                    frameSize = (frameSize + 3) & ~3;
+                    
+                    StructLocalInfo info;
+                    info.frameOffset = frameSize;
+                    info.structDecl = structDecl;
+                    structLocals[varDecl.name] = info;
+                    
+                    frameSize += structDecl.structSize;
+                    return;
+                }
+            }
+            
+            // Regular local - add to WASM locals
             auto vt = emitter.dTypeToValType(varDecl.type);
             localIndex[varDecl.name] = cast(uint)localTypes.length;
             localTypes ~= vt;
@@ -1438,6 +1531,57 @@ private class FuncContext {
             if (forStmt.init) collectLocals(forStmt.init);
             collectLocals(forStmt.body_);
         }
+    }
+    
+    /**
+     * Finalize locals after collection - add saved SP local if needed
+     */
+    void finalizeLocals() {
+        if (frameSize > 0) {
+            // Need a local to save the old SP for restoration
+            savedSpLocal = cast(uint)localTypes.length;
+            localTypes ~= ValType.i32;
+        }
+    }
+    
+    /**
+     * Emit shadow stack prologue (if function has struct locals)
+     * 
+     * savedSp = $sp
+     * $sp = $sp - frameSize
+     */
+    void emitPrologue(ref Appender!(ubyte[]) out_) {
+        if (frameSize == 0) return;
+        
+        // savedSp = global.get $sp
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.local_set;
+        leb128u(out_, savedSpLocal);
+        
+        // $sp = $sp - frameSize
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, frameSize);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.global_set;
+        leb128u(out_, emitter.spGlobal);
+    }
+    
+    /**
+     * Emit shadow stack epilogue (restores SP before implicit return)
+     * 
+     * $sp = savedSp
+     */
+    void emitEpilogue(ref Appender!(ubyte[]) out_) {
+        if (frameSize == 0) return;
+        
+        // $sp = savedSp
+        out_ ~= Op.local_get;
+        leb128u(out_, savedSpLocal);
+        out_ ~= Op.global_set;
+        leb128u(out_, emitter.spGlobal);
     }
     
     /**
@@ -1497,7 +1641,12 @@ private class FuncContext {
         } else if (auto forStmt = cast(ForStatement)stmt) {
             emitFor(out_, forStmt);
         } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
-            emitVarDecl(out_, varDecl);
+            // Check if this is a struct local
+            if (varDecl.name in structLocals) {
+                emitStructVarDecl(out_, varDecl);
+            } else {
+                emitVarDecl(out_, varDecl);
+            }
         } else {
             throw new EmitError("Unsupported statement type", stmt.toString());
         }
@@ -1507,6 +1656,10 @@ private class FuncContext {
         if (stmt.value) {
             emitExpression(out_, stmt.value);
         }
+        
+        // Restore shadow stack before returning
+        emitEpilogue(out_);
+        
         out_ ~= Op.return_;
     }
     
@@ -1663,6 +1816,82 @@ private class FuncContext {
         leb128u(out_, idx);
     }
     
+    /**
+     * Emit struct local variable declaration - stores fields to shadow stack
+     */
+    void emitStructVarDecl(ref Appender!(ubyte[]) out_, VariableDeclarationStatement stmt) {
+        auto info = structLocals[stmt.name];
+        auto structDecl = info.structDecl;
+        
+        if (!stmt.initializer) {
+            // Zero-initialize the struct
+            foreach (field; structDecl.fields) {
+                // Address: SP + frameOffset + fieldOffset
+                out_ ~= Op.global_get;
+                leb128u(out_, emitter.spGlobal);
+                out_ ~= Op.i32_const;
+                leb128s(out_, info.frameOffset + cast(int)field.offset);
+                out_ ~= Op.i32_add;
+                
+                // Value: 0
+                out_ ~= Op.i32_const;
+                leb128s(out_, 0);
+                
+                // Store
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;  // alignment log2(4)
+                leb128u(out_, 0);          // offset
+            }
+            return;
+        }
+        
+        // Struct construction: Point(10, 20) or Outer(Inner(1,2), 3)
+        if (auto callExpr = cast(CallExpression)stmt.initializer) {
+            // Use unified struct init that handles nested structs
+            emitStructFieldsInit(out_, structDecl, callExpr.arguments, 
+                                EmitAddrMode.fromSP, info.frameOffset);
+            return;
+        }
+        
+        // Struct copy: Point b = a (copy from another struct variable)
+        if (auto identExpr = cast(IdentifierExpression)stmt.initializer) {
+            // Check if source is a local struct
+            if (auto srcInfo = identExpr.name in structLocals) {
+                // Copy field by field from source to destination
+                for (size_t i = 0; i < structDecl.fields.length; i++) {
+                    auto field = structDecl.fields[i];
+                    
+                    // Destination address: SP + destOffset + fieldOffset
+                    out_ ~= Op.global_get;
+                    leb128u(out_, emitter.spGlobal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, info.frameOffset + cast(int)field.offset);
+                    out_ ~= Op.i32_add;
+                    
+                    // Source value: load from SP + srcOffset + fieldOffset
+                    out_ ~= Op.global_get;
+                    leb128u(out_, emitter.spGlobal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, srcInfo.frameOffset + cast(int)field.offset);
+                    out_ ~= Op.i32_add;
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                    
+                    // Store to destination
+                    out_ ~= Op.i32_store;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                }
+                return;
+            }
+            
+            // TODO: copy from global struct
+        }
+        
+        throw new EmitError("Unsupported struct initializer", stmt.initializer.toString());
+    }
+    
     //==========================================================================
     // Expression Emission
     //==========================================================================
@@ -1734,9 +1963,147 @@ private class FuncContext {
                     }
                 }
             }
+            
+            // Check if it's a local struct variable (on shadow stack)
+            if (auto info = ident.name in structLocals) {
+                auto structDecl = info.structDecl;
+                auto field = structDecl.getField(expr.memberName);
+                if (field) {
+                    // Load i32 from shadow stack at SP + frameOffset + fieldOffset
+                    out_ ~= Op.global_get;
+                    leb128u(out_, emitter.spGlobal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, info.frameOffset + cast(int)field.offset);
+                    out_ ~= Op.i32_add;
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;  // alignment log2(4)
+                    leb128u(out_, 0);          // offset
+                    return;
+                }
+            }
+            
+            // Check if it's a struct parameter (pointer passed as i32)
+            if (auto info = ident.name in structParams) {
+                auto structDecl = info.structDecl;
+                auto field = structDecl.getField(expr.memberName);
+                if (field) {
+                    // Load pointer from local, add field offset, load value
+                    out_ ~= Op.local_get;
+                    leb128u(out_, info.localIndex);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, cast(int)field.offset);
+                    out_ ~= Op.i32_add;
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                    return;
+                }
+            }
+        }
+        
+        // Handle chained member access (o.i.a where object is MemberExpression)
+        if (auto innerMember = cast(MemberExpression)expr.object) {
+            // Get the type of the inner member to find the field
+            // Emit address of inner member, then add field offset and load
+            emitMemberAddress(out_, innerMember);
+            
+            // Now we need to find the field within the type of innerMember
+            // Get the struct type of innerMember
+            auto innerType = getMemberExpressionType(innerMember);
+            if (auto userType = cast(UserType)innerType) {
+                if (!userType.declaration) {
+                    auto ts = emitter.symbolTable.lookupSymbol(userType.name);
+                    if (ts) userType.declaration = ts.declaration;
+                }
+                if (auto structDecl = cast(StructDecl)userType.declaration) {
+                    auto field = structDecl.getField(expr.memberName);
+                    if (field) {
+                        // Add field offset and load
+                        if (field.offset > 0) {
+                            out_ ~= Op.i32_const;
+                            leb128s(out_, cast(int)field.offset);
+                            out_ ~= Op.i32_add;
+                        }
+                        out_ ~= Op.i32_load;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                        return;
+                    }
+                }
+            }
         }
         
         throw new EmitError("Member access not yet fully implemented", expr.toString());
+    }
+    
+    /**
+     * Emit the ADDRESS of a member expression (for nested access).
+     * Leaves address on stack, doesn't load the value.
+     */
+    void emitMemberAddress(ref Appender!(ubyte[]) out_, MemberExpression expr) {
+        if (auto ident = cast(IdentifierExpression)expr.object) {
+            // Check struct locals
+            if (auto info = ident.name in structLocals) {
+                auto structDecl = info.structDecl;
+                auto field = structDecl.getField(expr.memberName);
+                if (field) {
+                    // Emit address: SP + frameOffset + fieldOffset
+                    out_ ~= Op.global_get;
+                    leb128u(out_, emitter.spGlobal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, info.frameOffset + cast(int)field.offset);
+                    out_ ~= Op.i32_add;
+                    return;
+                }
+            }
+        }
+        // Recursive case: object is also a MemberExpression
+        if (auto innerMember = cast(MemberExpression)expr.object) {
+            emitMemberAddress(out_, innerMember);
+            auto innerType = getMemberExpressionType(innerMember);
+            if (auto userType = cast(UserType)innerType) {
+                if (auto structDecl = cast(StructDecl)userType.declaration) {
+                    auto field = structDecl.getField(expr.memberName);
+                    if (field && field.offset > 0) {
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, cast(int)field.offset);
+                        out_ ~= Op.i32_add;
+                    }
+                    return;
+                }
+            }
+        }
+        throw new EmitError("Cannot compute address of member", expr.toString());
+    }
+    
+    /**
+     * Get the type of a member expression (for determining nested field offsets).
+     */
+    Type getMemberExpressionType(MemberExpression expr) {
+        Type objType;
+        
+        if (auto ident = cast(IdentifierExpression)expr.object) {
+            if (auto info = ident.name in structLocals) {
+                objType = new UserType(SourceLocation(), info.structDecl.name);
+                (cast(UserType)objType).declaration = info.structDecl;
+            } else if (auto info = ident.name in structParams) {
+                objType = new UserType(SourceLocation(), info.structDecl.name);
+                (cast(UserType)objType).declaration = info.structDecl;
+            }
+        } else if (auto innerMember = cast(MemberExpression)expr.object) {
+            objType = getMemberExpressionType(innerMember);
+        }
+        
+        if (auto userType = cast(UserType)objType) {
+            if (auto structDecl = cast(StructDecl)userType.declaration) {
+                auto field = structDecl.getField(expr.memberName);
+                if (field) {
+                    return field.type;
+                }
+            }
+        }
+        
+        return null;
     }
     
     void emitLiteral(ref Appender!(ubyte[]) out_, LiteralExpression expr) {
@@ -1774,6 +2141,17 @@ private class FuncContext {
         if (auto idx = expr.name in localIndex) {
             out_ ~= Op.local_get;
             leb128u(out_, *idx);
+            return;
+        }
+        
+        // Check if it's a struct local - emit address
+        if (auto info = expr.name in structLocals) {
+            // Emit address: SP + frameOffset
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.spGlobal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset);
+            out_ ~= Op.i32_add;
             return;
         }
         
@@ -1935,6 +2313,25 @@ private class FuncContext {
             throw new EmitError("Indirect calls not yet supported");
         }
         
+        // Check if this is struct construction (not a function call)
+        auto symbol = emitter.symbolTable.lookupSymbol(ident.name);
+        if (symbol && symbol.kind == SymbolKind.Type) {
+            if (auto userType = cast(UserType)symbol.type) {
+                // Resolve declaration if needed
+                if (!userType.declaration) {
+                    auto typeSymbol = emitter.symbolTable.lookupSymbol(userType.name);
+                    if (typeSymbol && typeSymbol.kind == SymbolKind.Type) {
+                        userType.declaration = typeSymbol.declaration;
+                    }
+                }
+                if (auto structDecl = cast(StructDecl)userType.declaration) {
+                    // Allocate temp, initialize, return pointer
+                    emitStructConstructionToTemp(out_, structDecl, expr.arguments);
+                    return;
+                }
+            }
+        }
+        
         // Emit arguments
         foreach (arg; expr.arguments) {
             emitExpression(out_, arg);
@@ -1946,7 +2343,90 @@ private class FuncContext {
         leb128u(out_, funcIdx);
     }
     
+    /**
+     * Emit struct construction to a temporary on shadow stack.
+     * Leaves pointer to the struct on the value stack.
+     */
+    void emitStructConstructionToTemp(ref Appender!(ubyte[]) out_, StructDecl structDecl, Expression[] args) {
+        uint structSize = cast(uint)structDecl.structSize;
+        
+        // Allocate space: SP = SP - structSize
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, structSize);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.global_set;
+        leb128u(out_, emitter.spGlobal);
+        
+        // Initialize at base address = current SP
+        emitStructFieldsInit(out_, structDecl, args, EmitAddrMode.fromSP, 0);
+        
+        // Leave pointer to struct on stack
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+    }
+    
+    // How to compute the destination address for a field
+    enum EmitAddrMode { fromSP, fromSPWithFrameOffset }
+    
+    /**
+     * Initialize struct fields at a base address.
+     * baseMode determines how to compute the address.
+     */
+    void emitStructFieldsInit(ref Appender!(ubyte[]) out_, StructDecl structDecl, 
+                              Expression[] args, EmitAddrMode baseMode, int baseOffset) {
+        for (size_t i = 0; i < structDecl.fields.length && i < args.length; i++) {
+            auto field = structDecl.fields[i];
+            int fieldAddr = baseOffset + cast(int)field.offset;
+            
+            // Check if argument is nested struct construction
+            if (auto callArg = cast(CallExpression)args[i]) {
+                if (auto argIdent = cast(IdentifierExpression)callArg.function_) {
+                    auto argSymbol = emitter.symbolTable.lookupSymbol(argIdent.name);
+                    if (argSymbol && argSymbol.kind == SymbolKind.Type) {
+                        if (auto argUserType = cast(UserType)argSymbol.type) {
+                            if (!argUserType.declaration) {
+                                auto ts = emitter.symbolTable.lookupSymbol(argUserType.name);
+                                if (ts) argUserType.declaration = ts.declaration;
+                            }
+                            if (auto nestedDecl = cast(StructDecl)argUserType.declaration) {
+                                // Recurse: initialize nested struct directly at fieldAddr
+                                emitStructFieldsInit(out_, nestedDecl, callArg.arguments, 
+                                                    baseMode, fieldAddr);
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Emit destination address
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.spGlobal);
+            if (fieldAddr != 0) {
+                out_ ~= Op.i32_const;
+                leb128s(out_, fieldAddr);
+                out_ ~= Op.i32_add;
+            }
+            
+            // Emit value
+            emitExpression(out_, args[i]);
+            
+            // Store
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+        }
+    }
+    
     void emitAssignment(ref Appender!(ubyte[]) out_, AssignmentExpression expr) {
+        // Check for struct field assignment (p.x = value)
+        if (auto member = cast(MemberExpression)expr.left) {
+            emitMemberAssignment(out_, member, expr.right);
+            return;
+        }
+        
         auto ident = cast(IdentifierExpression)expr.left;
         if (!ident) {
             throw new EmitError("Complex assignment targets not yet supported");
@@ -1960,6 +2440,55 @@ private class FuncContext {
         // Store and leave value on stack (assignment is an expression)
         out_ ~= Op.local_tee;
         leb128u(out_, idx);
+    }
+    
+    /**
+     * Emit assignment to a struct field (p.x = value)
+     */
+    void emitMemberAssignment(ref Appender!(ubyte[]) out_, MemberExpression member, Expression value) {
+        auto objIdent = cast(IdentifierExpression)member.object;
+        if (!objIdent) {
+            throw new EmitError("Complex member assignment targets not yet supported");
+        }
+        
+        // Check if it's a local struct
+        if (auto info = objIdent.name in structLocals) {
+            auto structDecl = info.structDecl;
+            auto field = structDecl.getField(member.memberName);
+            if (!field) {
+                throw new EmitError(format("Unknown field '%s' in struct '%s'",
+                                          member.memberName, structDecl.name));
+            }
+            
+            // Calculate address: SP + frameOffset + fieldOffset
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.spGlobal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset + cast(int)field.offset);
+            out_ ~= Op.i32_add;
+            
+            // Emit value
+            emitExpression(out_, value);
+            
+            // Store (assume i32 for now)
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;  // alignment log2(4)
+            leb128u(out_, 0);          // offset
+            
+            // Assignment is an expression - need to leave value on stack
+            // Re-load the value we just stored
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.spGlobal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset + cast(int)field.offset);
+            out_ ~= Op.i32_add;
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            return;
+        }
+        
+        throw new EmitError("Unsupported member assignment target", member.toString());
     }
     
     //==========================================================================

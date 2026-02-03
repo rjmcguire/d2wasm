@@ -383,6 +383,22 @@ class SymbolCollector {
         
         foreach (member; decl.members) {
             if (auto varDecl = cast(VariableDecl)member) {
+                // For UserType fields, resolve the declaration and ensure layout is computed
+                if (auto userType = cast(UserType)varDecl.type) {
+                    if (!userType.declaration) {
+                        auto sym = symbolTable.lookupSymbol(userType.name);
+                        if (sym && sym.kind == SymbolKind.Type) {
+                            userType.declaration = sym.declaration;
+                        }
+                    }
+                    // Ensure nested struct layout is computed
+                    if (auto nestedStruct = cast(StructDecl)userType.declaration) {
+                        if (!nestedStruct.layoutComputed) {
+                            computeStructLayout(nestedStruct);
+                        }
+                    }
+                }
+                
                 size_t fieldSize = varDecl.type ? varDecl.type.size() : 4;
                 size_t fieldAlign = varDecl.type ? varDecl.type.alignment() : 4;
                 
