@@ -138,9 +138,35 @@ class SymbolTable {
     private Scope currentScope;
     private Scope[] scopeStack;
     
+    // Built-in methods registry: maps (typeKind, methodName) to FunctionDecl
+    // typeKind is a string like "array", "string", etc.
+    private FunctionDecl[string][string] builtinMethods;
+    
     this() {
         globalScope = new Scope(null, "global");
         currentScope = globalScope;
+    }
+    
+    /**
+     * Register a built-in method for a type kind
+     */
+    void registerBuiltinMethod(string typeKind, string methodName, FunctionDecl method) {
+        if (typeKind !in builtinMethods) {
+            builtinMethods[typeKind] = (FunctionDecl[string]).init;
+        }
+        builtinMethods[typeKind][methodName] = method;
+    }
+    
+    /**
+     * Look up a built-in method for a type kind
+     */
+    FunctionDecl lookupBuiltinMethod(string typeKind, string methodName) {
+        if (auto methods = typeKind in builtinMethods) {
+            if (auto method = methodName in *methods) {
+                return *method;
+            }
+        }
+        return null;
     }
     
     /**
@@ -231,6 +257,26 @@ class SymbolTable {
         
         // CTFE-specific builtins
         addBuiltinFunction("__writeln", loc);  // CTFE output during compilation
+        
+        // Register built-in methods for array/slice types
+        registerArrayBuiltinMethods(loc);
+    }
+    
+    /**
+     * Register built-in methods for array/slice types
+     */
+    private void registerArrayBuiltinMethods(SourceLocation loc) {
+        // opIndex: (size_t index) -> elementType
+        // For now, we use int for index and return type (element type is dynamic)
+        auto indexType = new BasicType(loc, BasicType.Kind.Int32);
+        auto elementType = new BasicType(loc, BasicType.Kind.Int32);  // Generic, actual type determined at call site
+        
+        Parameter[] params = [Parameter(indexType, "index", null)];
+        auto opIndex = new FunctionDecl(loc, "opIndex", elementType, params, null);
+        opIndex.isMethod = true;
+        opIndex.isIntrinsic = true;
+        
+        registerBuiltinMethod("array", "opIndex", opIndex);
     }
     
     /**

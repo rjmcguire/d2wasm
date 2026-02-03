@@ -641,6 +641,47 @@ class TypeChecker {
                 }
             }
             
+            // Check for built-in methods on array types
+            if (!foundMethod) {
+                if (auto arrayType = cast(ArrayType)objectType) {
+                    auto builtinMethod = symbolTable.lookupBuiltinMethod("array", memberExpr.memberName);
+                    if (builtinMethod) {
+                        foundMethod = true;
+                        
+                        // Check argument count
+                        if (expr.arguments.length != builtinMethod.parameters.length) {
+                            throw new TypeError(
+                                format("Method '%s' expects %d arguments, got %d",
+                                       memberExpr.memberName, builtinMethod.parameters.length, expr.arguments.length),
+                                expr.location
+                            );
+                        }
+                        
+                        // Check argument types
+                        for (size_t i = 0; i < expr.arguments.length; i++) {
+                            Type argType = checkExpression(expr.arguments[i]);
+                            Type paramType = builtinMethod.parameters[i].type;
+                            
+                            auto compat = checkTypeCompatibility(argType, paramType);
+                            if (!compat.isCompatible) {
+                                throw new TypeError(
+                                    format("Argument %d: expected type '%s', got '%s'",
+                                           i + 1, paramType.toString(), argType.toString()),
+                                    expr.arguments[i].location
+                                );
+                            }
+                        }
+                        
+                        // For opIndex, return the element type, not the generic return type
+                        if (memberExpr.memberName == "opIndex") {
+                            return arrayType.elementType;
+                        }
+                        
+                        return builtinMethod.returnType;
+                    }
+                }
+            }
+            
             // UFCS: If not a method, try to find a free function with that name
             // obj.func(args...) becomes func(obj, args...)
             if (!foundMethod) {
