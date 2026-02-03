@@ -12,6 +12,7 @@ import ast.nodes;
 import ast.statements;
 import ast.expressions;
 import semantic.symbol_table;
+import semantic.type_checker;
 import codegen.emitter;
 import codegen.wasm;
 import parser.tree_sitter_bridge : TreeSitterBridge;
@@ -1234,6 +1235,17 @@ class CTFEEvaluator {
      * Compile a single function to WASM bytes
      */
     ubyte[] compileFunctionToWasm(FunctionDecl funcDecl) {
+        // Ensure the function is type-checked before compilation
+        // This is necessary because CTFE may run before the main type-checking pass
+        // (e.g., when evaluating manifest constants during mixin expansion)
+        auto typeChecker = new TypeChecker(symbolTable);
+        try {
+            typeChecker.checkFunctionDeclaration(funcDecl);
+        } catch (TypeError e) {
+            writeln("CTFE type check error: ", e.msg);
+            return null;
+        }
+        
         // Create a minimal compilation with just this function
         auto emitter = new BinaryEmitter(symbolTable);
         auto result = emitter.emit([funcDecl]);

@@ -1,0 +1,6 @@
+{
+  "name": "ctfe_slice_parity",
+  "description": "CTFE produces same result as runtime for slice operations",
+  "type": "wasm_exec",
+  "entry": "main"
+}
