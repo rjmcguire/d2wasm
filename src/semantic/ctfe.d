@@ -15,6 +15,7 @@ import semantic.symbol_table;
 import semantic.type_checker;
 import codegen.emitter;
 import codegen.wasm;
+import codegen.backend;
 import parser.tree_sitter_bridge : TreeSitterBridge;
 
 import std.stdio;
@@ -58,6 +59,7 @@ struct CTFEResult {
 class CTFEEvaluator {
     private SymbolTable symbolTable;
     private Declaration[] allDeclarations;
+    private Backend backend;  // Code generation backend (WASM or Native)
     
     // CTFE Arena for __ctfe_runtime memory allocation
     private static struct CTFEArena {
@@ -97,9 +99,10 @@ class CTFEEvaluator {
     }
     private CTFEArena arena;
     
-    this(SymbolTable symbolTable, Declaration[] declarations) {
+    this(SymbolTable symbolTable, Declaration[] declarations, string backendName = "wasm") {
         this.symbolTable = symbolTable;
         this.allDeclarations = declarations;
+        this.backend = createBackend(backendName, symbolTable);
     }
     
     /**
@@ -1290,7 +1293,38 @@ class CTFEEvaluator {
     }
     
     /**
+     * Execute a function via the configured backend.
+     * This is the new unified path that works with both WASM and Native backends.
+     */
+    long executeViaBackend(FunctionDecl funcDecl, long[] args) {
+        // Type-check the function first
+        auto typeChecker = new TypeChecker(symbolTable);
+        try {
+            typeChecker.checkFunctionDeclaration(funcDecl);
+        } catch (TypeError e) {
+            throw new CTFEError("CTFE type check error: " ~ e.msg);
+        }
+        
+        // Compile via backend
+        auto compiled = backend.compile(funcDecl);
+        if (compiled is null) {
+            throw new CTFEError("CTFE compile error: " ~ backend.error());
+        }
+        scope(exit) compiled.dispose();
+        
+        // Execute
+        auto result = compiled.call(args);
+        if (!result.success) {
+            throw new CTFEError("CTFE execution error: " ~ result.error);
+        }
+        
+        writeln("CTFE [", backend.name, "]: ", funcDecl.name, "(", args, ") = ", result.intValue);
+        return result.intValue;
+    }
+    
+    /**
      * Compile a single function to WASM bytes
+     * @deprecated Use executeViaBackend instead
      */
     ubyte[] compileFunctionToWasm(FunctionDecl funcDecl) {
         // Ensure the function is type-checked before compilation
