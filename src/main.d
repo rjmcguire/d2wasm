@@ -27,10 +27,12 @@ import semantic.feature_validator;
 import semantic.symbol_table;
 import semantic.type_checker;
 import codegen.emitter;
+import codegen.backend;
 
 struct CompilerOptions {
     string inputFile;
     string outputFile;
+    string backend = "wasm";  // Backend: "wasm" or "native"
     bool verbose = false;
     bool dryRun = false;
     bool printAst = false;
@@ -47,6 +49,7 @@ int main(string[] args) {
         auto helpInformation = getopt(args,
             "input|i", "Input D source file", &options.inputFile,
             "output|o", "Output WASM file (default: input.wasm)", &options.outputFile,
+            "backend|b", "Code generation backend: wasm, native (default: wasm)", &options.backend,
             "verbose|v", "Verbose output", &options.verbose,
             "dry-run|n", "Parse and validate only, don't generate code", &options.dryRun,
             "print-ast", "Print the AST after parsing", &options.printAst,
@@ -94,6 +97,7 @@ int compileFile(CompilerOptions options) {
             writeln("D-to-WASM Compiler v1.0");
             writeln("Input: ", options.inputFile);
             writeln("Output: ", options.outputFile);
+            writeln("Backend: ", options.backend);
             writeln();
         }
         
@@ -222,7 +226,7 @@ int compileFile(CompilerOptions options) {
         }
         
         import semantic.ctfe;
-        auto ctfeEvaluator = new CTFEEvaluator(symbolTable, ast);
+        auto ctfeEvaluator = new CTFEEvaluator(symbolTable, ast, options.backend);
         ctfeEvaluator.evaluateManifestConstants();
         
         if (options.verbose) {
