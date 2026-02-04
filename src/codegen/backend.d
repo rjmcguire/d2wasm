@@ -160,14 +160,17 @@ class NativeCompiledFunction : CompiledFunction {
     import ast.nodes;
     import ast.statements;
     import ast.expressions;
+    import semantic.symbol_table : SymbolKind;
     
     private string funcName;
     private NativeCodeGen gen;  // renamed from codegen to avoid module name collision
     private size_t entryPoint;
     private size_t paramCount;           // number of function parameters
+    private SymbolTable symbolTable;     // for looking up struct types
     
     // Local variable tracking
     private uint[string] localOffsets;  // variable name → stack offset
+    private StructDecl[string] localStructTypes;  // variable name → struct type (if struct)
     private uint nextLocalOffset;        // next available stack slot
     private uint totalLocalBytes;        // total stack space needed
     
@@ -175,10 +178,11 @@ class NativeCompiledFunction : CompiledFunction {
     import codegen.native.arm64_codegen : Label;
     private Label epilogueLabel;
     
-    this(FunctionDecl func, SymbolTable symbolTable) {
+    this(FunctionDecl func, SymbolTable st) {
         import std.stdio : writeln;
         
         this.funcName = func.name;
+        this.symbolTable = st;
         this.gen = NativeCodeGen.alloc(64 * 1024);  // 64KB code buffer
         
         if (!gen.base) {
@@ -295,16 +299,55 @@ class NativeCompiledFunction : CompiledFunction {
         } else if (auto exprStmt = cast(ExpressionStatement)stmt) {
             compileExpression(exprStmt.expression);
         } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
+            // Check if this is a struct type
+            StructDecl structType = null;
+            uint varSize = 4;  // default to 4 bytes for int
+            
+            if (auto userType = cast(UserType)varDecl.type) {
+                if (auto sd = cast(StructDecl)userType.declaration) {
+                    structType = sd;
+                    varSize = cast(uint)sd.structSize;
+                }
+            }
+            
             // Allocate stack slot for this variable
             localOffsets[varDecl.name] = nextLocalOffset;
+            if (structType) {
+                localStructTypes[varDecl.name] = structType;
+            }
             
             // Compile initializer if present
             if (varDecl.initializer) {
-                compileExpression(varDecl.initializer);
-                gen.emitStoreLocal32(nextLocalOffset);
+                if (structType) {
+                    // Struct initialization: the initializer should be a CallExpression
+                    // After compileExpression, x0 has pointer to temp struct
+                    // We need to copy from temp to our variable's location
+                    // Actually, we can optimize: compile directly to our slot
+                    if (auto call = cast(CallExpression)varDecl.initializer) {
+                        if (auto funcIdent = cast(IdentifierExpression)call.function_) {
+                            auto symbol = symbolTable.lookupSymbol(funcIdent.name);
+                            if (symbol && symbol.kind == SymbolKind.Type) {
+                                if (auto ut = cast(UserType)symbol.type) {
+                                    if (auto sd = cast(StructDecl)ut.declaration) {
+                                        // Initialize struct fields directly at our variable's location
+                                        for (size_t i = 0; i < sd.fields.length && i < call.arguments.length; i++) {
+                                            auto field = sd.fields[i];
+                                            uint fieldOffset = nextLocalOffset + cast(uint)field.offset;
+                                            compileExpression(call.arguments[i]);
+                                            gen.emitStoreLocal32(fieldOffset);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    compileExpression(varDecl.initializer);
+                    gen.emitStoreLocal32(nextLocalOffset);
+                }
             }
             
-            nextLocalOffset += 4;  // 4 bytes per int
+            nextLocalOffset += varSize;
         } else if (auto ifStmt = cast(IfStatement)stmt) {
             // Compile: if (cond) { then } else { else }
             auto elseLabel = gen.newLabel();
@@ -523,10 +566,116 @@ class NativeCompiledFunction : CompiledFunction {
                 gen.emitStoreLocal32(*offsetPtr);
             }
             // Result of assignment is the assigned value (already in x0)
+        } else if (auto call = cast(CallExpression)expr) {
+            // Check if this is struct construction
+            if (auto funcIdent = cast(IdentifierExpression)call.function_) {
+                auto symbol = symbolTable.lookupSymbol(funcIdent.name);
+                if (symbol && symbol.kind == SymbolKind.Type) {
+                    if (auto userType = cast(UserType)symbol.type) {
+                        if (auto structDecl = cast(StructDecl)userType.declaration) {
+                            // Struct construction: allocate space and init fields
+                            compileStructConstruction(structDecl, call.arguments);
+                            return;
+                        }
+                    }
+                }
+            }
+            throw new Exception("Function calls not yet supported in native backend");
+        } else if (auto member = cast(MemberExpression)expr) {
+            // Field access: obj.field
+            auto structDecl = getStructDeclFromExpr(member.object);
+            if (structDecl is null) {
+                throw new Exception("Cannot determine struct type for member access");
+            }
+            
+            auto field = structDecl.getField(member.memberName);
+            if (field is null) {
+                throw new Exception("Unknown field: " ~ member.memberName);
+            }
+            
+            // For local struct variables, compute address and load field
+            if (auto ident = cast(IdentifierExpression)member.object) {
+                if (auto baseOffset = ident.name in localOffsets) {
+                    // Load from stack: local offset + field offset
+                    uint totalOffset = *baseOffset + cast(uint)field.offset;
+                    gen.emitLoadLocal32(totalOffset);
+                    return;
+                }
+            }
+            
+            // For other expressions (e.g., nested access), compile to get pointer
+            compileExpression(member.object);
+            // x0 now has pointer to struct
+            uint fieldOffset = cast(uint)field.offset;
+            gen.emitLoadFromPointer(fieldOffset);
         } else {
             throw new Exception("Expression type not yet supported in native backend: " ~ 
                 typeid(expr).toString());
         }
+    }
+    
+    /**
+     * Compile struct construction: allocate space on stack, initialize fields
+     */
+    private void compileStructConstruction(StructDecl structDecl, Expression[] args) {
+        // Allocate space for struct on the stack
+        uint structSize = cast(uint)structDecl.structSize;
+        uint structOffset = nextLocalOffset;
+        nextLocalOffset += structSize;
+        
+        // Initialize each field from arguments
+        for (size_t i = 0; i < structDecl.fields.length && i < args.length; i++) {
+            auto field = structDecl.fields[i];
+            uint fieldOffset = structOffset + cast(uint)field.offset;
+            
+            // Compile the argument value (into x0)
+            compileExpression(args[i]);
+            
+            // Store to the field's stack location
+            gen.emitStoreLocal32(fieldOffset);
+        }
+        
+        // Leave pointer to struct in x0 (stack pointer + offset)
+        // For now, we use the stack offset directly since our loads expect offsets
+        // Actually, for member access to work, we need the actual pointer
+        // Let's compute: x0 = sp + structOffset
+        gen.emitLoadStackPointer();
+        gen.emitMoveX0ToX1();
+        gen.emitImm32(stencil_load_imm32, cast(int)structOffset);
+        gen.emit(stencil_add_i32);
+        // Now x0 = pointer to struct
+    }
+    
+    /**
+     * Get the StructDecl from an expression (for member access type resolution)
+     */
+    private StructDecl getStructDeclFromExpr(Expression expr) {
+        // For identifier expressions, check our local struct types first
+        if (auto ident = cast(IdentifierExpression)expr) {
+            // Check local struct variables
+            if (auto sd = ident.name in localStructTypes) {
+                return *sd;
+            }
+            // Fall back to symbol table
+            auto symbol = symbolTable.lookupSymbol(ident.name);
+            if (symbol) {
+                if (auto userType = cast(UserType)symbol.type) {
+                    return cast(StructDecl)userType.declaration;
+                }
+            }
+        }
+        // For call expressions (struct construction), get the struct type
+        if (auto call = cast(CallExpression)expr) {
+            if (auto funcIdent = cast(IdentifierExpression)call.function_) {
+                auto symbol = symbolTable.lookupSymbol(funcIdent.name);
+                if (symbol && symbol.kind == SymbolKind.Type) {
+                    if (auto userType = cast(UserType)symbol.type) {
+                        return cast(StructDecl)userType.declaration;
+                    }
+                }
+            }
+        }
+        return null;
     }
     
     override ExecutionResult call(long[] args) {

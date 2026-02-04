@@ -317,6 +317,29 @@ struct NativeCodeGen {
         emitRaw32(0xB94003E0 | (imm12 << 10));
     }
     
+    // ========== Struct Support ==========
+    
+    /// Load stack pointer into x0: MOV x0, sp
+    void emitLoadStackPointer() {
+        // MOV x0, sp is actually ADD x0, sp, #0
+        // ADD x0, sp, #0 = 0x910003E0
+        emitRaw32(0x910003E0);
+    }
+    
+    /// Load 32-bit value from pointer in x0 with offset: LDR w0, [x0, #offset]
+    void emitLoadFromPointer(uint offset) {
+        // LDR w0, [x0, #offset] where offset is scaled by 4
+        uint imm12 = offset / 4;
+        emitRaw32(0xB9400000 | (imm12 << 10));
+    }
+    
+    /// Store 32-bit value from x1 to pointer in x0 with offset: STR w1, [x0, #offset]  
+    void emitStoreToPointer(uint offset) {
+        // STR w1, [x0, #offset] where offset is scaled by 4
+        uint imm12 = offset / 4;
+        emitRaw32(0xB9000001 | (imm12 << 10));
+    }
+    
     // ========== Finalization ==========
     
     /// Resolve all branch targets and make code executable
