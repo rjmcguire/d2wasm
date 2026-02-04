@@ -98,16 +98,36 @@ CTFE runs during every compile. Native execution is faster than wasm3 interpreta
 
 **Total: 60 tests passing in copy-patch library**
 
-### Phase 3: Backend Integration 🔶 IN PROGRESS
+### Phase 3: Backend Integration ✅ COMPLETE
 
 | #  | Name                        | Description                          | Status |
 |----|-----------------------------|--------------------------------------|--------|
 | 89 | native_backend_basic        | `return 42;` works via native CTFE   | ✅     |
-| 90 | native_backend_arithmetic   | Variables + expressions              | ⬜     |
-| 91 | native_backend_control_flow | if/else, while loops                 | ⬜     |
-| 92 | native_backend_functions    | Multiple functions, calls            | ⬜     |
-| 93 | native_backend_structs      | Struct layout, field access          | ⬜     |
-| 94 | native_backend_slices       | Slice operations                     | ⬜     |
+| 90 | native_backend_variables    | Variables + expressions              | ✅     |
+| 91 | native_backend_control_flow | if/else, while loops                 | ✅     |
+
+Native backend now has parity with WASM backend for basic CTFE operations.
+
+### Phase 3b: CTFE Feature Extension 🔶 IN PROGRESS
+
+These milestones extend what CTFE can do, testing BOTH backends together.
+Previously, structs/slices/function-calls only worked at runtime (WASM execution),
+not at compile time (CTFE). These milestones add CTFE support and verify parity.
+
+| #  | Name                  | Description                                         | Status |
+|----|-----------------------|-----------------------------------------------------|--------|
+| 92 | ctfe_structs          | CTFE can construct structs, access fields           | ⬜     |
+| 93 | ctfe_slices           | CTFE can use slice operations                       | ⬜     |
+| 94 | ctfe_function_calls   | CTFE can call other D functions                     | ⬜     |
+
+Test pattern for these milestones:
+```d
+// Force CTFE via enum, then verify at runtime
+enum result = someCTFEFunction();
+int main() { return result; }
+```
+
+Both backends must produce the same result.
 
 ### Phase 4: CTFE Parity
 
@@ -125,56 +145,42 @@ CTFE runs during every compile. Native execution is faster than wasm3 interpreta
 
 ## Current State (2026-02-04)
 
-**What works in native backend:**
+**What works in BOTH backends for CTFE:**
 - Literals (int, long, bool)
+- Variables (declaration, access, assignment, compound assignment)
 - Binary expressions (arithmetic, comparison, bitwise)
 - Unary expressions (-x, !x)
-- Return statements
+- Control flow (if/else, while)
+- Function parameters (up to 4)
+- Return statements (including early returns)
 
-**What fails:**
+**What doesn't work in CTFE (either backend):**
 ```d
-int compute() {
-    int x = 42;   // ❌ VariableDeclaration not handled
-    return x;     // ❌ IdentifierExpression throws "not yet supported"
+struct Point { int x; int y; }
+int test() {
+    Point p = Point(10, 20);  // ❌ "Undefined identifier 'Point'"
+    return p.x;
+}
+
+int helper() { return 42; }
+int test2() {
+    return helper();          // ❌ "Undefined identifier 'helper'"
 }
 ```
 
-## Next Steps (Milestone 90)
+These fail during CTFE type-checking, before reaching either backend.
 
-To support variables, need to add to `NativeCompiledFunction`:
+## Next Steps (Milestone 92: ctfe_structs)
 
-1. **Local slot tracking:**
-   ```d
-   uint[string] localOffsets;  // variable name → stack offset
-   uint nextLocalOffset = 0;
-   ```
+The issue is in the CTFE evaluator's symbol table/type checker, not the backends.
+Need to investigate:
 
-2. **Handle `VariableDeclaration` in `compileStatement()`:**
-   ```d
-   if (auto varDecl = cast(VariableDeclaration)stmt) {
-       compileExpression(varDecl.initializer);
-       localOffsets[varDecl.name] = nextLocalOffset;
-       gen.emitStoreLocal32(nextLocalOffset);
-       nextLocalOffset += 4;
-   }
-   ```
+1. Why does CTFE type-checking fail to find struct types?
+2. Why does CTFE type-checking fail to find other functions?
+3. How does the WASM emitter handle these at runtime (for reference)?
 
-3. **Handle `IdentifierExpression` in `compileExpression()`:**
-   ```d
-   if (auto ident = cast(IdentifierExpression)expr) {
-       uint offset = localOffsets[ident.name];
-       gen.emitLoadLocal32(offset);
-   }
-   ```
-
-4. **Handle `AssignmentExpression`:**
-   ```d
-   if (auto assign = cast(AssignmentExpression)expr) {
-       compileExpression(assign.value);
-       uint offset = localOffsets[assign.target.name];
-       gen.emitStoreLocal32(offset);
-   }
-   ```
+The fix will likely be in `src/semantic/ctfe.d` — ensuring the type checker
+used during CTFE compilation has access to all declarations.
 
 ## Stencil Regeneration
 
