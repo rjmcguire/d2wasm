@@ -200,10 +200,28 @@ struct NativeCodeGen {
         emitRaw32(0xAA0003E1);
     }
     
-    /// Move x0 to x8 (for indirect call target)
+    /// Move x0 to x2 (for function arg 2)
+    void emitMoveX0ToX2() {
+        // MOV x2, x0: ORR x2, xzr, x0 = 0xAA0003E2
+        emitRaw32(0xAA0003E2);
+    }
+    
+    /// Move x0 to x3 (for function arg 3)
+    void emitMoveX0ToX3() {
+        // MOV x3, x0: ORR x3, xzr, x0 = 0xAA0003E3
+        emitRaw32(0xAA0003E3);
+    }
+    
+    /// Move x0 to x8 (for saving across calls)
     void emitMoveX0ToX8() {
         // MOV x8, x0: ORR x8, xzr, x0 = 0xAA0003E8
         emitRaw32(0xAA0003E8);
+    }
+    
+    /// Move x8 to x0 (restore after calls)
+    void emitMoveX8ToX0() {
+        // MOV x0, x8: ORR x0, xzr, x8 = 0xAA0803E0
+        emitRaw32(0xAA0803E0);
     }
     
     /// Push x30 (link register) - needed before calling functions
@@ -218,6 +236,20 @@ struct NativeCodeGen {
         // LDR x30, [sp], #16  (post-index)
         // = 0xF84107FE
         emitRaw32(0xF84107FE);
+    }
+    
+    /// Push a register to stack (16-byte aligned)
+    void emitPush(int reg) {
+        // STR x<reg>, [sp, #-16]!
+        // Base: 0xF81F0FE0, reg in bits 0-4
+        emitRaw32(0xF81F0FE0 | reg);
+    }
+    
+    /// Pop a register from stack (16-byte aligned)
+    void emitPop(int reg) {
+        // LDR x<reg>, [sp], #16
+        // Base: 0xF84107E0, reg in bits 0-4
+        emitRaw32(0xF84107E0 | reg);
     }
     
     /// Standard function prologue (save LR and frame pointer)

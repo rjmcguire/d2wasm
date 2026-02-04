@@ -1,0 +1,6 @@
+{
+  "name": "native_multifunction",
+  "description": "Multi-function native backend (fib recursion)",
+  "type": "wasm_exec",
+  "expected_result": 55
+}

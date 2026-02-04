@@ -150,16 +150,23 @@ class NativeBackend : Backend {
     }
     
     override CompiledFunction compileWithDependencies(FunctionDecl[] funcs, string entryFuncName) {
-        // For now, native backend only supports single-function compilation
-        // Multi-function support is Milestone 79
-        if (funcs.length == 1) {
-            return compile(funcs[0]);
+        // Type-check all functions first
+        auto typeChecker = new TypeChecker(symbolTable);
+        foreach (func; funcs) {
+            try {
+                typeChecker.checkFunctionDeclaration(func);
+            } catch (Exception e) {
+                lastError = "Type check error in " ~ func.name ~ ": " ~ e.msg;
+                return null;
+            }
         }
         
-        // TODO: Implement multi-function native compilation (milestone 79)
-        import std.format : format;
-        lastError = format("Native backend does not yet support multi-function CTFE (need %d functions)", funcs.length);
-        return null;
+        try {
+            return new NativeCompiledFunction(funcs, entryFuncName, symbolTable);
+        } catch (Exception e) {
+            lastError = "Native compile error: " ~ e.msg;
+            return null;
+        }
     }
     
     override ubyte[] compileModule(Declaration[] decls) {
@@ -196,11 +203,17 @@ class NativeCompiledFunction : CompiledFunction {
     private StructDecl[string] localStructTypes;  // variable name → struct type (if struct)
     private uint nextLocalOffset;        // next available stack slot
     private uint totalLocalBytes;        // total stack space needed
+    private uint tempSlot;               // stack offset for expression temporaries
     
     // For return statements to jump to
     import codegen.native.arm64_codegen : Label;
     private Label epilogueLabel;
     
+    // For multi-function support: map function names to their labels
+    private Label[string] functionLabels;
+    private FunctionDecl[string] functionDecls;  // for looking up parameter counts
+    
+    /// Single function constructor (original)
     this(FunctionDecl func, SymbolTable st) {
         import std.stdio : writeln;
         
@@ -224,13 +237,65 @@ class NativeCompiledFunction : CompiledFunction {
         }
     }
     
+    /// Multi-function constructor for CTFE with dependencies
+    this(FunctionDecl[] funcs, string entryFuncName, SymbolTable st) {
+        import std.stdio : writeln;
+        
+        this.funcName = entryFuncName;
+        this.symbolTable = st;
+        this.gen = NativeCodeGen.alloc(64 * 1024);  // 64KB code buffer
+        
+        if (!gen.base) {
+            throw new Exception("Failed to allocate executable memory");
+        }
+        
+        // Store all function decls for call resolution
+        foreach (func; funcs) {
+            functionDecls[func.name] = func;
+        }
+        
+        // Create labels for all functions before compiling any
+        foreach (func; funcs) {
+            functionLabels[func.name] = gen.newLabel();
+        }
+        
+        // Find entry function and store its param count
+        if (auto entryFunc = entryFuncName in functionDecls) {
+            this.paramCount = (*entryFunc).parameters.length;
+        }
+        
+        // Compile all functions
+        foreach (func; funcs) {
+            compileFunction(func);
+        }
+        
+        // Set entry point to the entry function
+        if (auto entryLabel = entryFuncName in functionLabels) {
+            entryPoint = (*entryLabel).offset;
+        }
+        
+        // Finalize (resolve branches, make executable)
+        if (!gen.finalize()) {
+            throw new Exception("Failed to finalize native code");
+        }
+    }
+    
     private void compileFunction(FunctionDecl func) {
         import std.stdio : writeln;
         
-        entryPoint = gen.pos;
+        // Bind function label (for multi-function mode)
+        if (auto labelPtr = func.name in functionLabels) {
+            gen.bindLabel(*labelPtr);
+        }
         
-        // Reset local tracking
+        // For single-function mode, track entry point
+        if (functionLabels.length == 0) {
+            entryPoint = gen.pos;
+        }
+        
+        // Reset local tracking for this function
         localOffsets.clear();
+        localStructTypes.clear();
         nextLocalOffset = 0;
         
         // Reserve space for parameters first (they come in registers x0-x7)
@@ -241,7 +306,12 @@ class NativeCompiledFunction : CompiledFunction {
         
         // Count bytes needed for locals in the body
         uint bodyLocalBytes = countLocalBytesInStatement(func.body_);
-        totalLocalBytes = (nextLocalOffset + bodyLocalBytes + 15) & ~15;  // 16-byte aligned
+        
+        // Reserve extra space for expression temporaries (8 bytes for temp slot)
+        uint tempSlotOffset = nextLocalOffset + bodyLocalBytes;
+        tempSlot = tempSlotOffset;  // Store for use in compileExpression
+        uint totalNeeded = tempSlotOffset + 8;  // 8 bytes for temp
+        totalLocalBytes = (totalNeeded + 15) & ~15;  // 16-byte aligned
         
         // Create epilogue label for return statements
         epilogueLabel = gen.newLabel();
@@ -461,6 +531,39 @@ class NativeCompiledFunction : CompiledFunction {
         // TODO: for
     }
     
+    /// Check if an expression contains a function call (which would clobber registers)
+    private bool containsFunctionCall(Expression expr) {
+        if (expr is null) return false;
+        
+        if (cast(CallExpression)expr) {
+            // Check if it's a struct construction (not a real function call)
+            if (auto call = cast(CallExpression)expr) {
+                if (auto funcIdent = cast(IdentifierExpression)call.function_) {
+                    auto symbol = symbolTable.lookupSymbol(funcIdent.name);
+                    if (symbol && symbol.kind == SymbolKind.Type) {
+                        return false;  // Struct construction, not a function call
+                    }
+                }
+            }
+            return true;
+        }
+        
+        if (auto binary = cast(BinaryExpression)expr) {
+            return containsFunctionCall(binary.left) || containsFunctionCall(binary.right);
+        }
+        if (auto unary = cast(UnaryExpression)expr) {
+            return containsFunctionCall(unary.operand);
+        }
+        if (auto index = cast(IndexExpression)expr) {
+            return containsFunctionCall(index.array) || containsFunctionCall(index.index);
+        }
+        if (auto member = cast(MemberExpression)expr) {
+            return containsFunctionCall(member.object);
+        }
+        
+        return false;
+    }
+    
     private void compileExpression(Expression expr) {
         import std.variant : Variant;
         
@@ -476,11 +579,31 @@ class NativeCompiledFunction : CompiledFunction {
                 throw new Exception("Literal type not supported: " ~ lit.value.type.toString());
             }
         } else if (auto binOp = cast(BinaryExpression)expr) {
+            // Check if left operand might clobber registers (is a function call)
+            bool leftMightClobber = containsFunctionCall(binOp.left);
+            
             // Compile right operand first (into x0)
             compileExpression(binOp.right);
-            gen.emitMoveX0ToX1();  // Move to x1
-            // Compile left operand (into x0)
-            compileExpression(binOp.left);
+            
+            if (leftMightClobber) {
+                // Save right result to temp slot (function calls clobber x0-x7)
+                // Using pre-allocated temp slot instead of push/pop to avoid moving SP
+                gen.emitStoreLocal32(tempSlot);  // store w0 to temp slot (32-bit)
+                // Compile left operand (into x0)
+                compileExpression(binOp.left);
+                // Now x0 = left result
+                // Save left to x8 (safe since no more calls)
+                gen.emitMoveX0ToX8();  // x8 = left
+                // Load right from temp slot
+                gen.emitLoadLocal32(tempSlot);  // x0 = right (from temp slot)
+                gen.emitMoveX0ToX1();  // x1 = right
+                // Restore left from x8
+                gen.emitMoveX8ToX0();  // x0 = left
+            } else {
+                gen.emitMoveX0ToX1();  // Move to x1
+                // Compile left operand (into x0)
+                compileExpression(binOp.left);
+            }
             // Now x0=left, x1=right
             
             // Emit operation
@@ -639,8 +762,35 @@ class NativeCompiledFunction : CompiledFunction {
                         }
                     }
                 }
+                
+                // Check if this is a call to a known function
+                if (auto labelPtr = funcIdent.name in functionLabels) {
+                    if (call.arguments.length > 4) {
+                        throw new Exception("Native backend: more than 4 arguments not yet supported");
+                    }
+                    
+                    // Compile arguments in reverse order into their target registers
+                    // This avoids clobbering: compile arg3→x3, arg2→x2, arg1→x1, arg0→x0
+                    for (long i = cast(long)call.arguments.length - 1; i >= 0; i--) {
+                        compileExpression(call.arguments[i]);
+                        // Move x0 to target register (x0 stays, others need mov)
+                        switch (i) {
+                            case 0: break;  // already in x0
+                            case 1: gen.emitMoveX0ToX1(); break;
+                            case 2: gen.emitMoveX0ToX2(); break;
+                            case 3: gen.emitMoveX0ToX3(); break;
+                            default: break;
+                        }
+                    }
+                    
+                    // Emit the call (BL instruction)
+                    gen.emitCall(*labelPtr);
+                    // Result is in x0
+                    return;
+                }
             }
-            throw new Exception("Function calls not yet supported in native backend");
+            throw new Exception("Function calls not yet supported in native backend: " ~ 
+                (cast(IdentifierExpression)call.function_ ? (cast(IdentifierExpression)call.function_).name : "unknown"));
         } else if (auto member = cast(MemberExpression)expr) {
             // Check for slice.length first
             if (member.memberName == "length") {
