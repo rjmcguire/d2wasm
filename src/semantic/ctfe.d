@@ -61,6 +61,11 @@ class CTFEEvaluator {
     private Declaration[] allDeclarations;
     private Backend backend;  // Code generation backend (WASM or Native)
     
+    // Persistent CTFE context - accumulates compiled functions
+    private bool[string] compiledFunctions;  // functions already in context
+    private CompiledFunction cachedContext;  // reusable compiled module
+    private FunctionDecl[] contextFunctions; // functions in current context
+    
     // CTFE Arena for __ctfe_runtime memory allocation
     private static struct CTFEArena {
         enum MEMORY_RESERVED = 1024;  // First 1KB reserved for future use
@@ -1294,35 +1299,70 @@ class CTFEEvaluator {
      */
     long executeViaBackend(FunctionDecl funcDecl, long[] args) {
         import semantic.dependency_analyzer : DependencyAnalyzer;
-        import std.algorithm : map;
+        import std.algorithm : map, filter, canFind;
         import std.array : array, join;
         
         // Find all functions this one depends on (transitive closure)
         auto analyzer = new DependencyAnalyzer(symbolTable, allDeclarations);
         auto dependencies = analyzer.findDependencies(funcDecl);
         
-        writeln("CTFE: ", funcDecl.name, " depends on: [", 
-            dependencies.map!(f => f.name).array.join(", "), "]");
+        // Check which functions are new (not yet in context)
+        auto newFuncs = dependencies.filter!(f => f.name !in compiledFunctions).array;
+        bool needsRecompile = newFuncs.length > 0;
         
-        // Type-check all functions in the dependency set
-        auto typeChecker = new TypeChecker(symbolTable);
-        foreach (dep; dependencies) {
-            try {
-                typeChecker.checkFunctionDeclaration(dep);
-            } catch (TypeError e) {
-                throw new CTFEError("CTFE type check error in " ~ dep.name ~ ": " ~ e.msg);
+        if (needsRecompile) {
+            writeln("CTFE: ", funcDecl.name, " needs: [", 
+                dependencies.map!(f => f.name).array.join(", "), "]");
+            writeln("CTFE: Adding ", newFuncs.length, " new function(s): [",
+                newFuncs.map!(f => f.name).array.join(", "), "]");
+            
+            // Type-check only new functions
+            auto typeChecker = new TypeChecker(symbolTable);
+            foreach (dep; newFuncs) {
+                try {
+                    typeChecker.checkFunctionDeclaration(dep);
+                } catch (TypeError e) {
+                    throw new CTFEError("CTFE type check error in " ~ dep.name ~ ": " ~ e.msg);
+                }
+            }
+            
+            // Dispose old context and recompile with all functions (old + new)
+            if (cachedContext !is null) {
+                cachedContext.dispose();
+                cachedContext = null;
+            }
+            
+            auto allFuncs = contextFunctions ~ newFuncs;
+            cachedContext = backend.compileWithDependencies(allFuncs, funcDecl.name);
+            if (cachedContext is null) {
+                throw new CTFEError("CTFE compile error: " ~ backend.error());
+            }
+            
+            // Only mark as compiled after successful compilation
+            contextFunctions = allFuncs;
+            foreach (f; newFuncs) {
+                compiledFunctions[f.name] = true;
+            }
+        } else {
+            writeln("CTFE: Reusing cached context for ", funcDecl.name);
+            // Update entry point to the function we want to call
+            // Note: compileWithDependencies sets entry point, but we're reusing
+            // Need to ensure we can call any function in the context
+        }
+        
+        // Execute - need to call the right function
+        // Current limitation: cachedContext has a fixed entry point
+        // For now, recompile if entry function differs
+        if (cachedContext.name != funcDecl.name) {
+            writeln("CTFE: Recompiling to change entry point to ", funcDecl.name);
+            cachedContext.dispose();
+            cachedContext = backend.compileWithDependencies(contextFunctions, funcDecl.name);
+            if (cachedContext is null) {
+                throw new CTFEError("CTFE compile error: " ~ backend.error());
             }
         }
         
-        // Compile all dependencies together into one module
-        auto compiled = backend.compileWithDependencies(dependencies, funcDecl.name);
-        if (compiled is null) {
-            throw new CTFEError("CTFE compile error: " ~ backend.error());
-        }
-        scope(exit) compiled.dispose();
-        
-        // Execute
-        auto result = compiled.call(args);
+        auto result = cachedContext.call(args);
         if (!result.success) {
             throw new CTFEError("CTFE execution error: " ~ result.error);
         }

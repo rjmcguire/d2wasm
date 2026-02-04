@@ -1,0 +1,6 @@
+{
+  "name": "ctfe_caching",
+  "description": "CTFE function caching across multiple evaluations",
+  "type": "wasm_exec",
+  "expected_result": 104
+}
