@@ -66,6 +66,12 @@ class CTFEEvaluator {
     private CompiledFunction cachedContext;  // reusable compiled module
     private FunctionDecl[] contextFunctions; // functions in current context
     
+    // CTFE statistics
+    private uint statFunctionsCompiled;   // total functions compiled
+    private uint statCacheHits;           // times we reused cached context
+    private uint statCacheMisses;         // times we needed to compile new functions
+    private uint statCallCount;           // total CTFE calls
+    
     // CTFE Arena for __ctfe_runtime memory allocation
     private static struct CTFEArena {
         enum MEMORY_RESERVED = 1024;  // First 1KB reserved for future use
@@ -111,6 +117,29 @@ class CTFEEvaluator {
         
         // Register lazy resolver with symbol table
         symbolTable.ctfeResolver = &this.evaluateManifestConstant;
+    }
+    
+    /**
+     * Get CTFE statistics as a formatted string.
+     */
+    string getStats() {
+        import std.format : format;
+        return format("CTFE Stats: %d calls, %d functions compiled, %d cache hits, %d cache misses",
+            statCallCount, statFunctionsCompiled, statCacheHits, statCacheMisses);
+    }
+    
+    /**
+     * Print CTFE statistics to stdout.
+     */
+    void printStats() {
+        if (statCallCount > 0) {
+            writeln(getStats());
+            writeln("  Functions in context: ", contextFunctions.length);
+            if (statCallCount > 0) {
+                auto hitRate = statCacheHits * 100 / statCallCount;
+                writeln("  Cache hit rate: ", hitRate, "%");
+            }
+        }
     }
     
     /**
@@ -1306,11 +1335,16 @@ class CTFEEvaluator {
         auto analyzer = new DependencyAnalyzer(symbolTable, allDeclarations);
         auto dependencies = analyzer.findDependencies(funcDecl);
         
+        // Track call count
+        statCallCount++;
+        
         // Check which functions are new (not yet in context)
         auto newFuncs = dependencies.filter!(f => f.name !in compiledFunctions).array;
         bool needsRecompile = newFuncs.length > 0;
         
         if (needsRecompile) {
+            statCacheMisses++;
+            statFunctionsCompiled += cast(uint)newFuncs.length;
             writeln("CTFE: ", funcDecl.name, " needs: [", 
                 dependencies.map!(f => f.name).array.join(", "), "]");
             writeln("CTFE: Adding ", newFuncs.length, " new function(s): [",
@@ -1344,6 +1378,7 @@ class CTFEEvaluator {
                 compiledFunctions[f.name] = true;
             }
         } else {
+            statCacheHits++;
             writeln("CTFE: Reusing cached context for ", funcDecl.name);
         }
         

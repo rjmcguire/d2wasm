@@ -217,7 +217,7 @@ int compileFile(CompilerOptions options) {
         import semantic.ctfe;
         // Create evaluator - registers lazy resolver with symbol table
         // Actual evaluation happens when manifest constant values are accessed
-        new CTFEEvaluator(symbolTable, ast, options.backend);
+        auto ctfeEvaluator = new CTFEEvaluator(symbolTable, ast, options.backend);
         
         if (options.verbose) {
             writeln("CTFE resolver ready");
@@ -258,6 +258,11 @@ int compileFile(CompilerOptions options) {
             writeln("Successfully compiled to ", options.outputFile);
         } else {
             writeln("Dry run complete - frontend phases successful");
+        }
+        
+        // Print CTFE stats in verbose mode
+        if (options.verbose) {
+            ctfeEvaluator.printStats();
         }
         
         return 0;

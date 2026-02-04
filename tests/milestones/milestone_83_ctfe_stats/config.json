@@ -1,0 +1,6 @@
+{
+  "name": "ctfe_stats",
+  "description": "CTFE statistics tracking",
+  "type": "wasm_exec",
+  "expected_result": 40
+}
