@@ -694,15 +694,8 @@ class CTFEEvaluator {
         
         writeln("CTFE: Calling ", funcName, " with args ", args);
         
-        // Compile function to WASM
-        ubyte[] wasmBytes = compileFunctionToWasm(funcDecl);
-        
-        if (wasmBytes is null) {
-            throw new CTFEError("CTFE: Failed to compile function '" ~ funcName ~ "'");
-        }
-        
-        // Execute with wasm3
-        long result = executeWasm(wasmBytes, funcName, args);
+        // Execute via the configured backend (WASM or Native)
+        long result = executeViaBackend(funcDecl, args);
         
         return CTFEResult.fromInt(result);
     }
