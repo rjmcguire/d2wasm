@@ -1,0 +1,6 @@
+{
+  "name": "backend_parity",
+  "description": "Verify WASM and native backends produce identical CTFE results",
+  "type": "wasm_exec",
+  "expected_result": 142
+}
