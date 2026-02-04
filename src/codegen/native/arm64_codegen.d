@@ -289,6 +289,27 @@ struct NativeCodeGen {
         emitRaw32(0xB90003E0 | (imm12 << 10));
     }
     
+    /// Store x1 to local at offset (32-bit) - for second parameter
+    void emitStoreLocal32FromX1(uint offset) {
+        // STR w1, [sp, #offset]
+        uint imm12 = offset / 4;
+        emitRaw32(0xB90003E1 | (imm12 << 10));
+    }
+    
+    /// Store x2 to local at offset (32-bit) - for third parameter
+    void emitStoreLocal32FromX2(uint offset) {
+        // STR w2, [sp, #offset]
+        uint imm12 = offset / 4;
+        emitRaw32(0xB90003E2 | (imm12 << 10));
+    }
+    
+    /// Store x3 to local at offset (32-bit) - for fourth parameter
+    void emitStoreLocal32FromX3(uint offset) {
+        // STR w3, [sp, #offset]
+        uint imm12 = offset / 4;
+        emitRaw32(0xB90003E3 | (imm12 << 10));
+    }
+    
     /// Load from local to x0 (32-bit, zero-extended)
     void emitLoadLocal32(uint offset) {
         // LDR w0, [sp, #offset]

@@ -164,6 +164,12 @@ class NativeCompiledFunction : CompiledFunction {
     private string funcName;
     private NativeCodeGen gen;  // renamed from codegen to avoid module name collision
     private size_t entryPoint;
+    private size_t paramCount;           // number of function parameters
+    
+    // Local variable tracking
+    private uint[string] localOffsets;  // variable name → stack offset
+    private uint nextLocalOffset;        // next available stack slot
+    private uint totalLocalBytes;        // total stack space needed
     
     this(FunctionDecl func, SymbolTable symbolTable) {
         import std.stdio : writeln;
@@ -174,6 +180,9 @@ class NativeCompiledFunction : CompiledFunction {
         if (!gen.base) {
             throw new Exception("Failed to allocate executable memory");
         }
+        
+        // Store parameter count for call()
+        this.paramCount = func.parameters.length;
         
         // Compile the function
         compileFunction(func);
@@ -189,14 +198,42 @@ class NativeCompiledFunction : CompiledFunction {
         
         entryPoint = gen.pos;
         
-        // Count locals needed
-        uint localBytes = countLocals(func) * 8;  // 8 bytes per local
+        // Reset local tracking
+        localOffsets.clear();
+        nextLocalOffset = 0;
+        
+        // Reserve space for parameters first (they come in registers x0-x7)
+        foreach (param; func.parameters) {
+            localOffsets[param.name] = nextLocalOffset;
+            nextLocalOffset += 4;  // 4 bytes per int (32-bit for now)
+        }
+        
+        // Count additional locals needed from the body
+        uint bodyLocals = countLocalsInStatement(func.body_);
+        totalLocalBytes = (nextLocalOffset + bodyLocals * 4 + 15) & ~15;  // 16-byte aligned
         
         // Emit prologue
-        if (localBytes > 0) {
-            gen.emitPrologueWithLocals(localBytes);
+        if (totalLocalBytes > 0) {
+            gen.emitPrologueWithLocals(totalLocalBytes);
         } else {
             gen.emitPrologue();
+        }
+        
+        // Spill parameters from registers to stack
+        // ARM64 calling convention: first 8 args in x0-x7
+        foreach (i, param; func.parameters) {
+            if (i >= 4) {
+                throw new Exception("Native backend: more than 4 parameters not yet supported");
+            }
+            // Store parameter register to its stack slot
+            uint offset = localOffsets[param.name];
+            switch (i) {
+                case 0: gen.emitStoreLocal32(offset); break;        // x0
+                case 1: gen.emitStoreLocal32FromX1(offset); break;  // x1
+                case 2: gen.emitStoreLocal32FromX2(offset); break;  // x2
+                case 3: gen.emitStoreLocal32FromX3(offset); break;  // x3
+                default: break;
+            }
         }
         
         // Compile body
@@ -205,16 +242,33 @@ class NativeCompiledFunction : CompiledFunction {
         }
         
         // Emit epilogue (if not already returned)
-        if (localBytes > 0) {
-            gen.emitEpilogueWithLocals(localBytes);
+        if (totalLocalBytes > 0) {
+            gen.emitEpilogueWithLocals(totalLocalBytes);
         } else {
             gen.emitEpilogue();
         }
     }
     
-    private uint countLocals(FunctionDecl func) {
-        // For now, simple counting - no actual local management
-        return 0;
+    private uint countLocalsInStatement(Statement stmt) {
+        if (stmt is null) return 0;
+        
+        uint count = 0;
+        
+        if (auto compound = cast(CompoundStatement)stmt) {
+            foreach (s; compound.statements) {
+                count += countLocalsInStatement(s);
+            }
+        } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
+            count = 1;
+        } else if (auto ifStmt = cast(IfStatement)stmt) {
+            count += countLocalsInStatement(ifStmt.thenStatement);
+            count += countLocalsInStatement(ifStmt.elseStatement);
+        } else if (auto whileStmt = cast(WhileStatement)stmt) {
+            count += countLocalsInStatement(whileStmt.body_);
+        }
+        // Other statement types don't introduce locals
+        
+        return count;
     }
     
     private void compileStatement(Statement stmt) {
@@ -229,8 +283,19 @@ class NativeCompiledFunction : CompiledFunction {
             // Return value is in x0, epilogue will handle the rest
         } else if (auto exprStmt = cast(ExpressionStatement)stmt) {
             compileExpression(exprStmt.expression);
+        } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
+            // Allocate stack slot for this variable
+            localOffsets[varDecl.name] = nextLocalOffset;
+            
+            // Compile initializer if present
+            if (varDecl.initializer) {
+                compileExpression(varDecl.initializer);
+                gen.emitStoreLocal32(nextLocalOffset);
+            }
+            
+            nextLocalOffset += 4;  // 4 bytes per int
         }
-        // TODO: if, while, for, var decls
+        // TODO: if, while, for
     }
     
     private void compileExpression(Expression expr) {
@@ -323,6 +388,81 @@ class NativeCompiledFunction : CompiledFunction {
                 gen.emitImm32(stencil_load_imm32, 0);
                 gen.emit(stencil_eq_i32);
             }
+        } else if (auto ident = cast(IdentifierExpression)expr) {
+            // Load variable from stack
+            if (auto offsetPtr = ident.name in localOffsets) {
+                gen.emitLoadLocal32(*offsetPtr);
+            } else {
+                throw new Exception("Unknown variable in native backend: " ~ ident.name);
+            }
+        } else if (auto assign = cast(AssignmentExpression)expr) {
+            // For now, only support simple assignment to identifiers
+            auto targetIdent = cast(IdentifierExpression)assign.left;
+            if (targetIdent is null) {
+                throw new Exception("Assignment to non-identifier not yet supported in native backend");
+            }
+            
+            auto offsetPtr = targetIdent.name in localOffsets;
+            if (offsetPtr is null) {
+                throw new Exception("Unknown variable in native backend: " ~ targetIdent.name);
+            }
+            
+            if (assign.operator == AssignmentExpression.Operator.Assign) {
+                // Simple assignment: x = expr
+                compileExpression(assign.right);
+                gen.emitStoreLocal32(*offsetPtr);
+            } else {
+                // Compound assignment: x op= expr
+                // First compile right side to x0
+                compileExpression(assign.right);
+                gen.emitMoveX0ToX1();  // x1 = right value
+                
+                // Load current value to x0
+                gen.emitLoadLocal32(*offsetPtr);
+                // Now x0 = current (left), x1 = right
+                
+                // Apply operation based on operator
+                switch (assign.operator) {
+                    case AssignmentExpression.Operator.AddAssign:
+                        gen.emit(stencil_add_i32);
+                        break;
+                    case AssignmentExpression.Operator.SubtractAssign:
+                        gen.emit(stencil_sub_i32);
+                        break;
+                    case AssignmentExpression.Operator.MultiplyAssign:
+                        gen.emit(stencil_mul_i32);
+                        break;
+                    case AssignmentExpression.Operator.DivideAssign:
+                        gen.emit(stencil_div_i32);
+                        break;
+                    case AssignmentExpression.Operator.ModuloAssign:
+                        gen.emit(stencil_mod_i32);
+                        break;
+                    case AssignmentExpression.Operator.AndAssign:
+                        gen.emit(stencil_and_i32);
+                        break;
+                    case AssignmentExpression.Operator.OrAssign:
+                        gen.emit(stencil_or_i32);
+                        break;
+                    case AssignmentExpression.Operator.XorAssign:
+                        gen.emit(stencil_xor_i32);
+                        break;
+                    case AssignmentExpression.Operator.ShiftLeftAssign:
+                        gen.emit(stencil_shl_i32);
+                        break;
+                    case AssignmentExpression.Operator.ShiftRightAssign:
+                        gen.emit(stencil_shr_i32);
+                        break;
+                    case AssignmentExpression.Operator.ConcatAssign:
+                        throw new Exception("~= not yet supported in native backend");
+                    default:
+                        break;
+                }
+                
+                // Store result back
+                gen.emitStoreLocal32(*offsetPtr);
+            }
+            // Result of assignment is the assigned value (already in x0)
         } else {
             throw new Exception("Expression type not yet supported in native backend: " ~ 
                 typeid(expr).toString());
@@ -330,12 +470,44 @@ class NativeCompiledFunction : CompiledFunction {
     }
     
     override ExecutionResult call(long[] args) {
-        // Get function pointer to entry point
-        alias FuncType = extern(C) long function();
-        auto fn = cast(FuncType)(gen.base + entryPoint);
+        // Call the compiled function with appropriate number of arguments
+        // ARM64 calling convention: first 8 args in x0-x7
+        long result;
         
-        // Call it! (args not yet supported)
-        long result = fn();
+        switch (paramCount) {
+            case 0:
+                alias Fn0 = extern(C) long function();
+                result = (cast(Fn0)(gen.base + entryPoint))();
+                break;
+            case 1:
+                alias Fn1 = extern(C) long function(long);
+                result = (cast(Fn1)(gen.base + entryPoint))(
+                    args.length > 0 ? args[0] : 0);
+                break;
+            case 2:
+                alias Fn2 = extern(C) long function(long, long);
+                result = (cast(Fn2)(gen.base + entryPoint))(
+                    args.length > 0 ? args[0] : 0,
+                    args.length > 1 ? args[1] : 0);
+                break;
+            case 3:
+                alias Fn3 = extern(C) long function(long, long, long);
+                result = (cast(Fn3)(gen.base + entryPoint))(
+                    args.length > 0 ? args[0] : 0,
+                    args.length > 1 ? args[1] : 0,
+                    args.length > 2 ? args[2] : 0);
+                break;
+            case 4:
+                alias Fn4 = extern(C) long function(long, long, long, long);
+                result = (cast(Fn4)(gen.base + entryPoint))(
+                    args.length > 0 ? args[0] : 0,
+                    args.length > 1 ? args[1] : 0,
+                    args.length > 2 ? args[2] : 0,
+                    args.length > 3 ? args[3] : 0);
+                break;
+            default:
+                throw new Exception("Native backend: too many parameters (max 4 for now)");
+        }
         
         return ExecutionResult.fromInt(result);
     }
