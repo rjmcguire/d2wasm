@@ -52,6 +52,12 @@ interface CompiledFunction {
     /// Execute the function with the given arguments
     ExecutionResult call(long[] args);
     
+    /// Execute a specific function by name (for multi-function contexts)
+    ExecutionResult callByName(string funcName, long[] args);
+    
+    /// Check if a function exists in this compiled context
+    bool hasFunction(string funcName);
+    
     /// Release any resources (native memory, runtime state, etc.)
     void dispose();
     
@@ -579,8 +585,9 @@ class NativeCompiledFunction : CompiledFunction {
                 throw new Exception("Literal type not supported: " ~ lit.value.type.toString());
             }
         } else if (auto binOp = cast(BinaryExpression)expr) {
-            // Check if left operand might clobber registers (is a function call)
-            bool leftMightClobber = containsFunctionCall(binOp.left);
+            // Check if left operand might clobber x1 (function call OR nested binary expr)
+            bool leftMightClobber = containsFunctionCall(binOp.left) || 
+                                    cast(BinaryExpression)binOp.left !is null;
             
             // Compile right operand first (into x0)
             compileExpression(binOp.right);
@@ -1048,6 +1055,65 @@ class NativeCompiledFunction : CompiledFunction {
         return ExecutionResult.fromInt(result);
     }
     
+    override ExecutionResult callByName(string targetFuncName, long[] args) {
+        // Look up function entry point and param count
+        auto labelPtr = targetFuncName in functionLabels;
+        if (labelPtr is null) {
+            return ExecutionResult.failure("Function not found: " ~ targetFuncName);
+        }
+        
+        auto funcDeclPtr = targetFuncName in functionDecls;
+        if (funcDeclPtr is null) {
+            return ExecutionResult.failure("Function decl not found: " ~ targetFuncName);
+        }
+        
+        size_t targetEntry = (*labelPtr).offset;
+        size_t targetParamCount = (*funcDeclPtr).parameters.length;
+        
+        // Call with the target function's entry point and param count
+        long result;
+        switch (targetParamCount) {
+            case 0:
+                alias Fn0 = extern(C) long function();
+                result = (cast(Fn0)(gen.base + targetEntry))();
+                break;
+            case 1:
+                alias Fn1 = extern(C) long function(long);
+                result = (cast(Fn1)(gen.base + targetEntry))(
+                    args.length > 0 ? args[0] : 0);
+                break;
+            case 2:
+                alias Fn2 = extern(C) long function(long, long);
+                result = (cast(Fn2)(gen.base + targetEntry))(
+                    args.length > 0 ? args[0] : 0,
+                    args.length > 1 ? args[1] : 0);
+                break;
+            case 3:
+                alias Fn3 = extern(C) long function(long, long, long);
+                result = (cast(Fn3)(gen.base + targetEntry))(
+                    args.length > 0 ? args[0] : 0,
+                    args.length > 1 ? args[1] : 0,
+                    args.length > 2 ? args[2] : 0);
+                break;
+            case 4:
+                alias Fn4 = extern(C) long function(long, long, long, long);
+                result = (cast(Fn4)(gen.base + targetEntry))(
+                    args.length > 0 ? args[0] : 0,
+                    args.length > 1 ? args[1] : 0,
+                    args.length > 2 ? args[2] : 0,
+                    args.length > 3 ? args[3] : 0);
+                break;
+            default:
+                return ExecutionResult.failure("Too many parameters (max 4)");
+        }
+        
+        return ExecutionResult.fromInt(result);
+    }
+    
+    override bool hasFunction(string targetFuncName) {
+        return (targetFuncName in functionLabels) !is null;
+    }
+    
     override void dispose() {
         if (gen.base) {
             gen.free();
@@ -1143,6 +1209,28 @@ class WASMCompiledFunction : CompiledFunction {
         } catch (CTFERuntimeError e) {
             return ExecutionResult.failure(e.msg);
         }
+    }
+    
+    override ExecutionResult callByName(string targetFuncName, long[] args) {
+        try {
+            int[] intArgs;
+            foreach (arg; args) {
+                intArgs ~= cast(int)arg;
+            }
+            
+            auto result = runtime.callI32(targetFuncName, intArgs);
+            return ExecutionResult.fromInt(result.asInt());
+            
+        } catch (CTFERuntimeError e) {
+            return ExecutionResult.failure(e.msg);
+        }
+    }
+    
+    override bool hasFunction(string targetFuncName) {
+        // WASM runtime exports all functions, so any compiled function should be callable
+        // For a proper implementation, we'd check the module exports
+        // For now, assume true (will fail at call time if not found)
+        return true;
     }
     
     override void dispose() {

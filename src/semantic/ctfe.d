@@ -1345,24 +1345,10 @@ class CTFEEvaluator {
             }
         } else {
             writeln("CTFE: Reusing cached context for ", funcDecl.name);
-            // Update entry point to the function we want to call
-            // Note: compileWithDependencies sets entry point, but we're reusing
-            // Need to ensure we can call any function in the context
         }
         
-        // Execute - need to call the right function
-        // Current limitation: cachedContext has a fixed entry point
-        // For now, recompile if entry function differs
-        if (cachedContext.name != funcDecl.name) {
-            writeln("CTFE: Recompiling to change entry point to ", funcDecl.name);
-            cachedContext.dispose();
-            cachedContext = backend.compileWithDependencies(contextFunctions, funcDecl.name);
-            if (cachedContext is null) {
-                throw new CTFEError("CTFE compile error: " ~ backend.error());
-            }
-        }
-        
-        auto result = cachedContext.call(args);
+        // Execute - use callByName to call any function in the context
+        auto result = cachedContext.callByName(funcDecl.name, args);
         if (!result.success) {
             throw new CTFEError("CTFE execution error: " ~ result.error);
         }
