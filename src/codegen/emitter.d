@@ -162,6 +162,7 @@ class BinaryEmitter {
             uint length;
         }
         ArrayLiteralInfo[string] arrayLiterals;
+        uint[string] manifestArrayAddrs;  // Manifest constant arrays (import(), etc.)
         
         // Whether we need array support (allocator, etc.)
         bool needsArraySupport = false;
@@ -270,6 +271,7 @@ class BinaryEmitter {
             globals.length = 0;
             dataEntries.length = 0;
             arrayLiterals.clear();
+            manifestArrayAddrs.clear();
             nextDataOffset = MEMORY_RESERVED;
             needsArraySupport = true;  // We're evaluating strings
             hasBuiltins = false;
@@ -639,9 +641,12 @@ class BinaryEmitter {
         // Basic types are OK
         if (cast(BasicType)t) return true;
         
-        // UserType "string" is NOT OK (CTFE-only)
+        // Array/slice types are OK (emitted as pointer to slice struct)
+        if (cast(ArrayType)t) return true;
+        
+        // UserTypes (structs) need checking
         if (auto userType = cast(UserType)t) {
-            return false;  // String and other user types can't be emitted yet
+            return false;  // User types can't be emitted yet (except structs handled elsewhere)
         }
         
         return false;
@@ -687,14 +692,39 @@ class BinaryEmitter {
     }
     
     /**
-     * Scan an expression for calls to CTFE-only functions
+     * Scan an expression for calls to CTFE-only functions.
+     * For __writeln, we pre-expand to the typed __ctfe_write_* imports.
      */
     private void scanExpressionForCTFECalls(Expression expr) {
         if (auto call = cast(CallExpression)expr) {
             if (auto ident = cast(IdentifierExpression)call.function_) {
                 auto symbol = symbolTable.lookupSymbol(ident.name);
                 if (symbol && symbol.isCTFEOnly) {
-                    neededCTFEImports[ident.name] = true;
+                    // Special case: __writeln is variadic, expand to typed imports
+                    if (ident.name == "__writeln") {
+                        // Pre-register all __ctfe_write_* imports that might be needed
+                        // We always need newline
+                        neededCTFEImports["__ctfe_write_newline"] = true;
+                        
+                        // Scan arguments to determine which typed writers we need
+                        foreach (arg; call.arguments) {
+                            if (auto literal = cast(LiteralExpression)arg) {
+                                if (literal.value.type == typeid(string)) {
+                                    neededCTFEImports["__ctfe_write_str"] = true;
+                                } else if (literal.value.type == typeid(long) || 
+                                           literal.value.type == typeid(int)) {
+                                    neededCTFEImports["__ctfe_write_i32"] = true;
+                                } else if (literal.value.type == typeid(bool)) {
+                                    neededCTFEImports["__ctfe_write_bool"] = true;
+                                }
+                            } else {
+                                // Non-literal expressions default to i32
+                                neededCTFEImports["__ctfe_write_i32"] = true;
+                            }
+                        }
+                    } else {
+                        neededCTFEImports[ident.name] = true;
+                    }
                 }
             }
             // Also scan arguments
@@ -748,6 +778,10 @@ class BinaryEmitter {
     private bool expressionUsesVariadicCTFE(Expression expr) {
         if (auto call = cast(CallExpression)expr) {
             if (auto ident = cast(IdentifierExpression)call.function_) {
+                // __writeln is lowered to typed calls, so it's no longer "variadic" for emission purposes
+                if (ident.name == "__writeln") {
+                    return false;
+                }
                 auto symbol = symbolTable.lookupSymbol(ident.name);
                 if (symbol && symbol.isCTFEOnly && symbol.isVariadic) {
                     return true;
@@ -996,13 +1030,32 @@ class BinaryEmitter {
             
             // Build signature based on the function
             FuncSig sig;
-            if (name == "__ctfe_print_i32") {
-                sig.params = [ValType.i32];
-                // void return
-            } else if (name == "__writeln") {
-                // Variadic - will be handled differently later
-                // For now skip
-                continue;
+            switch (name) {
+                // Standalone debug function
+                case "__ctfe_print_i32":
+                    sig.params = [ValType.i32];
+                    break;
+                    
+                // Building blocks for __writeln
+                case "__ctfe_write_i32":
+                    sig.params = [ValType.i32];
+                    break;
+                case "__ctfe_write_str":
+                    sig.params = [ValType.i32, ValType.i32];  // ptr, len
+                    break;
+                case "__ctfe_write_bool":
+                    sig.params = [ValType.i32];
+                    break;
+                case "__ctfe_write_newline":
+                    sig.params = [];
+                    break;
+                    
+                case "__writeln":
+                    // Variadic - lowered to typed calls at emit time, don't import
+                    continue;
+                default:
+                    // Unknown CTFE function - skip
+                    continue;
             }
             
             // Get or create type index
@@ -1605,6 +1658,36 @@ class BinaryEmitter {
         uint structOffset = addData(structData[]);
         
         arrayLiterals[s] = ArrayLiteralInfo(structOffset, dataOffset, len);
+        
+        return structOffset;
+    }
+    
+    /**
+     * Register a manifest constant array (from import() or array literal CTFE)
+     * and return the struct address in the data section.
+     */
+    uint registerManifestArray(ManifestConstantDecl manifest) {
+        import codegen.wasm : ARRAY_STRUCT_SIZE, ARRAY_PTR_OFFSET, ARRAY_LEN_OFFSET, ARRAY_CAP_OFFSET;
+        
+        // Check if already registered
+        if (manifest.name in manifestArrayAddrs) {
+            return manifestArrayAddrs[manifest.name];
+        }
+        
+        needsArraySupport = true;
+        
+        // Add the raw bytes to data section
+        uint dataOffset = addData(manifest.ctfeArrayBytes);
+        uint len = cast(uint)manifest.ctfeArrayBytes.length;
+        
+        // Create the Array struct: { ptr, len, cap }
+        ubyte[ARRAY_STRUCT_SIZE] structData;
+        *cast(uint*)&structData[ARRAY_PTR_OFFSET] = dataOffset;
+        *cast(uint*)&structData[ARRAY_LEN_OFFSET] = len;
+        *cast(uint*)&structData[ARRAY_CAP_OFFSET] = len;
+        
+        uint structOffset = addData(structData[]);
+        manifestArrayAddrs[manifest.name] = structOffset;
         
         return structOffset;
     }
@@ -2292,6 +2375,121 @@ private class FuncContext {
             return;
         }
         
+        // String literal initializer: "hello" -> ubyte[]
+        if (auto literal = cast(LiteralExpression)stmt.initializer) {
+            if (literal.value.type == typeid(string)) {
+                string strVal = literal.value.get!string();
+                uint structAddr = emitter.registerArrayLiteral(strVal);
+                uint len = cast(uint)strVal.length;
+                
+                // Load ptr from data section struct
+                out_ ~= Op.local_get;
+                leb128u(out_, fpLocal);
+                out_ ~= Op.i32_const;
+                leb128s(out_, info.frameOffset);  // slice.ptr offset = 0
+                out_ ~= Op.i32_add;
+                
+                out_ ~= Op.i32_const;
+                leb128u(out_, structAddr);
+                out_ ~= Op.i32_load;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+                
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+                
+                // length
+                out_ ~= Op.local_get;
+                leb128u(out_, fpLocal);
+                out_ ~= Op.i32_const;
+                leb128s(out_, info.frameOffset + 4);  // slice.length offset = 4
+                out_ ~= Op.i32_add;
+                
+                out_ ~= Op.i32_const;
+                leb128s(out_, len);
+                
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+                
+                // capacity = length (immutable string data)
+                out_ ~= Op.local_get;
+                leb128u(out_, fpLocal);
+                out_ ~= Op.i32_const;
+                leb128s(out_, info.frameOffset + 8);  // slice.capacity offset = 8
+                out_ ~= Op.i32_add;
+                
+                out_ ~= Op.i32_const;
+                leb128s(out_, len);
+                
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+                
+                return;
+            }
+        }
+        
+        // Import expression initializer: import("file.txt") -> ubyte[]
+        if (auto importExpr = cast(ImportExpression)stmt.initializer) {
+            import std.file : read, exists;
+            import std.path : buildPath, dirName;
+            
+            string filename = importExpr.filename;
+            string sourcePath = importExpr.location.filename;
+            string sourceDir = sourcePath.length > 0 ? dirName(sourcePath) : ".";
+            string fullPath = buildPath(sourceDir, filename);
+            
+            if (!exists(fullPath)) fullPath = filename;
+            
+            if (!exists(fullPath)) {
+                throw new EmitError("import(): file not found: " ~ filename);
+            }
+            
+            ubyte[] fileData = cast(ubyte[])read(fullPath);
+            uint len = cast(uint)fileData.length;
+            
+            // Add file data to data section
+            uint dataOffset = emitter.addData(fileData);
+            
+            // Initialize slice struct: ptr = dataOffset, length = len, capacity = len
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset);
+            out_ ~= Op.i32_add;
+            out_ ~= Op.i32_const;
+            leb128s(out_, dataOffset);
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset + 4);
+            out_ ~= Op.i32_add;
+            out_ ~= Op.i32_const;
+            leb128s(out_, len);
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset + 8);
+            out_ ~= Op.i32_add;
+            out_ ~= Op.i32_const;
+            leb128s(out_, len);
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            
+            return;
+        }
+        
         // Slice expression initializer: arr[1..3]
         if (auto sliceExpr = cast(SliceExpression)stmt.initializer) {
             auto sourceIdent = cast(IdentifierExpression)sliceExpr.array;
@@ -2475,6 +2673,46 @@ private class FuncContext {
             out_ ~= cast(ubyte)0x02;
             leb128u(out_, 0);
             return;
+        }
+        
+        // Check if it's a manifest constant array (import(), etc.)
+        auto symbol = emitter.symbolTable.lookupSymbol(arrayIdent.name);
+        if (symbol && symbol.kind == SymbolKind.Variable && symbol.isConstant) {
+            if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
+                if (manifest.ctfeComplete && manifest.isArrayType) {
+                    uint structAddr = emitter.registerManifestArray(manifest);
+                    
+                    // Determine element size based on inferred type
+                    uint elemSize = manifest.ctfeElementSize;
+                    if (elemSize == 0) elemSize = 4;  // default to i32
+                    
+                    // Load ptr from struct (offset 0)
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, structAddr);
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                    
+                    // Calculate address: ptr + index * elemSize
+                    emitExpression(out_, expr.index);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, elemSize);
+                    out_ ~= Op.i32_mul;
+                    out_ ~= Op.i32_add;
+                    
+                    // Load the element (use appropriate size)
+                    if (elemSize == 1) {
+                        out_ ~= Op.i32_load8_u;  // ubyte
+                        out_ ~= cast(ubyte)0x00;
+                        leb128u(out_, 0);
+                    } else {
+                        out_ ~= Op.i32_load;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                    }
+                    return;
+                }
+            }
         }
         
         throw new EmitError("Unsupported array indexing on " ~ arrayIdent.name);
@@ -3228,6 +3466,42 @@ private class FuncContext {
                 }
             }
             
+            // Check if it's a manifest constant array (import(), array literal, etc.)
+            if (symbol && symbol.kind == SymbolKind.Variable && symbol.isConstant) {
+                if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
+                    if (manifest.ctfeComplete && manifest.isArrayType) {
+                        // Register the array data and get struct address
+                        uint structAddr = emitter.registerManifestArray(manifest);
+                        
+                        if (expr.memberName == "length") {
+                            // Length is at offset 4 in Array struct
+                            out_ ~= Op.i32_const;
+                            leb128s(out_, structAddr + 4);
+                            out_ ~= Op.i32_load;
+                            out_ ~= cast(ubyte)0x02;
+                            leb128u(out_, 0);
+                            return;
+                        } else if (expr.memberName == "ptr") {
+                            // Ptr is at offset 0
+                            out_ ~= Op.i32_const;
+                            leb128s(out_, structAddr);
+                            out_ ~= Op.i32_load;
+                            out_ ~= cast(ubyte)0x02;
+                            leb128u(out_, 0);
+                            return;
+                        } else if (expr.memberName == "capacity") {
+                            // Capacity is at offset 8
+                            out_ ~= Op.i32_const;
+                            leb128s(out_, structAddr + 8);
+                            out_ ~= Op.i32_load;
+                            out_ ~= cast(ubyte)0x02;
+                            leb128u(out_, 0);
+                            return;
+                        }
+                    }
+                }
+            }
+            
             // Check if it's a variable with struct type (e.g., P.x where P is a global struct)
             if (symbol && symbol.kind == SymbolKind.Variable) {
                 if (auto varDecl = cast(VariableDecl)symbol.declaration) {
@@ -3710,6 +3984,12 @@ private class FuncContext {
             }
         }
         
+        // Special handling for __writeln: lower to typed CTFE print calls
+        if (ident.name == "__writeln") {
+            emitWritelnCall(out_, expr.arguments);
+            return;
+        }
+        
         // Emit arguments (copy structs for pass-by-value semantics)
         uint totalCopySize = 0;
         foreach (arg; expr.arguments) {
@@ -3884,6 +4164,84 @@ private class FuncContext {
             out_ ~= Op.global_set;
             leb128u(out_, emitter.spGlobal);
         }
+    }
+    
+    /**
+     * Emit __writeln(args...) by lowering to typed CTFE write calls.
+     * Each argument is printed according to its type, followed by a newline.
+     * Uses __ctfe_write_* (building blocks without prefix) not __ctfe_print_*.
+     */
+    void emitWritelnCall(ref Appender!(ubyte[]) out_, Expression[] args) {
+        foreach (arg; args) {
+            // Determine argument type and emit appropriate write call
+            if (auto literal = cast(LiteralExpression)arg) {
+                if (literal.value.type == typeid(string)) {
+                    // String literal: emit __ctfe_write_str(ptr, len)
+                    string strVal = literal.value.get!string();
+                    uint structAddr = emitter.registerArrayLiteral(strVal);
+                    
+                    // Load ptr from struct (offset 0)
+                    out_ ~= Op.i32_const;
+                    leb128u(out_, structAddr);
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;  // align=4
+                    leb128u(out_, 0);         // offset=0
+                    
+                    // Load length from struct (offset 4)
+                    out_ ~= Op.i32_const;
+                    leb128u(out_, structAddr + 4);
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                    
+                    // Call __ctfe_write_str
+                    emitter.neededCTFEImports["__ctfe_write_str"] = true;
+                    uint funcIdx = emitter.getFuncIndex("__ctfe_write_str");
+                    out_ ~= Op.call;
+                    leb128u(out_, funcIdx);
+                }
+                else if (literal.value.type == typeid(long) || literal.value.type == typeid(int)) {
+                    // Integer literal: emit __ctfe_write_i32(value)
+                    long val = literal.value.type == typeid(long) 
+                        ? literal.value.get!long() 
+                        : literal.value.get!int();
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, cast(int)val);
+                    
+                    emitter.neededCTFEImports["__ctfe_write_i32"] = true;
+                    uint funcIdx = emitter.getFuncIndex("__ctfe_write_i32");
+                    out_ ~= Op.call;
+                    leb128u(out_, funcIdx);
+                }
+                else if (literal.value.type == typeid(bool)) {
+                    // Boolean literal: emit __ctfe_write_bool(0 or 1)
+                    bool val = literal.value.get!bool();
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, val ? 1 : 0);
+                    
+                    emitter.neededCTFEImports["__ctfe_write_bool"] = true;
+                    uint funcIdx = emitter.getFuncIndex("__ctfe_write_bool");
+                    out_ ~= Op.call;
+                    leb128u(out_, funcIdx);
+                }
+            }
+            else {
+                // Non-literal expression: evaluate and print as i32
+                // TODO: Support other types via expression type analysis
+                emitExpression(out_, arg);
+                
+                emitter.neededCTFEImports["__ctfe_write_i32"] = true;
+                uint funcIdx = emitter.getFuncIndex("__ctfe_write_i32");
+                out_ ~= Op.call;
+                leb128u(out_, funcIdx);
+            }
+        }
+        
+        // Emit newline at the end
+        emitter.neededCTFEImports["__ctfe_write_newline"] = true;
+        uint newlineIdx = emitter.getFuncIndex("__ctfe_write_newline");
+        out_ ~= Op.call;
+        leb128u(out_, newlineIdx);
     }
     
     /**
@@ -4637,6 +4995,11 @@ private class FuncContext {
             // Check if function returns void
             auto ident = cast(IdentifierExpression)call.function_;
             if (ident) {
+                // Special case: __writeln is lowered to typed calls, returns void
+                if (ident.name == "__writeln") {
+                    return false;
+                }
+                
                 // Check local functions
                 if (auto idx = ident.name in emitter.funcIndex) {
                     auto f = emitter.functions[*idx];

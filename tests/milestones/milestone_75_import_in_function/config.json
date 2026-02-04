@@ -1,0 +1,6 @@
+{
+  "name": "import_in_function",
+  "description": "import() inside CTFE function",
+  "type": "wasm_exec",
+  "expected_result": 3
+}

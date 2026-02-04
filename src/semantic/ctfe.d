@@ -282,6 +282,12 @@ class CTFEEvaluator {
             return;
         }
         
+        // Check for import expression: import("filename")
+        if (auto importExpr = cast(ImportExpression)manifest.initializer) {
+            evaluateImportExpression(manifest, importExpr);
+            return;
+        }
+        
         // Shouldn't reach here - call expressions are handled above
         // This is legacy code for non-call expressions that need WASM evaluation
         
@@ -407,6 +413,58 @@ class CTFEEvaluator {
         manifest.isArrayType = true;
         
         writeln("CTFE: ", manifest.name, " = ", values, " (array literal, ", bytes.data.length, " bytes)");
+    }
+    
+    /**
+     * Evaluate import("filename") expression.
+     * Reads file at compile time and stores contents as ubyte[].
+     */
+    void evaluateImportExpression(ManifestConstantDecl manifest, ImportExpression importExpr) {
+        import std.file : read, exists;
+        import std.path : buildPath, dirName;
+        
+        string filename = importExpr.filename;
+        
+        // Try to find the file relative to the source file
+        string sourcePath = importExpr.location.filename;
+        string sourceDir = sourcePath.length > 0 ? dirName(sourcePath) : ".";
+        string fullPath = buildPath(sourceDir, filename);
+        
+        // Also try current directory if not found
+        if (!exists(fullPath)) {
+            fullPath = filename;
+        }
+        
+        if (!exists(fullPath)) {
+            throw new CTFEError(
+                format("import(\"%s\"): file not found (tried '%s' and '%s')",
+                       filename, buildPath(sourceDir, filename), filename)
+            );
+        }
+        
+        writeln("CTFE: Reading file '", fullPath, "'");
+        
+        // Read the file
+        ubyte[] fileData;
+        try {
+            fileData = cast(ubyte[])read(fullPath);
+        } catch (Exception e) {
+            throw new CTFEError(
+                format("import(\"%s\"): failed to read file: %s", filename, e.msg)
+            );
+        }
+        
+        // Store as array value
+        manifest.ctfeArrayBytes = fileData;
+        manifest.ctfeElementSize = 1;  // ubyte
+        manifest.ctfeComplete = true;
+        manifest.isArrayType = true;
+        
+        // Set the inferred type to ubyte[]
+        auto ubyteType = new BasicType(manifest.location, BasicType.Kind.UInt8);
+        manifest.inferredType = new ArrayType(manifest.location, ubyteType);
+        
+        writeln("CTFE: ", manifest.name, " = import(\"", filename, "\") (", fileData.length, " bytes)");
     }
     
     /**

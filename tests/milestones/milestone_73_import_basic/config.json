@@ -1,0 +1,6 @@
+{
+  "name": "import_basic",
+  "description": "import() reads file at compile time, returns ubyte[]",
+  "type": "wasm_exec",
+  "expected_result": 2
+}

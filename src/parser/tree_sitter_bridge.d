@@ -1463,6 +1463,8 @@ class TreeSitterBridge {
                 return parseUnaryExpression(node, loc);
             case "call_expression":
                 return parseCallExpression(node, loc);
+            case "import_expression":
+                return parseImportExpression(node, loc);
             case "index_expression":
                 return parseIndexExpression(node, loc);
             case "index":
@@ -1797,6 +1799,43 @@ class TreeSitterBridge {
         // Regular index expression
         Expression index = parseExpression(indexNode);
         return new IndexExpression(loc, array, index);
+    }
+    
+    /**
+     * Parse import expression: import("filename")
+     * D's compile-time file import.
+     */
+    ImportExpression parseImportExpression(TSNode node, SourceLocation loc) {
+        // Find the string literal argument (may be wrapped in "expression" node)
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string nodeType = TreeSitterParser.getNodeType(child);
+            
+            if (nodeType == "string_literal") {
+                string text = TreeSitterParser.getNodeText(child, sourceText);
+                // Remove quotes
+                string filename = text[1..$-1];
+                return new ImportExpression(loc, filename);
+            }
+            
+            // tree-sitter wraps the argument in "expression" node
+            if (nodeType == "expression") {
+                // Look for string_literal inside
+                uint innerCount = TreeSitterParser.getChildCount(child);
+                for (uint j = 0; j < innerCount; j++) {
+                    TSNode inner = TreeSitterParser.getChild(child, j);
+                    string innerType = TreeSitterParser.getNodeType(inner);
+                    if (innerType == "string_literal") {
+                        string text = TreeSitterParser.getNodeText(inner, sourceText);
+                        string filename = text[1..$-1];
+                        return new ImportExpression(loc, filename);
+                    }
+                }
+            }
+        }
+        
+        throw new ParseError("import() requires a string literal argument", loc);
     }
     
     /**

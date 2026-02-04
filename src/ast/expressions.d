@@ -462,3 +462,28 @@ class AssignmentExpression : Expression {
         }
     }
 }
+/**
+ * Import expression: import("filename")
+ * Reads file contents at compile time (CTFE-only).
+ * Returns ubyte[] containing the file bytes.
+ */
+class ImportExpression : Expression {
+    string filename;  // The filename argument (must be a string literal)
+    
+    this(SourceLocation loc, string filename) {
+        super(loc);
+        this.filename = filename;
+    }
+    
+    override bool isConstant() const {
+        return true;  // import() is evaluated at compile time
+    }
+    
+    override bool hasLValue() const {
+        return false;
+    }
+    
+    override string toString() const {
+        return format("import(\"%s\")", filename);
+    }
+}

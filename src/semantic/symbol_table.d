@@ -260,13 +260,41 @@ class SymbolTable {
         // CTFE-only builtins (only available at compile time)
         addBuiltinFunction("__writeln", loc, true, true);  // CTFE-only, variadic
         
-        // __ctfe_print_i32: void(int) - single i32 parameter
+        // CTFE print intrinsics - typed variants (all become WASM imports)
         auto i32Type = new BasicType(loc, BasicType.Kind.Int32);
         auto voidType = new BasicType(loc, BasicType.Kind.Void);
+        
+        // __ctfe_print_i32: void(int) - standalone debug, prints "CTFE: <value>\n"
         auto printI32Type = new FunctionType(loc, voidType, [i32Type]);
         auto printI32Symbol = new Symbol("__ctfe_print_i32", SymbolKind.Function, printI32Type, null, loc, true);
         printI32Symbol.isCTFEOnly = true;
         globalScope.addSymbol(printI32Symbol);
+        
+        // Building blocks for __writeln lowering (no prefix, no automatic newline)
+        
+        // __ctfe_write_i32: void(int)
+        auto writeI32Type = new FunctionType(loc, voidType, [i32Type]);
+        auto writeI32Symbol = new Symbol("__ctfe_write_i32", SymbolKind.Function, writeI32Type, null, loc, true);
+        writeI32Symbol.isCTFEOnly = true;
+        globalScope.addSymbol(writeI32Symbol);
+        
+        // __ctfe_write_str: void(ptr: i32, len: i32) - string from memory
+        auto writeStrType = new FunctionType(loc, voidType, [i32Type, i32Type]);
+        auto writeStrSymbol = new Symbol("__ctfe_write_str", SymbolKind.Function, writeStrType, null, loc, true);
+        writeStrSymbol.isCTFEOnly = true;
+        globalScope.addSymbol(writeStrSymbol);
+        
+        // __ctfe_write_bool: void(int) - prints "true" or "false"
+        auto writeBoolType = new FunctionType(loc, voidType, [i32Type]);
+        auto writeBoolSymbol = new Symbol("__ctfe_write_bool", SymbolKind.Function, writeBoolType, null, loc, true);
+        writeBoolSymbol.isCTFEOnly = true;
+        globalScope.addSymbol(writeBoolSymbol);
+        
+        // __ctfe_write_newline: void() - emits newline
+        auto writeNewlineType = new FunctionType(loc, voidType, []);
+        auto writeNewlineSymbol = new Symbol("__ctfe_write_newline", SymbolKind.Function, writeNewlineType, null, loc, true);
+        writeNewlineSymbol.isCTFEOnly = true;
+        globalScope.addSymbol(writeNewlineSymbol);
         
         // Register built-in methods for array/slice types
         registerArrayBuiltinMethods(loc);

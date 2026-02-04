@@ -121,14 +121,70 @@ struct CTFEValue {
 // These are called from WASM via imports from the "ctfe" module
 //==============================================================================
 
+// Store runtime reference for host functions that need memory access
+private __gshared IM3Runtime g_ctfeRuntime;
+
 /**
  * Host implementation of __ctfe_print_i32
- * Prints a single i32 value during compile time.
+ * Standalone debug print - prints "CTFE: <value>\n"
  */
 extern(C) const(void)* hostPrintI32(IM3Runtime runtime, IM3ImportContext ctx, uint* stack, void* mem) {
     int value = cast(int)(*stack);
     writeln("CTFE: ", value);
     return null;  // No error
+}
+
+/**
+ * Host implementation of __ctfe_write_i32
+ * Building block for __writeln - just the value, no prefix, no newline.
+ */
+extern(C) const(void)* hostWriteI32(IM3Runtime runtime, IM3ImportContext ctx, uint* stack, void* mem) {
+    int value = cast(int)(*stack);
+    write(value);
+    return null;
+}
+
+/**
+ * Host implementation of __ctfe_write_str
+ * Building block for __writeln - string from WASM memory (ptr, len).
+ */
+extern(C) const(void)* hostWriteStr(IM3Runtime runtime, IM3ImportContext ctx, uint* stack, void* mem) {
+    // wasm3 raw stack uses 64-bit slots per argument
+    // stack[0], stack[1] = first arg (ptr) as 64-bit
+    // stack[2], stack[3] = second arg (len) as 64-bit
+    uint ptr = stack[0];
+    uint len = stack[2];
+    
+    // Get memory pointer
+    uint memSize;
+    ubyte* wasmMem = m3_GetMemory(runtime, &memSize, 0);
+    
+    if (wasmMem is null || ptr + len > memSize) {
+        return "CTFE: memory access out of bounds".ptr;
+    }
+    
+    auto str = cast(char[])wasmMem[ptr .. ptr + len];
+    write(str);
+    return null;
+}
+
+/**
+ * Host implementation of __ctfe_write_bool
+ * Building block for __writeln - prints "true" or "false".
+ */
+extern(C) const(void)* hostWriteBool(IM3Runtime runtime, IM3ImportContext ctx, uint* stack, void* mem) {
+    int value = cast(int)(*stack);
+    write(value != 0 ? "true" : "false");
+    return null;
+}
+
+/**
+ * Host implementation of __ctfe_write_newline
+ * Building block for __writeln - just a newline.
+ */
+extern(C) const(void)* hostWriteNewline(IM3Runtime runtime, IM3ImportContext ctx, uint* stack, void* mem) {
+    writeln();
+    return null;
 }
 
 /**
@@ -200,14 +256,39 @@ class CTFERuntime {
      * These are called from WASM via imports from the "ctfe" module.
      */
     private void linkCTFEHostFunctions() {
-        // Link __ctfe_print_i32 - simple single-value print for testing
-        auto result = m3_LinkRawFunction(mod, "ctfe".ptr, "__ctfe_print_i32".ptr, "v(i)".ptr, &hostPrintI32);
-        // Ignore "function not found" - the module may not use this import
+        const(char)* result;
+        
+        // Standalone debug function
+        // __ctfe_print_i32: prints "CTFE: <value>\n"
+        result = m3_LinkRawFunction(mod, "ctfe".ptr, "__ctfe_print_i32".ptr, "v(i)".ptr, &hostPrintI32);
         if (result !is null && result != m3Err_functionLookupFailed) {
             throw new CTFERuntimeError("Failed to link __ctfe_print_i32: " ~ fromStringz(result).idup);
         }
         
-        // Future: link __writeln and other CTFE intrinsics here
+        // Building blocks for __writeln (no prefix, no automatic newline)
+        // __ctfe_write_i32: just the value
+        result = m3_LinkRawFunction(mod, "ctfe".ptr, "__ctfe_write_i32".ptr, "v(i)".ptr, &hostWriteI32);
+        if (result !is null && result != m3Err_functionLookupFailed) {
+            throw new CTFERuntimeError("Failed to link __ctfe_write_i32: " ~ fromStringz(result).idup);
+        }
+        
+        // __ctfe_write_str: void(ptr, len)
+        result = m3_LinkRawFunction(mod, "ctfe".ptr, "__ctfe_write_str".ptr, "v(ii)".ptr, &hostWriteStr);
+        if (result !is null && result != m3Err_functionLookupFailed) {
+            throw new CTFERuntimeError("Failed to link __ctfe_write_str: " ~ fromStringz(result).idup);
+        }
+        
+        // __ctfe_write_bool: void(i32)
+        result = m3_LinkRawFunction(mod, "ctfe".ptr, "__ctfe_write_bool".ptr, "v(i)".ptr, &hostWriteBool);
+        if (result !is null && result != m3Err_functionLookupFailed) {
+            throw new CTFERuntimeError("Failed to link __ctfe_write_bool: " ~ fromStringz(result).idup);
+        }
+        
+        // __ctfe_write_newline: void()
+        result = m3_LinkRawFunction(mod, "ctfe".ptr, "__ctfe_write_newline".ptr, "v()".ptr, &hostWriteNewline);
+        if (result !is null && result != m3Err_functionLookupFailed) {
+            throw new CTFERuntimeError("Failed to link __ctfe_write_newline: " ~ fromStringz(result).idup);
+        }
     }
     
     /**

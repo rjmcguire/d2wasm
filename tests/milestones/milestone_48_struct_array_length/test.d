@@ -1,8 +1,7 @@
 // Test: arrays as built-in structs - .length property
-// This validates that the string type uses struct field access machinery
-
-immutable string MSG = "hello";
+// String literals are ubyte[] - validates slice struct machinery
 
 int main() {
-    return cast(int)MSG.length;  // 5
+    ubyte[] msg = "hello";
+    return msg.length;  // 5
 }

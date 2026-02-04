@@ -1,8 +1,6 @@
 {
-  "name": "string_constant",
-  "description": "String constant in WASM memory",
-  "type": "compile_only",
-  "skip_reason": "Requires string type parsing - future work",
-  "entry": "getLength",
-  "capability": "Data section, string literals, memory access"
+  "name": "string_literal_as_ubyte",
+  "description": "String literal treated as ubyte[] slice",
+  "type": "wasm_exec",
+  "expected_result": 5
 }

@@ -1,0 +1,6 @@
+{
+  "name": "import_index",
+  "description": "Index into import() bytes",
+  "type": "wasm_exec",
+  "expected_result": 132
+}

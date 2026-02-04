@@ -1,6 +1,5 @@
-// For now, just test we can have a string and get its length
-immutable string MSG = "hello";
-
-int getLength() {
-    return cast(int)MSG.length;
+// Test string literal as ubyte[] and get its length
+int main() {
+    ubyte[] msg = "hello";
+    return msg.length;
 }

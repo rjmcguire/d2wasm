@@ -426,6 +426,8 @@ class TypeChecker {
             return checkArrayLiteralExpression(arrayLit);
         } else if (auto slice = cast(SliceExpression)expr) {
             return checkSliceExpression(slice);
+        } else if (auto import_ = cast(ImportExpression)expr) {
+            return checkImportExpression(import_);
         }
         
         throw new TypeError("Unknown expression type", expr.location);
@@ -970,6 +972,17 @@ class TypeChecker {
             expr.location);
     }
     
+    /**
+     * Type check import expression: import("filename")
+     * Returns ubyte[] - the file contents as raw bytes.
+     * This is CTFE-only - the file is read at compile time.
+     */
+    Type checkImportExpression(ImportExpression expr) {
+        // import() returns ubyte[] (raw file bytes)
+        auto ubyteType = new BasicType(expr.location, BasicType.Kind.UInt8);
+        return new ArrayType(expr.location, ubyteType);
+    }
+    
     Type checkMemberExpression(MemberExpression expr) {
         // Check if the object is a type name (for Type.sizeof, Type.alignof, etc.)
         if (auto ident = cast(IdentifierExpression)expr.object) {
@@ -1315,8 +1328,9 @@ class TypeChecker {
             // Boolean literal
             return new BasicType(literal.location, BasicType.Kind.Bool);
         } else if (literal.value.type == typeid(string)) {
-            // String literal - return as UserType "string" for now
-            return new UserType(literal.location, "string");
+            // String literal - treat as ubyte[] (raw bytes, no string semantics)
+            auto ubyteType = new BasicType(literal.location, BasicType.Kind.UInt8);
+            return new ArrayType(literal.location, ubyteType);
         } else if (literal.value.type == typeid(typeof(null))) {
             // Null literal
             return new BasicType(literal.location, BasicType.Kind.Void);  // TODO: Proper null type
