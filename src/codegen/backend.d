@@ -171,6 +171,10 @@ class NativeCompiledFunction : CompiledFunction {
     private uint nextLocalOffset;        // next available stack slot
     private uint totalLocalBytes;        // total stack space needed
     
+    // For return statements to jump to
+    import codegen.native.arm64_codegen : Label;
+    private Label epilogueLabel;
+    
     this(FunctionDecl func, SymbolTable symbolTable) {
         import std.stdio : writeln;
         
@@ -212,6 +216,9 @@ class NativeCompiledFunction : CompiledFunction {
         uint bodyLocals = countLocalsInStatement(func.body_);
         totalLocalBytes = (nextLocalOffset + bodyLocals * 4 + 15) & ~15;  // 16-byte aligned
         
+        // Create epilogue label for return statements
+        epilogueLabel = gen.newLabel();
+        
         // Emit prologue
         if (totalLocalBytes > 0) {
             gen.emitPrologueWithLocals(totalLocalBytes);
@@ -241,7 +248,10 @@ class NativeCompiledFunction : CompiledFunction {
             compileStatement(func.body_);
         }
         
-        // Emit epilogue (if not already returned)
+        // Bind epilogue label - return statements jump here
+        gen.bindLabel(epilogueLabel);
+        
+        // Emit epilogue
         if (totalLocalBytes > 0) {
             gen.emitEpilogueWithLocals(totalLocalBytes);
         } else {
@@ -280,7 +290,8 @@ class NativeCompiledFunction : CompiledFunction {
             if (ret.value) {
                 compileExpression(ret.value);
             }
-            // Return value is in x0, epilogue will handle the rest
+            // Jump to epilogue (which will restore stack and return)
+            gen.emitBranch(epilogueLabel);
         } else if (auto exprStmt = cast(ExpressionStatement)stmt) {
             compileExpression(exprStmt.expression);
         } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
@@ -294,8 +305,57 @@ class NativeCompiledFunction : CompiledFunction {
             }
             
             nextLocalOffset += 4;  // 4 bytes per int
+        } else if (auto ifStmt = cast(IfStatement)stmt) {
+            // Compile: if (cond) { then } else { else }
+            auto elseLabel = gen.newLabel();
+            auto endLabel = gen.newLabel();
+            
+            // Compile condition (result in x0)
+            compileExpression(ifStmt.condition);
+            
+            // Branch to else if condition is zero
+            gen.emitBranchIfZero(elseLabel);
+            
+            // Compile then branch
+            compileStatement(ifStmt.thenStatement);
+            
+            if (ifStmt.elseStatement) {
+                // Jump over else branch
+                gen.emitBranch(endLabel);
+            }
+            
+            // Else branch (or just the end if no else)
+            gen.bindLabel(elseLabel);
+            if (ifStmt.elseStatement) {
+                compileStatement(ifStmt.elseStatement);
+            }
+            
+            gen.bindLabel(endLabel);
+            
+        } else if (auto whileStmt = cast(WhileStatement)stmt) {
+            // Compile: while (cond) { body }
+            auto loopStart = gen.newLabel();
+            auto loopEnd = gen.newLabel();
+            
+            // Loop start
+            gen.bindLabel(loopStart);
+            
+            // Compile condition (result in x0)
+            compileExpression(whileStmt.condition);
+            
+            // Exit loop if condition is zero
+            gen.emitBranchIfZero(loopEnd);
+            
+            // Compile body
+            compileStatement(whileStmt.body_);
+            
+            // Jump back to start
+            gen.emitBranch(loopStart);
+            
+            // Loop end
+            gen.bindLabel(loopEnd);
         }
-        // TODO: if, while, for
+        // TODO: for
     }
     
     private void compileExpression(Expression expr) {
