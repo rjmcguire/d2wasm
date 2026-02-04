@@ -217,12 +217,11 @@ class MixinExpander {
      * Collect manifest constants and evaluate them via CTFE.
      */
     private void collectAndEvaluateManifests() {
-        // Collect manifest constants into symbol table
+        // Collect all declarations into symbol table for CTFE
+        // (structs, functions, manifest constants - everything CTFE might reference)
         auto collector = new SymbolCollector(tempSymbolTable);
         foreach (decl; allDeclarations) {
-            if (cast(ManifestConstantDecl)decl) {
-                collector.collectSymbol(decl);
-            }
+            collector.collectSymbol(decl);
         }
         
         // Evaluate them via CTFE

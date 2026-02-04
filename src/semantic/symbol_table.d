@@ -473,6 +473,11 @@ class SymbolCollector {
      * Compute struct layout: field offsets, alignment, and total size
      */
     private void computeStructLayout(StructDecl decl) {
+        // Skip if already computed (avoid double-counting fields)
+        if (decl.layoutComputed) {
+            return;
+        }
+        
         size_t currentOffset = 0;
         size_t maxAlign = 1;
         
