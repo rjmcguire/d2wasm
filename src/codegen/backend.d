@@ -161,6 +161,7 @@ class NativeCompiledFunction : CompiledFunction {
     import ast.statements;
     import ast.expressions;
     import semantic.symbol_table : SymbolKind;
+    alias ArrayType = ast.nodes.ArrayType;
     
     private string funcName;
     private NativeCodeGen gen;  // renamed from codegen to avoid module name collision
@@ -216,9 +217,9 @@ class NativeCompiledFunction : CompiledFunction {
             nextLocalOffset += 4;  // 4 bytes per int (32-bit for now)
         }
         
-        // Count additional locals needed from the body
-        uint bodyLocals = countLocalsInStatement(func.body_);
-        totalLocalBytes = (nextLocalOffset + bodyLocals * 4 + 15) & ~15;  // 16-byte aligned
+        // Count bytes needed for locals in the body
+        uint bodyLocalBytes = countLocalBytesInStatement(func.body_);
+        totalLocalBytes = (nextLocalOffset + bodyLocalBytes + 15) & ~15;  // 16-byte aligned
         
         // Create epilogue label for return statements
         epilogueLabel = gen.newLabel();
@@ -263,26 +264,48 @@ class NativeCompiledFunction : CompiledFunction {
         }
     }
     
-    private uint countLocalsInStatement(Statement stmt) {
+    /**
+     * Count bytes needed for locals in a statement (not just count of vars)
+     */
+    private uint countLocalBytesInStatement(Statement stmt) {
         if (stmt is null) return 0;
         
-        uint count = 0;
+        uint bytes = 0;
         
         if (auto compound = cast(CompoundStatement)stmt) {
             foreach (s; compound.statements) {
-                count += countLocalsInStatement(s);
+                bytes += countLocalBytesInStatement(s);
             }
         } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
-            count = 1;
+            // Check type to determine size
+            if (auto userType = cast(UserType)varDecl.type) {
+                if (auto sd = cast(StructDecl)userType.declaration) {
+                    bytes = cast(uint)sd.structSize;
+                } else {
+                    bytes = 4;
+                }
+            } else if (auto arrType = cast(ArrayType)varDecl.type) {
+                if (arrType.arraySize is null) {
+                    // Slice: 16 bytes for struct (64-bit ptr) + data
+                    bytes = 16;
+                    // Add data size if initialized with literal
+                    if (auto arrLit = cast(ArrayLiteralExpression)varDecl.initializer) {
+                        bytes += cast(uint)(arrLit.elements.length * 4);
+                    }
+                } else {
+                    bytes = 4;  // Fixed array pointer?
+                }
+            } else {
+                bytes = 4;  // int, bool, etc.
+            }
         } else if (auto ifStmt = cast(IfStatement)stmt) {
-            count += countLocalsInStatement(ifStmt.thenStatement);
-            count += countLocalsInStatement(ifStmt.elseStatement);
+            bytes += countLocalBytesInStatement(ifStmt.thenStatement);
+            bytes += countLocalBytesInStatement(ifStmt.elseStatement);
         } else if (auto whileStmt = cast(WhileStatement)stmt) {
-            count += countLocalsInStatement(whileStmt.body_);
+            bytes += countLocalBytesInStatement(whileStmt.body_);
         }
-        // Other statement types don't introduce locals
         
-        return count;
+        return bytes;
     }
     
     private void compileStatement(Statement stmt) {
@@ -299,14 +322,25 @@ class NativeCompiledFunction : CompiledFunction {
         } else if (auto exprStmt = cast(ExpressionStatement)stmt) {
             compileExpression(exprStmt.expression);
         } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
-            // Check if this is a struct type
+            // Check if this is a struct type or slice type
             StructDecl structType = null;
+            bool isSlice = false;
             uint varSize = 4;  // default to 4 bytes for int
             
             if (auto userType = cast(UserType)varDecl.type) {
                 if (auto sd = cast(StructDecl)userType.declaration) {
                     structType = sd;
                     varSize = cast(uint)sd.structSize;
+                }
+            } else if (auto arrType = cast(ArrayType)varDecl.type) {
+                if (arrType.arraySize is null) {
+                    // Dynamic array (slice) = 16 bytes on native (64-bit ptr)
+                    isSlice = true;
+                    varSize = 16;
+                    // Add data size if initialized with literal
+                    if (auto arrLit = cast(ArrayLiteralExpression)varDecl.initializer) {
+                        varSize += cast(uint)(arrLit.elements.length * 4);
+                    }
                 }
             }
             
@@ -319,10 +353,7 @@ class NativeCompiledFunction : CompiledFunction {
             // Compile initializer if present
             if (varDecl.initializer) {
                 if (structType) {
-                    // Struct initialization: the initializer should be a CallExpression
-                    // After compileExpression, x0 has pointer to temp struct
-                    // We need to copy from temp to our variable's location
-                    // Actually, we can optimize: compile directly to our slot
+                    // Struct initialization
                     if (auto call = cast(CallExpression)varDecl.initializer) {
                         if (auto funcIdent = cast(IdentifierExpression)call.function_) {
                             auto symbol = symbolTable.lookupSymbol(funcIdent.name);
@@ -340,6 +371,13 @@ class NativeCompiledFunction : CompiledFunction {
                                 }
                             }
                         }
+                    }
+                } else if (isSlice) {
+                    // Slice initialization from array literal
+                    if (auto arrLit = cast(ArrayLiteralExpression)varDecl.initializer) {
+                        compileSliceInit(nextLocalOffset, arrLit);
+                    } else {
+                        throw new Exception("Slice can only be initialized from array literal");
                     }
                 } else {
                     compileExpression(varDecl.initializer);
@@ -582,7 +620,22 @@ class NativeCompiledFunction : CompiledFunction {
             }
             throw new Exception("Function calls not yet supported in native backend");
         } else if (auto member = cast(MemberExpression)expr) {
-            // Field access: obj.field
+            // Check for slice.length first
+            if (member.memberName == "length") {
+                if (auto ident = cast(IdentifierExpression)member.object) {
+                    if (auto sliceOffset = ident.name in localOffsets) {
+                        // Check if it's a slice (not a struct)
+                        if (ident.name !in localStructTypes) {
+                            // Native slice layout: { ptr: i64, length: i32, capacity: i32 }
+                            // length is at offset 8
+                            gen.emitLoadLocal32(*sliceOffset + 8);
+                            return;
+                        }
+                    }
+                }
+            }
+            
+            // Field access: obj.field (for structs)
             auto structDecl = getStructDeclFromExpr(member.object);
             if (structDecl is null) {
                 throw new Exception("Cannot determine struct type for member access");
@@ -608,6 +661,73 @@ class NativeCompiledFunction : CompiledFunction {
             // x0 now has pointer to struct
             uint fieldOffset = cast(uint)field.offset;
             gen.emitLoadFromPointer(fieldOffset);
+        } else if (auto arrLit = cast(ArrayLiteralExpression)expr) {
+            // Array literal: [1, 2, 3]
+            // Allocate space for data + slice struct
+            uint elemCount = cast(uint)arrLit.elements.length;
+            uint dataSize = elemCount * 4;  // 4 bytes per int element
+            uint sliceSize = 12;  // ptr, length, capacity
+            
+            uint dataOffset = nextLocalOffset;
+            nextLocalOffset += dataSize;
+            uint sliceOffset = nextLocalOffset;
+            nextLocalOffset += sliceSize;
+            
+            // Initialize data elements
+            foreach (i, elem; arrLit.elements) {
+                compileExpression(elem);
+                gen.emitStoreLocal32(dataOffset + cast(uint)(i * 4));
+            }
+            
+            // Initialize slice struct
+            // ptr = sp + dataOffset
+            gen.emitLoadStackPointer();
+            gen.emitMoveX0ToX1();
+            gen.emitImm32(stencil_load_imm32, cast(int)dataOffset);
+            gen.emit(stencil_add_i32);
+            gen.emitStoreLocal32(sliceOffset);  // store ptr
+            
+            // length = elemCount
+            gen.emitImm32(stencil_load_imm32, cast(int)elemCount);
+            gen.emitStoreLocal32(sliceOffset + 4);  // store length
+            
+            // capacity = elemCount
+            gen.emitImm32(stencil_load_imm32, cast(int)elemCount);
+            gen.emitStoreLocal32(sliceOffset + 8);  // store capacity
+            
+            // Leave pointer to slice struct in x0
+            gen.emitLoadStackPointer();
+            gen.emitMoveX0ToX1();
+            gen.emitImm32(stencil_load_imm32, cast(int)sliceOffset);
+            gen.emit(stencil_add_i32);
+            
+        } else if (auto indexExpr = cast(IndexExpression)expr) {
+            // Array/slice indexing: arr[i]
+            // Native slice layout: { ptr: i64, length: i32, capacity: i32 }
+            if (auto ident = cast(IdentifierExpression)indexExpr.array) {
+                if (auto sliceOffset = ident.name in localOffsets) {
+                    // Compile index first (may clobber registers)
+                    compileExpression(indexExpr.index);
+                    // x0 = index
+                    
+                    // Compute index * 4 (element size)
+                    gen.emitMoveX0ToX1();  // x1 = index
+                    gen.emitImm32(stencil_load_imm32, 4);  // x0 = 4
+                    gen.emit(stencil_mul_i32);  // x0 = index * 4
+                    gen.emitMoveX0ToX1();  // x1 = index * 4
+                    
+                    // Load 64-bit ptr from slice struct (offset 0)
+                    gen.emitLoadLocal(*sliceOffset);  // x0 = ptr (64-bit!)
+                    
+                    // Compute address: ptr + index * 4
+                    gen.emit(stencil_add_i32);  // x0 = ptr + index * 4
+                    
+                    // Load value from computed address
+                    gen.emitLoadFromPointer(0);
+                    return;
+                }
+            }
+            throw new Exception("Slice indexing only supported for local variables");
         } else {
             throw new Exception("Expression type not yet supported in native backend: " ~ 
                 typeid(expr).toString());
@@ -644,6 +764,41 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitImm32(stencil_load_imm32, cast(int)structOffset);
         gen.emit(stencil_add_i32);
         // Now x0 = pointer to struct
+    }
+    
+    /**
+     * Compile slice initialization from array literal directly to a stack location.
+     * Native slice layout: { ptr: i64, length: i32, capacity: i32 } = 16 bytes
+     * (Unlike WASM which uses 32-bit pointers, native ARM64 needs 64-bit)
+     */
+    private void compileSliceInit(uint sliceOffset, ArrayLiteralExpression arrLit) {
+        uint elemCount = cast(uint)arrLit.elements.length;
+        uint dataSize = elemCount * 4;  // 4 bytes per int element
+        
+        // Data goes right after the 16-byte slice struct
+        uint dataOffset = sliceOffset + 16;
+        
+        // Initialize data elements
+        foreach (i, elem; arrLit.elements) {
+            compileExpression(elem);
+            gen.emitStoreLocal32(dataOffset + cast(uint)(i * 4));
+        }
+        
+        // Initialize slice struct at sliceOffset
+        // ptr = sp + dataOffset (64-bit pointer!)
+        gen.emitLoadStackPointer();
+        gen.emitMoveX0ToX1();
+        gen.emitImm32(stencil_load_imm32, cast(int)dataOffset);
+        gen.emit(stencil_add_i32);
+        gen.emitStoreLocal(sliceOffset);  // store 64-bit ptr
+        
+        // length = elemCount (32-bit at offset 8)
+        gen.emitImm32(stencil_load_imm32, cast(int)elemCount);
+        gen.emitStoreLocal32(sliceOffset + 8);  // store length
+        
+        // capacity = elemCount (32-bit at offset 12)
+        gen.emitImm32(stencil_load_imm32, cast(int)elemCount);
+        gen.emitStoreLocal32(sliceOffset + 12);  // store capacity
     }
     
     /**
