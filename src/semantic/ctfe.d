@@ -1293,15 +1293,29 @@ class CTFEEvaluator {
      * This is the new unified path that works with both WASM and Native backends.
      */
     long executeViaBackend(FunctionDecl funcDecl, long[] args) {
-        // Type-check the function first
+        import semantic.dependency_analyzer : DependencyAnalyzer;
+        import std.algorithm : map;
+        import std.array : array, join;
+        
+        // Find all functions this one depends on (transitive closure)
+        auto analyzer = new DependencyAnalyzer(symbolTable, allDeclarations);
+        auto dependencies = analyzer.findDependencies(funcDecl);
+        
+        writeln("CTFE: ", funcDecl.name, " depends on: [", 
+            dependencies.map!(f => f.name).array.join(", "), "]");
+        
+        // Type-check all functions in the dependency set
         auto typeChecker = new TypeChecker(symbolTable);
-        try {
-            typeChecker.checkFunctionDeclaration(funcDecl);
-        } catch (TypeError e) {
-            throw new CTFEError("CTFE type check error: " ~ e.msg);
+        foreach (dep; dependencies) {
+            try {
+                typeChecker.checkFunctionDeclaration(dep);
+            } catch (TypeError e) {
+                throw new CTFEError("CTFE type check error in " ~ dep.name ~ ": " ~ e.msg);
+            }
         }
         
-        // Compile via backend
+        // TODO: Compile all dependencies together (milestone 78/79)
+        // For now, still compile just the entry function
         auto compiled = backend.compile(funcDecl);
         if (compiled is null) {
             throw new CTFEError("CTFE compile error: " ~ backend.error());
