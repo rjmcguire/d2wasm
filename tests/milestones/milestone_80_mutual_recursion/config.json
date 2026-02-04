@@ -1,0 +1,6 @@
+{
+  "name": "mutual_recursion",
+  "description": "Mutual recursion in CTFE (isEven/isOdd)",
+  "type": "wasm_exec",
+  "expected_result": 2
+}
