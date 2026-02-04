@@ -355,8 +355,9 @@ class BinaryEmitter {
             auto symbol = symbolTable.lookupSymbol(ident.name);
             if (symbol && symbol.isConstant) {
                 if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
-                    if (manifest.ctfeComplete && !manifest.isStringType) {
-                        return manifest.ctfeValue;
+                    if (!manifest.isStringType) {
+                        // Lazy evaluation via resolver
+                        return symbolTable.resolveManifestValue(manifest);
                     }
                 }
             }
@@ -3796,23 +3797,26 @@ private class FuncContext {
             }
         }
         
-        // Check if it's a manifest constant (CTFE-evaluated)
+        // Check if it's a manifest constant (CTFE-evaluated lazily)
         auto symbol = emitter.symbolTable.lookupSymbol(expr.name);
         if (symbol && symbol.isConstant) {
             if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
-                if (manifest.ctfeComplete) {
-                    if (manifest.isStringType) {
-                        // String constant: register and emit struct pointer
-                        uint structAddr = emitter.registerArrayLiteral(manifest.ctfeStringValue);
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, structAddr);
-                    } else {
-                        // Numeric constant: emit value directly
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, manifest.ctfeValue);
+                // Trigger lazy evaluation if needed, then emit
+                if (manifest.isStringType) {
+                    // Ensure it's evaluated (for string, ctfeStringValue is set during eval)
+                    if (!manifest.ctfeComplete) {
+                        emitter.symbolTable.resolveManifestValue(manifest);
                     }
-                    return;
+                    // String constant: register and emit struct pointer
+                    uint structAddr = emitter.registerArrayLiteral(manifest.ctfeStringValue);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, structAddr);
+                } else {
+                    // Numeric constant: emit value via lazy resolver
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, emitter.symbolTable.resolveManifestValue(manifest));
                 }
+                return;
             }
         }
         
@@ -5129,8 +5133,9 @@ private class EvalContext {
             auto symbol = emitter.symbolTable.lookupSymbol(ident.name);
             if (symbol && symbol.isConstant) {
                 if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
-                    if (manifest.ctfeComplete && !manifest.isStringType) {
-                        return manifest.ctfeValue;
+                    if (!manifest.isStringType) {
+                        // Lazy evaluation via resolver
+                        return emitter.symbolTable.resolveManifestValue(manifest);
                     }
                 }
             }
@@ -5184,21 +5189,23 @@ private class EvalContext {
     }
     
     void emitIdentifier(ref Appender!(ubyte[]) out_, IdentifierExpression expr) {
-        // Must be a manifest constant
+        // Must be a manifest constant - evaluate lazily
         auto symbol = emitter.symbolTable.lookupSymbol(expr.name);
         if (symbol && symbol.isConstant) {
             if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
-                if (manifest.ctfeComplete) {
-                    if (manifest.isStringType) {
-                        uint structAddr = emitter.registerArrayLiteral(manifest.ctfeStringValue);
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, structAddr);
-                    } else {
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, manifest.ctfeValue);
+                // Trigger lazy evaluation if needed
+                if (manifest.isStringType) {
+                    if (!manifest.ctfeComplete) {
+                        emitter.symbolTable.resolveManifestValue(manifest);
                     }
-                    return;
+                    uint structAddr = emitter.registerArrayLiteral(manifest.ctfeStringValue);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, structAddr);
+                } else {
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, emitter.symbolTable.resolveManifestValue(manifest));
                 }
+                return;
             }
         }
         throw new EmitError("Unknown identifier in __eval: " ~ expr.name);

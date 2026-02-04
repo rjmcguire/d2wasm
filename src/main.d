@@ -158,7 +158,7 @@ int compileFile(CompilerOptions options) {
         }
         
         import semantic.mixin_expander;
-        auto mixinExpander = new MixinExpander();
+        auto mixinExpander = new MixinExpander(options.backend);
         try {
             ast = mixinExpander.expandMixins(ast);
         } catch (MixinError e) {
@@ -208,7 +208,22 @@ int compileFile(CompilerOptions options) {
             writeln("Symbol table built with ", symbolTable.getGlobalScope().getAllSymbols().length, " global symbols");
         }
         
-        // 5. Type checking
+        // 5. CTFE setup (lazy evaluation - must be before type checking)
+        // Type checking may need to resolve manifest constant types
+        if (options.verbose) {
+            writeln("Setting up CTFE resolver...");
+        }
+        
+        import semantic.ctfe;
+        // Create evaluator - registers lazy resolver with symbol table
+        // Actual evaluation happens when manifest constant values are accessed
+        new CTFEEvaluator(symbolTable, ast, options.backend);
+        
+        if (options.verbose) {
+            writeln("CTFE resolver ready");
+        }
+        
+        // 6. Type checking
         if (options.verbose) {
             writeln("Running type checking...");
         }
@@ -218,19 +233,6 @@ int compileFile(CompilerOptions options) {
         
         if (options.verbose) {
             writeln("Type checking passed");
-        }
-        
-        // 6. CTFE evaluation (compile-time function execution)
-        if (options.verbose) {
-            writeln("Evaluating compile-time expressions...");
-        }
-        
-        import semantic.ctfe;
-        auto ctfeEvaluator = new CTFEEvaluator(symbolTable, ast, options.backend);
-        ctfeEvaluator.evaluateManifestConstants();
-        
-        if (options.verbose) {
-            writeln("CTFE evaluation complete");
         }
         
         // 7. Code generation (binary WASM emission)

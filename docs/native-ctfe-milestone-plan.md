@@ -108,7 +108,7 @@ CTFE runs during every compile. Native execution is faster than wasm3 interpreta
 
 Native backend now has parity with WASM backend for basic CTFE operations.
 
-### Phase 3b: CTFE Feature Extension 🔶 IN PROGRESS
+### Phase 3b: CTFE Feature Extension ✅ SLICES DONE
 
 These milestones extend what CTFE can do, testing BOTH backends together.
 Previously, structs/slices/function-calls only worked at runtime (WASM execution),
@@ -116,8 +116,8 @@ not at compile time (CTFE). These milestones add CTFE support and verify parity.
 
 | #  | Name                  | Description                                         | Status |
 |----|-----------------------|-----------------------------------------------------|--------|
-| 92 | ctfe_structs          | CTFE can construct structs, access fields           | ⬜     |
-| 93 | ctfe_slices           | CTFE can use slice operations                       | ⬜     |
+| 92 | ctfe_structs          | CTFE can construct structs, access fields           | ✅     |
+| 93 | ctfe_slices           | CTFE can use slice operations (test: milestone_76)  | ✅     |
 | 94 | ctfe_function_calls   | CTFE can call other D functions                     | ⬜     |
 
 Test pattern for these milestones:
@@ -145,6 +145,8 @@ Both backends must produce the same result.
 
 ## Current State (2026-02-04)
 
+**94 tests passing** (was 93)
+
 **What works in BOTH backends for CTFE:**
 - Literals (int, long, bool)
 - Variables (declaration, access, assignment, compound assignment)
@@ -153,22 +155,21 @@ Both backends must produce the same result.
 - Control flow (if/else, while)
 - Function parameters (up to 4)
 - Return statements (including early returns)
+- **Structs** (construction, field access) — added milestone 92
+- **Slices** (array literals, indexing, .length) — added test milestone_76
+
+**Dual backend verification:** CTFE runs twice — once in mixin expansion (WASM),
+once in main (with requested backend). Both must produce identical results.
 
 **What doesn't work in CTFE (either backend):**
 ```d
-struct Point { int x; int y; }
-int test() {
-    Point p = Point(10, 20);  // ❌ "Undefined identifier 'Point'"
-    return p.x;
-}
-
 int helper() { return 42; }
-int test2() {
-    return helper();          // ❌ "Undefined identifier 'helper'"
+int test() {
+    return helper();          // ❌ D-to-D function calls not yet supported
 }
 ```
 
-These fail during CTFE type-checking, before reaching either backend.
+D-to-D function calls in CTFE are the next milestone (94).
 
 ## Next Steps (Milestone 92: ctfe_structs)
 

@@ -103,6 +103,9 @@ class CTFEEvaluator {
         this.symbolTable = symbolTable;
         this.allDeclarations = declarations;
         this.backend = createBackend(backendName, symbolTable);
+        
+        // Register lazy resolver with symbol table
+        symbolTable.ctfeResolver = &this.evaluateManifestConstant;
     }
     
     /**

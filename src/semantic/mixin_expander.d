@@ -51,11 +51,13 @@ class MixinExpander {
     private Declaration[] allDeclarations;
     private SymbolTable tempSymbolTable;
     private uint currentDepth = 0;
+    private string backendName;
     
     /// Maximum mixin expansion depth to prevent infinite recursion
     enum MAX_EXPANSION_DEPTH = 100;
     
-    this() {
+    this(string backendName = "wasm") {
+        this.backendName = backendName;
         tempSymbolTable = new SymbolTable();
         tempSymbolTable.addBuiltinSymbols();
     }
@@ -69,7 +71,7 @@ class MixinExpander {
         
         // First pass: collect manifest constants into temporary symbol table
         // and evaluate them (needed for static if conditions that reference them)
-        collectAndEvaluateManifests();
+        setupCTFE();
         
         // Second pass: expand module-level mixins and static ifs
         Declaration[] result;
@@ -214,9 +216,10 @@ class MixinExpander {
     }
     
     /**
-     * Collect manifest constants and evaluate them via CTFE.
+     * Set up symbol table and lazy CTFE resolver.
+     * Actual evaluation happens on-demand when values are accessed.
      */
-    private void collectAndEvaluateManifests() {
+    private void setupCTFE() {
         // Collect all declarations into symbol table for CTFE
         // (structs, functions, manifest constants - everything CTFE might reference)
         auto collector = new SymbolCollector(tempSymbolTable);
@@ -224,9 +227,9 @@ class MixinExpander {
             collector.collectSymbol(decl);
         }
         
-        // Evaluate them via CTFE
-        auto ctfe = new CTFEEvaluator(tempSymbolTable, allDeclarations);
-        ctfe.evaluateManifestConstants();
+        // Create evaluator - this registers the lazy resolver with the symbol table
+        // Actual evaluation happens when resolveManifestValue() is called
+        new CTFEEvaluator(tempSymbolTable, allDeclarations, backendName);
     }
     
     /**
@@ -347,14 +350,9 @@ class MixinExpander {
             foreach (decl; allDeclarations) {
                 if (auto manifest = cast(ManifestConstantDecl)decl) {
                     if (manifest.name == ident.name) {
-                        if (!manifest.ctfeComplete) {
-                            throw new MixinError(
-                                "Manifest constant '" ~ ident.name ~ "' not yet evaluated for static if",
-                                loc
-                            );
-                        }
-                        // Return the value as bool (non-zero is true)
-                        return manifest.ctfeValue != 0;
+                        // Lazy evaluation: resolve triggers CTFE if not yet evaluated
+                        long value = tempSymbolTable.resolveManifestValue(manifest);
+                        return value != 0;
                     }
                 }
             }
@@ -426,13 +424,8 @@ class MixinExpander {
             foreach (decl; allDeclarations) {
                 if (auto manifest = cast(ManifestConstantDecl)decl) {
                     if (manifest.name == ident.name) {
-                        if (!manifest.ctfeComplete) {
-                            throw new MixinError(
-                                "Manifest constant '" ~ ident.name ~ "' not yet evaluated",
-                                loc
-                            );
-                        }
-                        return manifest.ctfeValue;
+                        // Lazy evaluation: resolve triggers CTFE if not yet evaluated
+                        return tempSymbolTable.resolveManifestValue(manifest);
                     }
                 }
             }
@@ -486,19 +479,15 @@ class MixinExpander {
             foreach (decl; allDeclarations) {
                 if (auto manifest = cast(ManifestConstantDecl)decl) {
                     if (manifest.name == ident.name) {
-                        if (!manifest.ctfeComplete) {
-                            throw new MixinError(
-                                "Manifest constant '" ~ ident.name ~ "' not yet evaluated",
-                                loc
-                            );
-                        }
+                        // Lazy evaluation via resolver
+                        string value = tempSymbolTable.resolveManifestStringValue(manifest);
                         if (!manifest.isStringType) {
                             throw new MixinError(
                                 "Mixin argument '" ~ ident.name ~ "' is not a string",
                                 loc
                             );
                         }
-                        return manifest.ctfeStringValue;
+                        return value;
                     }
                 }
             }

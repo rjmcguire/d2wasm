@@ -144,9 +144,59 @@ class SymbolTable {
     // typeKind is a string like "array", "string", etc.
     private FunctionDecl[string][string] builtinMethods;
     
+    // Lazy CTFE evaluation - callback set by CTFEEvaluator
+    void delegate(ManifestConstantDecl) ctfeResolver;
+    
     this() {
         globalScope = new Scope(null, "global");
         currentScope = globalScope;
+    }
+    
+    /**
+     * Lazily resolve a manifest constant's integer value via CTFE.
+     * Call this instead of accessing ctfeValue directly.
+     */
+    long resolveManifestValue(ManifestConstantDecl manifest) {
+        if (!manifest.ctfeComplete) {
+            if (ctfeResolver is null) {
+                throw new SemanticError("CTFE not configured - cannot resolve '" ~ manifest.name ~ "'", manifest.location);
+            }
+            ctfeResolver(manifest);
+        }
+        return manifest.ctfeValue;
+    }
+    
+    /**
+     * Lazily resolve a manifest constant's string value via CTFE.
+     * Use for string enum constants.
+     */
+    string resolveManifestStringValue(ManifestConstantDecl manifest) {
+        if (!manifest.ctfeComplete) {
+            if (ctfeResolver is null) {
+                throw new SemanticError("CTFE not configured - cannot resolve '" ~ manifest.name ~ "'", manifest.location);
+            }
+            ctfeResolver(manifest);
+        }
+        return manifest.ctfeStringValue;
+    }
+    
+    /**
+     * Ensure a manifest constant is evaluated (for either type).
+     */
+    void ensureManifestEvaluated(ManifestConstantDecl manifest) {
+        if (!manifest.ctfeComplete) {
+            if (ctfeResolver is null) {
+                throw new SemanticError("CTFE not configured - cannot resolve '" ~ manifest.name ~ "'", manifest.location);
+            }
+            ctfeResolver(manifest);
+        }
+    }
+    
+    /**
+     * Check if a manifest constant has been evaluated yet.
+     */
+    bool isManifestEvaluated(ManifestConstantDecl manifest) {
+        return manifest.ctfeComplete;
     }
     
     /**
@@ -199,10 +249,28 @@ class SymbolTable {
     }
     
     /**
-     * Look up symbol starting from current scope
+     * Look up symbol starting from current scope.
+     * For manifest constants, triggers lazy CTFE evaluation to ensure
+     * the type is correct (e.g., string vs int).
      */
     Symbol lookupSymbol(string name) {
-        return currentScope.lookup(name);
+        auto symbol = currentScope.lookup(name);
+        
+        // For manifest constants, ensure CTFE has run so type is correct
+        if (symbol && symbol.isConstant) {
+            if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
+                if (!manifest.ctfeComplete && ctfeResolver !is null) {
+                    // Trigger lazy evaluation
+                    ctfeResolver(manifest);
+                    // Update symbol type from inferred type
+                    if (manifest.inferredType !is null) {
+                        symbol.type = manifest.inferredType;
+                    }
+                }
+            }
+        }
+        
+        return symbol;
     }
     
     /**
