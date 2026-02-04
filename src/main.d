@@ -38,6 +38,8 @@ struct CompilerOptions {
     bool dryRun = false;
     bool printAst = false;
     bool onlyValidate = false;
+    bool run = false;         // Compile and run immediately
+    string runFunc = "main";  // Function to run (default: main)
 }
 
 int main(string[] args) {
@@ -73,6 +75,8 @@ int main(string[] args) {
             "input|i", "Input D source file", &options.inputFile,
             "output|o", "Output WASM file (default: input.wasm)", &options.outputFile,
             "backend|b", "Code generation backend: wasm, native (default: wasm)", &options.backend,
+            "run|r", "Compile and run immediately (like rdmd)", &options.run,
+            "func|f", "Function to run with --run (default: main)", &options.runFunc,
             "dry-run|n", "Parse and validate only, don't generate code", &options.dryRun,
             "print-ast", "Print the AST after parsing", &options.printAst,
             "validate-only", "Only run feature validation", &options.onlyValidate
@@ -83,7 +87,8 @@ int main(string[] args) {
         if (helpInformation.helpWanted) {
             defaultGetoptPrinter("D-to-WASM Compiler\n" ~
                 "Compiles a subset of D language to WebAssembly\n" ~
-                "\nUsage: d2wasm [options] input.d\n",
+                "\nUsage: d2wasm [options] input.d\n" ~
+                "\nVerbosity: -v (progress), -vv (detail), -vvv (debug)\n",
                 helpInformation.options);
             return 0;
         }
@@ -243,6 +248,35 @@ int compileFile(CompilerOptions options) {
             std.file.write(options.outputFile, wasm);
             
             log(1, "Generated ", wasm.length, " bytes of binary WASM");
+            
+            // 8. Run if requested (like rdmd)
+            //
+            // IMPORTANT: We deliberately read from the file we just wrote, NOT from
+            // the in-memory wasm bytes. This is intentional:
+            //   1. Proves the written file is valid and complete
+            //   2. Ensures what we run matches what's on disk exactly
+            //   3. Catches any file I/O issues (permissions, disk full, etc.)
+            //
+            // Do NOT "optimize" this to use the in-memory bytes directly!
+            if (options.run) {
+                log(1, "Running ", options.runFunc, " from ", options.outputFile, "...");
+                
+                import semantic.ctfe_runtime : CTFERuntime;
+                auto wasmFromFile = cast(ubyte[])std.file.read(options.outputFile);
+                
+                auto runner = new CTFERuntime();
+                runner.loadModule(wasmFromFile);
+                
+                int result = runner.callI32(options.runFunc).asInt();
+                log(1, "Exit code: ", result);
+                
+                // Print CTFE stats at verbosity 2+
+                if (options.verbosity >= 2) {
+                    ctfeEvaluator.printStats();
+                }
+                
+                return result;
+            }
             
             writeln("Successfully compiled to ", options.outputFile);
         } else {
