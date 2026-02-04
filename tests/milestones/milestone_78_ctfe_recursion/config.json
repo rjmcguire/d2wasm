@@ -1,0 +1,6 @@
+{
+  "name": "ctfe_recursion",
+  "description": "Recursive CTFE (fibonacci)",
+  "type": "wasm_exec",
+  "expected_result": 55
+}

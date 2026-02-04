@@ -1314,9 +1314,8 @@ class CTFEEvaluator {
             }
         }
         
-        // TODO: Compile all dependencies together (milestone 78/79)
-        // For now, still compile just the entry function
-        auto compiled = backend.compile(funcDecl);
+        // Compile all dependencies together into one module
+        auto compiled = backend.compileWithDependencies(dependencies, funcDecl.name);
         if (compiled is null) {
             throw new CTFEError("CTFE compile error: " ~ backend.error());
         }

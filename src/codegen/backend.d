@@ -76,6 +76,15 @@ interface Backend {
     CompiledFunction compile(FunctionDecl func);
     
     /**
+     * Compile multiple functions together with a designated entry point.
+     * All functions can call each other directly (no trampoline).
+     * 
+     * Used for CTFE where a function may call other D functions.
+     * Returns a callable for the entry function.
+     */
+    CompiledFunction compileWithDependencies(FunctionDecl[] funcs, string entryFuncName);
+    
+    /**
      * Compile multiple declarations (for full module compilation).
      * Returns raw bytes (WASM binary or native object, depending on backend).
      * Returns null on failure.
@@ -138,6 +147,19 @@ class NativeBackend : Backend {
             lastError = "Native compile error: " ~ e.msg;
             return null;
         }
+    }
+    
+    override CompiledFunction compileWithDependencies(FunctionDecl[] funcs, string entryFuncName) {
+        // For now, native backend only supports single-function compilation
+        // Multi-function support is Milestone 79
+        if (funcs.length == 1) {
+            return compile(funcs[0]);
+        }
+        
+        // TODO: Implement multi-function native compilation (milestone 79)
+        import std.format : format;
+        lastError = format("Native backend does not yet support multi-function CTFE (need %d functions)", funcs.length);
+        return null;
     }
     
     override ubyte[] compileModule(Declaration[] decls) {
@@ -908,6 +930,24 @@ class WASMBackend : Backend {
         }
         
         return new WASMCompiledFunction(func.name, wasmBytes);
+    }
+    
+    override CompiledFunction compileWithDependencies(FunctionDecl[] funcs, string entryFuncName) {
+        import std.algorithm : map;
+        import std.array : array;
+        
+        // Convert FunctionDecl[] to Declaration[] for the emitter
+        Declaration[] decls = funcs.map!(f => cast(Declaration)f).array;
+        
+        auto emitter = new BinaryEmitter(symbolTable);
+        auto wasmBytes = emitter.emit(decls);
+        
+        if (wasmBytes is null) {
+            lastError = emitter.error();
+            return null;
+        }
+        
+        return new WASMCompiledFunction(entryFuncName, wasmBytes);
     }
     
     override ubyte[] compileModule(Declaration[] decls) {
