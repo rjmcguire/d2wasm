@@ -15,6 +15,7 @@ import std.string;
 import std.conv;
 import std.stdio;
 import std.algorithm;
+import diagnostic.log : log;
 
 /**
  * Unescape a D string literal (handle \n, \t, \", \\, etc.)
@@ -98,8 +99,6 @@ class TreeSitterBridge {
      */
     Declaration[] parseSourceFileNode(TSNode root) {
         try {
-            import std.stdio : writeln;
-            
             if (!TreeSitterParser.isValid(root)) {
                 throw new ParseError("Invalid parse tree root", SourceLocation(filename, 1, 1, 0, 0));
             }
@@ -111,23 +110,23 @@ class TreeSitterBridge {
             Declaration[] declarations;
             
             uint childCount = TreeSitterParser.getChildCount(root);
-            writeln("Root has ", childCount, " children");
+            log(3, "Root has ", childCount, " children");
             
             for (uint i = 0; i < childCount; i++) {
                 TSNode child = TreeSitterParser.getChild(root, i);
                 if (!TreeSitterParser.isValid(child)) {
-                    writeln("Warning: Invalid child node at index ", i);
+                    log(2, "Warning: Invalid child node at index ", i);
                     continue;
                 }
                 
                 string nodeType = TreeSitterParser.getNodeType(child);
-                writeln("Processing child ", i, " of type: ", nodeType);
+                log(3, "Processing child ", i, " of type: ", nodeType);
                 
                 try {
                     if (nodeType == "function_declaration") {
                         auto decl = parseFunctionDeclaration(child);
                         declarations ~= decl;
-                        writeln("Successfully parsed function declaration");
+                        log(3, "Successfully parsed function declaration");
                     } else if (nodeType == "import_declaration") {
                         auto importDecl = parseImportDeclaration(child);
                         if (importDecl !is null) {
@@ -151,21 +150,20 @@ class TreeSitterBridge {
                     } else if (nodeType == "conditional_declaration") {
                         declarations ~= parseConditionalDeclaration(child);
                     } else if (nodeType != "comment" && nodeType.length > 0) {
-                        writeln("Warning: Skipping unknown top-level node: ", nodeType);
+                        log(2, "Warning: Skipping unknown top-level node: ", nodeType);
                     }
                 } catch (ParseError e) {
-                    writeln("Parse error in ", nodeType, ": ", e.msg);
+                    log(2, "Parse error in ", nodeType, ": ", e.msg);
                     // Continue parsing other declarations
                 } catch (Exception e) {
-                    writeln("Unexpected error in ", nodeType, ": ", e.msg);
+                    log(2, "Unexpected error in ", nodeType, ": ", e.msg);
                     // Continue parsing other declarations
                 }
             }
             
             return declarations;
         } catch (Exception e) {
-            import std.stdio : writeln;
-            writeln("Exception in parseSourceFileNode: ", e.msg);
+            log(2, "Exception in parseSourceFileNode: ", e.msg);
             throw e;
         }
     }
@@ -223,7 +221,7 @@ class TreeSitterBridge {
             string moduleName = parseWasmLinkage(linkageNode);
             if (moduleName !is null) {
                 // This is a WASM import declaration
-                writeln("Parsed WASM import: ", moduleName, ".", name);
+                log(3, "Parsed WASM import: ", moduleName, ".", name);
                 return new ImportedFunctionDecl(loc, name, returnType, parameters, moduleName);
             }
         }
@@ -457,7 +455,7 @@ class TreeSitterBridge {
                 try {
                     statements ~= parseStatement(child);
                 } catch (ParseError e) {
-                    writeln("Warning: Skipping statement due to parse error: ", e.msg);
+                    log(2, "Warning: Skipping statement due to parse error: ", e.msg);
                 }
             }
         }
@@ -683,7 +681,7 @@ class TreeSitterBridge {
             throw new ParseError("Manifest constant '" ~ name ~ "' missing initializer", loc);
         }
         
-        writeln("Parsed manifest constant: ", name, " = ", initializer.toString());
+        log(3, "Parsed manifest constant: ", name, " = ", initializer.toString());
         return new ManifestConstantDecl(loc, name, initializer);
     }
     
@@ -753,7 +751,7 @@ class TreeSitterBridge {
         // Parse the expression
         Expression mixinArg = parseExpression(exprNode);
         
-        writeln("Parsed mixin declaration: mixin(", mixinArg.toString(), ")");
+        log(3, "Parsed mixin declaration: mixin(", mixinArg.toString(), ")");
         
         return new MixinDecl(loc, mixinArg);
     }
@@ -782,12 +780,12 @@ class TreeSitterBridge {
         SourceLocation loc = makeSourceLocation(node);
         
         // Debug: print the tree structure
-        writeln("Parsing conditional_declaration with ", TreeSitterParser.getChildCount(node), " children:");
+        log(3, "Parsing conditional_declaration with ", TreeSitterParser.getChildCount(node), " children:");
         uint childCount = TreeSitterParser.getChildCount(node);
         for (uint i = 0; i < childCount; i++) {
             TSNode child = TreeSitterParser.getChild(node, i);
             string childType = TreeSitterParser.getNodeType(child);
-            writeln("  Child ", i, ": ", childType);
+            log(3, "  Child ", i, ": ", childType);
         }
         
         // Find the condition node (first child that is 'condition')
@@ -831,7 +829,7 @@ class TreeSitterBridge {
             throw new ParseError("Conditional declaration missing condition", loc);
         }
         
-        writeln("Parsed static if: condition=", conditionExpr.toString(), 
+        log(3, "Parsed static if: condition=", conditionExpr.toString(), 
                 ", then=", thenDecls.length, " decls, else=", elseDecls.length, " decls");
         
         return new StaticIfDecl(loc, conditionExpr, thenDecls, elseDecls);
@@ -885,7 +883,7 @@ class TreeSitterBridge {
         string nodeType = TreeSitterParser.getNodeType(node);
         SourceLocation loc = makeSourceLocation(node);
         
-        writeln("  Parsing declaration node of type: ", nodeType);
+        log(3, "  Parsing declaration node of type: ", nodeType);
         
         if (nodeType == "function_declaration") {
             return [parseFunctionDeclaration(node)];
@@ -916,7 +914,7 @@ class TreeSitterBridge {
         }
         
         // Unknown node type - return empty
-        writeln("  Warning: Unknown declaration node type: ", nodeType);
+        log(2, "  Warning: Unknown declaration node type: ", nodeType);
         return [];
     }
     
@@ -1088,9 +1086,9 @@ class TreeSitterBridge {
         string nodeType = TreeSitterParser.getNodeType(node);
         
         // Debug: print node info
-        writeln("Parsing statement: ", nodeType, " with ", TreeSitterParser.getChildCount(node), " children");
+        log(3, "Parsing statement: ", nodeType, " with ", TreeSitterParser.getChildCount(node), " children");
         for (uint i = 0; i < TreeSitterParser.getChildCount(node); i++) {
-            writeln("  Child ", i, ": ", TreeSitterParser.getNodeType(TreeSitterParser.getChild(node, i)), 
+            log(3, "  Child ", i, ": ", TreeSitterParser.getNodeType(TreeSitterParser.getChild(node, i)), 
                     " (field: ", TreeSitterParser.getChildFieldName(node, i), ")");
         }
         
@@ -1163,7 +1161,7 @@ class TreeSitterBridge {
         // Parse the expression
         Expression mixinArg = parseExpression(exprNode);
         
-        writeln("Parsed mixin statement: mixin(", mixinArg.toString(), ")");
+        log(3, "Parsed mixin statement: mixin(", mixinArg.toString(), ")");
         
         return new MixinStatement(loc, mixinArg);
     }
@@ -1410,12 +1408,12 @@ class TreeSitterBridge {
         string nodeType = TreeSitterParser.getNodeType(exprNode);
         if (nodeType == "expression_list") {
             uint childCount = TreeSitterParser.getChildCount(exprNode);
-            writeln("DEBUG expression_list has ", childCount, " children:");
+            log(3, "DEBUG expression_list has ", childCount, " children:");
             for (uint i = 0; i < childCount; i++) {
                 TSNode child = TreeSitterParser.getChild(exprNode, i);
                 string childType = TreeSitterParser.getNodeType(child);
                 string fieldName = TreeSitterParser.getChildFieldName(exprNode, i);
-                writeln("  Child ", i, ": ", childType, " (field: ", fieldName, ") = ", TreeSitterParser.getNodeText(child, sourceText));
+                log(3, "  Child ", i, ": ", childType, " (field: ", fieldName, ") = ", TreeSitterParser.getNodeText(child, sourceText));
                 if (childType != "," && childType != "(" && childType != ")") {
                     exprNode = child;
                     break;

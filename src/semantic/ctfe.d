@@ -17,6 +17,7 @@ import codegen.emitter;
 import codegen.wasm;
 import codegen.backend;
 import parser.tree_sitter_bridge : TreeSitterBridge;
+import diagnostic.log : log;
 
 import std.stdio;
 import std.path;
@@ -133,11 +134,11 @@ class CTFEEvaluator {
      */
     void printStats() {
         if (statCallCount > 0) {
-            writeln(getStats());
-            writeln("  Functions in context: ", contextFunctions.length);
+            log(2, getStats());
+            log(2, "  Functions in context: ", contextFunctions.length);
             if (statCallCount > 0) {
                 auto hitRate = statCacheHits * 100 / statCallCount;
-                writeln("  Cache hit rate: ", hitRate, "%");
+                log(2, "  Cache hit rate: ", hitRate, "%");
             }
         }
     }
@@ -160,7 +161,7 @@ class CTFEEvaluator {
      * Evaluate a __ctfe_runtime function call
      */
     private CTFEResult evaluateCTFERuntimeCall(string funcName, Expression[] arguments) {
-        writeln("CTFE: __ctfe_runtime.", funcName, " called");
+        log(3, "CTFE: __ctfe_runtime.", funcName, " called");
         
         switch (funcName) {
             case "alloc":
@@ -169,7 +170,7 @@ class CTFEEvaluator {
                 }
                 int size = cast(int)evaluateSimpleExpression(arguments[0]);
                 int ptr = arena.alloc(size);
-                writeln("CTFE: __ctfe_runtime.alloc(", size, ") = ", ptr);
+                log(3, "CTFE: __ctfe_runtime.alloc(", size, ") = ", ptr);
                 return CTFEResult.fromInt(ptr);
                 
             case "push":
@@ -177,7 +178,7 @@ class CTFEEvaluator {
                     throw new CTFEError("CTFE: __ctfe_runtime.push takes no arguments");
                 }
                 arena.push();
-                writeln("CTFE: __ctfe_runtime.push()");
+                log(3, "CTFE: __ctfe_runtime.push()");
                 return CTFEResult.fromInt(0);
                 
             case "pop":
@@ -185,7 +186,7 @@ class CTFEEvaluator {
                     throw new CTFEError("CTFE: __ctfe_runtime.pop takes no arguments");
                 }
                 arena.pop();
-                writeln("CTFE: __ctfe_runtime.pop()");
+                log(3, "CTFE: __ctfe_runtime.pop()");
                 return CTFEResult.fromInt(0);
                 
             case "remaining":
@@ -193,7 +194,7 @@ class CTFEEvaluator {
                     throw new CTFEError("CTFE: __ctfe_runtime.remaining takes no arguments");
                 }
                 int rem = arena.remaining();
-                writeln("CTFE: __ctfe_runtime.remaining() = ", rem);
+                log(3, "CTFE: __ctfe_runtime.remaining() = ", rem);
                 return CTFEResult.fromInt(rem);
                 
             default:
@@ -216,7 +217,7 @@ class CTFEEvaluator {
      * Evaluate a single manifest constant
      */
     void evaluateManifestConstant(ManifestConstantDecl manifest) {
-        writeln("CTFE: Evaluating ", manifest.name);
+        log(3, "CTFE: Evaluating ", manifest.name);
         
         // Check if it's a simple literal (no CTFE needed)
         if (auto literal = cast(LiteralExpression)manifest.initializer) {
@@ -232,7 +233,7 @@ class CTFEEvaluator {
                 manifest.ctfeValue = value;
                 manifest.ctfeComplete = true;
                 manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Int32);
-                writeln("CTFE: ", manifest.name, " = ", manifest.ctfeValue, " (literal)");
+                log(3, "CTFE: ", manifest.name, " = ", manifest.ctfeValue, " (literal)");
                 return;
             }
             if (literal.value.type == typeid(string)) {
@@ -240,7 +241,7 @@ class CTFEEvaluator {
                 manifest.ctfeComplete = true;
                 manifest.isStringType = true;
                 // TODO: proper string type
-                writeln("CTFE: ", manifest.name, " = \"", manifest.ctfeStringValue, "\" (string literal)");
+                log(3, "CTFE: ", manifest.name, " = \"", manifest.ctfeStringValue, "\" (string literal)");
                 return;
             }
             if (literal.value.type == typeid(char)) {
@@ -248,14 +249,14 @@ class CTFEEvaluator {
                 manifest.ctfeValue = cast(long)literal.value.get!char();
                 manifest.ctfeComplete = true;
                 manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Char);
-                writeln("CTFE: ", manifest.name, " = '", literal.value.get!char(), "' (char literal)");
+                log(3, "CTFE: ", manifest.name, " = '", literal.value.get!char(), "' (char literal)");
                 return;
             }
             if (literal.value.type == typeid(bool)) {
                 manifest.ctfeValue = literal.value.get!bool() ? 1 : 0;
                 manifest.ctfeComplete = true;
                 manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Bool);
-                writeln("CTFE: ", manifest.name, " = ", manifest.ctfeValue ? "true" : "false", " (bool literal)");
+                log(3, "CTFE: ", manifest.name, " = ", manifest.ctfeValue ? "true" : "false", " (bool literal)");
                 return;
             }
         }
@@ -276,7 +277,7 @@ class CTFEEvaluator {
                 manifest.ctfeValue = value;
                 manifest.ctfeComplete = true;
                 manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Int32);
-                writeln("CTFE: ", manifest.name, " = ", manifest.ctfeValue, " (unary minus)");
+                log(3, "CTFE: ", manifest.name, " = ", manifest.ctfeValue, " (unary minus)");
                 return;
             }
         }
@@ -292,7 +293,7 @@ class CTFEEvaluator {
                     manifest.ctfeStringValue = result;
                     manifest.ctfeComplete = true;
                     manifest.isStringType = true;
-                    writeln("CTFE: ", manifest.name, " = \"", result, "\" (concatenated)");
+                    log(3, "CTFE: ", manifest.name, " = \"", result, "\" (concatenated)");
                 }
                 return;
             }
@@ -305,13 +306,13 @@ class CTFEEvaluator {
                 manifest.ctfeStringValue = result.stringValue;
                 manifest.ctfeComplete = true;
                 manifest.isStringType = true;
-                writeln("CTFE: ", manifest.name, " = \"", result.stringValue, "\" (function call)");
+                log(3, "CTFE: ", manifest.name, " = \"", result.stringValue, "\" (function call)");
                 return;
             } else {
                 manifest.ctfeValue = result.intValue;
                 manifest.ctfeComplete = true;
                 manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Int32);
-                writeln("CTFE: ", manifest.name, " = ", manifest.ctfeValue, " (evaluated)");
+                log(3, "CTFE: ", manifest.name, " = ", manifest.ctfeValue, " (evaluated)");
                 return;
             }
         }
@@ -349,7 +350,7 @@ class CTFEEvaluator {
         import semantic.ctfe_runtime : CTFERuntime, CTFERuntimeError;
         import codegen.wasm : ARRAY_PTR_OFFSET, ARRAY_LEN_OFFSET;
         
-        writeln("CTFE: Evaluating array concat via WASM");
+        log(3, "CTFE: Evaluating array concat via WASM");
         
         // First, ensure any manifest constants referenced are already evaluated
         ensureDependenciesEvaluated(expr);
@@ -363,7 +364,7 @@ class CTFEEvaluator {
         }
         
         // Debug: show the generated WASM size
-        writeln("CTFE: Generated ", wasmBytes.length, " bytes of WASM");
+        log(3, "CTFE: Generated ", wasmBytes.length, " bytes of WASM");
         
         // Execute in wasm3
         auto runtime = new CTFERuntime();
@@ -376,18 +377,18 @@ class CTFEEvaluator {
             auto result = runtime.callI32("__eval");
             uint structPtr = result.asInt();
             
-            writeln("CTFE: __eval returned struct at ", structPtr);
+            log(3, "CTFE: __eval returned struct at ", structPtr);
             
             // Read the String struct from memory
             uint dataPtr = runtime.readU32(structPtr + ARRAY_PTR_OFFSET);
             uint len = runtime.readU32(structPtr + ARRAY_LEN_OFFSET);
             
-            writeln("CTFE: String data at ", dataPtr, ", len=", len);
+            log(3, "CTFE: String data at ", dataPtr, ", len=", len);
             
             // Read the string data
             string resultStr = runtime.readString(dataPtr, len);
             
-            writeln("CTFE: Result = \"", resultStr, "\"");
+            log(3, "CTFE: Result = \"", resultStr, "\"");
             
             return resultStr;
             
@@ -452,7 +453,7 @@ class CTFEEvaluator {
         manifest.ctfeComplete = true;
         manifest.isArrayType = true;
         
-        writeln("CTFE: ", manifest.name, " = ", values, " (array literal, ", bytes.data.length, " bytes)");
+        log(3, "CTFE: ", manifest.name, " = ", values, " (array literal, ", bytes.data.length, " bytes)");
     }
     
     /**
@@ -482,7 +483,7 @@ class CTFEEvaluator {
             );
         }
         
-        writeln("CTFE: Reading file '", fullPath, "'");
+        log(3, "CTFE: Reading file '", fullPath, "'");
         
         // Read the file
         ubyte[] fileData;
@@ -504,7 +505,7 @@ class CTFEEvaluator {
         auto ubyteType = new BasicType(manifest.location, BasicType.Kind.UInt8);
         manifest.inferredType = new ArrayType(manifest.location, ubyteType);
         
-        writeln("CTFE: ", manifest.name, " = import(\"", filename, "\") (", fileData.length, " bytes)");
+        log(3, "CTFE: ", manifest.name, " = import(\"", filename, "\") (", fileData.length, " bytes)");
     }
     
     /**
@@ -555,7 +556,7 @@ class CTFEEvaluator {
     void evaluateArrayConcat(ManifestConstantDecl manifest, BinaryExpression expr) {
         import std.array : appender;
         
-        writeln("CTFE: Evaluating array concat");
+        log(3, "CTFE: Evaluating array concat");
         
         // Ensure operands are evaluated
         ensureDependenciesEvaluated(expr);
@@ -580,7 +581,7 @@ class CTFEEvaluator {
         manifest.ctfeComplete = true;
         manifest.isArrayType = true;
         
-        writeln("CTFE: ", manifest.name, " = ", combinedVals, " (array concat, ", combined.data.length, " bytes)");
+        log(3, "CTFE: ", manifest.name, " = ", combinedVals, " (array concat, ", combined.data.length, " bytes)");
     }
     
     /**
@@ -704,7 +705,7 @@ class CTFEEvaluator {
             }
         }
         
-        writeln("CTFE: Calling ", funcName, " (returns string: ", returnsString, ")");
+        log(3, "CTFE: Calling ", funcName, " (returns string: ", returnsString, ")");
         
         // For string-returning functions, interpret directly
         if (returnsString) {
@@ -713,13 +714,13 @@ class CTFEEvaluator {
         
         // Check if this is a simple function that only contains CTFE intrinsics
         if (canInterpretDirectly(funcDecl)) {
-            writeln("CTFE: Interpreting ", funcName, " directly");
+            log(3, "CTFE: Interpreting ", funcName, " directly");
             return CTFEResult.fromInt(interpretFunction(funcDecl));
         }
         
         // Check if function uses __ctfe_runtime - if so, interpret it
         if (usesCTFERuntime(funcDecl)) {
-            writeln("CTFE: Function uses __ctfe_runtime, interpreting directly");
+            log(3, "CTFE: Function uses __ctfe_runtime, interpreting directly");
             return interpretIntFunction(funcDecl);
         }
         
@@ -729,7 +730,7 @@ class CTFEEvaluator {
             args ~= evaluateSimpleExpression(arg);
         }
         
-        writeln("CTFE: Calling ", funcName, " with args ", args);
+        log(3, "CTFE: Calling ", funcName, " with args ", args);
         
         // Execute via the configured backend (WASM or Native)
         long result = executeViaBackend(funcDecl, args);
@@ -754,7 +755,7 @@ class CTFEEvaluator {
      * Handles functions with mixins, local variables, and return statements.
      */
     string interpretStringFunction(FunctionDecl funcDecl) {
-        writeln("CTFE: Interpreting string function ", funcDecl.name);
+        log(3, "CTFE: Interpreting string function ", funcDecl.name);
         
         if (!funcDecl.body_) {
             throw new CTFEError("CTFE: Function '" ~ funcDecl.name ~ "' has no body");
@@ -823,11 +824,11 @@ class CTFEEvaluator {
     private StatementResult executeMixinStatement(MixinStatement mixinStmt,
                                                   ref string[string] localStrings,
                                                   ref long[string] localInts) {
-        writeln("CTFE: Expanding mixin inside function: ", mixinStmt.mixinExpr.toString());
+        log(3, "CTFE: Expanding mixin inside function: ", mixinStmt.mixinExpr.toString());
         
         // Evaluate the mixin expression to get the code string
         string code = evaluateStringExpressionWithLocals(mixinStmt.mixinExpr, localStrings, localInts);
-        writeln("CTFE: Mixin expands to: \"", code, "\"");
+        log(3, "CTFE: Mixin expands to: \"", code, "\"");
         
         // Parse the code as statements
         string wrappedCode = "void __mixin_wrapper() { " ~ code ~ " }";
@@ -863,12 +864,12 @@ class CTFEEvaluator {
         if (isString && varDecl.initializer) {
             string value = evaluateStringExpressionWithLocals(varDecl.initializer, localStrings, localInts);
             localStrings[varDecl.name] = value;
-            writeln("CTFE: Local string '", varDecl.name, "' = \"", value, "\"");
+            log(3, "CTFE: Local string '", varDecl.name, "' = \"", value, "\"");
         } else if (varDecl.initializer) {
             // Assume integer
             long value = evaluateSimpleExpressionWithLocals(varDecl.initializer, localInts);
             localInts[varDecl.name] = value;
-            writeln("CTFE: Local int '", varDecl.name, "' = ", value);
+            log(3, "CTFE: Local int '", varDecl.name, "' = ", value);
         }
     }
     
@@ -1012,7 +1013,7 @@ class CTFEEvaluator {
      * Interpret a function that returns an integer and may use __ctfe_runtime.
      */
     private CTFEResult interpretIntFunction(FunctionDecl funcDecl) {
-        writeln("CTFE: Interpreting int function ", funcDecl.name);
+        log(3, "CTFE: Interpreting int function ", funcDecl.name);
         
         if (!funcDecl.body_) {
             throw new CTFEError("CTFE: Function '" ~ funcDecl.name ~ "' has no body");
@@ -1050,7 +1051,7 @@ class CTFEEvaluator {
                 if (varDecl.initializer) {
                     long value = evaluateIntExpressionWithLocals(varDecl.initializer, localInts);
                     localInts[varDecl.name] = value;
-                    writeln("CTFE: Local '", varDecl.name, "' = ", value);
+                    log(3, "CTFE: Local '", varDecl.name, "' = ", value);
                 }
                 continue;
             }
@@ -1345,9 +1346,9 @@ class CTFEEvaluator {
         if (needsRecompile) {
             statCacheMisses++;
             statFunctionsCompiled += cast(uint)newFuncs.length;
-            writeln("CTFE: ", funcDecl.name, " needs: [", 
+            log(3, "CTFE: ", funcDecl.name, " needs: [", 
                 dependencies.map!(f => f.name).array.join(", "), "]");
-            writeln("CTFE: Adding ", newFuncs.length, " new function(s): [",
+            log(3, "CTFE: Adding ", newFuncs.length, " new function(s): [",
                 newFuncs.map!(f => f.name).array.join(", "), "]");
             
             // Type-check only new functions
@@ -1379,7 +1380,7 @@ class CTFEEvaluator {
             }
         } else {
             statCacheHits++;
-            writeln("CTFE: Reusing cached context for ", funcDecl.name);
+            log(3, "CTFE: Reusing cached context for ", funcDecl.name);
         }
         
         // Execute - use callByName to call any function in the context
@@ -1425,7 +1426,7 @@ class CTFEEvaluator {
     long executeWasm(ubyte[] wasmBytes, string funcName, long[] args) {
         import semantic.ctfe_runtime : CTFERuntime, CTFERuntimeError;
         
-        writeln("CTFE: Executing ", funcName, " via embedded wasm3");
+        log(3, "CTFE: Executing ", funcName, " via embedded wasm3");
         
         auto runtime = new CTFERuntime();
         scope(exit) destroy(runtime);
@@ -1440,7 +1441,7 @@ class CTFEEvaluator {
             }
             
             auto result = runtime.callI32(funcName, intArgs);
-            writeln("CTFE: Result = ", result.asInt());
+            log(3, "CTFE: Result = ", result.asInt());
             return result.asInt();
             
         } catch (CTFERuntimeError e) {

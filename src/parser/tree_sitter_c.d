@@ -10,6 +10,7 @@ import core.stdc.stdint;
 import std.string;
 import std.stdio;
 import std.conv;
+import diagnostic.log : log;
 
 // Tree-sitter C API bindings
 extern (C) {
@@ -68,33 +69,31 @@ class TreeSitterParser {
     private TSTree* currentTree;
 
     this() {
-        import std.stdio : writeln;
-        
         try {
-            writeln("TreeSitterParser constructor started");
+            log(3, "TreeSitterParser constructor started");
             
-            writeln("Creating ts_parser...");
+            log(3, "Creating ts_parser...");
             parser = ts_parser_new();
             if (!parser) {
                 throw new Exception("Failed to create tree-sitter parser");
             }
-            writeln("ts_parser created successfully");
+            log(3, "ts_parser created successfully");
 
-            writeln("Getting D language...");
+            log(3, "Getting D language...");
             auto language = tree_sitter_d();
             if (!language) {
                 throw new Exception("Failed to get tree-sitter-d language");
             }
-            writeln("D language obtained successfully");
+            log(3, "D language obtained successfully");
 
-            writeln("Setting language...");
+            log(3, "Setting language...");
             if (!ts_parser_set_language(parser, language)) {
                 ts_parser_delete(parser);
                 throw new Exception("Failed to set D language for parser");
             }
-            writeln("Language set successfully");
+            log(3, "Language set successfully");
         } catch (Exception e) {
-            writeln("Exception in TreeSitterParser constructor: ", e.msg);
+            log(2, "Exception in TreeSitterParser constructor: ", e.msg);
             throw e;
         }
     }

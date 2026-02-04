@@ -15,6 +15,7 @@ import std.array;
 import std.algorithm;
 import std.conv;
 import std.stdio;
+import diagnostic.log : log;
 
 /**
  * Type checking error
@@ -96,19 +97,19 @@ class TypeChecker {
             return;
         }
         
-        writeln("Type checking function: ", decl.name);
+        log(3, "Type checking function: ", decl.name);
         
         // Skip CTFE-only functions (functions that return string type)
         // These are only used at compile time for mixin expansion
         if (auto userType = cast(UserType)decl.returnType) {
             if (userType.name == "string") {
-                writeln("Skipping type check for CTFE-only function: ", decl.name);
+                log(3, "Skipping type check for CTFE-only function: ", decl.name);
                 return;
             }
         }
         
         // Enter function scope
-        if (!symbolTable) { writeln("Error: symbolTable is null!"); return; }
+        if (!symbolTable) { log(1, "Error: symbolTable is null!"); return; }
         symbolTable.enterScope("function:" ~ decl.name);
         scope(exit) symbolTable.exitScope();
         
@@ -125,9 +126,9 @@ class TypeChecker {
         scope(exit) currentStructDecl = oldStructDecl;
         
         // Add parameters to scope
-        writeln("Checking parameters for ", decl.name);
+        log(3, "Checking parameters for ", decl.name);
         foreach (param; decl.parameters) {
-            writeln("  Parameter: ", param.name);
+            log(3, "  Parameter: ", param.name);
             
             // Check if parameter type is null (from parsing issues)
             if (!param.type) {
@@ -163,7 +164,7 @@ class TypeChecker {
         
         // Type check function body
         if (decl.body_) {
-            writeln("Checking body for ", decl.name);
+            log(3, "Checking body for ", decl.name);
             checkStatement(decl.body_);
             
             // Check that non-void functions return on all paths
@@ -291,7 +292,7 @@ class TypeChecker {
      */
     void checkStatement(Statement stmt) {
         if (!stmt) {
-            writeln("Warning: visiting null statement in TypeChecker");
+            log(2, "Warning: visiting null statement in TypeChecker");
             return;
         }
         // writeln("Checking statement type: ", typeid(stmt).name);
@@ -399,7 +400,7 @@ class TypeChecker {
      */
     Type checkExpression(Expression expr) {
         if (!expr) {
-            writeln("Error: visiting null expression in TypeChecker");
+            log(2, "Error: visiting null expression in TypeChecker");
             return new BasicType(SourceLocation(), BasicType.Kind.Void);
         }
         // writeln("Checking expression type: ", typeid(expr).name);
