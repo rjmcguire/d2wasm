@@ -146,6 +146,50 @@ struct NativeCodeGen {
         emitRaw32(0xF2E00000 | (cast(uint)imm3 << 5));  // MOVK x0, #imm3, LSL 48
     }
     
+    // ========== Indirect Calls (Milestone 88) ==========
+    
+    /// Load a 64-bit immediate into x9 (scratch register for indirect calls)
+    /// This preserves x0-x3 which may contain arguments
+    void emitLoadImm64ToX9(ulong value) {
+        // Same as emitLoadImm64 but targeting x9 instead of x0
+        // x9 encoding = register bits 0-4 = 9 = 0b01001
+        ushort imm0 = cast(ushort)(value & 0xFFFF);
+        ushort imm1 = cast(ushort)((value >> 16) & 0xFFFF);
+        ushort imm2 = cast(ushort)((value >> 32) & 0xFFFF);
+        ushort imm3 = cast(ushort)((value >> 48) & 0xFFFF);
+        
+        emitRaw32(0xD2800009 | (cast(uint)imm0 << 5));  // MOV x9, #imm0
+        emitRaw32(0xF2A00009 | (cast(uint)imm1 << 5));  // MOVK x9, #imm1, LSL 16
+        emitRaw32(0xF2C00009 | (cast(uint)imm2 << 5));  // MOVK x9, #imm2, LSL 32
+        emitRaw32(0xF2E00009 | (cast(uint)imm3 << 5));  // MOVK x9, #imm3, LSL 48
+    }
+    
+    /// Load 64-bit value from address in x9 into x9
+    /// LDR x9, [x9]
+    void emitLoadFromX9() {
+        // LDR x9, [x9] = 0xF9400129
+        // Encoding: 1111 1001 01 000000 000000 01001 01001
+        //           size=11 opc=01 imm12=0 Rn=x9 Rt=x9
+        emitRaw32(0xF9400129);
+    }
+    
+    /// Call function at address in x9 (BLR x9)
+    void emitCallIndirectX9() {
+        // BLR x9 = 0xD63F0120
+        // Encoding: 1101 0110 0011 1111 0000 0001 0010 0000
+        //           BLR Rn where Rn=x9 (bits 5-9 = 01001)
+        emitRaw32(0xD63F0120);
+    }
+    
+    /// Emit a complete indirect call through a function pointer slot
+    /// slotAddress = address of the function pointer in memory
+    /// Arguments should already be set up in x0-x3
+    void emitIndirectCall(ulong slotAddress) {
+        emitLoadImm64ToX9(slotAddress);  // x9 = address of function pointer
+        emitLoadFromX9();                 // x9 = *x9 (actual function pointer)
+        emitCallIndirectX9();             // call x9
+    }
+    
     // ========== Branch Instructions ==========
     
     /// Create a new label (not yet placed)

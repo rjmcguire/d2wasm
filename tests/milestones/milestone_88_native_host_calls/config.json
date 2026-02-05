@@ -1,0 +1,6 @@
+{
+  "name": "native_host_calls",
+  "description": "Native backend can call host functions via indirect call (BLR)",
+  "type": "compile_output",
+  "expected_output": "CTFE: 42"
+}

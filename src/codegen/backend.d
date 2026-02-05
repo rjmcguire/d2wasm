@@ -222,6 +222,9 @@ class NativeCompiledFunction : CompiledFunction {
     // Data section for external data (import() file contents, etc.) - Milestone 85/86
     private NativeDataSection dataSection;
     
+    // Host function table for CTFE intrinsics - Milestone 87/88
+    private HostFunctionTable hostFunctions;
+    
     /// Single function constructor (original)
     this(FunctionDecl func, SymbolTable st) {
         import std.stdio : writeln;
@@ -230,6 +233,7 @@ class NativeCompiledFunction : CompiledFunction {
         this.symbolTable = st;
         this.gen = NativeCodeGen.alloc(64 * 1024);  // 64KB code buffer
         this.dataSection = NativeDataSection.alloc(64 * 1024);  // 64KB data section
+        this.hostFunctions = createCTFEHostFunctions();  // Milestone 88
         
         if (!gen.base) {
             throw new Exception("Failed to allocate executable memory");
@@ -258,6 +262,7 @@ class NativeCompiledFunction : CompiledFunction {
         this.symbolTable = st;
         this.gen = NativeCodeGen.alloc(64 * 1024);  // 64KB code buffer
         this.dataSection = NativeDataSection.alloc(64 * 1024);  // 64KB data section
+        this.hostFunctions = createCTFEHostFunctions();  // Milestone 88
         
         if (!gen.base) {
             throw new Exception("Failed to allocate executable memory");
@@ -806,6 +811,31 @@ class NativeCompiledFunction : CompiledFunction {
                     
                     // Emit the call (BL instruction)
                     gen.emitCall(*labelPtr);
+                    // Result is in x0
+                    return;
+                }
+                
+                // Milestone 88: Check if this is a host function call
+                ulong hostSlot = hostFunctions.getFunctionSlotAddress(funcIdent.name);
+                if (hostSlot != 0) {
+                    if (call.arguments.length > 4) {
+                        throw new Exception("Native backend: more than 4 arguments not yet supported");
+                    }
+                    
+                    // Compile arguments in reverse order into their target registers
+                    for (long i = cast(long)call.arguments.length - 1; i >= 0; i--) {
+                        compileExpression(call.arguments[i]);
+                        switch (i) {
+                            case 0: break;  // already in x0
+                            case 1: gen.emitMoveX0ToX1(); break;
+                            case 2: gen.emitMoveX0ToX2(); break;
+                            case 3: gen.emitMoveX0ToX3(); break;
+                            default: break;
+                        }
+                    }
+                    
+                    // Emit indirect call through host function table
+                    gen.emitIndirectCall(hostSlot);
                     // Result is in x0
                     return;
                 }
