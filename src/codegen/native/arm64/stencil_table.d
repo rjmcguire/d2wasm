@@ -149,6 +149,29 @@ immutable stencil_le_i32 = Stencil(
     []
 );
 
+// Unsigned comparisons for bounds checking
+// CSET uses inverted condition: CSET Rd, cond = CSINC Rd, xzr, xzr, invert(cond)
+// lt_i32 uses 0xa7 (cond=1010=GE, inverts to LT signed)
+// For "lo" (unsigned <), we invert to "hs" (0010), so byte becomes 0x27
+// For "hs" (unsigned >=), we invert to "lo" (0011), so byte becomes 0x37
+immutable stencil_lt_u32 = Stencil(
+    "lt_u32",
+    cast(immutable ubyte[])[
+        0x1f, 0x00, 0x01, 0xeb,  // CMP x0, x1
+        0xe0, 0x27, 0x9f, 0x1a   // CSET x0, lo (encode inverted HS=0010)
+    ],
+    []
+);
+
+immutable stencil_ge_u32 = Stencil(
+    "ge_u32",
+    cast(immutable ubyte[])[
+        0x1f, 0x00, 0x01, 0xeb,  // CMP x0, x1
+        0xe0, 0x37, 0x9f, 0x1a   // CSET x0, hs (encode inverted LO=0011)
+    ],
+    []
+);
+
 immutable stencil_gt_i32 = Stencil(
     "gt_i32",
     cast(immutable ubyte[])[
@@ -578,13 +601,17 @@ shared static this() {
     stencilTable["shr_i32"] = &stencil_shr_i32;
     stencilTable["not_i32"] = &stencil_not_i32;
     
-    // Comparison
+    // Comparison (signed)
     stencilTable["eq_i32"] = &stencil_eq_i32;
     stencilTable["ne_i32"] = &stencil_ne_i32;
     stencilTable["lt_i32"] = &stencil_lt_i32;
     stencilTable["le_i32"] = &stencil_le_i32;
     stencilTable["gt_i32"] = &stencil_gt_i32;
     stencilTable["ge_i32"] = &stencil_ge_i32;
+    
+    // Comparison (unsigned) - for bounds checking
+    stencilTable["lt_u32"] = &stencil_lt_u32;
+    stencilTable["ge_u32"] = &stencil_ge_u32;
     
     // Immediates
     stencilTable["load_imm32"] = &stencil_load_imm32;

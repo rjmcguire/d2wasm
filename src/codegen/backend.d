@@ -1000,6 +1000,10 @@ class NativeCompiledFunction : CompiledFunction {
                     compileExpression(indexExpr.index);
                     // x0 = index
                     
+                    // Bounds check: 0 <= index < length
+                    emitBoundsCheck(*sliceOffset);
+                    // x0 still = index
+                    
                     // Compute index * 4 (element size)
                     gen.emitMoveX0ToX1();  // x1 = index
                     gen.emitImm32(stencil_load_imm32, 4);  // x0 = 4
@@ -1062,6 +1066,55 @@ class NativeCompiledFunction : CompiledFunction {
         ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_pop_call");
         ulong ctxSlot = hostFunctions.getContextSlotAddress();
         gen.emitHostCall(slot, ctxSlot);
+    }
+    
+    /**
+     * Emit bounds check: if index < 0 or index >= length, call __ctfe_trap.
+     * Assumes: index in x0
+     * Slice layout: { ptr: i64, length: i32, capacity: i32 } at sliceOffset (16 bytes)
+     * Preserves: x0 (index)
+     */
+    private void emitBoundsCheck(uint sliceOffset) {
+        auto errorLabel = gen.newLabel();
+        auto okLabel = gen.newLabel();
+        
+        // Use depth-aware temp slot to avoid conflicts with nested expressions
+        uint myTempSlot = tempSlot + (tempSlotDepth * 4);
+        tempSlotDepth++;
+        
+        // Save index to temp (we need it after bounds check)
+        gen.emitStoreLocal32(myTempSlot);
+        
+        // Check index < 0 (for signed int)
+        // CBZ doesn't check negative, we need signed comparison
+        // For simplicity, just check index >= length (unsigned) covers negative as large positive
+        
+        // Load length from slice (offset 8 = after 64-bit ptr)
+        // Slice layout: { ptr: i64 (8), length: i32 (4), capacity: i32 (4) } = 16 bytes
+        gen.emitLoadLocal32(sliceOffset + 8);  // x0 = length
+        gen.emitMoveX0ToX1();  // x1 = length
+        
+        // Reload index
+        gen.emitLoadLocal32(myTempSlot);  // x0 = index
+        
+        // Compare: if index >= length (unsigned), error
+        // We use: if index < length, OK; else error
+        // CMP + B.HS (branch if higher or same, unsigned)
+        gen.emit(stencil_lt_u32);  // x0 = (index < length) ? 1 : 0
+        gen.emitBranchIfNonZero(okLabel);  // branch if index < length
+        
+        // Out of bounds - call trap
+        gen.emitImm32(stencil_load_imm32, cast(int)CTFEErrorKind.OutOfBounds);
+        ulong trapSlot = hostFunctions.getFunctionSlotAddress("__ctfe_trap");
+        ulong contextSlot = hostFunctions.getContextSlotAddress();
+        gen.emitHostCall(trapSlot, contextSlot);
+        // longjmp never returns
+        
+        gen.bindLabel(okLabel);
+        // Restore index to x0
+        gen.emitLoadLocal32(myTempSlot);  // x0 = index
+        
+        tempSlotDepth--;
     }
     
     /**
