@@ -11,7 +11,7 @@ module codegen.native.arm64_codegen;
 import codegen.native.stencil_catalog;
 import codegen.native.arm64.stencil_table;
 import codegen.native.codegen_interface : Label, NativeDataSection, NativeCTFEContext, 
-    HostFunctionPtr, HostFunctionTable, CTFEErrorKind, ctfeErrorMessage;
+    HostFunctionPtr, HostFunctionTable, CTFEErrorKind, ctfeErrorMessage, longjmp;
 import core.sys.posix.sys.mman;
 import core.stdc.string : memcpy;
 
@@ -254,6 +254,14 @@ struct NativeCodeGen {
         // Emit placeholder: CBNZ w0, +0
         emitRaw32(0x35000000);  // CBNZ w0
         unresolved ~= UnresolvedBranch(branchOffset, target.id, BranchKind.ifNonZero);
+    }
+    
+    /// Emit branch if x1 == 0 (CBZ w1, target) - for checking divisor
+    void emitBranchIfZeroX1(Label target) {
+        uint branchOffset = pos;
+        // Emit placeholder: CBZ w1, +0  (register 1 in bits 0-4)
+        emitRaw32(0x34000001);  // CBZ w1
+        unresolved ~= UnresolvedBranch(branchOffset, target.id, BranchKind.ifZero);
     }
     
     /// Emit raw 32-bit instruction
@@ -536,15 +544,15 @@ struct NativeCodeGen {
                     break;
                     
                 case BranchKind.ifZero:
-                    // CBZ: imm19 in bits 5-23
+                    // CBZ: imm19 in bits 5-23, preserve register in bits 0-4
                     int imm19 = relOffset / 4;
-                    *instr = 0x34000000 | ((imm19 & 0x7FFFF) << 5);
+                    *instr = (*instr & 0x1F) | 0x34000000 | ((imm19 & 0x7FFFF) << 5);
                     break;
                     
                 case BranchKind.ifNonZero:
-                    // CBNZ: imm19 in bits 5-23
+                    // CBNZ: imm19 in bits 5-23, preserve register in bits 0-4
                     int imm19_2 = relOffset / 4;
-                    *instr = 0x35000000 | ((imm19_2 & 0x7FFFF) << 5);
+                    *instr = (*instr & 0x1F) | 0x35000000 | ((imm19_2 & 0x7FFFF) << 5);
                     break;
                     
                 case BranchKind.call:
@@ -635,6 +643,19 @@ private extern(C) long _native_ctfe_print_i32(NativeCTFEContext* ctx, long val, 
     return 0;
 }
 
+/// CTFE trap handler - called when a runtime error occurs
+/// Uses longjmp to abort execution and return to setjmp in call()
+private extern(C) long _native_ctfe_trap(NativeCTFEContext* ctx, long errorKind, long, long) nothrow {
+    import codegen.native.codegen_interface : longjmp;
+    if (ctx is null) return -1;
+    
+    ctx.errorKind = cast(CTFEErrorKind)errorKind;
+    longjmp(ctx.errorJump, 1);  // Non-local exit to call()
+    
+    // Never reached - longjmp doesn't return
+    return -1;
+}
+
 /**
  * Create a HostFunctionTable pre-populated with CTFE intrinsics.
  */
@@ -647,6 +668,7 @@ HostFunctionTable createCTFEHostFunctions() {
     table.registerFunction("__ctfe_write_bool", &_native_ctfe_write_bool);
     table.registerFunction("__ctfe_write_newline", &_native_ctfe_write_newline);
     table.registerFunction("__ctfe_print_i32", &_native_ctfe_print_i32);
+    table.registerFunction("__ctfe_trap", &_native_ctfe_trap);
     
     return table;
 }

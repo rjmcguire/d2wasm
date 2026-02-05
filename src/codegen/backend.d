@@ -683,10 +683,10 @@ class NativeCompiledFunction : CompiledFunction {
                     gen.emit(stencil_mul_i32);
                     break;
                 case BinaryExpression.Operator.Divide:
-                    gen.emit(stencil_div_i32);
+                    emitCheckedDiv();  // Division by zero trap
                     break;
                 case BinaryExpression.Operator.Modulo:
-                    gen.emit(stencil_mod_i32);
+                    emitCheckedMod();  // Division by zero trap
                     break;
                 case BinaryExpression.Operator.Equal:
                     gen.emit(stencil_eq_i32);
@@ -794,10 +794,10 @@ class NativeCompiledFunction : CompiledFunction {
                         gen.emit(stencil_mul_i32);
                         break;
                     case AssignmentExpression.Operator.DivideAssign:
-                        gen.emit(stencil_div_i32);
+                        emitCheckedDiv();  // Division by zero trap
                         break;
                     case AssignmentExpression.Operator.ModuloAssign:
-                        gen.emit(stencil_mod_i32);
+                        emitCheckedMod();  // Division by zero trap
                         break;
                     case AssignmentExpression.Operator.AndAssign:
                         gen.emit(stencil_and_i32);
@@ -1012,6 +1012,71 @@ class NativeCompiledFunction : CompiledFunction {
             throw new Exception("Expression type not yet supported in native backend: " ~ 
                 typeid(expr).toString());
         }
+    }
+    
+    /**
+     * Emit checked division: if divisor is 0, call __ctfe_trap.
+     * Assumes: dividend in x0, divisor in x1
+     * Result: quotient in x0
+     */
+    private void emitCheckedDiv() {
+        // Structure:
+        //   CBZ x1, .Ldiv_error      ; branch if divisor == 0
+        //   SDIV x0, x0, x1          ; do division
+        //   B .Ldiv_done             ; skip error handler
+        // .Ldiv_error:
+        //   MOV x0, #1               ; ERROR_DIV_ZERO (will be shifted to x1 by emitHostCall)
+        //   call __ctfe_trap
+        // .Ldiv_done:
+        
+        auto errorLabel = gen.newLabel();
+        auto doneLabel = gen.newLabel();
+        
+        // CBZ x1, error  (branch if divisor is zero)
+        gen.emitBranchIfZeroX1(errorLabel);
+        
+        // SDIV x0, x0, x1
+        gen.emit(stencil_div_i32);
+        
+        // B done (skip error handler)
+        gen.emitBranch(doneLabel);
+        
+        // .Ldiv_error:
+        gen.bindLabel(errorLabel);
+        
+        // Load error code into x0 (emitHostCall will shift it to x1)
+        gen.emitImm32(stencil_load_imm32, cast(int)CTFEErrorKind.DivByZero);
+        
+        // Call __ctfe_trap(ctx, ERROR_DIV_ZERO)
+        ulong trapSlot = hostFunctions.getFunctionSlotAddress("__ctfe_trap");
+        ulong contextSlot = hostFunctions.getContextSlotAddress();
+        gen.emitHostCall(trapSlot, contextSlot);
+        // longjmp happens inside __ctfe_trap, we never return here
+        
+        // .Ldiv_done:
+        gen.bindLabel(doneLabel);
+    }
+    
+    /**
+     * Emit checked modulo: if divisor is 0, call __ctfe_trap.
+     * Assumes: dividend in x0, divisor in x1
+     * Result: remainder in x0
+     */
+    private void emitCheckedMod() {
+        auto errorLabel = gen.newLabel();
+        auto doneLabel = gen.newLabel();
+        
+        gen.emitBranchIfZeroX1(errorLabel);
+        gen.emit(stencil_mod_i32);
+        gen.emitBranch(doneLabel);
+        
+        gen.bindLabel(errorLabel);
+        gen.emitImm32(stencil_load_imm32, cast(int)CTFEErrorKind.DivByZero);
+        ulong trapSlot = hostFunctions.getFunctionSlotAddress("__ctfe_trap");
+        ulong contextSlot = hostFunctions.getContextSlotAddress();
+        gen.emitHostCall(trapSlot, contextSlot);
+        
+        gen.bindLabel(doneLabel);
     }
     
     /**
@@ -1429,11 +1494,20 @@ class NativeCompiledFunction : CompiledFunction {
     }
     
     override ExecutionResult call(long[] args) {
+        import codegen.native.codegen_interface : setjmp;
+        
         // Set up execution context for host functions
         NativeCTFEContext ctx;
         ctx.dataSection = &dataSection;
+        ctx.errorKind = CTFEErrorKind.None;
         hostFunctions.setContext(&ctx);
         scope(exit) hostFunctions.setContext(null);
+        
+        // Set up error recovery point - longjmp returns here on trap
+        if (setjmp(ctx.errorJump) != 0) {
+            // Got here via longjmp - error occurred
+            return ExecutionResult.failure(ctfeErrorMessage(ctx.errorKind));
+        }
         
         // Call the compiled function with appropriate number of arguments
         // ARM64 calling convention: first 8 args in x0-x7
@@ -1478,9 +1552,12 @@ class NativeCompiledFunction : CompiledFunction {
     }
     
     override ExecutionResult callByName(string targetFuncName, long[] args) {
+        import codegen.native.codegen_interface : setjmp;
+        
         // Set up execution context for host functions
         NativeCTFEContext ctx;
         ctx.dataSection = &dataSection;
+        ctx.errorKind = CTFEErrorKind.None;
         hostFunctions.setContext(&ctx);
         scope(exit) hostFunctions.setContext(null);
         
@@ -1497,6 +1574,12 @@ class NativeCompiledFunction : CompiledFunction {
         
         size_t targetEntry = (*labelPtr).offset;
         size_t targetParamCount = (*funcDeclPtr).parameters.length;
+        
+        // Set up error recovery point - longjmp returns here on trap
+        if (setjmp(ctx.errorJump) != 0) {
+            // Got here via longjmp - error occurred
+            return ExecutionResult.failure(ctfeErrorMessage(ctx.errorKind));
+        }
         
         // Call with the target function's entry point and param count
         long result;
