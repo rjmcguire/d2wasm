@@ -112,11 +112,36 @@ interface Backend {
  * Backend factory - creates the appropriate backend based on configuration.
  */
 Backend createBackend(string backendName, SymbolTable symbolTable) {
+    import codegen.native.codegen_interface : hostArchitecture;
+    
     switch (backendName) {
         case "wasm":
             return new WASMBackend(symbolTable);
+        
         case "native":
+            // Auto-detect host architecture
+            string arch = hostArchitecture();
+            switch (arch) {
+                case "arm64":
+                    return new NativeBackend(symbolTable);
+                
+                case "x86_64":
+                    throw new Exception(
+                        "Native backend not yet implemented for x86_64. " ~
+                        "Use --backend=wasm or contribute x86_64 support!");
+                
+                default:
+                    throw new Exception(
+                        "Native backend not supported on architecture: " ~ arch ~ ". " ~
+                        "Use --backend=wasm instead.");
+            }
+        
+        // Allow explicit architecture selection for testing/development
+        case "native-arm64":
             return new NativeBackend(symbolTable);
+        
+        // Future: case "native-x86_64": return new X86_64NativeBackend(symbolTable);
+        
         default:
             throw new Exception("Unknown backend: " ~ backendName);
     }

@@ -1,0 +1,6 @@
+{
+  "name": "arch_detection",
+  "description": "Native backend auto-detects host architecture",
+  "type": "compile_only",
+  "note": "Architecture detection verified by --backend=native working on ARM64 Mac"
+}
