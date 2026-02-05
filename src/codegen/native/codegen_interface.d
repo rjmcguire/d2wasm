@@ -217,7 +217,7 @@ struct NativeCTFEContext {
         }
     }
     
-    /// Format call stack for error message
+    /// Format call stack for error message (rustc-style with source context)
     string formatCallStack() nothrow {
         import std.conv : to;
         import std.path : baseName;
@@ -226,13 +226,80 @@ struct NativeCTFEContext {
         
         string result;
         try {
-            result = "\n  Call stack:";
-            foreach_reverse (frame; callStack) {
+            foreach_reverse (i, frame; callStack) {
                 string file = frame.fileName.length > 0 ? baseName(frame.fileName) : "?";
-                result ~= "\n    " ~ frame.funcName ~ "() at " ~ file ~ ":" ~ to!string(frame.line);
+                string lineNum = to!string(frame.line);
+                
+                // Location header
+                if (i == callStack.length - 1) {
+                    // Innermost frame (where error occurred)
+                    result ~= "\n --> " ~ file ~ ":" ~ lineNum;
+                } else {
+                    // Caller frames
+                    result ~= "\nnote: called from `" ~ frame.funcName ~ "()` at " ~ file ~ ":" ~ lineNum;
+                }
+                
+                // Try to show source line
+                string sourceLine = getSourceLine(frame.fileName, frame.line);
+                if (sourceLine.length > 0) {
+                    result ~= "\n  |";
+                    result ~= "\n" ~ padLeft(lineNum, 3) ~ " | " ~ sourceLine;
+                    result ~= "\n  |";
+                }
             }
         } catch (Exception) {}
         return result;
+    }
+}
+
+// ============================================================================
+// Source Line Cache (for error messages)
+// ============================================================================
+
+/// Cache of source file contents (file path -> lines)
+private __gshared string[][string] sourceLineCache;
+
+/// Get a specific line from a source file (1-indexed), returns empty on failure
+string getSourceLine(string filePath, uint line) nothrow {
+    if (filePath.length == 0 || line == 0) return "";
+    
+    try {
+        // Check cache first
+        if (auto linesPtr = filePath in sourceLineCache) {
+            auto lines = *linesPtr;
+            if (line <= lines.length) {
+                return lines[line - 1];
+            }
+            return "";
+        }
+        
+        // Read and cache the file
+        import std.file : readText, exists;
+        import std.string : splitLines;
+        
+        if (!exists(filePath)) return "";
+        
+        string content = readText(filePath);
+        string[] lines = splitLines(content);
+        sourceLineCache[filePath] = lines;
+        
+        if (line <= lines.length) {
+            return lines[line - 1];
+        }
+    } catch (Exception) {}
+    
+    return "";
+}
+
+/// Left-pad a string to a minimum width
+private string padLeft(string s, size_t width) nothrow {
+    if (s.length >= width) return s;
+    try {
+        char[] padding = new char[width - s.length];
+        padding[] = ' ';
+        return cast(string)padding ~ s;
+    } catch (Exception) {
+        return s;
     }
 }
 
