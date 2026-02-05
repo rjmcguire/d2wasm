@@ -84,6 +84,10 @@ class MixinExpander {
                 // Expand this static if
                 auto expanded = expandStaticIf(staticIfDecl);
                 result ~= expanded;
+            } else if (auto staticAssertDecl = cast(StaticAssertDecl)decl) {
+                // Evaluate this static assert
+                evaluateStaticAssert(staticAssertDecl);
+                // Static asserts don't produce declarations, just validate
             } else {
                 // Keep other declarations as-is
                 result ~= decl;
@@ -325,6 +329,33 @@ class MixinExpander {
         staticIfDecl.isExpanded = true;
         
         return result;
+    }
+    
+    /**
+     * Evaluate a static assert at compile time.
+     * Throws an error if the condition is false.
+     */
+    private void evaluateStaticAssert(StaticAssertDecl staticAssert) {
+        if (staticAssert.isChecked) return;
+        staticAssert.isChecked = true;
+        
+        bool conditionResult = evaluateStaticIfCondition(
+            staticAssert.condition, 
+            staticAssert.location
+        );
+        
+        if (!conditionResult) {
+            // Get the error message
+            string errorMsg = "static assertion failed";
+            if (staticAssert.message !is null) {
+                if (auto literal = cast(LiteralExpression)staticAssert.message) {
+                    if (literal.value.type == typeid(string)) {
+                        errorMsg = literal.value.get!string();
+                    }
+                }
+            }
+            throw new MixinError(errorMsg, staticAssert.location);
+        }
     }
     
     /**

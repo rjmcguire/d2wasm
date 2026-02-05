@@ -1,0 +1,6 @@
+{
+  "name": "static_assert_fails",
+  "description": "Static assert failure produces correct error message",
+  "type": "compile_error",
+  "capability": "Error message quality - static assert"
+}

@@ -1,0 +1,8 @@
+{
+  "name": "static_assert",
+  "description": "Static assert for compile-time assertions",
+  "type": "wasm_exec",
+  "entry": "result",
+  "expected_result": 4,
+  "capability": "static assert(condition, message)"
+}

@@ -149,6 +149,8 @@ class TreeSitterBridge {
                         declarations ~= parseMixinDeclaration(child);
                     } else if (nodeType == "conditional_declaration") {
                         declarations ~= parseConditionalDeclaration(child);
+                    } else if (nodeType == "static_assert") {
+                        declarations ~= parseStaticAssert(child);
                     } else if (nodeType != "comment" && nodeType.length > 0) {
                         log(2, "Warning: Skipping unknown top-level node: ", nodeType);
                     }
@@ -836,6 +838,63 @@ class TreeSitterBridge {
     }
     
     /**
+     * Parse static_assert declaration
+     * Structure: static_assert > assert_expression > assert_arguments > expression(s)
+     */
+    StaticAssertDecl parseStaticAssert(TSNode node) {
+        SourceLocation loc = makeSourceLocation(node);
+        Expression conditionExpr;
+        Expression messageExpr;
+        
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            
+            if (childType == "assert_expression") {
+                // Dive into assert_expression to find assert_arguments
+                uint assertChildCount = TreeSitterParser.getChildCount(child);
+                for (uint j = 0; j < assertChildCount; j++) {
+                    TSNode assertChild = TreeSitterParser.getChild(child, j);
+                    string assertChildType = TreeSitterParser.getNodeType(assertChild);
+                    
+                    if (assertChildType == "assert_arguments") {
+                        // Parse expressions from assert_arguments
+                        uint argCount = TreeSitterParser.getChildCount(assertChild);
+                        int exprIndex = 0;
+                        for (uint k = 0; k < argCount; k++) {
+                            TSNode argChild = TreeSitterParser.getChild(assertChild, k);
+                            string argChildType = TreeSitterParser.getNodeType(argChild);
+                            
+                            // Skip punctuation
+                            if (argChildType == "(" || argChildType == ")" || argChildType == ",") {
+                                continue;
+                            }
+                            
+                            if (exprIndex == 0) {
+                                conditionExpr = parseExpression(argChild);
+                                exprIndex++;
+                            } else if (exprIndex == 1) {
+                                messageExpr = parseExpression(argChild);
+                                exprIndex++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (conditionExpr is null) {
+            throw new ParseError("static assert missing condition", loc);
+        }
+        
+        log(3, "Parsed static assert: condition=", conditionExpr.toString(),
+            messageExpr !is null ? ", message=" ~ messageExpr.toString() : "");
+        
+        return new StaticAssertDecl(loc, conditionExpr, messageExpr);
+    }
+    
+    /**
      * Parse the condition from a condition node (static if, version, or debug)
      */
     private Expression parseCondition(TSNode conditionNode) {
@@ -903,6 +962,8 @@ class TreeSitterBridge {
             return [parseMixinDeclaration(node)];
         } else if (nodeType == "conditional_declaration") {
             return [parseConditionalDeclaration(node)];
+        } else if (nodeType == "static_assert") {
+            return [parseStaticAssert(node)];
         } else if (nodeType == "declaration_or_statement") {
             // Some grammar variants use this wrapper
             uint childCount = TreeSitterParser.getChildCount(node);

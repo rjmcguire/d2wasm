@@ -611,3 +611,23 @@ class StaticIfDecl : Declaration {
             condition.toString(), thenDeclarations.length, elseDeclarations.length);
     }
 }
+
+class StaticAssertDecl : Declaration {
+    Expression condition;    // The condition to evaluate at compile time
+    Expression message;      // Optional error message (may be null)
+    bool isChecked;          // Whether this has been evaluated
+    
+    this(SourceLocation loc, Expression condition, Expression message = null) {
+        super(loc, "<static assert>", true);
+        this.condition = condition;
+        this.message = message;
+        this.isChecked = false;
+    }
+    
+    override string toString() const {
+        if (message !is null) {
+            return format("StaticAssertDecl(%s, %s)", condition.toString(), message.toString());
+        }
+        return format("StaticAssertDecl(%s)", condition.toString());
+    }
+}
