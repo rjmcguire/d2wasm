@@ -8,7 +8,8 @@
  */
 module codegen.native.arm64_codegen;
 
-import codegen.native.stencil_table;
+import codegen.native.stencil_catalog;
+import codegen.native.arm64.stencil_table;
 import core.sys.posix.sys.mman;
 import core.stdc.string : memcpy;
 
@@ -86,14 +87,16 @@ struct NativeCodeGen {
         
         foreach (ref hole; s.holes) {
             uint* instr = cast(uint*)(cast(ubyte*)addr + hole.offset);
-            final switch (hole.kind) {
-                case HoleKind.imm16_lo:
-                case HoleKind.imm16_lo_2:
+            // Patch based on hole kind - imm16_0/1 for 32-bit immediates
+            switch (hole.kind) {
+                case HoleKind.imm16_0:
                     *instr = (*instr & 0xFFE0001F) | ((value & 0xFFFF) << 5);
                     break;
-                case HoleKind.imm16_hi:
-                case HoleKind.imm16_hi_2:
+                case HoleKind.imm16_1:
                     *instr = (*instr & 0xFFE0001F) | (((value >> 16) & 0xFFFF) << 5);
+                    break;
+                default:
+                    // Other hole kinds not used for 32-bit immediates
                     break;
             }
         }

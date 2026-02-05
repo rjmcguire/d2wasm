@@ -127,7 +127,8 @@ Backend createBackend(string backendName, SymbolTable symbolTable) {
  */
 class NativeBackend : Backend {
     import codegen.native.arm64_codegen;
-    import codegen.native.stencil_table;
+    import codegen.native.arm64.stencil_table;
+    import codegen.native.stencil_catalog;
     import semantic.type_checker;
     
     private SymbolTable symbolTable;
@@ -191,7 +192,8 @@ class NativeBackend : Backend {
  */
 class NativeCompiledFunction : CompiledFunction {
     import codegen.native.arm64_codegen;
-    import codegen.native.stencil_table;
+    import codegen.native.arm64.stencil_table;
+    import codegen.native.stencil_catalog;
     import ast.nodes;
     import ast.statements;
     import ast.expressions;
