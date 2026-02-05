@@ -693,10 +693,12 @@ class NativeCompiledFunction : CompiledFunction {
                     gen.emit(stencil_mul_i32);
                     break;
                 case BinaryExpression.Operator.Divide:
-                    emitCheckedDiv();  // Division by zero trap
+                    emitCheckedDiv(binOp.location.filename ? binOp.location.filename : "",
+                                   binOp.location.line, binOp.location.column);
                     break;
                 case BinaryExpression.Operator.Modulo:
-                    emitCheckedMod();  // Division by zero trap
+                    emitCheckedMod(binOp.location.filename ? binOp.location.filename : "",
+                                   binOp.location.line, binOp.location.column);
                     break;
                 case BinaryExpression.Operator.Equal:
                     gen.emit(stencil_eq_i32);
@@ -804,10 +806,12 @@ class NativeCompiledFunction : CompiledFunction {
                         gen.emit(stencil_mul_i32);
                         break;
                     case AssignmentExpression.Operator.DivideAssign:
-                        emitCheckedDiv();  // Division by zero trap
+                        emitCheckedDiv(assign.location.filename ? assign.location.filename : "",
+                                       assign.location.line, assign.location.column);
                         break;
                     case AssignmentExpression.Operator.ModuloAssign:
-                        emitCheckedMod();  // Division by zero trap
+                        emitCheckedMod(assign.location.filename ? assign.location.filename : "",
+                                       assign.location.line, assign.location.column);
                         break;
                     case AssignmentExpression.Operator.AndAssign:
                         gen.emit(stencil_and_i32);
@@ -1001,7 +1005,9 @@ class NativeCompiledFunction : CompiledFunction {
                     // x0 = index
                     
                     // Bounds check: 0 <= index < length
-                    emitBoundsCheck(*sliceOffset);
+                    emitBoundsCheck(*sliceOffset,
+                                    indexExpr.location.filename ? indexExpr.location.filename : "",
+                                    indexExpr.location.line, indexExpr.location.column);
                     // x0 still = index
                     
                     // Compute index * 4 (element size)
@@ -1074,7 +1080,9 @@ class NativeCompiledFunction : CompiledFunction {
      * Slice layout: { ptr: i64, length: i32, capacity: i32 } at sliceOffset (16 bytes)
      * Preserves: x0 (index)
      */
-    private void emitBoundsCheck(uint sliceOffset) {
+    private void emitBoundsCheck(uint sliceOffset, string fileName, uint line, uint column) {
+        import codegen.native.arm64_codegen : ErrorLocData;
+        
         auto errorLabel = gen.newLabel();
         auto okLabel = gen.newLabel();
         
@@ -1085,30 +1093,32 @@ class NativeCompiledFunction : CompiledFunction {
         // Save index to temp (we need it after bounds check)
         gen.emitStoreLocal32(myTempSlot);
         
-        // Check index < 0 (for signed int)
-        // CBZ doesn't check negative, we need signed comparison
-        // For simplicity, just check index >= length (unsigned) covers negative as large positive
-        
         // Load length from slice (offset 8 = after 64-bit ptr)
-        // Slice layout: { ptr: i64 (8), length: i32 (4), capacity: i32 (4) } = 16 bytes
         gen.emitLoadLocal32(sliceOffset + 8);  // x0 = length
         gen.emitMoveX0ToX1();  // x1 = length
         
         // Reload index
         gen.emitLoadLocal32(myTempSlot);  // x0 = index
         
-        // Compare: if index >= length (unsigned), error
-        // We use: if index < length, OK; else error
-        // CMP + B.HS (branch if higher or same, unsigned)
+        // Compare: if index < length (unsigned), OK; else error
         gen.emit(stencil_lt_u32);  // x0 = (index < length) ? 1 : 0
         gen.emitBranchIfNonZero(okLabel);  // branch if index < length
         
-        // Out of bounds - call trap
-        gen.emitImm32(stencil_load_imm32, cast(int)CTFEErrorKind.OutOfBounds);
+        // Out of bounds - call trap with location
+        ubyte* filePtr = dataSection.addString(fileName);
+        ErrorLocData errData;
+        errData.filePtr = cast(ulong)filePtr;
+        errData.fileLen = cast(uint)fileName.length;
+        errData.line = line;
+        errData.column = column;
+        errData.errorKind = cast(uint)CTFEErrorKind.OutOfBounds;
+        
+        ubyte* errLocPtr = dataSection.addData((cast(ubyte*)&errData)[0..ErrorLocData.sizeof]);
+        gen.emitLoadImm64(cast(ulong)errLocPtr);
+        
         ulong trapSlot = hostFunctions.getFunctionSlotAddress("__ctfe_trap");
         ulong contextSlot = hostFunctions.getContextSlotAddress();
         gen.emitHostCall(trapSlot, contextSlot);
-        // longjmp never returns
         
         gen.bindLabel(okLabel);
         // Restore index to x0
@@ -1122,15 +1132,8 @@ class NativeCompiledFunction : CompiledFunction {
      * Assumes: dividend in x0, divisor in x1
      * Result: quotient in x0
      */
-    private void emitCheckedDiv() {
-        // Structure:
-        //   CBZ x1, .Ldiv_error      ; branch if divisor == 0
-        //   SDIV x0, x0, x1          ; do division
-        //   B .Ldiv_done             ; skip error handler
-        // .Ldiv_error:
-        //   MOV x0, #1               ; ERROR_DIV_ZERO (will be shifted to x1 by emitHostCall)
-        //   call __ctfe_trap
-        // .Ldiv_done:
+    private void emitCheckedDiv(string fileName, uint line, uint column) {
+        import codegen.native.arm64_codegen : ErrorLocData;
         
         auto errorLabel = gen.newLabel();
         auto doneLabel = gen.newLabel();
@@ -1147,10 +1150,21 @@ class NativeCompiledFunction : CompiledFunction {
         // .Ldiv_error:
         gen.bindLabel(errorLabel);
         
-        // Load error code into x0 (emitHostCall will shift it to x1)
-        gen.emitImm32(stencil_load_imm32, cast(int)CTFEErrorKind.DivByZero);
+        // Build ErrorLocData in data section
+        ubyte* filePtr = dataSection.addString(fileName);
+        ErrorLocData errData;
+        errData.filePtr = cast(ulong)filePtr;
+        errData.fileLen = cast(uint)fileName.length;
+        errData.line = line;
+        errData.column = column;
+        errData.errorKind = cast(uint)CTFEErrorKind.DivByZero;
         
-        // Call __ctfe_trap(ctx, ERROR_DIV_ZERO)
+        ubyte* errLocPtr = dataSection.addData((cast(ubyte*)&errData)[0..ErrorLocData.sizeof]);
+        
+        // Load error location pointer into x0
+        gen.emitLoadImm64(cast(ulong)errLocPtr);
+        
+        // Call __ctfe_trap(ctx, errorLocPtr)
         ulong trapSlot = hostFunctions.getFunctionSlotAddress("__ctfe_trap");
         ulong contextSlot = hostFunctions.getContextSlotAddress();
         gen.emitHostCall(trapSlot, contextSlot);
@@ -1165,7 +1179,9 @@ class NativeCompiledFunction : CompiledFunction {
      * Assumes: dividend in x0, divisor in x1
      * Result: remainder in x0
      */
-    private void emitCheckedMod() {
+    private void emitCheckedMod(string fileName, uint line, uint column) {
+        import codegen.native.arm64_codegen : ErrorLocData;
+        
         auto errorLabel = gen.newLabel();
         auto doneLabel = gen.newLabel();
         
@@ -1174,7 +1190,19 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitBranch(doneLabel);
         
         gen.bindLabel(errorLabel);
-        gen.emitImm32(stencil_load_imm32, cast(int)CTFEErrorKind.DivByZero);
+        
+        // Build ErrorLocData in data section
+        ubyte* filePtr = dataSection.addString(fileName);
+        ErrorLocData errData;
+        errData.filePtr = cast(ulong)filePtr;
+        errData.fileLen = cast(uint)fileName.length;
+        errData.line = line;
+        errData.column = column;
+        errData.errorKind = cast(uint)CTFEErrorKind.DivByZero;
+        
+        ubyte* errLocPtr = dataSection.addData((cast(ubyte*)&errData)[0..ErrorLocData.sizeof]);
+        gen.emitLoadImm64(cast(ulong)errLocPtr);
+        
         ulong trapSlot = hostFunctions.getFunctionSlotAddress("__ctfe_trap");
         ulong contextSlot = hostFunctions.getContextSlotAddress();
         gen.emitHostCall(trapSlot, contextSlot);

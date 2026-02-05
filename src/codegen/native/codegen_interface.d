@@ -184,6 +184,13 @@ struct CallFrame {
     uint line;
 }
 
+/// Error location info (where the error actually occurred)
+struct ErrorLocation {
+    string fileName;
+    uint line;
+    uint column;
+}
+
 struct NativeCTFEContext {
     /// Data section for string literals, import() content, allocations
     NativeDataSection* dataSection;
@@ -194,8 +201,20 @@ struct NativeCTFEContext {
     /// Error kind if trap occurred
     CTFEErrorKind errorKind;
     
+    /// Precise error location (expression-level)
+    ErrorLocation errorLoc;
+    
     /// Call stack for error reporting
     CallFrame[] callStack;
+    
+    /// Set error location (called by trap handler)
+    void setErrorLocation(const(char)* filePtr, size_t fileLen, uint line, uint column) nothrow {
+        try {
+            errorLoc.fileName = cast(string)filePtr[0..fileLen];
+            errorLoc.line = line;
+            errorLoc.column = column;
+        } catch (Exception) {}
+    }
     
     /// Push a call frame onto the stack
     /// Args: namePtr, nameLen, filePtr, fileLen, line
@@ -222,33 +241,66 @@ struct NativeCTFEContext {
         import std.conv : to;
         import std.path : baseName;
         
-        if (callStack.length == 0) return "";
-        
         string result;
         try {
-            foreach_reverse (i, frame; callStack) {
-                string file = frame.fileName.length > 0 ? baseName(frame.fileName) : "?";
-                string lineNum = to!string(frame.line);
+            // Show precise error location first (if available)
+            if (errorLoc.line > 0) {
+                string file = errorLoc.fileName.length > 0 ? baseName(errorLoc.fileName) : "?";
+                string lineNum = to!string(errorLoc.line);
+                string colNum = to!string(errorLoc.column);
                 
-                // Location header
-                if (i == callStack.length - 1) {
-                    // Innermost frame (where error occurred)
-                    result ~= "\n --> " ~ file ~ ":" ~ lineNum;
-                } else {
-                    // Caller frames
-                    result ~= "\nnote: called from `" ~ frame.funcName ~ "()` at " ~ file ~ ":" ~ lineNum;
-                }
+                result ~= "\n --> " ~ file ~ ":" ~ lineNum ~ ":" ~ colNum;
                 
-                // Try to show source line
-                string sourceLine = getSourceLine(frame.fileName, frame.line);
+                string sourceLine = getSourceLine(errorLoc.fileName, errorLoc.line);
                 if (sourceLine.length > 0) {
                     result ~= "\n  |";
                     result ~= "\n" ~ padLeft(lineNum, 3) ~ " | " ~ sourceLine;
-                    result ~= "\n  |";
+                    
+                    // Add caret/underline at column position
+                    if (errorLoc.column > 0) {
+                        result ~= "\n  | " ~ spaces(errorLoc.column - 1) ~ "^^^";
+                    }
+                }
+            }
+            
+            // Show call stack
+            if (callStack.length > 0) {
+                foreach_reverse (i, frame; callStack) {
+                    string file = frame.fileName.length > 0 ? baseName(frame.fileName) : "?";
+                    string lineNum = to!string(frame.line);
+                    
+                    // Skip innermost if we already showed errorLoc from same function
+                    if (i == callStack.length - 1 && errorLoc.line > 0 && 
+                        errorLoc.fileName == frame.fileName) {
+                        result ~= "\n  |";
+                        result ~= "\nnote: in `" ~ frame.funcName ~ "()`";
+                        continue;
+                    }
+                    
+                    result ~= "\nnote: called from `" ~ frame.funcName ~ "()` at " ~ file ~ ":" ~ lineNum;
+                    
+                    string sourceLine = getSourceLine(frame.fileName, frame.line);
+                    if (sourceLine.length > 0) {
+                        result ~= "\n  |";
+                        result ~= "\n" ~ padLeft(lineNum, 3) ~ " | " ~ sourceLine;
+                        result ~= "\n  |";
+                    }
                 }
             }
         } catch (Exception) {}
         return result;
+    }
+}
+
+/// Generate a string of N spaces
+private string spaces(size_t n) nothrow {
+    if (n == 0) return "";
+    try {
+        char[] s = new char[n];
+        s[] = ' ';
+        return cast(string)s;
+    } catch (Exception) {
+        return "";
     }
 }
 

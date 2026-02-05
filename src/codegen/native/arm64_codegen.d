@@ -643,13 +643,31 @@ private extern(C) long _native_ctfe_print_i32(NativeCTFEContext* ctx, long val, 
     return 0;
 }
 
+/// Error location data passed to trap handler
+struct ErrorLocData {
+    ulong filePtr;
+    uint fileLen;
+    uint line;
+    uint column;
+    uint errorKind;
+}
+
 /// CTFE trap handler - called when a runtime error occurs
 /// Uses longjmp to abort execution and return to setjmp in call()
-private extern(C) long _native_ctfe_trap(NativeCTFEContext* ctx, long errorKind, long, long) nothrow {
+/// Args: errorLocPtr (pointer to ErrorLocData struct with location + error kind)
+private extern(C) long _native_ctfe_trap(NativeCTFEContext* ctx, long errorLocPtr, long, long) nothrow {
     import codegen.native.codegen_interface : longjmp;
     if (ctx is null) return -1;
     
-    ctx.errorKind = cast(CTFEErrorKind)errorKind;
+    auto data = cast(ErrorLocData*)errorLocPtr;
+    if (data !is null) {
+        ctx.errorKind = cast(CTFEErrorKind)data.errorKind;
+        ctx.setErrorLocation(
+            cast(const(char)*)data.filePtr, data.fileLen,
+            data.line, data.column
+        );
+    }
+    
     longjmp(ctx.errorJump, 1);  // Non-local exit to call()
     
     // Never reached - longjmp doesn't return
