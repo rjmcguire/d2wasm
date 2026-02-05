@@ -1,0 +1,7 @@
+{
+  "name": "host_function_table",
+  "description": "Native backend infrastructure: host function registration table",
+  "type": "unittest",
+  "module": "codegen.native.arm64_codegen",
+  "note": "Infrastructure milestone - tested via unittest in source"
+}

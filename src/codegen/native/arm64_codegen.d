@@ -588,3 +588,188 @@ unittest {
     
     writeln("✓ NativeDataSection unittest passed");
 }
+
+// ============================================================================
+// Host Function Table - Milestone 87
+// ============================================================================
+
+/**
+ * Function pointer type for host functions callable from native code.
+ * 
+ * Uses extern(C) calling convention for compatibility with ARM64 ABI:
+ * - Arguments passed in x0-x7
+ * - Return value in x0
+ * - All parameters are long (64-bit) for simplicity
+ */
+alias HostFunctionPtr = extern(C) long function(long, long, long, long) nothrow;
+
+/**
+ * Registry of host functions that native CTFE code can call.
+ * 
+ * Native code will:
+ * 1. Look up function by name to get the table index
+ * 2. Load the function pointer from the table
+ * 3. Call it via BLR instruction
+ * 
+ * This struct holds both the mapping and the actual pointer table
+ * that generated code can index into.
+ */
+struct HostFunctionTable {
+    /// Map from function name to table index
+    private size_t[string] nameToIndex;
+    
+    /// Array of function pointers (stable addresses for native code)
+    private HostFunctionPtr[] functions;
+    
+    /// Array of function names (for debugging)
+    private string[] names;
+    
+    /// Register a host function, returns its index
+    size_t registerFunction(string name, HostFunctionPtr func) {
+        if (auto existingIdx = name in nameToIndex) {
+            // Already registered - update the pointer
+            functions[*existingIdx] = func;
+            return *existingIdx;
+        }
+        
+        size_t idx = functions.length;
+        functions ~= func;
+        names ~= name;
+        nameToIndex[name] = idx;
+        return idx;
+    }
+    
+    /// Look up a function by name, returns null if not found
+    HostFunctionPtr getFunction(string name) {
+        if (auto idx = name in nameToIndex) {
+            return functions[*idx];
+        }
+        return null;
+    }
+    
+    /// Get the index of a function by name, returns -1 if not found
+    long getFunctionIndex(string name) {
+        if (auto idx = name in nameToIndex) {
+            return cast(long)*idx;
+        }
+        return -1;
+    }
+    
+    /// Get the address of a function pointer in the table (for native code to load)
+    /// This returns the address of the slot, not the function itself
+    ulong getFunctionSlotAddress(string name) {
+        if (auto idx = name in nameToIndex) {
+            // Return address of the function pointer in our array
+            return cast(ulong)&functions[*idx];
+        }
+        return 0;
+    }
+    
+    /// Get the address of a function pointer by index
+    ulong getFunctionSlotAddressByIndex(size_t idx) {
+        if (idx < functions.length) {
+            return cast(ulong)&functions[idx];
+        }
+        return 0;
+    }
+    
+    /// Number of registered functions
+    @property size_t count() { return functions.length; }
+    
+    /// Get all registered function names (for debugging)
+    @property const(string)[] registeredNames() { return names; }
+}
+
+// CTFE host function implementations (extern(C) for ARM64 ABI compatibility)
+// Using _native_ prefix to avoid name collisions
+private extern(C) long _native_ctfe_write_i32(long val, long, long, long) nothrow {
+    import std.stdio : write;
+    try { write(cast(int)val); } catch (Exception) {}
+    return 0;
+}
+
+private extern(C) long _native_ctfe_write_str(long ptr, long len, long, long) nothrow {
+    import std.stdio : write;
+    try {
+        auto str = (cast(char*)ptr)[0 .. cast(size_t)len];
+        write(str);
+    } catch (Exception) {}
+    return 0;
+}
+
+private extern(C) long _native_ctfe_write_bool(long val, long, long, long) nothrow {
+    import std.stdio : write;
+    try { write(val != 0 ? "true" : "false"); } catch (Exception) {}
+    return 0;
+}
+
+private extern(C) long _native_ctfe_write_newline(long, long, long, long) nothrow {
+    import std.stdio : writeln;
+    try { writeln(); } catch (Exception) {}
+    return 0;
+}
+
+private extern(C) long _native_ctfe_print_i32(long val, long, long, long) nothrow {
+    import std.stdio : writeln;
+    try { writeln("CTFE: ", cast(int)val); } catch (Exception) {}
+    return 0;
+}
+
+/**
+ * Create a HostFunctionTable pre-populated with CTFE intrinsics.
+ */
+HostFunctionTable createCTFEHostFunctions() {
+    HostFunctionTable table;
+    
+    table.registerFunction("__ctfe_write_i32", &_native_ctfe_write_i32);
+    table.registerFunction("__ctfe_write_str", &_native_ctfe_write_str);
+    table.registerFunction("__ctfe_write_bool", &_native_ctfe_write_bool);
+    table.registerFunction("__ctfe_write_newline", &_native_ctfe_write_newline);
+    table.registerFunction("__ctfe_print_i32", &_native_ctfe_print_i32);
+    
+    return table;
+}
+
+// Unittest for HostFunctionTable - Milestone 87
+unittest {
+    import std.stdio : writeln;
+    
+    HostFunctionTable table;
+    
+    // Register a test function
+    extern(C) long testFunc(long a, long b, long, long) nothrow {
+        return a + b;
+    }
+    
+    size_t idx = table.registerFunction("test_add", &testFunc);
+    assert(idx == 0, "First function should have index 0");
+    assert(table.count == 1, "Should have 1 function");
+    
+    // Look up by name
+    auto func = table.getFunction("test_add");
+    assert(func !is null, "Should find registered function");
+    assert(func(10, 20, 0, 0) == 30, "Function should work");
+    
+    // Look up index
+    assert(table.getFunctionIndex("test_add") == 0);
+    assert(table.getFunctionIndex("nonexistent") == -1);
+    
+    // Get slot address (for native code)
+    ulong slotAddr = table.getFunctionSlotAddress("test_add");
+    assert(slotAddr != 0, "Slot address should be non-zero");
+    
+    // Verify slot contains the function pointer
+    auto slotPtr = cast(HostFunctionPtr*)slotAddr;
+    assert(*slotPtr == &testFunc, "Slot should contain function pointer");
+    
+    // Test CTFE functions
+    auto ctfeTable = createCTFEHostFunctions();
+    assert(ctfeTable.count == 5, "Should have 5 CTFE functions");
+    assert(ctfeTable.getFunction("__ctfe_write_i32") !is null);
+    assert(ctfeTable.getFunction("__ctfe_write_str") !is null);
+    assert(ctfeTable.getFunction("__ctfe_write_bool") !is null);
+    assert(ctfeTable.getFunction("__ctfe_write_newline") !is null);
+    assert(ctfeTable.getFunction("__ctfe_print_i32") !is null);
+    
+    writeln("✓ HostFunctionTable unittest passed");
+}
