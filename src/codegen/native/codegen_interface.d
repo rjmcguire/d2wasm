@@ -245,7 +245,7 @@ struct NativeCTFEContext {
         try {
             // Show precise error location first (if available)
             if (errorLoc.line > 0) {
-                string file = errorLoc.fileName.length > 0 ? baseName(errorLoc.fileName) : "?";
+                string file = errorLoc.fileName.length > 0 ? baseName(errorLoc.fileName) : "<unknown>";
                 string lineNum = to!string(errorLoc.line);
                 string colNum = to!string(errorLoc.column);
                 
@@ -266,7 +266,7 @@ struct NativeCTFEContext {
             // Show call stack
             if (callStack.length > 0) {
                 foreach_reverse (i, frame; callStack) {
-                    string file = frame.fileName.length > 0 ? baseName(frame.fileName) : "?";
+                    string file = frame.fileName.length > 0 ? baseName(frame.fileName) : "<unknown>";
                     string lineNum = to!string(frame.line);
                     
                     // Skip innermost if we already showed errorLoc from same function
