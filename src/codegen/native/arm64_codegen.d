@@ -193,6 +193,27 @@ struct NativeCodeGen {
         emitCallIndirectX9();             // call x9
     }
     
+    /// Emit a host function call with automatic context injection
+    /// funcSlotAddress = address of the function pointer in memory
+    /// contextSlotAddress = address of the CTFEContext* in memory
+    /// Arguments should already be set up in x0-x2 (they get shifted to x1-x3)
+    void emitHostCall(ulong funcSlotAddress, ulong contextSlotAddress) {
+        // Shift args: x0->x1, x1->x2, x2->x3 (x3 is lost, but we only support 3 args)
+        emitMoveX2ToX3();
+        emitMoveX1ToX2();
+        emitMoveX0ToX1();
+        
+        // Load context pointer into x0
+        emitLoadImm64ToX9(contextSlotAddress);  // x9 = address of context pointer
+        emitLoadFromX9();                        // x9 = *x9 (actual context pointer)
+        emit(stencil_move_scratch_to_result);    // x0 = x9 (context)
+        
+        // Load function pointer and call
+        emitLoadImm64ToX9(funcSlotAddress);     // x9 = address of function pointer
+        emitLoadFromX9();                        // x9 = *x9 (actual function pointer)
+        emitCallIndirectX9();                    // call x9
+    }
+    
     // ========== Branch Instructions ==========
     
     /// Create a new label (not yet placed)
@@ -303,6 +324,18 @@ struct NativeCodeGen {
     void emitMoveX2ToX1() {
         // MOV x1, x2: ORR x1, xzr, x2 = 0xAA0203E1
         emitRaw32(0xAA0203E1);
+    }
+    
+    /// Move x1 to x2
+    void emitMoveX1ToX2() {
+        // MOV x2, x1: ORR x2, xzr, x1 = 0xAA0103E2
+        emitRaw32(0xAA0103E2);
+    }
+    
+    /// Move x2 to x3
+    void emitMoveX2ToX3() {
+        // MOV x3, x2: ORR x3, xzr, x2 = 0xAA0203E3
+        emitRaw32(0xAA0203E3);
     }
     
     // ===== Abstract Aliases (for architecture-agnostic code) =====
@@ -676,18 +709,33 @@ unittest {
  * - Return value in x0
  * - All parameters are long (64-bit) for simplicity
  */
-alias HostFunctionPtr = extern(C) long function(long, long, long, long) nothrow;
+/// Host function signature: context in first param, then up to 3 args
+alias HostFunctionPtr = extern(C) long function(CTFEContext*, long, long, long) nothrow;
+
+/**
+ * CTFE Execution Context - passed to all host functions.
+ * 
+ * This provides host functions with access to the execution environment
+ * without requiring global state. All host functions receive this as
+ * their first parameter (in x0).
+ */
+struct CTFEContext {
+    NativeDataSection* dataSection;
+    // Future: add other execution state as needed
+}
 
 /**
  * Registry of host functions that native CTFE code can call.
  * 
  * Native code will:
  * 1. Look up function by name to get the table index
- * 2. Load the function pointer from the table
- * 3. Call it via BLR instruction
+ * 2. Load the function pointer from the table (and context)
+ * 3. Load execution context into x0
+ * 4. Call function via BLR instruction
  * 
  * This struct holds both the mapping and the actual pointer table
- * that generated code can index into.
+ * that generated code can index into. Also stores the execution context
+ * pointer that gets passed to all host functions.
  */
 struct HostFunctionTable {
     /// Map from function name to table index
@@ -698,6 +746,9 @@ struct HostFunctionTable {
     
     /// Array of function names (for debugging)
     private string[] names;
+    
+    /// Execution context pointer - passed to all host functions in x0
+    private CTFEContext* context;
     
     /// Register a host function, returns its index
     size_t registerFunction(string name, HostFunctionPtr func) {
@@ -753,17 +804,51 @@ struct HostFunctionTable {
     
     /// Get all registered function names (for debugging)
     @property const(string)[] registeredNames() { return names; }
+    
+    /// Set the execution context (call before executing native code)
+    void setContext(CTFEContext* ctx) {
+        context = ctx;
+    }
+    
+    /// Get the address of the context pointer slot
+    /// Generated code loads from this address to get the context
+    ulong getContextSlotAddress() {
+        return cast(ulong)&context;
+    }
 }
 
 // CTFE host function implementations (extern(C) for ARM64 ABI compatibility)
+// All functions receive CTFEContext* as first parameter
 // Using _native_ prefix to avoid name collisions
-private extern(C) long _native_ctfe_write_i32(long val, long, long, long) nothrow {
+
+/// CTFE allocator - bump allocates from the context's data section
+/// Returns pointer to allocated memory, or 0 if out of space
+private extern(C) long _native_ctfe_alloc(CTFEContext* ctx, long size, long, long) nothrow {
+    if (ctx is null || ctx.dataSection is null) return 0;
+    
+    auto ds = ctx.dataSection;
+    
+    // Align size to 8 bytes
+    size_t alignedSize = (cast(size_t)size + 7) & ~cast(size_t)7;
+    
+    // Check if we have space
+    if (ds.used + alignedSize > ds.capacity) {
+        return 0;  // out of memory
+    }
+    
+    // Bump allocate
+    long ptr = cast(long)(ds.base + ds.used);
+    ds.used += alignedSize;
+    return ptr;
+}
+
+private extern(C) long _native_ctfe_write_i32(CTFEContext* ctx, long val, long, long) nothrow {
     import std.stdio : write;
     try { write(cast(int)val); } catch (Exception) {}
     return 0;
 }
 
-private extern(C) long _native_ctfe_write_str(long ptr, long len, long, long) nothrow {
+private extern(C) long _native_ctfe_write_str(CTFEContext* ctx, long ptr, long len, long) nothrow {
     import std.stdio : write;
     try {
         auto str = (cast(char*)ptr)[0 .. cast(size_t)len];
@@ -772,19 +857,19 @@ private extern(C) long _native_ctfe_write_str(long ptr, long len, long, long) no
     return 0;
 }
 
-private extern(C) long _native_ctfe_write_bool(long val, long, long, long) nothrow {
+private extern(C) long _native_ctfe_write_bool(CTFEContext* ctx, long val, long, long) nothrow {
     import std.stdio : write;
     try { write(val != 0 ? "true" : "false"); } catch (Exception) {}
     return 0;
 }
 
-private extern(C) long _native_ctfe_write_newline(long, long, long, long) nothrow {
+private extern(C) long _native_ctfe_write_newline(CTFEContext* ctx, long, long, long) nothrow {
     import std.stdio : writeln;
     try { writeln(); } catch (Exception) {}
     return 0;
 }
 
-private extern(C) long _native_ctfe_print_i32(long val, long, long, long) nothrow {
+private extern(C) long _native_ctfe_print_i32(CTFEContext* ctx, long val, long, long) nothrow {
     import std.stdio : writeln;
     try { writeln("CTFE: ", cast(int)val); } catch (Exception) {}
     return 0;
@@ -796,6 +881,7 @@ private extern(C) long _native_ctfe_print_i32(long val, long, long, long) nothro
 HostFunctionTable createCTFEHostFunctions() {
     HostFunctionTable table;
     
+    table.registerFunction("__ctfe_alloc", &_native_ctfe_alloc);
     table.registerFunction("__ctfe_write_i32", &_native_ctfe_write_i32);
     table.registerFunction("__ctfe_write_str", &_native_ctfe_write_str);
     table.registerFunction("__ctfe_write_bool", &_native_ctfe_write_bool);
@@ -805,14 +891,14 @@ HostFunctionTable createCTFEHostFunctions() {
     return table;
 }
 
-// Unittest for HostFunctionTable - Milestone 87
+// Unittest for HostFunctionTable - Milestone 87/90
 unittest {
     import std.stdio : writeln;
     
     HostFunctionTable table;
     
-    // Register a test function
-    extern(C) long testFunc(long a, long b, long, long) nothrow {
+    // Register a test function (new signature with context)
+    extern(C) long testFunc(CTFEContext* ctx, long a, long b, long) nothrow {
         return a + b;
     }
     
@@ -823,7 +909,7 @@ unittest {
     // Look up by name
     auto func = table.getFunction("test_add");
     assert(func !is null, "Should find registered function");
-    assert(func(10, 20, 0, 0) == 30, "Function should work");
+    assert(func(null, 10, 20, 0) == 30, "Function should work");
     
     // Look up index
     assert(table.getFunctionIndex("test_add") == 0);
@@ -839,7 +925,7 @@ unittest {
     
     // Test CTFE functions
     auto ctfeTable = createCTFEHostFunctions();
-    assert(ctfeTable.count == 5, "Should have 5 CTFE functions");
+    assert(ctfeTable.count == 6, "Should have 6 CTFE functions");
     assert(ctfeTable.getFunction("__ctfe_write_i32") !is null);
     assert(ctfeTable.getFunction("__ctfe_write_str") !is null);
     assert(ctfeTable.getFunction("__ctfe_write_bool") !is null);

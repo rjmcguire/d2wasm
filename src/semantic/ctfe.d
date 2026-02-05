@@ -217,6 +217,11 @@ class CTFEEvaluator {
      * Evaluate a single manifest constant
      */
     void evaluateManifestConstant(ManifestConstantDecl manifest) {
+        // Already evaluated? Skip.
+        if (manifest.ctfeComplete) {
+            return;
+        }
+        
         log(3, "CTFE: Evaluating ", manifest.name);
         
         // Check if it's a simple literal (no CTFE needed)

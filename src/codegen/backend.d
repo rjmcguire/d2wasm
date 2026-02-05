@@ -234,9 +234,11 @@ class NativeCompiledFunction : CompiledFunction {
     // Local variable tracking
     private uint[string] localOffsets;  // variable name → stack offset
     private StructDecl[string] localStructTypes;  // variable name → struct type (if struct)
+    private bool[string] localSliceVars;  // variable name → true if slice (for ~= support)
     private uint nextLocalOffset;        // next available stack slot
     private uint totalLocalBytes;        // total stack space needed
     private uint tempSlot;               // stack offset for expression temporaries
+    private uint tempSlotDepth;          // nesting depth for temp slot usage
     
     // For return statements to jump to
     import codegen.native.arm64_codegen : Label;
@@ -356,10 +358,11 @@ class NativeCompiledFunction : CompiledFunction {
         // Count bytes needed for locals in the body
         uint bodyLocalBytes = countLocalBytesInStatement(func.body_);
         
-        // Reserve extra space for expression temporaries (8 bytes for temp slot)
+        // Reserve extra space for expression temporaries
+        // Need 40 bytes for slice append temps: element(4) + newCap(4) + newPtr(8) + loopIdx(4) + loopVal(4) + padding
         uint tempSlotOffset = nextLocalOffset + bodyLocalBytes;
         tempSlot = tempSlotOffset;  // Store for use in compileExpression
-        uint totalNeeded = tempSlotOffset + 8;  // 8 bytes for temp
+        uint totalNeeded = tempSlotOffset + 48;  // 48 bytes for temps (slice append needs more)
         totalLocalBytes = (totalNeeded + 15) & ~15;  // 16-byte aligned
         
         // Create epilogue label for return statements
@@ -489,6 +492,9 @@ class NativeCompiledFunction : CompiledFunction {
             localOffsets[varDecl.name] = nextLocalOffset;
             if (structType) {
                 localStructTypes[varDecl.name] = structType;
+            }
+            if (isSlice) {
+                localSliceVars[varDecl.name] = true;
             }
             
             // Compile initializer if present
@@ -631,24 +637,29 @@ class NativeCompiledFunction : CompiledFunction {
                 throw new Exception("Literal type not supported: " ~ lit.value.type.toString());
             }
         } else if (auto binOp = cast(BinaryExpression)expr) {
-            // Check if left operand might clobber x1 (function call OR nested binary expr)
+            // Check if left operand might clobber x1 (function call, nested binary expr, or index expr)
+            // IndexExpression uses x1 internally for address calculation
             bool leftMightClobber = containsFunctionCall(binOp.left) || 
-                                    cast(BinaryExpression)binOp.left !is null;
+                                    cast(BinaryExpression)binOp.left !is null ||
+                                    cast(IndexExpression)binOp.left !is null;
             
             // Compile right operand first (into x0)
             compileExpression(binOp.right);
             
             if (leftMightClobber) {
                 // Save right result to temp slot (function calls clobber x0-x7)
-                // Using pre-allocated temp slot instead of push/pop to avoid moving SP
-                gen.emitStoreLocal32(tempSlot);  // store w0 to temp slot (32-bit)
+                // Use depth-aware temp slot to handle nested expressions
+                uint myTempSlot = tempSlot + (tempSlotDepth * 4);
+                tempSlotDepth++;
+                gen.emitStoreLocal32(myTempSlot);  // store w0 to temp slot (32-bit)
                 // Compile left operand (into x0)
                 compileExpression(binOp.left);
+                tempSlotDepth--;
                 // Now x0 = left result
                 // Save left to x8 (safe since no more calls)
                 gen.emitMoveX0ToX8();  // x8 = left
                 // Load right from temp slot
-                gen.emitLoadLocal32(tempSlot);  // x0 = right (from temp slot)
+                gen.emitLoadLocal32(myTempSlot);  // x0 = right (from temp slot)
                 gen.emitMoveX0ToX1();  // x1 = right
                 // Restore left from x8
                 gen.emitMoveX8ToX0();  // x0 = left
@@ -746,6 +757,16 @@ class NativeCompiledFunction : CompiledFunction {
                 throw new Exception("Unknown variable in native backend: " ~ targetIdent.name);
             }
             
+            // Handle slice append specially (~=)
+            if (assign.operator == AssignmentExpression.Operator.ConcatAssign) {
+                if (targetIdent.name in localSliceVars) {
+                    compileSliceAppend(*offsetPtr, assign.right);
+                    return;
+                } else {
+                    throw new Exception("~= only supported on slice types");
+                }
+            }
+            
             if (assign.operator == AssignmentExpression.Operator.Assign) {
                 // Simple assignment: x = expr
                 compileExpression(assign.right);
@@ -793,7 +814,8 @@ class NativeCompiledFunction : CompiledFunction {
                         gen.emit(stencil_shr_i32);
                         break;
                     case AssignmentExpression.Operator.ConcatAssign:
-                        throw new Exception("~= not yet supported in native backend");
+                        // Handled specially above for slices
+                        throw new Exception("~= on non-slice not supported");
                     default:
                         break;
                 }
@@ -848,27 +870,28 @@ class NativeCompiledFunction : CompiledFunction {
                     return;
                 }
                 
-                // Milestone 88: Check if this is a host function call
+                // Milestone 88/90: Check if this is a host function call
                 ulong hostSlot = hostFunctions.getFunctionSlotAddress(funcIdent.name);
                 if (hostSlot != 0) {
-                    if (call.arguments.length > 4) {
-                        throw new Exception("Native backend: more than 4 arguments not yet supported");
+                    if (call.arguments.length > 3) {
+                        throw new Exception("Native backend: host functions support max 3 arguments (x0 reserved for context)");
                     }
                     
-                    // Compile arguments in reverse order into their target registers
+                    // Compile arguments in reverse order into x0-x2
+                    // emitHostCall will shift them to x1-x3 and inject context in x0
                     for (long i = cast(long)call.arguments.length - 1; i >= 0; i--) {
                         compileExpression(call.arguments[i]);
                         switch (i) {
                             case 0: break;  // already in x0
                             case 1: gen.emitMoveX0ToX1(); break;
                             case 2: gen.emitMoveX0ToX2(); break;
-                            case 3: gen.emitMoveX0ToX3(); break;
                             default: break;
                         }
                     }
                     
-                    // Emit indirect call through host function table
-                    gen.emitIndirectCall(hostSlot);
+                    // Emit host call with context injection
+                    ulong contextSlot = hostFunctions.getContextSlotAddress();
+                    gen.emitHostCall(hostSlot, contextSlot);
                     // Result is in x0
                     return;
                 }
@@ -1111,6 +1134,205 @@ class NativeCompiledFunction : CompiledFunction {
     }
     
     /**
+     * Compile slice append: arr ~= element
+     * 
+     * Native slice layout: { ptr: i64, length: i32, capacity: i32 } = 16 bytes
+     * 
+     * Algorithm (mirrors WASM emitter):
+     * 1. Evaluate element, store to temp
+     * 2. Check if length >= capacity
+     * 3. If needs grow: alloc new buffer, copy, update ptr/capacity
+     * 4. Store element at ptr[length]
+     * 5. Increment length
+     */
+    private void compileSliceAppend(uint sliceOffset, Expression element) {
+        // Temp slots for intermediate values (use pre-allocated temp area)
+        // tempSlot is at the end of the frame, with 48 bytes reserved
+        uint tempElement = tempSlot;            // element value (4 bytes)
+        uint tempNewCap = tempSlot + 4;         // new capacity (4 bytes)
+        uint tempNewPtr = tempSlot + 8;         // new buffer ptr (8 bytes, 64-bit)
+        uint tempLoopIdx = tempSlot + 16;       // copy loop index (4 bytes)
+        uint tempLoopVal = tempSlot + 20;       // temp for loaded value (4 bytes)
+        
+        // 1. Evaluate element value, store to temp
+        compileExpression(element);
+        gen.emitStoreLocal32(tempElement);
+        
+        // 2. Load length and capacity, compare
+        gen.emitLoadLocal32(sliceOffset + 8);   // x0 = length
+        gen.emitMoveX0ToX1();                   // x1 = length
+        gen.emitLoadLocal32(sliceOffset + 12);  // x0 = capacity
+        // Now x0 = capacity, x1 = length
+        // We want: if (length >= capacity) -> x0 = 1
+        // Swap so we can use ge_i32 (x0 >= x1)
+        gen.emit(stencil_move_arg1_to_result);  // x0 = length
+        gen.emitMoveX0ToX1();                   // x1 = length (save)
+        gen.emitLoadLocal32(sliceOffset + 12);  // x0 = capacity
+        gen.emitMoveX0ToX2();                   // x2 = capacity
+        gen.emit(stencil_move_arg1_to_result);  // x0 = length
+        gen.emit(stencil_move_arg2_to_arg1);    // x1 = capacity
+        // Now x0 = length, x1 = capacity, x2 = capacity
+        gen.emit(stencil_ge_i32);               // x0 = (length >= capacity) ? 1 : 0
+        
+        // 3. Branch if no growth needed (x0 == 0)
+        auto growLabel = gen.newLabel();
+        auto noGrowLabel = gen.newLabel();
+        auto doneGrowLabel = gen.newLabel();
+        
+        gen.emitBranchIfZero(noGrowLabel);      // skip grow if length < capacity
+        
+        // === GROW PATH ===
+        gen.bindLabel(growLabel);
+        
+        // newCapacity = max(capacity * 2, 4)
+        gen.emitLoadLocal32(sliceOffset + 12);  // x0 = capacity
+        gen.emitMoveX0ToX1();                   // x1 = capacity
+        gen.emit(stencil_add_i32);              // x0 = capacity * 2 (capacity + capacity)
+        gen.emitStoreLocal32(tempNewCap);       // save capacity * 2
+        
+        // Compare with 4: if (capacity * 2 < 4) use 4
+        gen.emitImm32(stencil_load_imm32, 4);
+        gen.emitMoveX0ToX1();                   // x1 = 4
+        gen.emitLoadLocal32(tempNewCap);        // x0 = capacity * 2
+        gen.emit(stencil_lt_i32);               // x0 = (capacity * 2 < 4) ? 1 : 0
+        
+        auto useMinCapLabel = gen.newLabel();
+        auto calcAllocLabel = gen.newLabel();
+        
+        gen.emitBranchIfZero(calcAllocLabel);   // if cap*2 >= 4, use it
+        
+        // Use minimum capacity of 4
+        gen.emitImm32(stencil_load_imm32, 4);
+        gen.emitStoreLocal32(tempNewCap);
+        
+        gen.bindLabel(calcAllocLabel);
+        
+        // Allocate new buffer: __ctfe_alloc(newCapacity * 4)
+        gen.emitLoadLocal32(tempNewCap);        // x0 = newCapacity
+        gen.emitImm32(stencil_load_imm32, 4);
+        gen.emitMoveX0ToX1();                   // x1 = 4
+        gen.emitLoadLocal32(tempNewCap);        // x0 = newCapacity
+        gen.emit(stencil_mul_i32);              // x0 = newCapacity * 4 (bytes)
+        
+        // Call __ctfe_alloc(size) - size is in x0, will be shifted to x1
+        ulong allocSlot = hostFunctions.getFunctionSlotAddress("__ctfe_alloc");
+        ulong contextSlot = hostFunctions.getContextSlotAddress();
+        gen.emitHostCall(allocSlot, contextSlot);  // x0 = new buffer ptr
+        gen.emitStoreLocal(tempNewPtr);         // save new ptr (64-bit)
+        
+        // Copy loop: for i = 0 to length: newPtr[i] = oldPtr[i]
+        gen.emitImm32(stencil_load_imm32, 0);
+        gen.emitStoreLocal32(tempLoopIdx);      // i = 0
+        
+        auto copyLoopStart = gen.newLabel();
+        auto copyLoopEnd = gen.newLabel();
+        
+        gen.bindLabel(copyLoopStart);
+        
+        // Check: if (i >= length) break
+        gen.emitLoadLocal32(tempLoopIdx);       // x0 = i
+        gen.emitMoveX0ToX1();                   // x1 = i
+        gen.emitLoadLocal32(sliceOffset + 8);   // x0 = length
+        gen.emitMoveX0ToX2();                   // x2 = length
+        gen.emit(stencil_move_arg1_to_result);  // x0 = i
+        gen.emit(stencil_move_arg2_to_arg1);    // x1 = length
+        gen.emit(stencil_ge_i32);               // x0 = (i >= length)
+        gen.emitBranchIfNonZero(copyLoopEnd);   // break if done
+        
+        // Load from old: oldPtr[i]
+        gen.emitLoadLocal(sliceOffset);         // x0 = oldPtr (64-bit)
+        gen.emitMoveX0ToX1();                   // x1 = oldPtr
+        gen.emitLoadLocal32(tempLoopIdx);       // x0 = i
+        gen.emitImm32(stencil_load_imm32, 4);
+        gen.emitMoveX0ToX2();                   // x2 = 4
+        gen.emitLoadLocal32(tempLoopIdx);       // x0 = i
+        gen.emit(stencil_move_arg2_to_arg1);    // x1 = 4
+        gen.emit(stencil_mul_i32);              // x0 = i * 4
+        gen.emitMoveX0ToX1();                   // x1 = i * 4
+        gen.emitLoadLocal(sliceOffset);         // x0 = oldPtr
+        gen.emit(stencil_add_i32);              // x0 = oldPtr + i*4
+        gen.emit(stencil_load_i32);             // x0 = oldPtr[i]
+        gen.emitStoreLocal32(tempLoopVal);  // save loaded value
+        
+        // Store to new: newPtr[i] = value
+        gen.emitLoadLocal(tempNewPtr);          // x0 = newPtr
+        gen.emitMoveX0ToX1();                   // x1 = newPtr
+        gen.emitLoadLocal32(tempLoopIdx);       // x0 = i
+        gen.emitImm32(stencil_load_imm32, 4);
+        gen.emitMoveX0ToX2();                   // x2 = 4
+        gen.emitLoadLocal32(tempLoopIdx);       // x0 = i
+        gen.emit(stencil_move_arg2_to_arg1);    // x1 = 4
+        gen.emit(stencil_mul_i32);              // x0 = i * 4
+        gen.emitMoveX0ToX1();                   // x1 = i * 4
+        gen.emitLoadLocal(tempNewPtr);          // x0 = newPtr
+        gen.emit(stencil_add_i32);              // x0 = newPtr + i*4 (dest addr)
+        gen.emitMoveX0ToX1();                   // x1 = dest addr
+        gen.emitLoadLocal32(tempLoopVal);   // x0 = value to store
+        gen.emitMoveX0ToX2();                   // x2 = value
+        gen.emit(stencil_move_arg1_to_result);  // x0 = dest addr
+        gen.emit(stencil_move_arg2_to_arg1);    // x1 = value
+        gen.emit(stencil_store_i32);            // *dest = value
+        
+        // i++
+        gen.emitLoadLocal32(tempLoopIdx);
+        gen.emitMoveX0ToX1();
+        gen.emitImm32(stencil_load_imm32, 1);
+        gen.emitMoveX0ToX2();
+        gen.emit(stencil_move_arg1_to_result);  // x0 = i
+        gen.emit(stencil_move_arg2_to_arg1);    // x1 = 1
+        gen.emit(stencil_add_i32);              // x0 = i + 1
+        gen.emitStoreLocal32(tempLoopIdx);
+        
+        gen.emitBranch(copyLoopStart);
+        gen.bindLabel(copyLoopEnd);
+        
+        // Update slice ptr = newPtr
+        gen.emitLoadLocal(tempNewPtr);
+        gen.emitStoreLocal(sliceOffset);
+        
+        // Update slice capacity = newCapacity
+        gen.emitLoadLocal32(tempNewCap);
+        gen.emitStoreLocal32(sliceOffset + 12);
+        
+        gen.emitBranch(doneGrowLabel);
+        
+        // === NO GROW PATH ===
+        gen.bindLabel(noGrowLabel);
+        
+        gen.bindLabel(doneGrowLabel);
+        
+        // 4. Store element at ptr[length]
+        // Calculate address: ptr + length * 4
+        gen.emitLoadLocal(sliceOffset);         // x0 = ptr (64-bit)
+        gen.emitMoveX0ToX1();                   // x1 = ptr
+        gen.emitLoadLocal32(sliceOffset + 8);   // x0 = length
+        gen.emitImm32(stencil_load_imm32, 4);
+        gen.emitMoveX0ToX2();                   // x2 = 4
+        gen.emitLoadLocal32(sliceOffset + 8);   // x0 = length
+        gen.emit(stencil_move_arg2_to_arg1);    // x1 = 4
+        gen.emit(stencil_mul_i32);              // x0 = length * 4
+        gen.emitMoveX0ToX1();                   // x1 = length * 4
+        gen.emitLoadLocal(sliceOffset);         // x0 = ptr
+        gen.emit(stencil_add_i32);              // x0 = ptr + length*4
+        gen.emitMoveX0ToX1();                   // x1 = dest addr
+        gen.emitLoadLocal32(tempElement);       // x0 = element value
+        gen.emitMoveX0ToX2();                   // x2 = element
+        gen.emit(stencil_move_arg1_to_result);  // x0 = dest addr
+        gen.emit(stencil_move_arg2_to_arg1);    // x1 = element
+        gen.emit(stencil_store_i32);            // ptr[length] = element
+        
+        // 5. Increment length
+        gen.emitLoadLocal32(sliceOffset + 8);   // x0 = length
+        gen.emitMoveX0ToX1();                   // x1 = length
+        gen.emitImm32(stencil_load_imm32, 1);
+        gen.emitMoveX0ToX2();                   // x2 = 1
+        gen.emit(stencil_move_arg1_to_result);  // x0 = length
+        gen.emit(stencil_move_arg2_to_arg1);    // x1 = 1
+        gen.emit(stencil_add_i32);              // x0 = length + 1
+        gen.emitStoreLocal32(sliceOffset + 8);  // store new length
+    }
+    
+    /**
      * Compile __writeln(args...) by lowering to typed host function calls.
      * Milestone 89: Native __writeln support.
      */
@@ -1138,9 +1360,10 @@ class NativeCompiledFunction : CompiledFunction {
                     gen.emitMoveX1ToX0();  // x0 = ptr (restore)
                     gen.emitMoveX2ToX1();  // x1 = len
                     
-                    // Call __ctfe_write_str
+                    // Call __ctfe_write_str (args in x0=ptr, x1=len)
                     ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_write_str");
-                    gen.emitIndirectCall(slot);
+                    ulong ctxSlot = hostFunctions.getContextSlotAddress();
+                    gen.emitHostCall(slot, ctxSlot);
                 }
                 else if (literal.value.type == typeid(long) || literal.value.type == typeid(int)) {
                     // Integer literal: call __ctfe_write_i32(value)
@@ -1150,7 +1373,8 @@ class NativeCompiledFunction : CompiledFunction {
                     gen.emitImm32(stencil_load_imm32, cast(int)val);
                     
                     ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_write_i32");
-                    gen.emitIndirectCall(slot);
+                    ulong ctxSlot = hostFunctions.getContextSlotAddress();
+                    gen.emitHostCall(slot, ctxSlot);
                 }
                 else if (literal.value.type == typeid(bool)) {
                     // Boolean literal: call __ctfe_write_bool(0 or 1)
@@ -1158,7 +1382,8 @@ class NativeCompiledFunction : CompiledFunction {
                     gen.emitImm32(stencil_load_imm32, val ? 1 : 0);
                     
                     ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_write_bool");
-                    gen.emitIndirectCall(slot);
+                    ulong ctxSlot = hostFunctions.getContextSlotAddress();
+                    gen.emitHostCall(slot, ctxSlot);
                 }
             }
             else {
@@ -1166,13 +1391,15 @@ class NativeCompiledFunction : CompiledFunction {
                 compileExpression(arg);
                 
                 ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_write_i32");
-                gen.emitIndirectCall(slot);
+                ulong ctxSlot = hostFunctions.getContextSlotAddress();
+                gen.emitHostCall(slot, ctxSlot);
             }
         }
         
         // Emit newline at the end
         ulong newlineSlot = hostFunctions.getFunctionSlotAddress("__ctfe_write_newline");
-        gen.emitIndirectCall(newlineSlot);
+        ulong ctxSlot = hostFunctions.getContextSlotAddress();
+        gen.emitHostCall(newlineSlot, ctxSlot);
     }
     
     /**
@@ -1208,6 +1435,12 @@ class NativeCompiledFunction : CompiledFunction {
     }
     
     override ExecutionResult call(long[] args) {
+        // Set up execution context for host functions
+        CTFEContext ctx;
+        ctx.dataSection = &dataSection;
+        hostFunctions.setContext(&ctx);
+        scope(exit) hostFunctions.setContext(null);
+        
         // Call the compiled function with appropriate number of arguments
         // ARM64 calling convention: first 8 args in x0-x7
         long result;
@@ -1251,6 +1484,12 @@ class NativeCompiledFunction : CompiledFunction {
     }
     
     override ExecutionResult callByName(string targetFuncName, long[] args) {
+        // Set up execution context for host functions
+        CTFEContext ctx;
+        ctx.dataSection = &dataSection;
+        hostFunctions.setContext(&ctx);
+        scope(exit) hostFunctions.setContext(null);
+        
         // Look up function entry point and param count
         auto labelPtr = targetFuncName in functionLabels;
         if (labelPtr is null) {

@@ -141,6 +141,15 @@ run_test() {
                     echo "  Actual: $actual"
                     return 1
                 fi
+            else
+                # Check expected_result from config.json
+                local expected_result=$(jq -r '.expected_result // "null"' "$config_file")
+                if [ "$expected_result" != "null" ] && [ "$actual" != "$expected_result" ]; then
+                    echo -e "${RED}FAIL${NC} $test_name"
+                    echo "  Expected: $expected_result"
+                    echo "  Actual: $actual"
+                    return 1
+                fi
             fi
             
             echo -e "${GREEN}PASS${NC} $test_name (result: $actual)"
