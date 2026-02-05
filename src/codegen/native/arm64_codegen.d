@@ -656,11 +656,26 @@ private extern(C) long _native_ctfe_trap(NativeCTFEContext* ctx, long errorKind,
     return -1;
 }
 
-/// Push function name onto call stack (for error reporting)
-/// Args: namePtr (pointer to string), nameLen (length of string)
-private extern(C) long _native_ctfe_push_call(NativeCTFEContext* ctx, long namePtr, long nameLen, long) nothrow {
+/// Push call frame onto call stack (for error reporting)
+/// We pack 5 values into 3 args using a struct in memory
+/// Args: framePtr (pointer to CallFrameData struct)
+struct CallFrameData {
+    ulong namePtr;
+    uint nameLen;
+    ulong filePtr;
+    uint fileLen;
+    uint line;
+}
+
+private extern(C) long _native_ctfe_push_call(NativeCTFEContext* ctx, long framePtr, long, long) nothrow {
     if (ctx is null) return -1;
-    ctx.pushCall(cast(const(char)*)namePtr, cast(size_t)nameLen);
+    auto data = cast(CallFrameData*)framePtr;
+    if (data is null) return -1;
+    ctx.pushCall(
+        cast(const(char)*)data.namePtr, data.nameLen,
+        cast(const(char)*)data.filePtr, data.fileLen,
+        data.line
+    );
     return 0;
 }
 

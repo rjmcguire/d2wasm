@@ -177,6 +177,13 @@ struct NativeDataSection {
  * 
  * Also contains error handling state for longjmp-based trap handling.
  */
+/// Call frame info for stack traces
+struct CallFrame {
+    string funcName;
+    string fileName;
+    uint line;
+}
+
 struct NativeCTFEContext {
     /// Data section for string literals, import() content, allocations
     NativeDataSection* dataSection;
@@ -187,17 +194,23 @@ struct NativeCTFEContext {
     /// Error kind if trap occurred
     CTFEErrorKind errorKind;
     
-    /// Call stack for error reporting (function names)
-    string[] callStack;
+    /// Call stack for error reporting
+    CallFrame[] callStack;
     
-    /// Push a function name onto the call stack
-    void pushCall(const(char)* namePtr, size_t nameLen) nothrow {
+    /// Push a call frame onto the stack
+    /// Args: namePtr, nameLen, filePtr, fileLen, line
+    void pushCall(const(char)* namePtr, size_t nameLen,
+                  const(char)* filePtr, size_t fileLen, uint line) nothrow {
         try {
-            callStack ~= cast(string)namePtr[0..nameLen];
+            CallFrame frame;
+            frame.funcName = cast(string)namePtr[0..nameLen];
+            frame.fileName = cast(string)filePtr[0..fileLen];
+            frame.line = line;
+            callStack ~= frame;
         } catch (Exception) {}
     }
     
-    /// Pop a function name from the call stack
+    /// Pop a call frame from the stack
     void popCall() nothrow {
         if (callStack.length > 0) {
             callStack = callStack[0..$-1];
@@ -206,13 +219,17 @@ struct NativeCTFEContext {
     
     /// Format call stack for error message
     string formatCallStack() nothrow {
+        import std.conv : to;
+        import std.path : baseName;
+        
         if (callStack.length == 0) return "";
         
         string result;
         try {
             result = "\n  Call stack:";
-            foreach_reverse (name; callStack) {
-                result ~= "\n    " ~ name ~ "()";
+            foreach_reverse (frame; callStack) {
+                string file = frame.fileName.length > 0 ? baseName(frame.fileName) : "?";
+                result ~= "\n    " ~ frame.funcName ~ "() at " ~ file ~ ":" ~ to!string(frame.line);
             }
         } catch (Exception) {}
         return result;

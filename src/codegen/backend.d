@@ -394,7 +394,8 @@ class NativeCompiledFunction : CompiledFunction {
         }
         
         // Emit call stack push (for error reporting)
-        emitPushCall(func.name);
+        string fileName = func.location.filename ? func.location.filename : "";
+        emitPushCall(func.name, fileName, func.location.line);
         
         // Compile body
         if (func.body_) {
@@ -1024,20 +1025,29 @@ class NativeCompiledFunction : CompiledFunction {
     }
     
     /**
-     * Emit call stack push - store function name and call __ctfe_push_call
+     * Emit call stack push - store call frame data and call __ctfe_push_call
      */
-    private void emitPushCall(string funcName) {
-        // Store function name in data section
-        ubyte* namePtr = dataSection.addString(funcName);
-        if (namePtr is null) return;  // Out of space, skip tracking
+    private void emitPushCall(string funcName, string fileName, uint line) {
+        import codegen.native.arm64_codegen : CallFrameData;
         
-        // Set up args: x0 = namePtr, x1 = nameLen
-        // emitHostCall will shift to x1, x2 and inject ctx in x0
-        // Load length first, then pointer (so we end up with x0=ptr, x1=len)
-        gen.emitImm32(stencil_load_imm32, cast(int)funcName.length);  // x0 = nameLen
-        gen.emitMoveX0ToX1();                    // x1 = nameLen
-        gen.emitLoadImm64(cast(ulong)namePtr);  // x0 = namePtr
-        // Now: x0 = namePtr, x1 = nameLen - ready for emitHostCall
+        // Store function name and file name in data section
+        ubyte* namePtr = dataSection.addString(funcName);
+        ubyte* filePtr = dataSection.addString(fileName);
+        if (namePtr is null || filePtr is null) return;  // Out of space, skip tracking
+        
+        // Build CallFrameData struct in data section
+        CallFrameData frameData;
+        frameData.namePtr = cast(ulong)namePtr;
+        frameData.nameLen = cast(uint)funcName.length;
+        frameData.filePtr = cast(ulong)filePtr;
+        frameData.fileLen = cast(uint)fileName.length;
+        frameData.line = line;
+        
+        ubyte* framePtr = dataSection.addData((cast(ubyte*)&frameData)[0..CallFrameData.sizeof]);
+        if (framePtr is null) return;
+        
+        // Load frame pointer into x0
+        gen.emitLoadImm64(cast(ulong)framePtr);  // x0 = framePtr
         
         ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_push_call");
         ulong ctxSlot = hostFunctions.getContextSlotAddress();
