@@ -1273,15 +1273,8 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emit(stencil_move_arg2_to_arg1);    // x1 = value
         gen.emit(stencil_store_i32);            // *dest = value
         
-        // i++
-        gen.emitLoadLocal32(tempLoopIdx);
-        gen.emitMoveX0ToX1();
-        gen.emitImm32(stencil_load_imm32, 1);
-        gen.emitMoveX0ToX2();
-        gen.emit(stencil_move_arg1_to_result);  // x0 = i
-        gen.emit(stencil_move_arg2_to_arg1);    // x1 = 1
-        gen.emit(stencil_add_i32);              // x0 = i + 1
-        gen.emitStoreLocal32(tempLoopIdx);
+        // i++ (compound stencil)
+        gen.emitIncLocal32(tempLoopIdx);
         
         gen.emitBranch(copyLoopStart);
         gen.bindLabel(copyLoopEnd);

@@ -479,6 +479,12 @@ struct NativeCodeGen {
         emitRaw32(0xB94003E0 | (imm12 << 10));
     }
     
+    /// Increment 32-bit local in place: [fp + offset]++
+    /// Result left in x0
+    void emitIncLocal32(uint offset) {
+        emitImm32(stencil_inc_local_i32, cast(int)offset);
+    }
+    
     // ========== Struct Support ==========
     
     /// Load stack pointer into x0: MOV x0, sp

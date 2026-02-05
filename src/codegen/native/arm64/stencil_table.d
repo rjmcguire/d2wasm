@@ -339,6 +339,26 @@ immutable stencil_store_local_i64 = Stencil(
     ]
 );
 
+// ----- Compound Stencils -----
+// These combine multiple operations to reduce overhead
+
+/// Increment 32-bit local: [sp + offset]++
+/// Replaces: load, move, imm 1, move, move, move, add, store (8 ops)
+immutable stencil_inc_local_i32 = Stencil(
+    "inc_local_i32",
+    cast(immutable ubyte[])[
+        0x08, 0x00, 0x80, 0x52,  // MOV w8, #offset_lo (hole)
+        0x08, 0x00, 0xa0, 0x72,  // MOVK w8, #offset_hi, LSL 16 (hole)
+        0xe0, 0x6b, 0x68, 0xb8,  // LDR w0, [sp, x8]
+        0x00, 0x04, 0x00, 0x11,  // ADD w0, w0, #1
+        0xe0, 0x6b, 0x28, 0xb8   // STR w0, [sp, x8]
+    ],
+    [
+        StencilHole(0, HoleKind.imm16_0, 0),
+        StencilHole(4, HoleKind.imm16_1, 1)
+    ]
+);
+
 // ----- Indirect Calls -----
 
 /// Load pointer from [x9] into x9
@@ -582,6 +602,9 @@ shared static this() {
     stencilTable["store_local_i32"] = &stencil_store_local_i32;
     stencilTable["load_local_i64"] = &stencil_load_local_i64;
     stencilTable["store_local_i64"] = &stencil_store_local_i64;
+    
+    // Compound operations
+    stencilTable["inc_local_i32"] = &stencil_inc_local_i32;
     
     // Indirect calls
     stencilTable["load_ptr_indirect"] = &stencil_load_ptr_indirect;
