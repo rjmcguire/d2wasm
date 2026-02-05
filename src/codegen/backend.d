@@ -789,6 +789,12 @@ class NativeCompiledFunction : CompiledFunction {
                     }
                 }
                 
+                // Milestone 89: Handle __writeln - lower to typed write calls
+                if (funcIdent.name == "__writeln") {
+                    compileWriteln(call.arguments);
+                    return;
+                }
+                
                 // Check if this is a call to a known function
                 if (auto labelPtr = funcIdent.name in functionLabels) {
                     if (call.arguments.length > 4) {
@@ -1075,6 +1081,71 @@ class NativeCompiledFunction : CompiledFunction {
         // capacity = len (32-bit at offset 12)
         gen.emitImm32(stencil_load_imm32, cast(int)len);
         gen.emitStoreLocal32(sliceOffset + 12);  // store capacity
+    }
+    
+    /**
+     * Compile __writeln(args...) by lowering to typed host function calls.
+     * Milestone 89: Native __writeln support.
+     */
+    private void compileWriteln(Expression[] args) {
+        import std.variant : Variant;
+        
+        foreach (arg; args) {
+            // Determine argument type and emit appropriate write call
+            if (auto literal = cast(LiteralExpression)arg) {
+                if (literal.value.type == typeid(string)) {
+                    // String literal: store in data section, call __ctfe_write_str(ptr, len)
+                    string strVal = literal.value.get!string();
+                    ubyte* strPtr = dataSection.addString(strVal);
+                    if (strPtr is null) {
+                        throw new Exception("__writeln: data section full");
+                    }
+                    
+                    // Load ptr into x0
+                    gen.emitLoadImm64(cast(ulong)strPtr);
+                    // Load len into x1
+                    gen.emitMoveX0ToX1();  // Save ptr to x1 temporarily
+                    gen.emitImm32(stencil_load_imm32, cast(int)strVal.length);
+                    // Swap: x0=len, x1=ptr -> need x0=ptr, x1=len
+                    gen.emitMoveX0ToX2();  // x2 = len
+                    gen.emitMoveX1ToX0();  // x0 = ptr (restore)
+                    gen.emitMoveX2ToX1();  // x1 = len
+                    
+                    // Call __ctfe_write_str
+                    ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_write_str");
+                    gen.emitIndirectCall(slot);
+                }
+                else if (literal.value.type == typeid(long) || literal.value.type == typeid(int)) {
+                    // Integer literal: call __ctfe_write_i32(value)
+                    long val = literal.value.type == typeid(long) 
+                        ? literal.value.get!long() 
+                        : literal.value.get!int();
+                    gen.emitImm32(stencil_load_imm32, cast(int)val);
+                    
+                    ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_write_i32");
+                    gen.emitIndirectCall(slot);
+                }
+                else if (literal.value.type == typeid(bool)) {
+                    // Boolean literal: call __ctfe_write_bool(0 or 1)
+                    bool val = literal.value.get!bool();
+                    gen.emitImm32(stencil_load_imm32, val ? 1 : 0);
+                    
+                    ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_write_bool");
+                    gen.emitIndirectCall(slot);
+                }
+            }
+            else {
+                // Non-literal expression: evaluate and print as i32
+                compileExpression(arg);
+                
+                ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_write_i32");
+                gen.emitIndirectCall(slot);
+            }
+        }
+        
+        // Emit newline at the end
+        ulong newlineSlot = hostFunctions.getFunctionSlotAddress("__ctfe_write_newline");
+        gen.emitIndirectCall(newlineSlot);
     }
     
     /**

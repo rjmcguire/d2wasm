@@ -1,0 +1,6 @@
+{
+  "name": "native_writeln",
+  "description": "Native backend supports __writeln lowering to typed host calls",
+  "type": "compile_output",
+  "expected_output": "42"
+}

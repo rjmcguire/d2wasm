@@ -290,6 +290,18 @@ struct NativeCodeGen {
         emitRaw32(0xAA0803E0);
     }
     
+    /// Move x1 to x0
+    void emitMoveX1ToX0() {
+        // MOV x0, x1: ORR x0, xzr, x1 = 0xAA0103E0
+        emitRaw32(0xAA0103E0);
+    }
+    
+    /// Move x2 to x1
+    void emitMoveX2ToX1() {
+        // MOV x1, x2: ORR x1, xzr, x2 = 0xAA0203E1
+        emitRaw32(0xAA0203E1);
+    }
+    
     /// Push x30 (link register) - needed before calling functions
     void emitPushLR() {
         // STR x30, [sp, #-16]!  (pre-index, 16-byte aligned)
