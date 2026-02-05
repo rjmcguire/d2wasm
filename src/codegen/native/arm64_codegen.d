@@ -446,3 +446,123 @@ extern(C) {
     alias UnaryFn = long function(long);
     alias BinaryFn = long function(long, long);
 }
+
+// ============================================================================
+// Native Data Section - Milestone 85
+// ============================================================================
+
+/**
+ * Separate memory region for CTFE data storage.
+ * 
+ * This provides a mmap'd memory block for storing data that native code
+ * needs to access (e.g., file contents from import(), string literals).
+ * 
+ * Benefits:
+ * - Memory isolation from generated code
+ * - Can be made read-only after initialization
+ * - Stable pointers that persist for the lifetime of compilation
+ */
+struct NativeDataSection {
+    ubyte* base;
+    size_t capacity;
+    size_t used;
+    
+    /// Allocate a data section with the given capacity
+    static NativeDataSection alloc(size_t size) {
+        // Use mmap for memory that's separate from code
+        // READ+WRITE initially, could be made READ-only later
+        void* mem = mmap(null, size,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+            -1, 0);
+        
+        if (mem == MAP_FAILED) {
+            return NativeDataSection.init;
+        }
+        
+        return NativeDataSection(cast(ubyte*)mem, size, 0);
+    }
+    
+    /// Add data to the section, returns pointer to the data
+    /// Returns null if out of space
+    ubyte* addData(const(ubyte)[] data) {
+        if (used + data.length > capacity) {
+            return null;  // Out of space
+        }
+        
+        ubyte* ptr = base + used;
+        memcpy(ptr, data.ptr, data.length);
+        used += data.length;
+        
+        // Align to 8 bytes for next allocation
+        used = (used + 7) & ~7;
+        
+        return ptr;
+    }
+    
+    /// Add a string (convenience method)
+    ubyte* addString(string s) {
+        return addData(cast(const(ubyte)[])s);
+    }
+    
+    /// Get current usage
+    @property size_t bytesUsed() { return used; }
+    
+    /// Get remaining capacity
+    @property size_t bytesRemaining() { return capacity - used; }
+    
+    /// Make the section read-only (call after all data is added)
+    bool makeReadOnly() {
+        if (base is null) return false;
+        return mprotect(base, capacity, PROT_READ) == 0;
+    }
+    
+    /// Free the data section
+    void free() {
+        if (base !is null) {
+            munmap(base, capacity);
+            base = null;
+            capacity = 0;
+            used = 0;
+        }
+    }
+}
+
+// Unittest for NativeDataSection - Milestone 85
+unittest {
+    import std.stdio : writeln;
+    
+    // Allocate a small data section
+    auto dataSection = NativeDataSection.alloc(4096);
+    scope(exit) dataSection.free();
+    
+    assert(dataSection.base !is null, "Failed to allocate data section");
+    assert(dataSection.capacity == 4096);
+    assert(dataSection.bytesUsed == 0);
+    
+    // Add some data
+    ubyte[5] testData = [0x48, 0x65, 0x6c, 0x6c, 0x6f];  // "Hello"
+    ubyte* ptr1 = dataSection.addData(testData[]);
+    
+    assert(ptr1 !is null, "Failed to add data");
+    assert(ptr1 == dataSection.base, "First allocation should be at base");
+    assert(ptr1[0..5] == testData[], "Data should match");
+    
+    // Add more data
+    ubyte[3] moreData = [0x01, 0x02, 0x03];
+    ubyte* ptr2 = dataSection.addData(moreData[]);
+    
+    assert(ptr2 !is null, "Failed to add second data");
+    assert(ptr2 > ptr1, "Second allocation should be after first");
+    assert(ptr2[0..3] == moreData[], "Second data should match");
+    
+    // Original data should still be valid
+    assert(ptr1[0..5] == testData[], "First data should still be valid");
+    
+    // Test string convenience method
+    ubyte* strPtr = dataSection.addString("test");
+    assert(strPtr !is null);
+    assert(cast(char[])strPtr[0..4] == "test");
+    
+    writeln("✓ NativeDataSection unittest passed");
+}

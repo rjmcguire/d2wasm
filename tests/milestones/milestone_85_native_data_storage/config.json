@@ -1,0 +1,7 @@
+{
+  "name": "native_data_storage",
+  "description": "Native backend infrastructure: separate mmap'd memory block for CTFE data storage",
+  "type": "unittest",
+  "module": "codegen.backend",
+  "note": "Infrastructure milestone - tested via unittest in source, not D compilation"
+}
