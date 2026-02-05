@@ -219,6 +219,9 @@ class NativeCompiledFunction : CompiledFunction {
     private Label[string] functionLabels;
     private FunctionDecl[string] functionDecls;  // for looking up parameter counts
     
+    // Data section for external data (import() file contents, etc.) - Milestone 85/86
+    private NativeDataSection dataSection;
+    
     /// Single function constructor (original)
     this(FunctionDecl func, SymbolTable st) {
         import std.stdio : writeln;
@@ -226,9 +229,13 @@ class NativeCompiledFunction : CompiledFunction {
         this.funcName = func.name;
         this.symbolTable = st;
         this.gen = NativeCodeGen.alloc(64 * 1024);  // 64KB code buffer
+        this.dataSection = NativeDataSection.alloc(64 * 1024);  // 64KB data section
         
         if (!gen.base) {
             throw new Exception("Failed to allocate executable memory");
+        }
+        if (!dataSection.base) {
+            throw new Exception("Failed to allocate data section");
         }
         
         // Store parameter count for call()
@@ -250,9 +257,13 @@ class NativeCompiledFunction : CompiledFunction {
         this.funcName = entryFuncName;
         this.symbolTable = st;
         this.gen = NativeCodeGen.alloc(64 * 1024);  // 64KB code buffer
+        this.dataSection = NativeDataSection.alloc(64 * 1024);  // 64KB data section
         
         if (!gen.base) {
             throw new Exception("Failed to allocate executable memory");
+        }
+        if (!dataSection.base) {
+            throw new Exception("Failed to allocate data section");
         }
         
         // Store all function decls for call resolution
@@ -471,11 +482,14 @@ class NativeCompiledFunction : CompiledFunction {
                         }
                     }
                 } else if (isSlice) {
-                    // Slice initialization from array literal
+                    // Slice initialization from array literal or import()
                     if (auto arrLit = cast(ArrayLiteralExpression)varDecl.initializer) {
                         compileSliceInit(nextLocalOffset, arrLit);
+                    } else if (auto importExpr = cast(ImportExpression)varDecl.initializer) {
+                        // Milestone 86: import() in native backend
+                        compileImportInit(nextLocalOffset, importExpr);
                     } else {
-                        throw new Exception("Slice can only be initialized from array literal");
+                        throw new Exception("Slice can only be initialized from array literal or import()");
                     }
                 } else {
                     compileExpression(varDecl.initializer);
@@ -981,6 +995,59 @@ class NativeCompiledFunction : CompiledFunction {
     }
     
     /**
+     * Compile import() initialization for a slice variable.
+     * Milestone 86: Native backend import() support.
+     * 
+     * Reads the file at compile time, stores contents in dataSection,
+     * and initializes the slice to point to that data.
+     */
+    private void compileImportInit(uint sliceOffset, ImportExpression importExpr) {
+        import std.file : read, exists;
+        import std.path : buildPath, dirName;
+        
+        string filename = importExpr.filename;
+        
+        // Try to find the file relative to the source file
+        string sourcePath = importExpr.location.filename;
+        string sourceDir = sourcePath.length > 0 ? dirName(sourcePath) : ".";
+        string fullPath = buildPath(sourceDir, filename);
+        
+        // Also try current directory if not found
+        if (!exists(fullPath)) {
+            fullPath = filename;
+        }
+        
+        if (!exists(fullPath)) {
+            throw new Exception("import(): file not found: " ~ filename);
+        }
+        
+        // Read the file
+        ubyte[] fileData = cast(ubyte[])read(fullPath);
+        uint len = cast(uint)fileData.length;
+        
+        // Add file data to the data section (returns host pointer)
+        ubyte* dataPtr = dataSection.addData(fileData);
+        if (dataPtr is null) {
+            throw new Exception("import(): data section full");
+        }
+        
+        // Initialize slice struct at sliceOffset
+        // Native slice layout: { ptr: i64, length: i32, capacity: i32 } = 16 bytes
+        
+        // ptr = dataPtr (64-bit host pointer)
+        gen.emitLoadImm64(cast(ulong)dataPtr);
+        gen.emitStoreLocal(sliceOffset);  // store 64-bit ptr
+        
+        // length = len (32-bit at offset 8)
+        gen.emitImm32(stencil_load_imm32, cast(int)len);
+        gen.emitStoreLocal32(sliceOffset + 8);  // store length
+        
+        // capacity = len (32-bit at offset 12)
+        gen.emitImm32(stencil_load_imm32, cast(int)len);
+        gen.emitStoreLocal32(sliceOffset + 12);  // store capacity
+    }
+    
+    /**
      * Get the StructDecl from an expression (for member access type resolution)
      */
     private StructDecl getStructDeclFromExpr(Expression expr) {
@@ -1117,6 +1184,9 @@ class NativeCompiledFunction : CompiledFunction {
     override void dispose() {
         if (gen.base) {
             gen.free();
+        }
+        if (dataSection.base) {
+            dataSection.free();
         }
     }
     

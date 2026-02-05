@@ -1,0 +1,6 @@
+{
+  "name": "native_import",
+  "description": "Native backend supports import() expression in CTFE functions",
+  "type": "wasm_exec",
+  "expected_result": 5
+}

@@ -124,6 +124,28 @@ struct NativeCodeGen {
     void emitLoadImm(int value) { emitImm32(stencil_load_imm32, value); }
     void emitRet() { emit(stencil_return_val); }
     
+    /// Load a 64-bit immediate into x0
+    /// Uses MOV + 3 MOVK instructions (16 bytes total)
+    void emitLoadImm64(ulong value) {
+        // ARM64 encoding for loading 64-bit immediate into x0:
+        // MOV x0, #imm16          (bits 0-15)   : 0xD2800000 | (imm16 << 5)
+        // MOVK x0, #imm16, LSL 16 (bits 16-31) : 0xF2A00000 | (imm16 << 5)
+        // MOVK x0, #imm16, LSL 32 (bits 32-47) : 0xF2C00000 | (imm16 << 5)
+        // MOVK x0, #imm16, LSL 48 (bits 48-63) : 0xF2E00000 | (imm16 << 5)
+        
+        ushort imm0 = cast(ushort)(value & 0xFFFF);
+        ushort imm1 = cast(ushort)((value >> 16) & 0xFFFF);
+        ushort imm2 = cast(ushort)((value >> 32) & 0xFFFF);
+        ushort imm3 = cast(ushort)((value >> 48) & 0xFFFF);
+        
+        // Always emit all 4 instructions for correctness
+        // (Could optimize later to skip trailing zero MOVK)
+        emitRaw32(0xD2800000 | (cast(uint)imm0 << 5));  // MOV x0, #imm0
+        emitRaw32(0xF2A00000 | (cast(uint)imm1 << 5));  // MOVK x0, #imm1, LSL 16
+        emitRaw32(0xF2C00000 | (cast(uint)imm2 << 5));  // MOVK x0, #imm2, LSL 32
+        emitRaw32(0xF2E00000 | (cast(uint)imm3 << 5));  // MOVK x0, #imm3, LSL 48
+    }
+    
     // ========== Branch Instructions ==========
     
     /// Create a new label (not yet placed)
