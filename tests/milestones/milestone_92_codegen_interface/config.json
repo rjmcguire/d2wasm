@@ -1,0 +1,7 @@
+{
+  "name": "codegen_interface",
+  "description": "Abstract INativeCodeGen interface with ARM64 implementation",
+  "type": "unittest",
+  "module": "codegen.native.codegen_interface",
+  "note": "Architecture milestone - tests via compilation and existing test suite"
+}

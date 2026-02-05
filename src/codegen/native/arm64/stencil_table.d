@@ -447,6 +447,71 @@ immutable stencil_move_arg1_to_result = Stencil(
     []
 );
 
+/// MOV x1, x2
+immutable stencil_move_arg2_to_arg1 = Stencil(
+    "move_arg2_to_arg1",
+    cast(immutable ubyte[])[0xe1, 0x03, 0x02, 0xaa],  // ORR x1, xzr, x2
+    []
+);
+
+/// MOV x8, x0 (scratch2 = result)
+immutable stencil_move_result_to_scratch2 = Stencil(
+    "move_result_to_scratch2",
+    cast(immutable ubyte[])[0xe8, 0x03, 0x00, 0xaa],  // ORR x8, xzr, x0
+    []
+);
+
+/// MOV x0, x8 (result = scratch2)
+immutable stencil_move_scratch2_to_result = Stencil(
+    "move_scratch2_to_result",
+    cast(immutable ubyte[])[0xe0, 0x03, 0x08, 0xaa],  // ORR x0, xzr, x8
+    []
+);
+
+// ----- Parameter Spilling (store arg registers to locals) -----
+
+/// Store w1 (arg1) to [fp + offset]
+immutable stencil_store_arg1_to_local_i32 = Stencil(
+    "store_arg1_to_local_i32",
+    cast(immutable ubyte[])[
+        0x08, 0x00, 0x80, 0x52,  // MOV w8, #offset_lo (hole)
+        0x08, 0x00, 0xa0, 0x72,  // MOVK w8, #offset_hi, LSL 16 (hole)
+        0xa1, 0x6b, 0x28, 0xb8   // STR w1, [fp, x8]
+    ],
+    [
+        StencilHole(0, HoleKind.imm16_0, 0),
+        StencilHole(4, HoleKind.imm16_1, 1)
+    ]
+);
+
+/// Store w2 (arg2) to [fp + offset]
+immutable stencil_store_arg2_to_local_i32 = Stencil(
+    "store_arg2_to_local_i32",
+    cast(immutable ubyte[])[
+        0x08, 0x00, 0x80, 0x52,  // MOV w8, #offset_lo (hole)
+        0x08, 0x00, 0xa0, 0x72,  // MOVK w8, #offset_hi, LSL 16 (hole)
+        0xa2, 0x6b, 0x28, 0xb8   // STR w2, [fp, x8]
+    ],
+    [
+        StencilHole(0, HoleKind.imm16_0, 0),
+        StencilHole(4, HoleKind.imm16_1, 1)
+    ]
+);
+
+/// Store w3 (arg3) to [fp + offset]
+immutable stencil_store_arg3_to_local_i32 = Stencil(
+    "store_arg3_to_local_i32",
+    cast(immutable ubyte[])[
+        0x08, 0x00, 0x80, 0x52,  // MOV w8, #offset_lo (hole)
+        0x08, 0x00, 0xa0, 0x72,  // MOVK w8, #offset_hi, LSL 16 (hole)
+        0xa3, 0x6b, 0x28, 0xb8   // STR w3, [fp, x8]
+    ],
+    [
+        StencilHole(0, HoleKind.imm16_0, 0),
+        StencilHole(4, HoleKind.imm16_1, 1)
+    ]
+);
+
 // ----- Stack Pointer -----
 
 /// Get frame pointer into x0
@@ -535,6 +600,14 @@ shared static this() {
     stencilTable["move_result_to_scratch"] = &stencil_move_result_to_scratch;
     stencilTable["move_scratch_to_result"] = &stencil_move_scratch_to_result;
     stencilTable["move_arg1_to_result"] = &stencil_move_arg1_to_result;
+    stencilTable["move_arg2_to_arg1"] = &stencil_move_arg2_to_arg1;
+    stencilTable["move_result_to_scratch2"] = &stencil_move_result_to_scratch2;
+    stencilTable["move_scratch2_to_result"] = &stencil_move_scratch2_to_result;
+    
+    // Parameter spilling
+    stencilTable["store_arg1_to_local_i32"] = &stencil_store_arg1_to_local_i32;
+    stencilTable["store_arg2_to_local_i32"] = &stencil_store_arg2_to_local_i32;
+    stencilTable["store_arg3_to_local_i32"] = &stencil_store_arg3_to_local_i32;
     
     // Stack pointer
     stencilTable["get_frame_pointer"] = &stencil_get_frame_pointer;

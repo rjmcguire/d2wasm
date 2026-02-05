@@ -305,6 +305,17 @@ struct NativeCodeGen {
         emitRaw32(0xAA0203E1);
     }
     
+    // ===== Abstract Aliases (for architecture-agnostic code) =====
+    // These map abstract operation names to ARM64-specific implementations
+    
+    alias emitMoveResultToArg1 = emitMoveX0ToX1;
+    alias emitMoveResultToArg2 = emitMoveX0ToX2;
+    alias emitMoveResultToArg3 = emitMoveX0ToX3;
+    alias emitMoveResultToScratch2 = emitMoveX0ToX8;
+    alias emitMoveScratch2ToResult = emitMoveX8ToX0;
+    alias emitMoveArg1ToResult = emitMoveX1ToX0;
+    alias emitMoveArg2ToArg1 = emitMoveX2ToX1;
+    
     /// Push x30 (link register) - needed before calling functions
     void emitPushLR() {
         // STR x30, [sp, #-16]!  (pre-index, 16-byte aligned)
@@ -422,6 +433,11 @@ struct NativeCodeGen {
         uint imm12 = offset / 4;
         emitRaw32(0xB90003E3 | (imm12 << 10));
     }
+    
+    // Abstract aliases for parameter spilling
+    alias emitStoreArg1ToLocal32 = emitStoreLocal32FromX1;
+    alias emitStoreArg2ToLocal32 = emitStoreLocal32FromX2;
+    alias emitStoreArg3ToLocal32 = emitStoreLocal32FromX3;
     
     /// Load from local to x0 (32-bit, zero-extended)
     void emitLoadLocal32(uint offset) {
