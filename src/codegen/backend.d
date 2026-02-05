@@ -220,7 +220,7 @@ class NativeCompiledFunction : CompiledFunction {
     import codegen.native.arm64.stencil_table;
     import codegen.native.stencil_catalog;
     import codegen.native.codegen_interface : Label, NativeDataSection, NativeCTFEContext,
-        HostFunctionTable, CTFEErrorKind, ctfeErrorMessage;
+        HostFunctionTable, CTFEErrorKind, ctfeErrorMessage, ctfeErrorMessageWithStack;
     import ast.nodes;
     import ast.statements;
     import ast.expressions;
@@ -393,6 +393,9 @@ class NativeCompiledFunction : CompiledFunction {
             }
         }
         
+        // Emit call stack push (for error reporting)
+        emitPushCall(func.name);
+        
         // Compile body
         if (func.body_) {
             compileStatement(func.body_);
@@ -400,6 +403,12 @@ class NativeCompiledFunction : CompiledFunction {
         
         // Bind epilogue label - return statements jump here
         gen.bindLabel(epilogueLabel);
+        
+        // Emit call stack pop (before return)
+        // Save x0 (return value) to temp slot, call pop, restore
+        gen.emitStoreLocal32(tempSlot);   // save return value to stack
+        emitPopCall();
+        gen.emitLoadLocal32(tempSlot);    // restore return value to x0
         
         // Emit epilogue
         if (totalLocalBytes > 0) {
@@ -1015,6 +1024,37 @@ class NativeCompiledFunction : CompiledFunction {
     }
     
     /**
+     * Emit call stack push - store function name and call __ctfe_push_call
+     */
+    private void emitPushCall(string funcName) {
+        // Store function name in data section
+        ubyte* namePtr = dataSection.addString(funcName);
+        if (namePtr is null) return;  // Out of space, skip tracking
+        
+        // Set up args: x0 = namePtr, x1 = nameLen
+        // emitHostCall will shift to x1, x2 and inject ctx in x0
+        // Load length first, then pointer (so we end up with x0=ptr, x1=len)
+        gen.emitImm32(stencil_load_imm32, cast(int)funcName.length);  // x0 = nameLen
+        gen.emitMoveX0ToX1();                    // x1 = nameLen
+        gen.emitLoadImm64(cast(ulong)namePtr);  // x0 = namePtr
+        // Now: x0 = namePtr, x1 = nameLen - ready for emitHostCall
+        
+        ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_push_call");
+        ulong ctxSlot = hostFunctions.getContextSlotAddress();
+        gen.emitHostCall(slot, ctxSlot);
+    }
+    
+    /**
+     * Emit call stack pop - call __ctfe_pop_call
+     */
+    private void emitPopCall() {
+        // No arguments needed, emitHostCall will inject context
+        ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_pop_call");
+        ulong ctxSlot = hostFunctions.getContextSlotAddress();
+        gen.emitHostCall(slot, ctxSlot);
+    }
+    
+    /**
      * Emit checked division: if divisor is 0, call __ctfe_trap.
      * Assumes: dividend in x0, divisor in x1
      * Result: quotient in x0
@@ -1506,7 +1546,7 @@ class NativeCompiledFunction : CompiledFunction {
         // Set up error recovery point - longjmp returns here on trap
         if (setjmp(ctx.errorJump) != 0) {
             // Got here via longjmp - error occurred
-            return ExecutionResult.failure(ctfeErrorMessage(ctx.errorKind));
+            return ExecutionResult.failure(ctfeErrorMessageWithStack(&ctx));
         }
         
         // Call the compiled function with appropriate number of arguments
@@ -1578,7 +1618,7 @@ class NativeCompiledFunction : CompiledFunction {
         // Set up error recovery point - longjmp returns here on trap
         if (setjmp(ctx.errorJump) != 0) {
             // Got here via longjmp - error occurred
-            return ExecutionResult.failure(ctfeErrorMessage(ctx.errorKind));
+            return ExecutionResult.failure(ctfeErrorMessageWithStack(&ctx));
         }
         
         // Call with the target function's entry point and param count

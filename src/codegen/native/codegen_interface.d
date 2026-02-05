@@ -78,6 +78,14 @@ string ctfeErrorMessage(CTFEErrorKind kind) {
     }
 }
 
+/**
+ * Format error message with call stack.
+ */
+string ctfeErrorMessageWithStack(NativeCTFEContext* ctx) {
+    if (ctx is null) return "CTFE error (no context)";
+    return ctfeErrorMessage(ctx.errorKind) ~ ctx.formatCallStack();
+}
+
 // ============================================================================
 // Native Data Section
 // ============================================================================
@@ -178,6 +186,37 @@ struct NativeCTFEContext {
     
     /// Error kind if trap occurred
     CTFEErrorKind errorKind;
+    
+    /// Call stack for error reporting (function names)
+    string[] callStack;
+    
+    /// Push a function name onto the call stack
+    void pushCall(const(char)* namePtr, size_t nameLen) nothrow {
+        try {
+            callStack ~= cast(string)namePtr[0..nameLen];
+        } catch (Exception) {}
+    }
+    
+    /// Pop a function name from the call stack
+    void popCall() nothrow {
+        if (callStack.length > 0) {
+            callStack = callStack[0..$-1];
+        }
+    }
+    
+    /// Format call stack for error message
+    string formatCallStack() nothrow {
+        if (callStack.length == 0) return "";
+        
+        string result;
+        try {
+            result = "\n  Call stack:";
+            foreach_reverse (name; callStack) {
+                result ~= "\n    " ~ name ~ "()";
+            }
+        } catch (Exception) {}
+        return result;
+    }
 }
 
 // ============================================================================

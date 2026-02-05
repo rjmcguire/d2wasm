@@ -656,6 +656,21 @@ private extern(C) long _native_ctfe_trap(NativeCTFEContext* ctx, long errorKind,
     return -1;
 }
 
+/// Push function name onto call stack (for error reporting)
+/// Args: namePtr (pointer to string), nameLen (length of string)
+private extern(C) long _native_ctfe_push_call(NativeCTFEContext* ctx, long namePtr, long nameLen, long) nothrow {
+    if (ctx is null) return -1;
+    ctx.pushCall(cast(const(char)*)namePtr, cast(size_t)nameLen);
+    return 0;
+}
+
+/// Pop function name from call stack
+private extern(C) long _native_ctfe_pop_call(NativeCTFEContext* ctx, long, long, long) nothrow {
+    if (ctx is null) return -1;
+    ctx.popCall();
+    return 0;
+}
+
 /**
  * Create a HostFunctionTable pre-populated with CTFE intrinsics.
  */
@@ -669,6 +684,8 @@ HostFunctionTable createCTFEHostFunctions() {
     table.registerFunction("__ctfe_write_newline", &_native_ctfe_write_newline);
     table.registerFunction("__ctfe_print_i32", &_native_ctfe_print_i32);
     table.registerFunction("__ctfe_trap", &_native_ctfe_trap);
+    table.registerFunction("__ctfe_push_call", &_native_ctfe_push_call);
+    table.registerFunction("__ctfe_pop_call", &_native_ctfe_pop_call);
     
     return table;
 }
