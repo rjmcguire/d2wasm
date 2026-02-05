@@ -219,6 +219,8 @@ class NativeCompiledFunction : CompiledFunction {
     import codegen.native.arm64_codegen;
     import codegen.native.arm64.stencil_table;
     import codegen.native.stencil_catalog;
+    import codegen.native.codegen_interface : Label, NativeDataSection, NativeCTFEContext,
+        HostFunctionTable, CTFEErrorKind, ctfeErrorMessage;
     import ast.nodes;
     import ast.statements;
     import ast.expressions;
@@ -241,7 +243,6 @@ class NativeCompiledFunction : CompiledFunction {
     private uint tempSlotDepth;          // nesting depth for temp slot usage
     
     // For return statements to jump to
-    import codegen.native.arm64_codegen : Label;
     private Label epilogueLabel;
     
     // For multi-function support: map function names to their labels
@@ -1429,7 +1430,7 @@ class NativeCompiledFunction : CompiledFunction {
     
     override ExecutionResult call(long[] args) {
         // Set up execution context for host functions
-        CTFEContext ctx;
+        NativeCTFEContext ctx;
         ctx.dataSection = &dataSection;
         hostFunctions.setContext(&ctx);
         scope(exit) hostFunctions.setContext(null);
@@ -1478,7 +1479,7 @@ class NativeCompiledFunction : CompiledFunction {
     
     override ExecutionResult callByName(string targetFuncName, long[] args) {
         // Set up execution context for host functions
-        CTFEContext ctx;
+        NativeCTFEContext ctx;
         ctx.dataSection = &dataSection;
         hostFunctions.setContext(&ctx);
         scope(exit) hostFunctions.setContext(null);

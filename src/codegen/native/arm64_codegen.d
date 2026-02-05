@@ -10,19 +10,14 @@ module codegen.native.arm64_codegen;
 
 import codegen.native.stencil_catalog;
 import codegen.native.arm64.stencil_table;
+import codegen.native.codegen_interface : Label, NativeDataSection, NativeCTFEContext, 
+    HostFunctionPtr, HostFunctionTable, CTFEErrorKind, ctfeErrorMessage;
 import core.sys.posix.sys.mman;
 import core.stdc.string : memcpy;
 
-version(OSX) {
-    enum MAP_ANONYMOUS = 0x1000;
-    enum MAP_JIT = 0x0800;
-}
-
-/// Label for branch targets
-struct Label {
-    int id;
-    bool bound;      // Has the label been placed?
-    uint offset;     // Offset in code buffer (valid if bound)
+// macOS-specific mmap flags
+version (OSX) {
+    import codegen.native.codegen_interface : MAP_ANONYMOUS, MAP_JIT;
 }
 
 /// Unresolved branch that needs patching
@@ -195,7 +190,7 @@ struct NativeCodeGen {
     
     /// Emit a host function call with automatic context injection
     /// funcSlotAddress = address of the function pointer in memory
-    /// contextSlotAddress = address of the CTFEContext* in memory
+    /// contextSlotAddress = address of the NativeCTFEContext* in memory
     /// Arguments should already be set up in x0-x2 (they get shifted to x1-x3)
     void emitHostCall(ulong funcSlotAddress, ulong contextSlotAddress) {
         // Shift args: x0->x1, x1->x2, x2->x3 (x3 is lost, but we only support 3 args)
@@ -582,254 +577,13 @@ extern(C) {
     alias UnaryFn = long function(long);
     alias BinaryFn = long function(long, long);
 }
-
-// ============================================================================
-// Native Data Section - Milestone 85
-// ============================================================================
-
-/**
- * Separate memory region for CTFE data storage.
- * 
- * This provides a mmap'd memory block for storing data that native code
- * needs to access (e.g., file contents from import(), string literals).
- * 
- * Benefits:
- * - Memory isolation from generated code
- * - Can be made read-only after initialization
- * - Stable pointers that persist for the lifetime of compilation
- */
-struct NativeDataSection {
-    ubyte* base;
-    size_t capacity;
-    size_t used;
-    
-    /// Allocate a data section with the given capacity
-    static NativeDataSection alloc(size_t size) {
-        // Use mmap for memory that's separate from code
-        // READ+WRITE initially, could be made READ-only later
-        void* mem = mmap(null, size,
-            PROT_READ | PROT_WRITE,
-            MAP_PRIVATE | MAP_ANONYMOUS,
-            -1, 0);
-        
-        if (mem == MAP_FAILED) {
-            return NativeDataSection.init;
-        }
-        
-        return NativeDataSection(cast(ubyte*)mem, size, 0);
-    }
-    
-    /// Add data to the section, returns pointer to the data
-    /// Returns null if out of space
-    ubyte* addData(const(ubyte)[] data) {
-        if (used + data.length > capacity) {
-            return null;  // Out of space
-        }
-        
-        ubyte* ptr = base + used;
-        memcpy(ptr, data.ptr, data.length);
-        used += data.length;
-        
-        // Align to 8 bytes for next allocation
-        used = (used + 7) & ~7;
-        
-        return ptr;
-    }
-    
-    /// Add a string (convenience method)
-    ubyte* addString(string s) {
-        return addData(cast(const(ubyte)[])s);
-    }
-    
-    /// Get current usage
-    @property size_t bytesUsed() { return used; }
-    
-    /// Get remaining capacity
-    @property size_t bytesRemaining() { return capacity - used; }
-    
-    /// Make the section read-only (call after all data is added)
-    bool makeReadOnly() {
-        if (base is null) return false;
-        return mprotect(base, capacity, PROT_READ) == 0;
-    }
-    
-    /// Free the data section
-    void free() {
-        if (base !is null) {
-            munmap(base, capacity);
-            base = null;
-            capacity = 0;
-            used = 0;
-        }
-    }
-}
-
-// Unittest for NativeDataSection - Milestone 85
-unittest {
-    import std.stdio : writeln;
-    
-    // Allocate a small data section
-    auto dataSection = NativeDataSection.alloc(4096);
-    scope(exit) dataSection.free();
-    
-    assert(dataSection.base !is null, "Failed to allocate data section");
-    assert(dataSection.capacity == 4096);
-    assert(dataSection.bytesUsed == 0);
-    
-    // Add some data
-    ubyte[5] testData = [0x48, 0x65, 0x6c, 0x6c, 0x6f];  // "Hello"
-    ubyte* ptr1 = dataSection.addData(testData[]);
-    
-    assert(ptr1 !is null, "Failed to add data");
-    assert(ptr1 == dataSection.base, "First allocation should be at base");
-    assert(ptr1[0..5] == testData[], "Data should match");
-    
-    // Add more data
-    ubyte[3] moreData = [0x01, 0x02, 0x03];
-    ubyte* ptr2 = dataSection.addData(moreData[]);
-    
-    assert(ptr2 !is null, "Failed to add second data");
-    assert(ptr2 > ptr1, "Second allocation should be after first");
-    assert(ptr2[0..3] == moreData[], "Second data should match");
-    
-    // Original data should still be valid
-    assert(ptr1[0..5] == testData[], "First data should still be valid");
-    
-    // Test string convenience method
-    ubyte* strPtr = dataSection.addString("test");
-    assert(strPtr !is null);
-    assert(cast(char[])strPtr[0..4] == "test");
-    
-    writeln("✓ NativeDataSection unittest passed");
-}
-
-// ============================================================================
-// Host Function Table - Milestone 87
-// ============================================================================
-
-/**
- * Function pointer type for host functions callable from native code.
- * 
- * Uses extern(C) calling convention for compatibility with ARM64 ABI:
- * - Arguments passed in x0-x7
- * - Return value in x0
- * - All parameters are long (64-bit) for simplicity
- */
-/// Host function signature: context in first param, then up to 3 args
-alias HostFunctionPtr = extern(C) long function(CTFEContext*, long, long, long) nothrow;
-
-/**
- * CTFE Execution Context - passed to all host functions.
- * 
- * This provides host functions with access to the execution environment
- * without requiring global state. All host functions receive this as
- * their first parameter (in x0).
- */
-struct CTFEContext {
-    NativeDataSection* dataSection;
-    // Future: add other execution state as needed
-}
-
-/**
- * Registry of host functions that native CTFE code can call.
- * 
- * Native code will:
- * 1. Look up function by name to get the table index
- * 2. Load the function pointer from the table (and context)
- * 3. Load execution context into x0
- * 4. Call function via BLR instruction
- * 
- * This struct holds both the mapping and the actual pointer table
- * that generated code can index into. Also stores the execution context
- * pointer that gets passed to all host functions.
- */
-struct HostFunctionTable {
-    /// Map from function name to table index
-    private size_t[string] nameToIndex;
-    
-    /// Array of function pointers (stable addresses for native code)
-    private HostFunctionPtr[] functions;
-    
-    /// Array of function names (for debugging)
-    private string[] names;
-    
-    /// Execution context pointer - passed to all host functions in x0
-    private CTFEContext* context;
-    
-    /// Register a host function, returns its index
-    size_t registerFunction(string name, HostFunctionPtr func) {
-        if (auto existingIdx = name in nameToIndex) {
-            // Already registered - update the pointer
-            functions[*existingIdx] = func;
-            return *existingIdx;
-        }
-        
-        size_t idx = functions.length;
-        functions ~= func;
-        names ~= name;
-        nameToIndex[name] = idx;
-        return idx;
-    }
-    
-    /// Look up a function by name, returns null if not found
-    HostFunctionPtr getFunction(string name) {
-        if (auto idx = name in nameToIndex) {
-            return functions[*idx];
-        }
-        return null;
-    }
-    
-    /// Get the index of a function by name, returns -1 if not found
-    long getFunctionIndex(string name) {
-        if (auto idx = name in nameToIndex) {
-            return cast(long)*idx;
-        }
-        return -1;
-    }
-    
-    /// Get the address of a function pointer in the table (for native code to load)
-    /// This returns the address of the slot, not the function itself
-    ulong getFunctionSlotAddress(string name) {
-        if (auto idx = name in nameToIndex) {
-            // Return address of the function pointer in our array
-            return cast(ulong)&functions[*idx];
-        }
-        return 0;
-    }
-    
-    /// Get the address of a function pointer by index
-    ulong getFunctionSlotAddressByIndex(size_t idx) {
-        if (idx < functions.length) {
-            return cast(ulong)&functions[idx];
-        }
-        return 0;
-    }
-    
-    /// Number of registered functions
-    @property size_t count() { return functions.length; }
-    
-    /// Get all registered function names (for debugging)
-    @property const(string)[] registeredNames() { return names; }
-    
-    /// Set the execution context (call before executing native code)
-    void setContext(CTFEContext* ctx) {
-        context = ctx;
-    }
-    
-    /// Get the address of the context pointer slot
-    /// Generated code loads from this address to get the context
-    ulong getContextSlotAddress() {
-        return cast(ulong)&context;
-    }
-}
-
 // CTFE host function implementations (extern(C) for ARM64 ABI compatibility)
-// All functions receive CTFEContext* as first parameter
+// All functions receive NativeCTFEContext* as first parameter
 // Using _native_ prefix to avoid name collisions
 
 /// CTFE allocator - bump allocates from the context's data section
 /// Returns pointer to allocated memory, or 0 if out of space
-private extern(C) long _native_ctfe_alloc(CTFEContext* ctx, long size, long, long) nothrow {
+private extern(C) long _native_ctfe_alloc(NativeCTFEContext* ctx, long size, long, long) nothrow {
     if (ctx is null || ctx.dataSection is null) return 0;
     
     auto ds = ctx.dataSection;
@@ -848,13 +602,13 @@ private extern(C) long _native_ctfe_alloc(CTFEContext* ctx, long size, long, lon
     return ptr;
 }
 
-private extern(C) long _native_ctfe_write_i32(CTFEContext* ctx, long val, long, long) nothrow {
+private extern(C) long _native_ctfe_write_i32(NativeCTFEContext* ctx, long val, long, long) nothrow {
     import std.stdio : write;
     try { write(cast(int)val); } catch (Exception) {}
     return 0;
 }
 
-private extern(C) long _native_ctfe_write_str(CTFEContext* ctx, long ptr, long len, long) nothrow {
+private extern(C) long _native_ctfe_write_str(NativeCTFEContext* ctx, long ptr, long len, long) nothrow {
     import std.stdio : write;
     try {
         auto str = (cast(char*)ptr)[0 .. cast(size_t)len];
@@ -863,19 +617,19 @@ private extern(C) long _native_ctfe_write_str(CTFEContext* ctx, long ptr, long l
     return 0;
 }
 
-private extern(C) long _native_ctfe_write_bool(CTFEContext* ctx, long val, long, long) nothrow {
+private extern(C) long _native_ctfe_write_bool(NativeCTFEContext* ctx, long val, long, long) nothrow {
     import std.stdio : write;
     try { write(val != 0 ? "true" : "false"); } catch (Exception) {}
     return 0;
 }
 
-private extern(C) long _native_ctfe_write_newline(CTFEContext* ctx, long, long, long) nothrow {
+private extern(C) long _native_ctfe_write_newline(NativeCTFEContext* ctx, long, long, long) nothrow {
     import std.stdio : writeln;
     try { writeln(); } catch (Exception) {}
     return 0;
 }
 
-private extern(C) long _native_ctfe_print_i32(CTFEContext* ctx, long val, long, long) nothrow {
+private extern(C) long _native_ctfe_print_i32(NativeCTFEContext* ctx, long val, long, long) nothrow {
     import std.stdio : writeln;
     try { writeln("CTFE: ", cast(int)val); } catch (Exception) {}
     return 0;
@@ -904,7 +658,7 @@ unittest {
     HostFunctionTable table;
     
     // Register a test function (new signature with context)
-    extern(C) long testFunc(CTFEContext* ctx, long a, long b, long) nothrow {
+    extern(C) long testFunc(NativeCTFEContext* ctx, long a, long b, long) nothrow {
         return a + b;
     }
     

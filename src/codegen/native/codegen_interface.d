@@ -6,10 +6,286 @@
  * 
  * This allows the high-level compilation logic in NativeCompiledFunction
  * to be architecture-agnostic.
+ * 
+ * Also contains shared native infrastructure:
+ * - NativeDataSection: mmap'd memory for CTFE data
+ * - NativeCTFEContext: execution context with error handling
+ * - HostFunctionTable: registry for host functions callable from native code
  */
 module codegen.native.codegen_interface;
 
 import codegen.native.stencil_catalog;
+import core.sys.posix.sys.mman;
+import core.stdc.string : memcpy;
+
+// macOS-specific mmap flags not in D's stdlib
+version (OSX) {
+    enum MAP_ANONYMOUS = 0x1000;
+    enum MAP_JIT = 0x0800;
+}
+
+// setjmp/longjmp - D's stdlib doesn't have these for macOS, so we define them ourselves
+version (OSX) {
+    version (AArch64) {
+        // macOS ARM64: jmp_buf is 192 bytes (24 * 8)
+        alias jmp_buf = long[24];
+    } else version (X86_64) {
+        // macOS x86_64: jmp_buf is 148 bytes, align to 19 longs
+        alias jmp_buf = long[19];
+    } else {
+        static assert(false, "Unsupported macOS architecture for setjmp");
+    }
+} else version (linux) {
+    // Linux uses the POSIX definitions
+    import core.sys.posix.setjmp : jmp_buf;
+} else {
+    static assert(false, "Unsupported platform for setjmp");
+}
+
+// Declare setjmp/longjmp as extern(C)
+extern(C) nothrow @nogc {
+    int setjmp(ref jmp_buf env);
+    void longjmp(ref jmp_buf env, int val);
+}
+// ============================================================================
+// CTFE Error Handling
+// ============================================================================
+
+/**
+ * Error types that can occur during native CTFE execution.
+ * Used with longjmp to abort execution and report errors.
+ */
+enum CTFEErrorKind {
+    None = 0,
+    DivByZero = 1,
+    OutOfBounds = 2,
+    NullDeref = 3,
+    OutOfMemory = 4,
+    Overflow = 5,
+}
+
+/**
+ * Convert error kind to human-readable message.
+ */
+string ctfeErrorMessage(CTFEErrorKind kind) {
+    final switch (kind) {
+        case CTFEErrorKind.None: return "no error";
+        case CTFEErrorKind.DivByZero: return "integer divide by zero";
+        case CTFEErrorKind.OutOfBounds: return "array index out of bounds";
+        case CTFEErrorKind.NullDeref: return "null pointer dereference";
+        case CTFEErrorKind.OutOfMemory: return "CTFE out of memory";
+        case CTFEErrorKind.Overflow: return "integer overflow";
+    }
+}
+
+// ============================================================================
+// Native Data Section
+// ============================================================================
+
+/**
+ * Native data section for storing CTFE data (string literals, import() content).
+ * 
+ * Uses mmap for:
+ * - Memory isolation from code
+ * - Can be made read-only after initialization
+ * - Stable pointers that persist for the lifetime of compilation
+ */
+struct NativeDataSection {
+    ubyte* base;
+    size_t capacity;
+    size_t used;
+    
+    /// Allocate a data section with the given capacity
+    static NativeDataSection alloc(size_t size) {
+        // Use mmap for memory that's separate from code
+        // READ+WRITE initially, could be made READ-only later
+        void* mem = mmap(null, size,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+            -1, 0);
+        
+        if (mem == MAP_FAILED) {
+            return NativeDataSection.init;
+        }
+        
+        return NativeDataSection(cast(ubyte*)mem, size, 0);
+    }
+    
+    /// Add data to the section, returns pointer to the data
+    /// Returns null if out of space
+    ubyte* addData(const(ubyte)[] data) {
+        if (used + data.length > capacity) {
+            return null;  // Out of space
+        }
+        
+        ubyte* ptr = base + used;
+        memcpy(ptr, data.ptr, data.length);
+        used += data.length;
+        
+        // Align to 8 bytes for next allocation
+        used = (used + 7) & ~7;
+        
+        return ptr;
+    }
+    
+    /// Add a string (convenience method)
+    ubyte* addString(string s) {
+        return addData(cast(const(ubyte)[])s);
+    }
+    
+    /// Get current usage
+    @property size_t bytesUsed() { return used; }
+    
+    /// Get remaining capacity
+    @property size_t bytesRemaining() { return capacity - used; }
+    
+    /// Make the section read-only (call after all data is added)
+    bool makeReadOnly() {
+        if (base is null) return false;
+        return mprotect(base, capacity, PROT_READ) == 0;
+    }
+    
+    /// Free the data section
+    void free() {
+        if (base !is null) {
+            munmap(base, capacity);
+            base = null;
+            capacity = 0;
+            used = 0;
+        }
+    }
+}
+
+// ============================================================================
+// CTFE Execution Context
+// ============================================================================
+
+/**
+ * CTFE Execution Context - passed to all host functions.
+ * 
+ * This provides host functions with access to the execution environment
+ * without requiring global state. All host functions receive this as
+ * their first parameter.
+ * 
+ * Also contains error handling state for longjmp-based trap handling.
+ */
+struct NativeCTFEContext {
+    /// Data section for string literals, import() content, allocations
+    NativeDataSection* dataSection;
+    
+    /// Error handling: longjmp target for trap recovery
+    jmp_buf errorJump;
+    
+    /// Error kind if trap occurred
+    CTFEErrorKind errorKind;
+}
+
+// ============================================================================
+// Host Function Table
+// ============================================================================
+
+/**
+ * Function pointer type for host functions callable from native code.
+ * 
+ * Uses extern(C) calling convention for compatibility with native ABIs:
+ * - First parameter is always the execution context
+ * - Up to 3 additional arguments
+ * - Return value is 64-bit
+ */
+alias HostFunctionPtr = extern(C) long function(NativeCTFEContext*, long, long, long) nothrow;
+
+/**
+ * Registry of host functions that native CTFE code can call.
+ * 
+ * Native code will:
+ * 1. Look up function by name to get the table index
+ * 2. Load the function pointer from the table
+ * 3. Load execution context into first argument register
+ * 4. Call function via indirect call
+ * 
+ * This struct holds both the mapping and the actual pointer table
+ * that generated code can index into. Also stores the execution context
+ * pointer that gets passed to all host functions.
+ */
+struct HostFunctionTable {
+    /// Map from function name to table index
+    private size_t[string] nameToIndex;
+    
+    /// Array of function pointers (stable addresses for native code)
+    private HostFunctionPtr[] functions;
+    
+    /// Array of function names (for debugging)
+    private string[] names;
+    
+    /// Execution context pointer - passed to all host functions
+    private NativeCTFEContext* context;
+    
+    /// Register a host function, returns its index
+    size_t registerFunction(string name, HostFunctionPtr func) {
+        if (auto existingIdx = name in nameToIndex) {
+            // Already registered - update the pointer
+            functions[*existingIdx] = func;
+            return *existingIdx;
+        }
+        
+        size_t idx = functions.length;
+        functions ~= func;
+        names ~= name;
+        nameToIndex[name] = idx;
+        return idx;
+    }
+    
+    /// Look up a function by name, returns null if not found
+    HostFunctionPtr getFunction(string name) {
+        if (auto idx = name in nameToIndex) {
+            return functions[*idx];
+        }
+        return null;
+    }
+    
+    /// Get the index of a function by name, returns -1 if not found
+    long getFunctionIndex(string name) {
+        if (auto idx = name in nameToIndex) {
+            return cast(long)*idx;
+        }
+        return -1;
+    }
+    
+    /// Get the address of a function pointer in the table (for native code to load)
+    /// This returns the address of the slot, not the function itself
+    ulong getFunctionSlotAddress(string name) {
+        if (auto idx = name in nameToIndex) {
+            // Return address of the function pointer in our array
+            return cast(ulong)&functions[*idx];
+        }
+        return 0;
+    }
+    
+    /// Get the address of a function pointer by index
+    ulong getFunctionSlotAddressByIndex(size_t idx) {
+        if (idx < functions.length) {
+            return cast(ulong)&functions[idx];
+        }
+        return 0;
+    }
+    
+    /// Number of registered functions
+    @property size_t count() { return functions.length; }
+    
+    /// Get all registered function names (for debugging)
+    @property const(string)[] registeredNames() { return names; }
+    
+    /// Set the execution context (call before executing native code)
+    void setContext(NativeCTFEContext* ctx) {
+        context = ctx;
+    }
+    
+    /// Get the address of the context pointer slot
+    /// Generated code loads from this address to get the context
+    ulong getContextSlotAddress() {
+        return cast(ulong)&context;
+    }
+}
 
 /**
  * Label for branch targets.
