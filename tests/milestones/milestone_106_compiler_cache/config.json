@@ -1,0 +1,7 @@
+{
+  "name": "compiler_cache",
+  "description": "Incremental compilation: cache integration with compiler",
+  "type": "unittest",
+  "module": "cache.compiler_cache",
+  "note": "Infrastructure milestone - CompilerCache wrapper for cache operations during compilation"
+}
