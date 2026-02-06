@@ -252,8 +252,12 @@ class NativeCompiledFunction : CompiledFunction {
         }
         
         // Emit call stack push (for error reporting)
-        string fileName = func.location.filename ? func.location.filename : "";
-        emitPushCall(func.name, fileName, func.location.line);
+        // Note: disabled by default due to FFI overhead (~15x slowdown for recursive code)
+        // TODO: implement inline stack tracking without host calls
+        static if (false) {
+            string fileName = func.location.filename ? func.location.filename : "";
+            emitPushCall(func.name, fileName, func.location.line);
+        }
         
         // Compile body
         if (func.body_) {
@@ -264,10 +268,12 @@ class NativeCompiledFunction : CompiledFunction {
         gen.bindLabel(epilogueLabel);
         
         // Emit call stack pop (before return)
-        // Save x0 (return value) to temp slot, call pop, restore
-        gen.emitStoreLocal32(tempSlot);   // save return value to stack
-        emitPopCall();
-        gen.emitLoadLocal32(tempSlot);    // restore return value to x0
+        // Note: disabled by default due to FFI overhead
+        static if (false) {
+            gen.emitStoreLocal32(tempSlot);
+            emitPopCall();
+            gen.emitLoadLocal32(tempSlot);
+        }
         
         // Emit epilogue
         if (totalLocalBytes > 0) {
