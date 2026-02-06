@@ -479,29 +479,37 @@ private string formatTime() {
 /// Compile file for watch mode, handling errors gracefully
 private int compileFileForWatch(ref CompilerOptions options, 
                                 ref ubyte[32] lastErrorHash, ref bool hadError) {
-    import cache.entry : CacheEntry, SourceHash;
-    import std.digest.murmurhash : MurmurHash3;
+    import std.file : read, exists;
     
-    try {
-        auto result = compileFile(options);
-        if (result == 0) {
-            hadError = false;
-            lastErrorHash = SourceHash.init;
-        }
-        return result;
-    } catch (Exception e) {
-        // Compute hash of error message to detect repeats
-        auto hash = computeErrorHash(e.msg);
-        
-        if (hadError && hash == lastErrorHash) {
-            writeln("[", formatTime(), "] (same error, skipped)");
-        } else {
-            writeln("[", formatTime(), "] Error: ", e.msg);
-            lastErrorHash = hash;
-            hadError = true;
-        }
+    // Compute source hash to detect unchanged files
+    if (!exists(options.inputFile)) {
+        writeln("[", formatTime(), "] File not found: ", options.inputFile);
         return 1;
     }
+    
+    auto sourceHash = computeErrorHash(cast(string)read(options.inputFile));
+    
+    // Skip recompile if source unchanged and we had error
+    if (hadError && sourceHash == lastErrorHash) {
+        writeln("[", formatTime(), "] (unchanged after error, skipped)");
+        stdout.flush();
+        return 1;
+    }
+    
+    // Compile
+    auto result = compileFile(options);
+    
+    if (result == 0) {
+        // Success - clear error state
+        hadError = false;
+        lastErrorHash = typeof(lastErrorHash).init;
+    } else {
+        // Error - record source hash
+        hadError = true;
+        lastErrorHash = sourceHash;
+    }
+    
+    return result;
 }
 
 /// Compute hash of error message

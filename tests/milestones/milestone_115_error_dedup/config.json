@@ -1,0 +1,6 @@
+{
+  "name": "error_dedup",
+  "description": "Error deduplication - skip recompile if source unchanged after error",
+  "type": "shell",
+  "script": "run_test.sh"
+}
