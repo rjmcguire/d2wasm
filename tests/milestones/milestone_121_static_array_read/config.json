@@ -1,0 +1,5 @@
+{
+    "type": "wasm_exec",
+    "expected_result": 0,
+    "description": "Static array declaration and read - zero-initialized memory"
+}

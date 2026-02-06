@@ -46,6 +46,15 @@ class FuncContext {
     }
     SliceLocalInfo[string] sliceLocals;
     
+    // Shadow stack for static array locals (contiguous data, no slice struct)
+    struct StaticArrayLocalInfo {
+        uint frameOffset;      // Offset from frame pointer (FP) for the data
+        uint elementCount;     // Number of elements (from type)
+        uint elementSize;      // Size of each element in bytes
+        Type elementType;      // Element type
+    }
+    StaticArrayLocalInfo[string] staticArrayLocals;
+    
     uint frameSize = 0;        // Total size of struct/slice locals on shadow stack
     uint savedSpLocal;         // Local index to store saved SP (for epilogue restore)
     uint fpLocal;              // Local index for frame pointer (stable, never changes)
@@ -161,7 +170,28 @@ class FuncContext {
             
             // Check if it's a slice/array type
             if (auto arrayType = cast(ArrayType)varDecl.type) {
-                // Slice local - allocate 12 bytes for slice struct (ptr, length, capacity)
+                // Static array (int[4]) vs dynamic array/slice (int[])
+                if (arrayType.arraySize !is null) {
+                    // Static array - allocate contiguous data on shadow stack
+                    frameSize = (frameSize + 3) & ~3;  // Align to 4 bytes
+                    
+                    // Evaluate array size (must be compile-time constant)
+                    uint elemCount = evaluateStaticArraySize(arrayType.arraySize);
+                    size_t elemSize = arrayType.elementType.size();
+                    if (elemSize == 0) elemSize = 4;  // Default to 4 for i32
+                    
+                    StaticArrayLocalInfo info;
+                    info.frameOffset = frameSize;
+                    info.elementCount = elemCount;
+                    info.elementSize = cast(uint)elemSize;
+                    info.elementType = arrayType.elementType;
+                    
+                    frameSize += elemCount * cast(uint)elemSize;
+                    staticArrayLocals[varDecl.name] = info;
+                    return;
+                }
+                
+                // Dynamic array/slice - allocate 12 bytes for slice struct (ptr, length, capacity)
                 frameSize = (frameSize + 3) & ~3;  // Align to 4 bytes
                 
                 // Enable array support for __alloc, etc.
@@ -206,6 +236,21 @@ class FuncContext {
             if (forStmt.init) collectLocals(forStmt.init);
             collectLocals(forStmt.body_);
         }
+    }
+    
+    /**
+     * Evaluate static array size expression (must be compile-time constant)
+     */
+    uint evaluateStaticArraySize(Expression sizeExpr) {
+        if (auto lit = cast(LiteralExpression)sizeExpr) {
+            if (lit.value.type == typeid(long)) {
+                return cast(uint)lit.value.get!long();
+            } else if (lit.value.type == typeid(int)) {
+                return cast(uint)lit.value.get!int();
+            }
+        }
+        // TODO: Handle more complex constant expressions
+        throw new EmitError("Static array size must be a compile-time constant integer");
     }
     
     /**
@@ -328,6 +373,8 @@ class FuncContext {
             // Check if this is a struct local
             if (varDecl.name in structLocals) {
                 emitStructVarDecl(out_, varDecl);
+            } else if (varDecl.name in staticArrayLocals) {
+                emitStaticArrayVarDecl(out_, varDecl);
             } else if (varDecl.name in sliceLocals) {
                 emitSliceVarDecl(out_, varDecl);
             } else {
@@ -868,6 +915,46 @@ class FuncContext {
         throw new EmitError("Unsupported slice initializer", stmt.initializer.toString());
     }
     
+    /**
+     * Emit static array local variable declaration
+     * Static arrays are stored directly on the shadow stack (no slice struct)
+     */
+    void emitStaticArrayVarDecl(ref Appender!(ubyte[]) out_, VariableDeclarationStatement stmt) {
+        auto info = staticArrayLocals[stmt.name];
+        
+        // No initializer - leave as zero-initialized (shadow stack is zeroed)
+        if (!stmt.initializer) {
+            return;
+        }
+        
+        // Array literal initializer: [1, 2, 3, 4]
+        if (auto arrayLit = cast(ArrayLiteralExpression)stmt.initializer) {
+            uint elemCount = cast(uint)arrayLit.elements.length;
+            
+            // Store each element at FP + frameOffset + i * elemSize
+            for (uint i = 0; i < elemCount && i < info.elementCount; i++) {
+                // Address: FP + frameOffset + i * elemSize
+                out_ ~= Op.local_get;
+                leb128u(out_, fpLocal);
+                out_ ~= Op.i32_const;
+                leb128s(out_, info.frameOffset + i * info.elementSize);
+                out_ ~= Op.i32_add;
+                
+                // Value
+                emitExpression(out_, arrayLit.elements[i]);
+                
+                // Store
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+            }
+            return;
+        }
+        
+        throw new EmitError("Unsupported static array initializer", 
+                           stmt.initializer ? stmt.initializer.toString() : "none");
+    }
+    
     //==========================================================================
     // Expression Emission
     //==========================================================================
@@ -921,6 +1008,30 @@ class FuncContext {
         auto arrayIdent = cast(IdentifierExpression)expr.array;
         if (!arrayIdent) {
             throw new EmitError("Complex array indexing not yet supported");
+        }
+        
+        // Check if it's a static array local
+        if (auto info = arrayIdent.name in staticArrayLocals) {
+            // Static array: data is directly on shadow stack at frameOffset
+            // Address = FP + frameOffset + index * elemSize
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset);
+            out_ ~= Op.i32_add;
+            
+            // Add index * elemSize
+            emitExpression(out_, expr.index);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.elementSize);
+            out_ ~= Op.i32_mul;
+            out_ ~= Op.i32_add;
+            
+            // Load the element
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            return;
         }
         
         // Check if it's a slice local
