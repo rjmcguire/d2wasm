@@ -247,6 +247,26 @@ int compileFile(CompilerOptions options) {
             log(1, "Generating binary WASM...");
             
             auto emitter = new BinaryEmitter(symbolTable);
+            
+            // Load cache if enabled
+            import cache.compiler_cache : CompilerCache;
+            import cache.entry : CacheEntry;
+            CompilerCache cache;
+            if (options.cacheDir.length > 0) {
+                string moduleName = baseName(stripExtension(options.inputFile));
+                cache = new CompilerCache(options.cacheDir, moduleName);
+                
+                // Set source text for hash computation
+                emitter.setSourceText(sourceCode);
+                
+                // Load cached entries
+                auto cachedEntries = cache.getEntries();
+                if (cachedEntries.length > 0) {
+                    emitter.setCodeCache(cachedEntries);
+                    log(2, "Loaded ", cachedEntries.length, " cached function(s)");
+                }
+            }
+            
             ubyte[] wasm = emitter.emit(ast);
             
             if (wasm is null) {
@@ -287,44 +307,30 @@ int compileFile(CompilerOptions options) {
                 return result;
             }
             
-            // 9. Cache integration (if enabled)
-            if (options.cacheDir.length > 0) {
-                import cache.compiler_cache : CompilerCache;
+            // 9. Cache storage (if enabled)
+            if (cache !is null) {
                 import std.json;
                 
-                string moduleName = baseName(stripExtension(options.inputFile));
-                auto cache = new CompilerCache(options.cacheDir, moduleName);
-                
-                // Record all compiled functions
-                foreach (decl; ast) {
-                    if (auto func = cast(FunctionDecl)decl) {
-                        cache.recordFunction(func, ast, sourceCode, wasm);
-                    }
-                }
-                
-                // Write to staging file
-                if (options.stagingFile.length > 0) {
-                    import cache.staging : writeStagingFile;
-                    import std.path : dirName;
-                    // Use custom staging path
-                    auto stagingDir = dirName(options.stagingFile);
-                    cache.flush();  // Writes to default staging dir
-                }
+                // Store emitted code back to cache
+                auto emittedCode = emitter.getEmittedCode();
+                cache.storeEntries(emittedCode);
                 cache.flush();
+                
+                auto emitterStats = emitter.getCacheStats();
+                log(2, "Cache: ", emitterStats.cacheHits, " hits, ", 
+                    emitterStats.cacheMisses, " misses");
                 
                 // JSON output mode
                 if (options.jsonOutput) {
-                    auto stats = cache.getStats();
+                    string moduleName = baseName(stripExtension(options.inputFile));
                     JSONValue json;
                     json["module"] = moduleName;
                     json["input"] = options.inputFile;
                     json["output"] = options.outputFile;
                     json["success"] = true;
                     json["wasmSize"] = wasm.length;
-                    json["cacheHits"] = stats.cacheHits;
-                    json["cacheMisses"] = stats.cacheMisses;
-                    json["compiled"] = JSONValue(stats.recompiledMembers);
-                    json["cached"] = JSONValue(stats.cachedMembers);
+                    json["cacheHits"] = cast(int)emitterStats.cacheHits;
+                    json["cacheMisses"] = cast(int)emitterStats.cacheMisses;
                     writeln(json.toPrettyString());
                     return 0;
                 }

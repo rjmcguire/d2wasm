@@ -181,6 +181,30 @@ class CompilerCache {
     }
     
     /**
+     * Get all cached entries (for emitter integration).
+     * Returns entries from the database that can be passed to the emitter.
+     */
+    CacheEntry[] getEntries() {
+        CacheEntry[] results;
+        foreach (name; db.members()) {
+            auto entry = db.lookup(name);
+            if (entry !is null) {
+                results ~= *entry;
+            }
+        }
+        return results;
+    }
+    
+    /**
+     * Store entries from the emitter into the cache.
+     */
+    void storeEntries(CacheEntry[] entries) {
+        foreach (entry; entries) {
+            pendingEntries ~= entry;
+        }
+    }
+    
+    /**
      * Check if a member would be a cache hit.
      */
     bool wouldCacheHit(string memberName) {
