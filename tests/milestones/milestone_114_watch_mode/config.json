@@ -1,0 +1,6 @@
+{
+  "name": "watch_mode",
+  "description": "Watch mode CLI integration with native file watching",
+  "type": "shell",
+  "script": "run_test.sh"
+}

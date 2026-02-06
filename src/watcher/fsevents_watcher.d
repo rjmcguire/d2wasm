@@ -135,16 +135,16 @@ private extern(C) void fseventsCallback(
         auto watcher = cast(FSEventsWatcher)clientCallBackInfo;
         if (watcher is null) return;
         
-        // eventPaths is CFArrayRef of CFStringRef
-        auto pathArray = cast(CFArrayRef)eventPaths;
-        auto count = CFArrayGetCount(pathArray);
+        // eventPaths is char** (array of C strings) when not using UseCFTypes
+        auto cPaths = cast(const(char)**)eventPaths;
         
         string[] paths;
-        foreach (i; 0 .. count) {
-            auto cfStr = cast(CFStringRef)CFArrayGetValueAtIndex(pathArray, i);
-            auto path = fromCFString(cfStr);
-            if (path !is null) {
-                paths ~= path;
+        foreach (i; 0 .. numEvents) {
+            import core.stdc.string : strlen;
+            auto cstr = cPaths[i];
+            if (cstr !is null) {
+                auto len = strlen(cstr);
+                paths ~= cast(string)cstr[0 .. len].idup;
             }
         }
         

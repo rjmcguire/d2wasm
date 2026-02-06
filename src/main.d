@@ -50,6 +50,9 @@ struct CompilerOptions {
     string[] inputFiles;      // Multiple input files (for parallel mode)
     string outputDir;         // Output directory for parallel mode
     int maxParallel = 0;      // Max parallel compilations (0 = auto)
+    
+    // Watch mode options
+    bool watch = false;       // Watch files and recompile on change
 }
 
 int main(string[] args) {
@@ -96,7 +99,9 @@ int main(string[] args) {
             "staging", "Staging file output path", &options.stagingFile,
             "json", "Output JSON summary (for incremental mode)", &options.jsonOutput,
             // Parallel compilation
-            "jobs|j", "Max parallel compilations (0 = auto)", &options.maxParallel
+            "jobs|j", "Max parallel compilations (0 = auto)", &options.maxParallel,
+            // Watch mode
+            "watch|w", "Watch files and recompile on change", &options.watch
         );
         
         log(3, "main() started");
@@ -139,6 +144,11 @@ int main(string[] args) {
         // Set default output file
         if (options.outputFile.length == 0) {
             options.outputFile = setExtension(options.inputFile, ".wasm");
+        }
+        
+        // Watch mode
+        if (options.watch) {
+            return runWatch(options);
         }
         
         return compileFile(options);
@@ -389,6 +399,128 @@ int compileFile(CompilerOptions options) {
         log(1, e.info);
         return 1;
     }
+}
+
+/**
+ * Run watch mode - recompile on file changes.
+ */
+int runWatch(CompilerOptions options) {
+    import watcher.watcher : createDebouncedWatcher, DebouncedWatcher;
+    import watcher.fsevents_watcher : FSEventsWatcher;
+    import cache.entry : SourceHash, CacheEntry;
+    import std.datetime : Clock;
+    import std.path : dirName;
+    import core.thread : Thread;
+    import core.time : dur;
+    
+    writeln("[", formatTime(), "] Watching: ", options.inputFile);
+    writeln("[", formatTime(), "] Output: ", options.outputFile);
+    if (options.cacheDir.length > 0) {
+        writeln("[", formatTime(), "] Cache: ", options.cacheDir);
+    }
+    writeln();
+    stdout.flush();
+    
+    // Track last error hash to avoid repeating same error
+    ubyte[32] lastErrorHash;
+    bool hadError = false;
+    
+    // Initial compile
+    auto result = compileFileForWatch(options, lastErrorHash, hadError);
+    
+    // Create watcher
+    version(OSX) {
+        auto innerWatcher = new FSEventsWatcher();
+        
+        auto watcher = new DebouncedWatcher(innerWatcher, (paths) {
+            import std.algorithm : any;
+            import std.path : extension;
+            
+            // Filter to only .d files
+            bool hasD = paths.any!(p => p.extension == ".d");
+            if (!hasD) return;
+            
+            writeln();
+            writeln("[", formatTime(), "] Changed: ", options.inputFile);
+            stdout.flush();
+            compileFileForWatch(options, lastErrorHash, hadError);
+            stdout.flush();
+        }, 200);
+        
+        // Watch the directory containing the file
+        innerWatcher.setCallback((paths) {
+            watcher.onRawChange(paths);
+        });
+        
+        string watchDir = dirName(options.inputFile);
+        if (watchDir.length == 0) watchDir = ".";
+        innerWatcher.addPath(watchDir);
+        
+        writeln("[", formatTime(), "] Press Ctrl+C to stop\n");
+        stdout.flush();
+        
+        // This blocks until stopped
+        watcher.start();
+    } else {
+        writeln("Watch mode not supported on this platform");
+        return 1;
+    }
+    
+    return 0;
+}
+
+/// Format current time for log output
+private string formatTime() {
+    import std.datetime : Clock;
+    auto now = Clock.currTime();
+    return format("%02d:%02d:%02d", now.hour, now.minute, now.second);
+}
+
+/// Compile file for watch mode, handling errors gracefully
+private int compileFileForWatch(ref CompilerOptions options, 
+                                ref ubyte[32] lastErrorHash, ref bool hadError) {
+    import cache.entry : CacheEntry, SourceHash;
+    import std.digest.murmurhash : MurmurHash3;
+    
+    try {
+        auto result = compileFile(options);
+        if (result == 0) {
+            hadError = false;
+            lastErrorHash = SourceHash.init;
+        }
+        return result;
+    } catch (Exception e) {
+        // Compute hash of error message to detect repeats
+        auto hash = computeErrorHash(e.msg);
+        
+        if (hadError && hash == lastErrorHash) {
+            writeln("[", formatTime(), "] (same error, skipped)");
+        } else {
+            writeln("[", formatTime(), "] Error: ", e.msg);
+            lastErrorHash = hash;
+            hadError = true;
+        }
+        return 1;
+    }
+}
+
+/// Compute hash of error message
+private ubyte[32] computeErrorHash(string msg) {
+    import std.digest.murmurhash : MurmurHash3;
+    
+    ubyte[32] result;
+    auto hash1 = MurmurHash3!128(0);
+    auto hash2 = MurmurHash3!128(0x9E3779B9);
+    
+    hash1.put(cast(const(ubyte)[])msg);
+    hash2.put(cast(const(ubyte)[])msg);
+    
+    auto h1 = hash1.finish();
+    auto h2 = hash2.finish();
+    
+    result[0..16] = h1[];
+    result[16..32] = h2[];
+    return result;
 }
 
 /**
