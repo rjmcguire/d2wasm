@@ -78,11 +78,9 @@ Invalidation: if source_hash OR any dependency_hash changes → recompile.
 
 1. ✅ **milestone_101** Cache entry format (serialize/deserialize, round-trip test)
 2. ✅ **milestone_102** Source hashing + Dependency extraction
-3. Staging file write
-4. Staging file read + validate
-5. Main.db merge
-6. Cache hit detection
-7. Compile with cache (skip cached members)
-8. Child process mode (--compile-module flag + JSON output)
-9. Orchestrator (spawn children, merge results)
-10. Compaction
+3. ✅ **milestone_103** Staging file write/read/validate
+4. ✅ **milestone_104** Main.db (append, index, lookup, merge, compact)
+5. Cache hit detection
+6. Compile with cache (skip cached members)
+7. Child process mode (--compile-module flag + JSON output)
+8. Orchestrator (spawn children, merge results)

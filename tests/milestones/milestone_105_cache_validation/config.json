@@ -1,0 +1,7 @@
+{
+  "name": "cache_validation",
+  "description": "Incremental compilation: validate cache entries against current source",
+  "type": "unittest",
+  "module": "cache.validator",
+  "note": "Infrastructure milestone - checks source hash AND dependency hashes"
+}

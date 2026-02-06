@@ -1,0 +1,7 @@
+{
+  "name": "maindb",
+  "description": "Incremental compilation: append-only main database with index",
+  "type": "unittest",
+  "module": "cache.maindb",
+  "note": "Infrastructure milestone - persistent cache with append, lookup, merge, compact"
+}

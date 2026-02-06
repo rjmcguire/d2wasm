@@ -1,0 +1,7 @@
+{
+  "name": "staging_file",
+  "description": "Incremental compilation: staging file write/read with checksums",
+  "type": "unittest",
+  "module": "cache.staging",
+  "note": "Infrastructure milestone - per-module staging files for safe crash recovery"
+}
