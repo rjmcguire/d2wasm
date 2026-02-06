@@ -63,6 +63,11 @@ private class DependencyExtractor {
     }
     
     DependencyInfo extract(FunctionDecl func) {
+        // Include static if condition dependencies
+        foreach (dep; func.staticIfDependencies) {
+            functions[dep] = true;  // Treat as function deps (covers manifest constants)
+        }
+        
         // Extract from return type
         extractFromType(func.returnType);
         
@@ -83,6 +88,11 @@ private class DependencyExtractor {
     }
     
     DependencyInfo extract(StructDecl struct_) {
+        // Include static if condition dependencies
+        foreach (dep; struct_.staticIfDependencies) {
+            functions[dep] = true;  // Treat as function deps (covers manifest constants)
+        }
+        
         // Extract from field types
         foreach (field; struct_.fields) {
             extractFromType(field.type);

@@ -56,6 +56,11 @@ abstract class Declaration : ASTNode {
     string name;
     bool isPublic;
     
+    /// Dependencies from static if conditions that produced this declaration.
+    /// Used for incremental compilation - if these symbols change, this decl
+    /// must be recompiled even if its own source hasn't changed.
+    string[] staticIfDependencies;
+    
     this(SourceLocation loc, string name, bool isPublic = false) {
         super(loc);
         this.name = name;

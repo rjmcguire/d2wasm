@@ -297,6 +297,9 @@ class MixinExpander {
     private Declaration[] expandStaticIf(StaticIfDecl staticIfDecl) {
         writeln("Expanding static if: ", staticIfDecl.condition.toString());
         
+        // Extract identifiers from the condition (for incremental compilation tracking)
+        string[] conditionDeps = extractIdentifiers(staticIfDecl.condition);
+        
         // Evaluate the condition at compile time
         bool conditionResult = evaluateStaticIfCondition(staticIfDecl.condition, staticIfDecl.location);
         
@@ -324,11 +327,51 @@ class MixinExpander {
             }
         }
         
+        // Attach condition dependencies to resulting declarations
+        // (for incremental compilation cache invalidation)
+        foreach (decl; result) {
+            decl.staticIfDependencies ~= conditionDeps;
+        }
+        
         // Store the expanded declarations in the node (for debugging)
         staticIfDecl.expandedDeclarations = result;
         staticIfDecl.isExpanded = true;
         
         return result;
+    }
+    
+    /**
+     * Extract all identifier names from an expression.
+     * Used to track dependencies for incremental compilation.
+     */
+    private static string[] extractIdentifiers(Expression expr) {
+        string[] ids;
+        extractIdentifiersImpl(expr, ids);
+        return ids;
+    }
+    
+    private static void extractIdentifiersImpl(Expression expr, ref string[] ids) {
+        if (expr is null) return;
+        
+        if (auto ident = cast(IdentifierExpression)expr) {
+            ids ~= ident.name;
+        } else if (auto binary = cast(BinaryExpression)expr) {
+            extractIdentifiersImpl(binary.left, ids);
+            extractIdentifiersImpl(binary.right, ids);
+        } else if (auto unary = cast(UnaryExpression)expr) {
+            extractIdentifiersImpl(unary.operand, ids);
+        } else if (auto call = cast(CallExpression)expr) {
+            extractIdentifiersImpl(call.function_, ids);
+            foreach (arg; call.arguments) {
+                extractIdentifiersImpl(arg, ids);
+            }
+        } else if (auto member = cast(MemberExpression)expr) {
+            extractIdentifiersImpl(member.object, ids);
+        } else if (auto index = cast(IndexExpression)expr) {
+            extractIdentifiersImpl(index.array, ids);
+            extractIdentifiersImpl(index.index, ids);
+        }
+        // LiteralExpression has no identifiers
     }
     
     /**
