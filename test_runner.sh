@@ -274,6 +274,29 @@ run_test() {
             return 0
             ;;
             
+        shell)
+            # Shell script test - run a custom test script
+            local script=$(jq -r '.script // "run_test.sh"' "$config_file")
+            local script_path="$test_dir/$script"
+            
+            if [ ! -x "$script_path" ]; then
+                echo -e "${RED}FAIL${NC} $test_name"
+                echo "  Script not found or not executable: $script_path"
+                return 1
+            fi
+            
+            local script_output
+            if ! script_output=$("$script_path" 2>&1); then
+                echo -e "${RED}FAIL${NC} $test_name"
+                echo "  Script failed:"
+                echo "$script_output" | sed 's/^/    /'
+                return 1
+            fi
+            
+            echo -e "${GREEN}PASS${NC} $test_name (shell)"
+            return 0
+            ;;
+            
         *)
             echo -e "${YELLOW}SKIP${NC} $test_name (unknown type: $test_type)"
             return 0

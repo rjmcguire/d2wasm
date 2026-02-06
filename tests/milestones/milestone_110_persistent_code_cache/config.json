@@ -1,7 +1,6 @@
 {
   "name": "persistent_code_cache",
   "description": "Per-function code cache persists between compilations",
-  "type": "wasm_exec",
-  "entry": "main",
-  "expected_result": 3
+  "type": "shell",
+  "script": "run_test.sh"
 }
