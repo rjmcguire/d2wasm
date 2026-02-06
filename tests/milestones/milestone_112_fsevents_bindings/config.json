@@ -1,0 +1,6 @@
+{
+  "name": "fsevents_bindings",
+  "description": "macOS FSEvents C bindings for native file watching",
+  "type": "unittest",
+  "module": "watcher.fsevents"
+}
