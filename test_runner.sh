@@ -60,6 +60,18 @@ run_test() {
     local args=$(jq -r '.args // [] | join(" ")' "$config_file")
     local expected_exit=$(jq -r '.expected_exit // 0' "$config_file")
     
+    # Handle unittest type (verified by dub test at startup)
+    if [ "$test_type" = "unittest" ]; then
+        local module_name=$(jq -r '.module' "$config_file")
+        if [ "$UNITTEST_PASSED" = "1" ]; then
+            echo -e "${GREEN}PASS${NC} $test_name (unittest: $module_name)"
+            return 0
+        else
+            echo -e "${RED}FAIL${NC} $test_name (unittest: $module_name)"
+            return 1
+        fi
+    fi
+    
     # Build
     local wasm_file="$test_dir/test.wasm"
     rm -f "$wasm_file"
@@ -236,6 +248,19 @@ if [ ! -x "$COMPILER" ]; then
     echo "Building compiler..."
     (cd "$SCRIPT_DIR" && dub build)
 fi
+
+# Run unit tests (for unittest-type milestones)
+echo "Running unit tests..."
+if (cd "$SCRIPT_DIR" && dub test 2>&1) | grep -q "FAILED unittests"; then
+    echo -e "${RED}Unit tests FAILED${NC}"
+    UNITTEST_PASSED=0
+else
+    echo -e "${GREEN}Unit tests passed${NC}"
+    UNITTEST_PASSED=1
+fi
+# Rebuild (dub test leaves unittest-enabled binary)
+(cd "$SCRIPT_DIR" && dub build --force >/dev/null 2>&1)
+echo
 
 echo "Running milestone tests..."
 echo

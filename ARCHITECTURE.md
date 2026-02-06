@@ -489,9 +489,9 @@ tests/milestones/
 
 ## Future Work
 
-- [ ] x86_64 native backend
-- [ ] Template support
-- [ ] More string operations
 - [ ] Module system
-- [ ] Debug info (DWARF)
 - [ ] Incremental compilation
+- [ ] Debug info (DWARF)
+- [ ] x86_64 native backend
+- [X] Template support (we are using mixins instead)
+- [X] No more string operations (still think about the implementation)

@@ -1,0 +1,7 @@
+{
+  "name": "dependency_extraction",
+  "description": "Incremental compilation: extract all dependencies (functions, types) from module members",
+  "type": "unittest",
+  "module": "cache.dependency_extractor",
+  "note": "Infrastructure milestone - extracts transitive closure of referenced symbols"
+}

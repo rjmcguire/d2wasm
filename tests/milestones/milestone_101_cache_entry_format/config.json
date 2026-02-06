@@ -1,0 +1,7 @@
+{
+  "name": "cache_entry_format",
+  "description": "Incremental compilation: cache entry binary format with serialize/deserialize",
+  "type": "unittest",
+  "module": "cache.entry",
+  "note": "Infrastructure milestone - tested via unittest: round-trip, corruption detection, hash consistency"
+}

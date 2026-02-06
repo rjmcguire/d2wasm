@@ -757,7 +757,7 @@ unittest {
     
     // Test CTFE functions
     auto ctfeTable = createCTFEHostFunctions();
-    assert(ctfeTable.count == 6, "Should have 6 CTFE functions");
+    assert(ctfeTable.count == 9, "Should have 9 CTFE functions");
     assert(ctfeTable.getFunction("__ctfe_write_i32") !is null);
     assert(ctfeTable.getFunction("__ctfe_write_str") !is null);
     assert(ctfeTable.getFunction("__ctfe_write_bool") !is null);

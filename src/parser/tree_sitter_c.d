@@ -56,6 +56,12 @@ extern (C) {
     bool ts_node_is_null(TSNode node);
     bool ts_node_has_error(TSNode node);
     const(char)* ts_node_field_name_for_child(TSNode node, uint32_t index);
+    
+    // S-expression output (for hashing)
+    char* ts_node_string(TSNode node);
+    
+    // Memory management
+    void free(void* ptr);  // libc free - ts_node_string returns malloc'd memory
 
     // Language function - statically linked
     TSLanguage* tree_sitter_d();
@@ -172,5 +178,16 @@ class TreeSitterParser {
 
     static TSPoint getEndPoint(TSNode node) {
         return ts_node_end_point(node);
+    }
+    
+    /**
+     * Get S-expression representation of a node (for hashing).
+     * Returns the canonical AST structure, whitespace-independent.
+     */
+    static string getNodeSexp(TSNode node) {
+        char* sexp = ts_node_string(node);
+        if (sexp is null) return "";
+        scope(exit) free(sexp);
+        return to!string(sexp);
     }
 }
