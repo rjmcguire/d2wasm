@@ -1,0 +1,6 @@
+{
+  "name": "filewatcher",
+  "description": "FileWatcher abstraction with debouncing",
+  "type": "unittest",
+  "module": "watcher.watcher"
+}
