@@ -234,6 +234,46 @@ run_test() {
             fi
             ;;
             
+        deterministic)
+            # Deterministic output test - compile twice, verify byte-identical WASM
+            local wasm_file2="$test_dir/test2.wasm"
+            
+            # Second compilation
+            if ! "$COMPILER" "$test_file" -o "$wasm_file2" >/dev/null 2>&1; then
+                echo -e "${RED}FAIL${NC} $test_name"
+                echo "  Second compilation failed"
+                return 1
+            fi
+            
+            # Compare WASM files
+            if ! cmp -s "$wasm_file" "$wasm_file2"; then
+                echo -e "${RED}FAIL${NC} $test_name"
+                echo "  WASM files differ between compilations"
+                echo "  First:  $(xxd "$wasm_file" | head -5)"
+                echo "  Second: $(xxd "$wasm_file2" | head -5)"
+                return 1
+            fi
+            
+            # Also verify the result is correct
+            local result
+            if ! result=$(wasm3 --func "$func_name" "$wasm_file" 2>&1); then
+                echo -e "${RED}FAIL${NC} $test_name"
+                echo "  Execution failed: $result"
+                return 1
+            fi
+            
+            local actual=$(echo "$result" | grep -oE 'Result: -?[0-9]+' | grep -oE '\-?[0-9]+')
+            local expected_result=$(jq -r '.expected_result // "null"' "$config_file")
+            if [ "$expected_result" != "null" ] && [ "$actual" != "$expected_result" ]; then
+                echo -e "${RED}FAIL${NC} $test_name"
+                echo "  Expected: $expected_result, Actual: $actual"
+                return 1
+            fi
+            
+            echo -e "${GREEN}PASS${NC} $test_name (deterministic, result: $actual)"
+            return 0
+            ;;
+            
         *)
             echo -e "${YELLOW}SKIP${NC} $test_name (unknown type: $test_type)"
             return 0

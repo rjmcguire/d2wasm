@@ -199,6 +199,9 @@ class BinaryEmitter {
             // Add imports for CTFE-only functions that are called
             addCTFEImports();
             
+            // Stabilize indices for incremental compilation
+            stabilizeIndices();
+            
             phase = EmitPhase.init;
             emitHeader();
             
@@ -498,6 +501,7 @@ class BinaryEmitter {
         
         // Create function info
         FuncInfo info;
+        info.name = mangledName;  // Use mangled name for index lookups
         info.decl = method;
         info.typeIndex = tIdx;
         info.isImport = false;
@@ -1078,6 +1082,97 @@ class BinaryEmitter {
             importIndex[name] = cast(uint)imports.length;
             imports ~= info;
         }
+    }
+    
+    //==========================================================================
+    // Index Stabilization (for incremental compilation)
+    //==========================================================================
+    
+    /**
+     * Sort types, functions, and imports for stable index assignment.
+     * This ensures the same source code produces identical WASM indices
+     * across compilations, enabling incremental compilation caching.
+     */
+    private void stabilizeIndices() {
+        import std.algorithm : sort;
+        
+        // Build reverse mapping: old type index -> signature
+        FuncSig[] oldTypes = types.dup;
+        
+        // 1. Sort types by canonical representation
+        types.sort!((a, b) => funcSigKey(a) < funcSigKey(b));
+        
+        // Rebuild typeIndex with new indices
+        typeIndex.clear();
+        foreach (i, sig; types) {
+            typeIndex[sig] = cast(uint)i;
+        }
+        
+        // 2. Update function typeIndex references
+        foreach (ref f; functions) {
+            // Look up the signature using the OLD type index
+            if (f.typeIndex < oldTypes.length) {
+                auto sig = oldTypes[f.typeIndex];
+                // Get the NEW type index for this signature
+                f.typeIndex = typeIndex[sig];
+            }
+        }
+        
+        // 3. Update import typeIndex references
+        foreach (ref imp; imports) {
+            if (imp.typeIndex < oldTypes.length) {
+                auto sig = oldTypes[imp.typeIndex];
+                imp.typeIndex = typeIndex[sig];
+            }
+        }
+        
+        // 4. Sort functions by name
+        functions.sort!((a, b) => a.name < b.name);
+        
+        // Rebuild funcIndex
+        funcIndex.clear();
+        foreach (i, ref f; functions) {
+            funcIndex[f.name] = cast(uint)i;
+        }
+        
+        // 5. Sort imports by (module, field)
+        imports.sort!((a, b) {
+            if (a.moduleName != b.moduleName) return a.moduleName < b.moduleName;
+            return a.fieldName < b.fieldName;
+        });
+        
+        // Rebuild importIndex
+        importIndex.clear();
+        foreach (i, ref imp; imports) {
+            importIndex[imp.fieldName] = cast(uint)i;
+        }
+        
+        // 6. Update built-in function indices
+        if (hasBuiltins) {
+            if (auto idx = "__alloc" in funcIndex) {
+                allocFuncIndex = *idx + cast(uint)imports.length;
+            }
+            if (auto idx = "__array_concat" in funcIndex) {
+                concatFuncIndex = *idx + cast(uint)imports.length;
+            }
+        }
+    }
+    
+    /// Generate a canonical string key for a function signature (for sorting)
+    private static string funcSigKey(FuncSig sig) {
+        import std.conv : to;
+        string key = "(";
+        foreach (i, p; sig.params) {
+            if (i > 0) key ~= ",";
+            key ~= to!string(p);
+        }
+        key ~= ")->(";
+        foreach (i, r; sig.results) {
+            if (i > 0) key ~= ",";
+            key ~= to!string(r);
+        }
+        key ~= ")";
+        return key;
     }
     
     //==========================================================================

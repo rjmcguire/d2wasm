@@ -1,0 +1,7 @@
+{
+  "name": "stable_indices",
+  "description": "Verify same source produces identical WASM across compilations",
+  "type": "deterministic",
+  "entry": "main",
+  "expected_result": 30
+}
