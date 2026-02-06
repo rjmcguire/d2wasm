@@ -501,9 +501,26 @@ class TypeChecker {
             return new BasicType(expr.location, BasicType.Kind.Bool);
         }
         
-        // Bitwise operators - TODO: implement
+        // Bitwise operators (and, or, xor, shift)
+        if (expr.operator == BinaryExpression.Operator.BitwiseAnd ||
+            expr.operator == BinaryExpression.Operator.BitwiseOr ||
+            expr.operator == BinaryExpression.Operator.BitwiseXor ||
+            expr.operator == BinaryExpression.Operator.ShiftLeft ||
+            expr.operator == BinaryExpression.Operator.ShiftRight) {
+            
+            if (!isIntegerType(cast(BasicType)leftType) || !isIntegerType(cast(BasicType)rightType)) {
+                throw new TypeError(
+                    format("Bitwise operator requires integer types, got '%s' and '%s'",
+                           leftType.toString(), rightType.toString()),
+                    expr.location
+                );
+            }
+            
+            return leftType;  // Result is same type as left operand
+        }
+        
         throw new TypeError(
-            format("Bitwise operators not yet implemented"),
+            format("Unsupported binary operator"),
             expr.location
         );
     }

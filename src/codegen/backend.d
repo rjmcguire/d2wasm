@@ -59,6 +59,11 @@ interface CompiledFunction {
     /// Execute a specific function by name (for multi-function contexts)
     ExecutionResult callByName(string funcName, long[] args);
     
+    /// Execute a function that returns a large value (struct or static array)
+    /// via hidden __result parameter. The resultSize bytes are allocated,
+    /// address is prepended to args, and result bytes are read back.
+    ExecutionResult callWithLargeReturn(string funcName, long[] args, uint resultSize);
+    
     /// Check if a function exists in this compiled context
     bool hasFunction(string funcName);
     

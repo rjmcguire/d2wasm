@@ -688,13 +688,26 @@ class BinaryEmitter {
         
         // Build signature
         FuncSig sig;
-        sig.params = decl.parameters.map!(p => dTypeToValType(p.type)).array;
         
-        auto retType = dTypeToValType(decl.returnType);
-        if (retType != ValType.i32 || !isVoidType(decl.returnType)) {
-            // Non-void return
-            if (!isVoidType(decl.returnType)) {
-                sig.results = [retType];
+        // Check for large return type (struct or static array)
+        bool largeReturn = isLargeReturnType(decl.returnType);
+        
+        import std.stdio : stderr;
+        
+        if (largeReturn) {
+            // Add hidden __result pointer as first parameter
+            sig.params = [ValType.i32];
+            sig.params ~= decl.parameters.map!(p => dTypeToValType(p.type)).array;
+            // No result - caller reads from __result address
+        } else {
+            sig.params = decl.parameters.map!(p => dTypeToValType(p.type)).array;
+            
+            auto retType = dTypeToValType(decl.returnType);
+            if (retType != ValType.i32 || !isVoidType(decl.returnType)) {
+                // Non-void return
+                if (!isVoidType(decl.returnType)) {
+                    sig.results = [retType];
+                }
             }
         }
         
@@ -732,9 +745,9 @@ class BinaryEmitter {
         // Array/slice types are OK (emitted as pointer to slice struct)
         if (cast(ArrayType)t) return true;
         
-        // UserTypes (structs) need checking
+        // UserTypes (structs) are OK - returned via hidden pointer
         if (auto userType = cast(UserType)t) {
-            return false;  // User types can't be emitted yet (except structs handled elsewhere)
+            return true;
         }
         
         return false;
@@ -743,6 +756,36 @@ class BinaryEmitter {
     private bool isVoidType(Type t) {
         auto basic = cast(BasicType)t;
         return basic && basic.kind == BasicType.Kind.Void;
+    }
+    
+    /**
+     * Check if a return type requires hidden __result parameter
+     * (structs and static arrays are too large to return in a register)
+     */
+    private bool isLargeReturnType(Type t) {
+        if (t is null) return false;
+        
+        // UserType (struct)
+        if (auto userType = cast(UserType)t) {
+            if (!userType.declaration) {
+                auto sym = symbolTable.lookupSymbol(userType.name);
+                if (sym && sym.kind == SymbolKind.Type) {
+                    userType.declaration = sym.declaration;
+                }
+            }
+            if (cast(StructDecl)userType.declaration) {
+                return true;
+            }
+        }
+        
+        // Static array (int[4])
+        if (auto arrType = cast(ArrayType)t) {
+            if (arrType.arraySize !is null) {
+                return true;  // Static array
+            }
+        }
+        
+        return false;
     }
     
     /**

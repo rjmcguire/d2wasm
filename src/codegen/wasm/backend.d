@@ -112,6 +112,34 @@ class WASMCompiledFunction : CompiledFunction {
         }
     }
     
+    override ExecutionResult callWithLargeReturn(string targetFuncName, long[] args, uint resultSize) {
+        try {
+            // Use a fixed high address for result buffer
+            // WASM memory starts at 64KB, use address near the top
+            // This is safe for CTFE since we control the memory layout
+            uint resultAddr = 65536 - 256 - resultSize;  // Leave some headroom
+            
+            // Prepend result address to args
+            int[] intArgs;
+            intArgs ~= cast(int)resultAddr;
+            foreach (arg; args) {
+                intArgs ~= cast(int)arg;
+            }
+            
+            // Call function (void return, writes to resultAddr)
+            auto result = runtime.callI32(targetFuncName, intArgs);
+            // Note: result is void but callI32 still works
+            
+            // Read result bytes from memory
+            ubyte[] resultBytes = runtime.readMemory(resultAddr, resultSize);
+            
+            return ExecutionResult.fromArray(resultBytes);
+            
+        } catch (CTFERuntimeError e) {
+            return ExecutionResult.failure(e.msg);
+        }
+    }
+    
     override bool hasFunction(string targetFuncName) {
         // WASM runtime exports all functions, so any compiled function should be callable
         // For a proper implementation, we'd check the module exports

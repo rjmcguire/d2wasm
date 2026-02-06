@@ -455,7 +455,10 @@ class TreeSitterBridge {
             // Skip braces and parse actual statements
             if (nodeType != "{" && nodeType != "}") {
                 try {
-                    statements ~= parseStatement(child);
+                    auto stmt = parseStatement(child);
+                    if (stmt !is null) {  // Skip null statements (e.g., comments)
+                        statements ~= stmt;
+                    }
                 } catch (ParseError e) {
                     log(2, "Warning: Skipping statement due to parse error: ", e.msg);
                 }
@@ -1194,6 +1197,9 @@ class TreeSitterBridge {
                 return parseVariableDeclarationStatement(node, loc);
             case "mixin_declaration":
                 return parseMixinStatement(node, loc);
+            case "comment":
+                // Skip comments - return null (handled by caller)
+                return null;
             default:
                 throw new ParseError("Unknown statement node: " ~ nodeType, loc);
         }
@@ -1257,7 +1263,10 @@ class TreeSitterBridge {
             string nodeType = TreeSitterParser.getNodeType(child);
             
             if (nodeType != "{" && nodeType != "}") {
-                statements ~= parseStatement(child);
+                auto stmt = parseStatement(child);
+                if (stmt !is null) {  // Skip null statements (e.g., comments)
+                    statements ~= stmt;
+                }
             }
         }
         
@@ -1533,6 +1542,8 @@ class TreeSitterBridge {
             case "equal_expression":
             case "and_expression":
             case "or_expression":
+            case "xor_expression":
+            case "shift_expression":
                 return parseBinaryExpression(node, loc);
             case "postfix_expression":
                 return parsePostfixExpression(node, loc);
@@ -1604,6 +1615,17 @@ class TreeSitterBridge {
                 return parseAssignmentExpression(node, loc);
             case "property_expression":
                 return parsePropertyExpression(node, loc);
+            case "primary_expression":
+                // primary_expression wraps parenthesized expressions, literals, identifiers
+                // Just parse its first non-paren child
+                for (uint i = 0; i < TreeSitterParser.getChildCount(node); i++) {
+                    auto child = TreeSitterParser.getChild(node, i);
+                    string childType = TreeSitterParser.getNodeType(child);
+                    if (childType != "(" && childType != ")") {
+                        return parseExpression(child);
+                    }
+                }
+                throw new ParseError("Empty primary_expression", loc);
             default:
                 throw new ParseError("Unknown expression node: " ~ nodeType, loc);
         }

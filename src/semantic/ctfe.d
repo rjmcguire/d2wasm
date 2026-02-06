@@ -36,19 +36,35 @@ class CTFEError : Exception {
 }
 
 /**
- * Result of a CTFE evaluation that can be either a string or integer.
+ * Result of a CTFE evaluation that can be either a string, integer, or array.
  */
 struct CTFEResult {
     bool isString;
+    bool isArray;
     string stringValue;
     long intValue;
+    long[] arrayValues;
+    ubyte[] arrayBytes;
     
     static CTFEResult fromString(string s) {
-        return CTFEResult(true, s, 0);
+        CTFEResult r;
+        r.isString = true;
+        r.stringValue = s;
+        return r;
     }
     
     static CTFEResult fromInt(long v) {
-        return CTFEResult(false, "", v);
+        CTFEResult r;
+        r.intValue = v;
+        return r;
+    }
+    
+    static CTFEResult fromArray(long[] values, ubyte[] bytes) {
+        CTFEResult r;
+        r.isArray = true;
+        r.arrayValues = values;
+        r.arrayBytes = bytes;
+        return r;
     }
 }
 
@@ -304,7 +320,7 @@ class CTFEEvaluator {
             }
         }
         
-        // Check for function call that might return a string
+        // Check for function call that might return a string or array
         if (auto callExpr = cast(CallExpression)manifest.initializer) {
             auto result = evaluateCallExpressionString(callExpr);
             if (result.isString) {
@@ -312,6 +328,28 @@ class CTFEEvaluator {
                 manifest.ctfeComplete = true;
                 manifest.isStringType = true;
                 log(3, "CTFE: ", manifest.name, " = \"", result.stringValue, "\" (function call)");
+                return;
+            } else if (result.isArray) {
+                manifest.ctfeArrayValue = result.arrayValues;
+                manifest.ctfeArrayBytes = result.arrayBytes;
+                manifest.ctfeElementSize = 4;  // Assume int elements for now
+                manifest.ctfeComplete = true;
+                manifest.isArrayType = true;
+                
+                // Set the inferred type based on the function's return type
+                if (auto funcIdent = cast(IdentifierExpression)callExpr.function_) {
+                    foreach (decl; allDeclarations) {
+                        if (auto fd = cast(FunctionDecl)decl) {
+                            if (fd.name == funcIdent.name) {
+                                manifest.inferredType = fd.returnType;
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                log(3, "CTFE: ", manifest.name, " = ", result.arrayValues, " (array from function, ",
+                    result.arrayBytes.length, " bytes)");
                 return;
             } else {
                 manifest.ctfeValue = result.intValue;
@@ -702,6 +740,16 @@ class CTFEEvaluator {
             throw new CTFEError("CTFE: Function '" ~ funcName ~ "' not found");
         }
         
+        // Debug: print body statements
+        import std.stdio : stderr;
+        if (funcDecl.body_) {
+            if (auto compound = cast(CompoundStatement)funcDecl.body_) {
+                foreach (i, s; compound.statements) {
+                    stderr.writeln("  [", i, "] ", typeid(s), " = ", s.toString());
+                }
+            }
+        }
+        
         // Check if function returns a string
         bool returnsString = false;
         if (auto userType = cast(UserType)funcDecl.returnType) {
@@ -715,6 +763,14 @@ class CTFEEvaluator {
         // For string-returning functions, interpret directly
         if (returnsString) {
             return CTFEResult.fromString(interpretStringFunction(funcDecl));
+        }
+        
+        // Check if function returns a static array
+        if (auto arrType = cast(ArrayType)funcDecl.returnType) {
+            if (arrType.arraySize !is null) {
+                log(3, "CTFE: Function returns static array, evaluating with hidden param");
+                return evaluateStaticArrayReturningFunction(funcDecl, callExpr.arguments);
+            }
         }
         
         // Check if this is a simple function that only contains CTFE intrinsics
@@ -741,6 +797,125 @@ class CTFEEvaluator {
         long result = executeViaBackend(funcDecl, args);
         
         return CTFEResult.fromInt(result);
+    }
+    
+    /**
+     * Evaluate a function that returns a static array at compile time.
+     * Handles the hidden __result parameter by:
+     * 1. Allocating memory in WASM linear memory
+     * 2. Passing that address as first argument
+     * 3. Reading result bytes back after call
+     */
+    CTFEResult evaluateStaticArrayReturningFunction(FunctionDecl funcDecl, Expression[] argExprs) {
+        auto arrType = cast(ArrayType)funcDecl.returnType;
+        if (!arrType || arrType.arraySize is null) {
+            throw new CTFEError("Expected static array return type");
+        }
+        
+        // Evaluate array size
+        uint elemCount = 0;
+        if (auto lit = cast(LiteralExpression)arrType.arraySize) {
+            if (lit.value.type == typeid(long)) {
+                elemCount = cast(uint)lit.value.get!long();
+            } else if (lit.value.type == typeid(int)) {
+                elemCount = cast(uint)lit.value.get!int();
+            }
+        }
+        
+        if (elemCount == 0) {
+            throw new CTFEError("Cannot evaluate static array size");
+        }
+        
+        uint elemSize = 4;  // Assume int elements for now
+        uint totalSize = elemCount * elemSize;
+        
+        // Evaluate arguments
+        long[] args;
+        foreach (arg; argExprs) {
+            args ~= evaluateSimpleExpression(arg);
+        }
+        
+        log(3, "CTFE: Calling ", funcDecl.name, " with args ", args, " returning ", elemCount, " elements");
+        
+        // Execute via backend with large return support
+        auto result = executeStaticArrayViaBackend(funcDecl, args, elemCount, elemSize);
+        
+        return result;
+    }
+    
+    /**
+     * Execute a function that returns a static array via CTFE backend.
+     */
+    CTFEResult executeStaticArrayViaBackend(FunctionDecl funcDecl, long[] args, uint elemCount, uint elemSize) {
+        import semantic.dependency_analyzer : DependencyAnalyzer;
+        import std.algorithm : map, filter, canFind;
+        import std.array : array, join;
+        
+        // Find all functions this one depends on (transitive closure)
+        auto analyzer = new DependencyAnalyzer(symbolTable, allDeclarations);
+        auto dependencies = analyzer.findDependencies(funcDecl);
+        
+        // Check which functions are new (not yet in context)
+        auto newFuncs = dependencies.filter!(f => f.name !in compiledFunctions).array;
+        
+        // Recompile if we have new functions
+        if (!newFuncs.empty) {
+            statCacheMisses++;
+            statFunctionsCompiled += cast(uint)newFuncs.length;
+            log(3, "CTFE: Compiling ", newFuncs.length, " new functions for ", funcDecl.name);
+            
+            // Type-check new functions
+            auto typeChecker = new TypeChecker(symbolTable);
+            foreach (dep; newFuncs) {
+                try {
+                    typeChecker.checkFunctionDeclaration(dep);
+                } catch (TypeError e) {
+                    throw new CTFEError("CTFE type check error in " ~ dep.name ~ ": " ~ e.msg);
+                }
+            }
+            
+            if (cachedContext !is null) {
+                cachedContext.dispose();
+                cachedContext = null;
+            }
+            
+            auto allFuncs = contextFunctions ~ newFuncs;
+            cachedContext = backend.compileWithDependencies(allFuncs, funcDecl.name);
+            if (cachedContext is null) {
+                throw new CTFEError("CTFE compile error: " ~ backend.error());
+            }
+            
+            contextFunctions = allFuncs;
+            foreach (f; newFuncs) {
+                compiledFunctions[f.name] = true;
+            }
+        } else {
+            statCacheHits++;
+        }
+        
+        // Execute with large return - allocate result space and prepend address to args
+        uint totalSize = elemCount * elemSize;
+        auto result = cachedContext.callWithLargeReturn(funcDecl.name, args, totalSize);
+        
+        if (!result.success) {
+            throw new CTFEError("CTFE execution error: " ~ result.error);
+        }
+        
+        log(3, "CTFE: ", funcDecl.name, " returned ", result.arrayBytes.length, " bytes");
+        
+        // Convert bytes to array of longs
+        long[] values;
+        for (uint i = 0; i < result.arrayBytes.length; i += elemSize) {
+            if (elemSize == 4 && i + 4 <= result.arrayBytes.length) {
+                int v = (cast(int)result.arrayBytes[i]) |
+                       (cast(int)result.arrayBytes[i+1] << 8) |
+                       (cast(int)result.arrayBytes[i+2] << 16) |
+                       (cast(int)result.arrayBytes[i+3] << 24);
+                values ~= v;
+            }
+        }
+        
+        return CTFEResult.fromArray(values, result.arrayBytes);
     }
     
     /**

@@ -1610,6 +1610,68 @@ class NativeCompiledFunction : CompiledFunction {
         return ExecutionResult.fromInt(result);
     }
     
+    override ExecutionResult callWithLargeReturn(string targetFuncName, long[] args, uint resultSize) {
+        import codegen.native.codegen_interface : setjmp;
+        import core.stdc.stdlib : malloc, free;
+        
+        // Allocate buffer for result
+        ubyte* resultBuf = cast(ubyte*)malloc(resultSize);
+        if (resultBuf is null) {
+            return ExecutionResult.failure("Failed to allocate result buffer");
+        }
+        scope(exit) free(resultBuf);
+        
+        // Set up execution context for host functions
+        NativeCTFEContext ctx;
+        ctx.dataSection = &dataSection;
+        ctx.errorKind = CTFEErrorKind.None;
+        hostFunctions.setContext(&ctx);
+        scope(exit) hostFunctions.setContext(null);
+        
+        // Look up function entry point
+        auto labelPtr = targetFuncName in functionLabels;
+        if (labelPtr is null) {
+            return ExecutionResult.failure("Function not found: " ~ targetFuncName);
+        }
+        
+        size_t targetEntry = (*labelPtr).offset;
+        
+        // Set up error recovery point
+        if (setjmp(ctx.errorJump) != 0) {
+            return ExecutionResult.failure(ctfeErrorMessageWithStack(&ctx));
+        }
+        
+        // Prepend result pointer to args
+        long[] fullArgs = [cast(long)resultBuf] ~ args;
+        
+        // Call function (void return, writes to resultBuf)
+        switch (fullArgs.length) {
+            case 1:
+                alias Fn1 = extern(C) void function(long);
+                (cast(Fn1)(gen.base + targetEntry))(fullArgs[0]);
+                break;
+            case 2:
+                alias Fn2 = extern(C) void function(long, long);
+                (cast(Fn2)(gen.base + targetEntry))(fullArgs[0], fullArgs[1]);
+                break;
+            case 3:
+                alias Fn3 = extern(C) void function(long, long, long);
+                (cast(Fn3)(gen.base + targetEntry))(fullArgs[0], fullArgs[1], fullArgs[2]);
+                break;
+            case 4:
+                alias Fn4 = extern(C) void function(long, long, long, long);
+                (cast(Fn4)(gen.base + targetEntry))(fullArgs[0], fullArgs[1], fullArgs[2], fullArgs[3]);
+                break;
+            default:
+                return ExecutionResult.failure("Too many parameters (max 4)");
+        }
+        
+        // Copy result bytes
+        ubyte[] resultBytes = resultBuf[0 .. resultSize].dup;
+        
+        return ExecutionResult.fromArray(resultBytes);
+    }
+    
     override bool hasFunction(string targetFuncName) {
         return (targetFuncName in functionLabels) !is null;
     }

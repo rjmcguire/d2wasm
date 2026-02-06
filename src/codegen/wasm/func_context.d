@@ -2215,6 +2215,17 @@ class FuncContext {
             return;
         }
         
+        // Check if it's a static array local - emit address
+        if (auto info = expr.name in staticArrayLocals) {
+            // Emit address: FP + frameOffset
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset);
+            out_ ~= Op.i32_add;
+            return;
+        }
+        
         // In a method, check if it's an implicit field access (field without 'this.')
         if (func.structParent !is null) {
             auto field = func.structParent.getField(expr.name);
