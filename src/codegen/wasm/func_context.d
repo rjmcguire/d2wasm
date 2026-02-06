@@ -1139,6 +1139,36 @@ class FuncContext {
             throw new EmitError("Complex array index assignment not yet supported");
         }
         
+        // Check if it's a static array local
+        if (auto info = arrayIdent.name in staticArrayLocals) {
+            // Static array: direct address on shadow stack
+            // Address = FP + frameOffset + index * elemSize
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset);
+            out_ ~= Op.i32_add;
+            
+            // Add index * elemSize
+            emitExpression(out_, indexExpr.index);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.elementSize);
+            out_ ~= Op.i32_mul;
+            out_ ~= Op.i32_add;
+            
+            // Emit value
+            emitExpression(out_, value);
+            
+            // Store the element
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            
+            // Assignment is an expression - emit value again for result
+            emitExpression(out_, value);
+            return;
+        }
+        
         // Check if it's a slice local
         if (auto info = arrayIdent.name in sliceLocals) {
             // Load ptr from slice struct (offset 0)

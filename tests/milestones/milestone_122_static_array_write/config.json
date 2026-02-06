@@ -1,0 +1,5 @@
+{
+    "type": "wasm_exec",
+    "expected_result": 52,
+    "description": "Static array index assignment and read-back"
+}
