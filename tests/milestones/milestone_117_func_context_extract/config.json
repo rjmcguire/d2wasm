@@ -1,0 +1,5 @@
+{
+  "name": "func_context_extract",
+  "description": "Extract FuncContext (3300 lines) from emitter.d to wasm/func_context.d",
+  "type": "compile_only"
+}

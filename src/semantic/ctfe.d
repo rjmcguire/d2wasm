@@ -14,7 +14,7 @@ import ast.expressions;
 import semantic.symbol_table;
 import semantic.type_checker;
 import codegen.emitter;
-import codegen.wasm;
+import codegen.wasm.types;
 import codegen.backend;
 import parser.tree_sitter_bridge : TreeSitterBridge;
 import diagnostic.log : log;
@@ -353,7 +353,7 @@ class CTFEEvaluator {
      */
     string evaluateStringConcat(BinaryExpression expr) {
         import semantic.ctfe_runtime : CTFERuntime, CTFERuntimeError;
-        import codegen.wasm : ARRAY_PTR_OFFSET, ARRAY_LEN_OFFSET;
+        import codegen.wasm.types : ARRAY_PTR_OFFSET, ARRAY_LEN_OFFSET;
         
         log(3, "CTFE: Evaluating array concat via WASM");
         

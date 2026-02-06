@@ -5,5 +5,5 @@
  */
 module codegen;
 
-public import codegen.wasm;
+public import codegen.wasm.types;
 public import codegen.emitter;

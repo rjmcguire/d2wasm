@@ -4,7 +4,7 @@
  * This module defines the fundamental types and encoding functions
  * for emitting binary WebAssembly.
  */
-module codegen.wasm;
+module codegen.wasm.types;
 
 import std.array : Appender;
 
