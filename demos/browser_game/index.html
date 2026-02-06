@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>D-to-WASM Browser Game Demo</title>
+    <style>
+        body { font-family: system-ui; max-width: 600px; margin: 50px auto; padding: 20px; }
+        .score { font-size: 48px; text-align: center; margin: 20px 0; }
+        button { font-size: 24px; padding: 10px 20px; margin: 5px; cursor: pointer; }
+        .buttons { text-align: center; }
+        pre { background: #f5f5f5; padding: 15px; border-radius: 5px; overflow-x: auto; }
+    </style>
+</head>
+<body>
+    <h1>🎮 D-to-WASM Score Tracker</h1>
+    <p>This game logic is written in D and compiled to WebAssembly:</p>
+    
+    <div class="score">Score: <span id="score">0</span></div>
+    
+    <div class="buttons">
+        <button onclick="addPoints(10)">+10 Points</button>
+        <button onclick="addPoints(5)">+5 Points</button>
+        <button onclick="addPoints(1)">+1 Point</button>
+        <button onclick="reset()">Reset</button>
+    </div>
+    
+    <h3>The D Code:</h3>
+    <pre>
+int score = 0;
+
+int addPoints(int pts) {
+    score += pts;
+    return score;
+}
+
+int getScore() {
+    return score;
+}
+    </pre>
+    
+    <script>
+        let wasm;
+        
+        async function init() {
+            try {
+                const response = await fetch('game.wasm');
+                const bytes = await response.arrayBuffer();
+                const result = await WebAssembly.instantiate(bytes, {
+                    env: {
+                        // Add any imports the module needs here
+                    }
+                });
+                wasm = result.instance.exports;
+                updateScore();
+            } catch (e) {
+                document.getElementById('score').textContent = 'Error loading WASM: ' + e.message;
+            }
+        }
+        
+        function addPoints(pts) {
+            if (wasm) {
+                wasm.addPoints(pts);
+                updateScore();
+            }
+        }
+        
+        function reset() {
+            if (wasm) {
+                wasm.resetScore();
+                updateScore();
+            }
+        }
+        
+        function updateScore() {
+            if (wasm) {
+                document.getElementById('score').textContent = wasm.getScore();
+            }
+        }
+        
+        init();
+    </script>
+</body>
+</html>

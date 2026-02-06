@@ -1,0 +1,5 @@
+{
+    "type": "wasm_exec",
+    "expected_result": 1996959894,
+    "description": "CTFE CRC32 lookup table generation - tests static arrays, CTFE loops, bitwise ops"
+}
