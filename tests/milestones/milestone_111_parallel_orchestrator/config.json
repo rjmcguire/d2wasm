@@ -1,0 +1,6 @@
+{
+  "name": "parallel_orchestrator",
+  "description": "Parallel multi-file compilation with process isolation",
+  "type": "shell",
+  "script": "run_test.sh"
+}

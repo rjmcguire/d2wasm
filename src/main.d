@@ -45,6 +45,11 @@ struct CompilerOptions {
     string cacheDir;          // Cache directory (enables incremental mode)
     string stagingFile;       // Output staging file path
     bool jsonOutput = false;  // Output JSON summary instead of normal output
+    
+    // Parallel compilation options
+    string[] inputFiles;      // Multiple input files (for parallel mode)
+    string outputDir;         // Output directory for parallel mode
+    int maxParallel = 0;      // Max parallel compilations (0 = auto)
 }
 
 int main(string[] args) {
@@ -79,6 +84,7 @@ int main(string[] args) {
         auto helpInformation = getopt(args,
             "input|i", "Input D source file", &options.inputFile,
             "output|o", "Output WASM file (default: input.wasm)", &options.outputFile,
+            "outdir", "Output directory for parallel mode", &options.outputDir,
             "backend|b", "Code generation backend: wasm, native (default: wasm)", &options.backend,
             "run|r", "Compile and run immediately (like rdmd)", &options.run,
             "func|f", "Function to run with --run (default: main)", &options.runFunc,
@@ -88,7 +94,9 @@ int main(string[] args) {
             // Incremental compilation
             "cache", "Cache directory for incremental compilation", &options.cacheDir,
             "staging", "Staging file output path", &options.stagingFile,
-            "json", "Output JSON summary (for incremental mode)", &options.jsonOutput
+            "json", "Output JSON summary (for incremental mode)", &options.jsonOutput,
+            // Parallel compilation
+            "jobs|j", "Max parallel compilations (0 = auto)", &options.maxParallel
         );
         
         log(3, "main() started");
@@ -96,15 +104,30 @@ int main(string[] args) {
         if (helpInformation.helpWanted) {
             defaultGetoptPrinter("D-to-WASM Compiler\n" ~
                 "Compiles a subset of D language to WebAssembly\n" ~
-                "\nUsage: d2wasm [options] input.d\n" ~
+                "\nUsage: d2wasm [options] input.d [input2.d ...]\n" ~
                 "\nVerbosity: -v (progress), -vv (detail), -vvv (debug)\n",
                 helpInformation.options);
             return 0;
         }
         
-        // Get input file from positional argument if not specified
-        if (options.inputFile.length == 0 && args.length > 1) {
-            options.inputFile = args[1];
+        // Collect all positional arguments as input files
+        if (args.length > 1) {
+            options.inputFiles = args[1..$].dup;
+        }
+        
+        // If single -i option was used, add to inputFiles
+        if (options.inputFile.length > 0 && !options.inputFiles.canFind(options.inputFile)) {
+            options.inputFiles = [options.inputFile] ~ options.inputFiles;
+        }
+        
+        // Handle multiple input files (parallel mode)
+        if (options.inputFiles.length > 1) {
+            return runParallel(options);
+        }
+        
+        // Single file mode
+        if (options.inputFiles.length == 1) {
+            options.inputFile = options.inputFiles[0];
         }
         
         if (options.inputFile.length == 0) {
@@ -366,6 +389,84 @@ int compileFile(CompilerOptions options) {
         log(1, e.info);
         return 1;
     }
+}
+
+/**
+ * Run parallel compilation of multiple files.
+ */
+int runParallel(CompilerOptions options) {
+    import codegen.orchestrator : Orchestrator, OrchestratorResult;
+    import std.json;
+    import diagnostic.log : log;
+    
+    // Get the path to ourselves
+    import core.runtime : Runtime;
+    string compilerPath = Runtime.args[0];
+    
+    // Use output directory or current directory
+    string outDir = options.outputDir.length > 0 ? options.outputDir : ".";
+    
+    log(1, "Parallel compilation of ", options.inputFiles.length, " files...");
+    
+    auto orchestrator = new Orchestrator(
+        compilerPath,
+        options.cacheDir,
+        outDir,
+        options.maxParallel
+    );
+    orchestrator.setVerbosity(options.verbosity);
+    
+    auto result = orchestrator.compile(options.inputFiles);
+    
+    // Output results
+    if (options.jsonOutput) {
+        JSONValue json;
+        json["totalFiles"] = result.totalFiles;
+        json["success"] = result.successCount;
+        json["failed"] = result.failCount;
+        json["cacheHits"] = result.totalCacheHits;
+        json["cacheMisses"] = result.totalCacheMisses;
+        
+        JSONValue[] fileResults;
+        foreach (r; result.results) {
+            JSONValue fr;
+            fr["input"] = r.inputFile;
+            fr["output"] = r.outputFile;
+            fr["success"] = r.success;
+            if (!r.success) {
+                fr["error"] = r.error;
+            } else {
+                fr["wasmSize"] = r.wasmSize;
+                fr["cacheHits"] = r.cacheHits;
+                fr["cacheMisses"] = r.cacheMisses;
+            }
+            fileResults ~= fr;
+        }
+        json["files"] = fileResults;
+        
+        writeln(json.toPrettyString());
+    } else {
+        // Normal output
+        foreach (r; result.results) {
+            if (r.success) {
+                log(1, "Compiled ", r.inputFile, " -> ", r.outputFile);
+            } else {
+                writeln("Failed: ", r.inputFile);
+                writeln("  ", r.error);
+            }
+        }
+        
+        writeln();
+        writeln("Results: ", result.successCount, " succeeded, ", 
+                result.failCount, " failed");
+        
+        if (options.cacheDir.length > 0) {
+            writeln("Cache: ", result.totalCacheHits, " hits, ",
+                    result.totalCacheMisses, " misses");
+        }
+    }
+    
+    return result.allSucceeded() ? 0 : 1;
 }
 
 /**
