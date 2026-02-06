@@ -18,6 +18,7 @@ module codegen.emitter;
 
 import codegen.wasm.types;
 import codegen.wasm.func_context : FuncContext;
+import codegen.wasm.sections;
 import ast.nodes;
 import ast.statements;
 import ast.expressions;
@@ -29,6 +30,9 @@ import std.algorithm : map, canFind;
 import std.conv : to;
 import std.format : format;
 import std.digest.murmurhash;
+
+// Re-export section types used externally
+public import codegen.wasm.sections : FuncSig, ImportInfo;
 
 //==============================================================================
 // Error Handling
@@ -44,24 +48,8 @@ class EmitError : Exception {
 }
 
 //==============================================================================
-// Function Signature (for type section)
+// Function Signature - imported from codegen.wasm.sections
 //==============================================================================
-
-struct FuncSig {
-    ValType[] params;
-    ValType[] results;
-    
-    bool opEquals(const FuncSig other) const {
-        return params == other.params && results == other.results;
-    }
-    
-    size_t toHash() const nothrow @safe {
-        size_t h = 0;
-        foreach (p; params) h = h * 31 + p;
-        foreach (r; results) h = h * 31 + r;
-        return h;
-    }
-}
 
 //==============================================================================
 // Collected Function Info
@@ -77,14 +65,8 @@ struct FuncInfo {
 }
 
 //==============================================================================
-// Imported Function Info
+// Imported Function Info - imported from codegen.wasm.sections
 //==============================================================================
-
-struct ImportInfo {
-    string moduleName;   // WASM module (e.g., "env", "console")
-    string fieldName;    // Function name
-    uint typeIndex;      // Index into type section
-}
 
 //==============================================================================
 // Emitter State
@@ -1303,31 +1285,8 @@ class BinaryEmitter {
     //==========================================================================
     
     private void emitTypeSection() {
-        if (types.length == 0) return;
-        
-        Appender!(ubyte[]) section;
-        
-        // Type count
-        leb128u(section, types.length);
-        
-        foreach (sig; types) {
-            // Function type marker
-            section ~= cast(ubyte)0x60;
-            
-            // Parameters
-            leb128u(section, sig.params.length);
-            foreach (p; sig.params) {
-                section ~= cast(ubyte)p;
-            }
-            
-            // Results
-            leb128u(section, sig.results.length);
-            foreach (r; sig.results) {
-                section ~= cast(ubyte)r;
-            }
-        }
-        
-        emitSection(Section.type, section.data);
+        if (auto content = buildTypeSection(types))
+            emitSection(Section.type, content);
     }
     
     //==========================================================================
@@ -1335,30 +1294,8 @@ class BinaryEmitter {
     //==========================================================================
     
     private void emitImportSection() {
-        if (imports.length == 0) return;
-        
-        Appender!(ubyte[]) section;
-        
-        // Import count
-        leb128u(section, imports.length);
-        
-        foreach (imp; imports) {
-            // Module name (length-prefixed string)
-            leb128u(section, imp.moduleName.length);
-            section ~= cast(ubyte[])imp.moduleName;
-            
-            // Field name (length-prefixed string)
-            leb128u(section, imp.fieldName.length);
-            section ~= cast(ubyte[])imp.fieldName;
-            
-            // Import kind: 0x00 = function
-            section ~= cast(ubyte)0x00;
-            
-            // Type index
-            leb128u(section, imp.typeIndex);
-        }
-        
-        emitSection(Section.import_, section.data);
+        if (auto content = buildImportSection(imports))
+            emitSection(Section.import_, content);
     }
     
     //==========================================================================
@@ -1368,16 +1305,10 @@ class BinaryEmitter {
     private void emitFunctionSection() {
         if (functions.length == 0) return;
         
-        Appender!(ubyte[]) section;
-        
-        // Function count
-        leb128u(section, functions.length);
-        
-        foreach (f; functions) {
-            leb128u(section, f.typeIndex);
-        }
-        
-        emitSection(Section.function_, section.data);
+        // Extract type indices from FuncInfo array
+        auto typeIndices = functions.map!(f => f.typeIndex).array;
+        if (auto content = buildFunctionSection(typeIndices))
+            emitSection(Section.function_, content);
     }
     
     //==========================================================================
@@ -1386,16 +1317,8 @@ class BinaryEmitter {
     
     private void emitMemorySection() {
         // Always emit memory for now (needed for data section)
-        Appender!(ubyte[]) section;
-        
-        // 1 memory
-        leb128u(section, 1);
-        
-        // Limits: min pages, no max
-        section ~= cast(ubyte)0x00;  // flags: no max
-        leb128u(section, memoryPages);
-        
-        emitSection(Section.memory, section.data);
+        if (auto content = buildMemorySection(memoryPages))
+            emitSection(Section.memory, content);
     }
     
     //==========================================================================
@@ -1405,29 +1328,12 @@ class BinaryEmitter {
     private void emitGlobalSection() {
         if (globals.length == 0) return;
         
-        Appender!(ubyte[]) section;
+        // Convert to section builder's GlobalInfo format
+        import codegen.wasm.sections.global : GlobalInfo_ = GlobalInfo;
+        auto sectionGlobals = globals.map!(g => GlobalInfo_(g.type, g.mutable, g.initValue)).array;
         
-        // Global count
-        leb128u(section, globals.length);
-        
-        foreach (g; globals) {
-            // Type
-            section ~= cast(ubyte)g.type;
-            // Mutability: 0 = const, 1 = mutable
-            section ~= cast(ubyte)(g.mutable ? 1 : 0);
-            
-            // Init expression
-            if (g.type == ValType.i32) {
-                section ~= Op.i32_const;
-                leb128s(section, g.initValue);
-            } else if (g.type == ValType.i64) {
-                section ~= Op.i64_const;
-                leb128s(section, g.initValue);
-            }
-            section ~= Op.end;
-        }
-        
-        emitSection(Section.global, section.data);
+        if (auto content = buildGlobalSection(sectionGlobals))
+            emitSection(Section.global, content);
     }
     
     //==========================================================================
@@ -1435,54 +1341,23 @@ class BinaryEmitter {
     //==========================================================================
     
     private void emitExportSection() {
-        Appender!(ubyte[]) section;
-        
-        // Count exports (functions + memory + globals we want to export)
-        uint exportCount = 0;
-        foreach (f; functions) {
-            if (f.exported) exportCount++;
-        }
-        exportCount++;  // Memory export
-        if (needsArraySupport) {
-            exportCount++;  // Export heap_ptr for debugging
-        }
-        
-        leb128u(section, exportCount);
-        
-        // Export functions
+        // Build function exports
+        FuncExport[] funcExports;
         foreach (i, f; functions) {
-            if (!f.exported) continue;
-            
-            // Name
-            leb128u(section, f.name.length);
-            section ~= cast(ubyte[])f.name;
-            
-            // Kind: function
-            section ~= cast(ubyte)ExportKind.func;
-            
-            // Index: local functions start after imports
-            leb128u(section, cast(uint)imports.length + cast(uint)i);
+            if (f.exported) {
+                // Index: local functions start after imports
+                funcExports ~= FuncExport(f.name, cast(uint)imports.length + cast(uint)i);
+            }
         }
         
-        // Export memory
-        {
-            string memName = "memory";
-            leb128u(section, memName.length);
-            section ~= cast(ubyte[])memName;
-            section ~= cast(ubyte)ExportKind.memory;
-            leb128u(section, 0);  // Memory index 0
-        }
-        
-        // Export heap_ptr global (for CTFE debugging)
+        // Build global exports
+        GlobalExport[] globalExports;
         if (needsArraySupport) {
-            string hpName = "__heap_ptr";
-            leb128u(section, hpName.length);
-            section ~= cast(ubyte[])hpName;
-            section ~= cast(ubyte)ExportKind.global;
-            leb128u(section, heapPtrGlobal);
+            globalExports ~= GlobalExport("__heap_ptr", heapPtrGlobal);
         }
         
-        emitSection(Section.export_, section.data);
+        if (auto content = buildExportSection(funcExports, true, globalExports))
+            emitSection(Section.export_, content);
     }
     
     //==========================================================================
@@ -1492,20 +1367,14 @@ class BinaryEmitter {
     private void emitCodeSection() {
         if (functions.length == 0) return;
         
-        Appender!(ubyte[]) section;
-        
-        // Function count
-        leb128u(section, functions.length);
-        
+        // Emit all function bodies
+        ubyte[][] bodies;
         foreach (f; functions) {
-            auto body_ = emitFunctionBody(f);
-            
-            // Body size
-            leb128u(section, body_.length);
-            section ~= body_;
+            bodies ~= emitFunctionBody(f);
         }
         
-        emitSection(Section.code, section.data);
+        if (auto content = buildCodeSection(bodies))
+            emitSection(Section.code, content);
     }
     
     private ubyte[] emitFunctionBody(FuncInfo f) {
@@ -1788,26 +1657,12 @@ class BinaryEmitter {
     private void emitDataSection() {
         if (dataEntries.length == 0) return;
         
-        Appender!(ubyte[]) section;
+        // Convert to section builder's DataEntry format
+        import codegen.wasm.sections.data : DataEntry_ = DataEntry;
+        auto sectionEntries = dataEntries.map!(e => DataEntry_(e.offset, e.data)).array;
         
-        // Segment count
-        leb128u(section, dataEntries.length);
-        
-        foreach (entry; dataEntries) {
-            // Active segment, memory 0
-            section ~= cast(ubyte)0x00;
-            
-            // Offset expression: i32.const <offset>
-            section ~= Op.i32_const;
-            leb128s(section, entry.offset);
-            section ~= Op.end;
-            
-            // Data
-            leb128u(section, entry.data.length);
-            section ~= entry.data;
-        }
-        
-        emitSection(Section.data, section.data);
+        if (auto content = buildDataSection(sectionEntries))
+            emitSection(Section.data, content);
     }
     
     /**

@@ -1,0 +1,4 @@
+{
+    "type": "wasm_exec",
+    "expected_result": 42
+}
