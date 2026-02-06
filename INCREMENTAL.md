@@ -80,7 +80,7 @@ Invalidation: if source_hash OR any dependency_hash changes → recompile.
 2. ✅ **milestone_102** Source hashing + Dependency extraction
 3. ✅ **milestone_103** Staging file write/read/validate
 4. ✅ **milestone_104** Main.db (append, index, lookup, merge, compact)
-5. Cache hit detection
+5. ✅ **milestone_105** Cache validation (source + dependency hash checking)
 6. Compile with cache (skip cached members)
 7. Child process mode (--compile-module flag + JSON output)
 8. Orchestrator (spawn children, merge results)
