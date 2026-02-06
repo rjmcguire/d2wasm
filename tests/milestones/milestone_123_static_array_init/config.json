@@ -1,0 +1,5 @@
+{
+    "type": "wasm_exec",
+    "expected_result": 6,
+    "description": "Static array initialized with array literal"
+}

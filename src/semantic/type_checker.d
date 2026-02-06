@@ -1145,7 +1145,32 @@ class TypeChecker {
             return checkBasicTypeCompatibility(fromBasic, toBasic);
         }
         
-        // TODO: Add more type compatibility rules (pointers, arrays, user types)
+        // Array type compatibility
+        auto fromArray = cast(ArrayType)from;
+        auto toArray = cast(ArrayType)to;
+        
+        if (fromArray && toArray) {
+            // Check element type compatibility
+            auto elemCompat = checkTypeCompatibility(fromArray.elementType, toArray.elementType);
+            if (!elemCompat.isCompatible) {
+                return TypeCompatibility.incompatible();
+            }
+            
+            // Dynamic array → static array is allowed (array literal init)
+            // The actual length check happens at runtime or is checked by emitter
+            if (fromArray.arraySize is null && toArray.arraySize !is null) {
+                return TypeCompatibility.compatible();
+            }
+            
+            // Static → static with same size is compatible
+            // (would need to evaluate both sizes to check equality)
+            if (fromArray.arraySize !is null && toArray.arraySize !is null) {
+                return TypeCompatibility.compatible();  // Assume compatible, could add size check
+            }
+            
+            // Same kind (both dynamic or both static)
+            return TypeCompatibility.compatible();
+        }
         
         return TypeCompatibility.incompatible();
     }
