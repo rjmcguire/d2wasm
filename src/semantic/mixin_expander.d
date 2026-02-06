@@ -466,6 +466,7 @@ class MixinExpander {
                 case BinaryExpression.Operator.BitwiseXor:
                 case BinaryExpression.Operator.ShiftLeft:
                 case BinaryExpression.Operator.ShiftRight:
+                case BinaryExpression.Operator.UnsignedShiftRight:
                 case BinaryExpression.Operator.Concat:
                     throw new MixinError("Non-comparison operator in static if condition", loc);
             }

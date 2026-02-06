@@ -1,0 +1,5 @@
+{
+    "description": "Block scopes - variables scoped to their blocks, for loop scope",
+    "expected_result": 43,
+    "type": "run"
+}

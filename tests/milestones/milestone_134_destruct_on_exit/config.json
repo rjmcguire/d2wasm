@@ -1,0 +1,5 @@
+{
+    "description": "CompoundStatement destructOnExit list - type checker tracks variables for RAII",
+    "expected_result": 7,
+    "type": "run"
+}

@@ -1,0 +1,5 @@
+{
+    "description": "Shadowing detection - declaring variable that shadows outer scope should error",
+    "type": "compile_error",
+    "expected_error": "shadows"
+}

@@ -1,0 +1,5 @@
+{
+    "description": "Unique local IDs - type checker assigns unique IDs to variables/parameters",
+    "expected_result": 24,
+    "type": "run"
+}

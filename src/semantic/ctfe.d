@@ -244,11 +244,11 @@ class CTFEEvaluator {
         if (auto literal = cast(LiteralExpression)manifest.initializer) {
             if (literal.value.type == typeid(long)) {
                 long value = literal.value.get!long();
-                // Check for i32 overflow
-                if (value > int.max || value < int.min) {
+                // Allow both signed i32 and unsigned u32 range
+                if (value > uint.max || value < int.min) {
                     throw new CTFEError(
-                        format("Integer literal %d exceeds i32 range [%d, %d] for '%s'",
-                               value, int.min, int.max, manifest.name)
+                        format("Integer literal %d exceeds 32-bit range [%d, %d] for '%s'",
+                               value, int.min, uint.max, manifest.name)
                     );
                 }
                 manifest.ctfeValue = value;
@@ -288,11 +288,11 @@ class CTFEEvaluator {
                 // Evaluate the operand
                 long operand = evaluateSimpleExpression(unaryExpr.operand);
                 long value = -operand;
-                // Check for i32 overflow
-                if (value > int.max || value < int.min) {
+                // Allow both signed i32 and unsigned u32 range
+                if (value > uint.max || value < int.min) {
                     throw new CTFEError(
-                        format("Integer value %d exceeds i32 range [%d, %d] for '%s'",
-                               value, int.min, int.max, manifest.name)
+                        format("Integer value %d exceeds 32-bit range [%d, %d] for '%s'",
+                               value, int.min, uint.max, manifest.name)
                     );
                 }
                 manifest.ctfeValue = value;
@@ -1318,6 +1318,7 @@ class CTFEEvaluator {
                 case BinaryExpression.Operator.BitwiseXor: return left ^ right;
                 case BinaryExpression.Operator.ShiftLeft: return left << right;
                 case BinaryExpression.Operator.ShiftRight: return left >> right;
+                case BinaryExpression.Operator.UnsignedShiftRight: return left >>> right;
                 case BinaryExpression.Operator.Concat: 
                     throw new CTFEError("CTFE: String concat not supported in numeric context");
             }
@@ -1495,6 +1496,7 @@ class CTFEEvaluator {
                 case BinaryExpression.Operator.BitwiseXor: return left ^ right;
                 case BinaryExpression.Operator.ShiftLeft: return left << right;
                 case BinaryExpression.Operator.ShiftRight: return left >> right;
+                case BinaryExpression.Operator.UnsignedShiftRight: return left >>> right;
                 case BinaryExpression.Operator.Concat: 
                     throw new CTFEError("CTFE: String concat not supported in numeric context");
             }

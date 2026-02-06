@@ -40,6 +40,9 @@ class Symbol {
     bool isCTFEOnly;  // True for compile-time-only functions (__writeln, __traits, etc.)
     bool isVariadic;  // True for variadic functions (__writeln, etc.)
     
+    // For local variables/parameters: unique ID assigned by type checker
+    uint uniqueLocalId = uint.max;  // uint.max = not a local variable
+    
     this(string name, SymbolKind kind, Type type, Declaration decl, SourceLocation location, bool isGlobal = false) {
         this.name = name;
         this.kind = kind;
@@ -69,16 +72,43 @@ class Scope {
     }
     
     /**
-     * Add symbol to this scope
+     * Add symbol to this scope.
+     * Rejects if symbol already exists in this scope OR if it shadows
+     * a variable in an outer scope (shadowing is disallowed).
      */
     void addSymbol(Symbol symbol) {
+        // Check current scope
         if (symbol.name in symbols) {
             throw new SemanticError(
                 format("Symbol '%s' is already defined in scope '%s'", symbol.name, name),
                 symbol.location
             );
         }
+        
+        // Check for shadowing in parent scopes (only for variables/parameters)
+        if (symbol.kind == SymbolKind.Variable || symbol.kind == SymbolKind.Parameter) {
+            if (auto outer = lookupOuter(symbol.name)) {
+                if (outer.kind == SymbolKind.Variable || outer.kind == SymbolKind.Parameter) {
+                    throw new SemanticError(
+                        format("Variable '%s' shadows outer variable declared at %s",
+                               symbol.name, outer.location.toString()),
+                        symbol.location
+                    );
+                }
+            }
+        }
+        
         symbols[symbol.name] = symbol;
+    }
+    
+    /**
+     * Look up symbol in parent scopes only (not this scope)
+     */
+    Symbol lookupOuter(string name) {
+        if (parent) {
+            return parent.lookup(name);
+        }
+        return null;
     }
     
     /**

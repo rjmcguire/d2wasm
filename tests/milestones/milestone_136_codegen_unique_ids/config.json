@@ -1,0 +1,5 @@
+{
+    "description": "Codegen uses uniqueLocalId - variables resolved via unique IDs from type checker",
+    "expected_result": 26,
+    "type": "run"
+}

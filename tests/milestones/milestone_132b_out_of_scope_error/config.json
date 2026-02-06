@@ -1,0 +1,5 @@
+{
+    "description": "Out-of-scope variable access should produce error",
+    "type": "compile_error",
+    "expected_error": "undefined"
+}

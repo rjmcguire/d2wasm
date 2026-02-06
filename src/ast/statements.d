@@ -18,6 +18,10 @@ import std.conv;
 class CompoundStatement : Statement {
     Statement[] statements;
     
+    // Assigned by type checker - local IDs to destruct when exiting this scope
+    // Order is construction order; destruct in reverse
+    uint[] destructOnExit;
+    
     this(SourceLocation loc, Statement[] statements) {
         super(loc);
         this.statements = statements;
@@ -100,6 +104,11 @@ class ForStatement : Statement {
 class ReturnStatement : Statement {
     Expression value;  // null for void return
     
+    // Assigned by type checker - destruction lists for each scope we're exiting
+    // unwindChain[0] is the innermost scope, [n-1] is the function scope
+    // Each entry contains local IDs to destruct (in construction order; reverse for destruction)
+    uint[][] unwindChain;
+    
     this(SourceLocation loc, Expression value = null) {
         super(loc);
         this.value = value;
@@ -139,6 +148,10 @@ class VariableDeclarationStatement : Statement {
     string name;
     Type type;
     Expression initializer;  // null if no initializer
+    
+    // Assigned by type checker - unique ID for this local variable
+    uint uniqueLocalId = uint.max;  // uint.max = unassigned
+    bool needsDestruction = false;  // Has destructor that needs calling
     
     this(SourceLocation loc, string name, Type type, Expression initializer = null) {
         super(loc);

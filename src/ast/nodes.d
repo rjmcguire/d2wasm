@@ -160,6 +160,9 @@ struct Parameter {
     string name;
     Expression defaultValue;  // null if no default
     
+    // Assigned by type checker - unique ID for this parameter
+    uint uniqueLocalId = uint.max;  // uint.max = unassigned
+    
     string toString() const {
         if (defaultValue) {
             return format("%s %s = %s", type.toString(), name, defaultValue.toString());

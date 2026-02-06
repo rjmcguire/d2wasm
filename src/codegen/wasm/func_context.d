@@ -27,7 +27,8 @@ class FuncContext {
     
     // Local variables (parameters + locals)
     ValType[] localTypes;
-    uint[string] localIndex;
+    uint[uint] localIdToWasmIdx;  // uniqueLocalId -> WASM local index
+    uint[string] localIndex;       // name -> WASM local index (legacy, for struct/slice lookups)
     uint paramCount;
     
     // Shadow stack for struct locals
@@ -79,6 +80,11 @@ class FuncContext {
     // Method info: non-null structParent means we're in a method with hidden 'this'
     uint thisLocalIndex;  // Local index of hidden 'this' parameter (for methods)
     
+    // Large return value info (structs, static arrays)
+    bool hasLargeReturn = false;     // Function returns via hidden pointer
+    uint resultPtrLocalIdx;          // WASM local index of hidden result pointer
+    uint returnValueSize;            // Size of return value in bytes
+    
     this(FuncInfo f, BinaryEmitter e) {
         this.func = f;
         this.emitter = e;
@@ -98,10 +104,51 @@ class FuncContext {
             structParams["this"] = info;
         }
         
+        // Check for large return type (struct or static array)
+        hasLargeReturn = e.isLargeReturnType(f.decl.returnType);
+        if (hasLargeReturn) {
+            // Hidden result pointer is the next parameter
+            resultPtrLocalIdx = cast(uint)localTypes.length;
+            localTypes ~= ValType.i32;  // Result pointer is i32
+            localOffset++;
+            
+            // Calculate return value size
+            if (auto arrType = cast(ArrayType)f.decl.returnType) {
+                if (arrType.arraySize !is null) {
+                    // Static array: elemSize * count
+                    uint elemCount = evaluateStaticArraySize(arrType.arraySize);
+                    size_t elemSize = arrType.elementType.size();
+                    if (elemSize == 0) elemSize = 4;
+                    returnValueSize = elemCount * cast(uint)elemSize;
+                } else {
+                    returnValueSize = 12;  // Slice struct
+                }
+            } else if (auto userType = cast(UserType)f.decl.returnType) {
+                // Struct - resolve and get size
+                if (!userType.declaration) {
+                    auto typeSymbol = e.symbolTable.lookupSymbol(userType.name);
+                    if (typeSymbol && typeSymbol.kind == SymbolKind.Type) {
+                        userType.declaration = typeSymbol.declaration;
+                    }
+                }
+                if (auto structDecl = cast(StructDecl)userType.declaration) {
+                    returnValueSize = cast(uint)structDecl.structSize;
+                } else {
+                    returnValueSize = cast(uint)f.decl.returnType.size();
+                }
+            } else {
+                returnValueSize = cast(uint)f.decl.returnType.size();
+            }
+        }
+        
         // Parameters are the next locals
         foreach (i, p; f.decl.parameters) {
             auto vt = e.dTypeToValType(p.type);
-            localIndex[p.name] = cast(uint)(i + localOffset);
+            uint wasmIdx = cast(uint)(i + localOffset);
+            localIndex[p.name] = wasmIdx;  // Legacy name-based lookup
+            if (p.uniqueLocalId != uint.max) {
+                localIdToWasmIdx[p.uniqueLocalId] = wasmIdx;
+            }
             localTypes ~= vt;
             
             // Track struct parameters
@@ -223,7 +270,11 @@ class FuncContext {
             
             // Regular local - add to WASM locals
             auto vt = emitter.dTypeToValType(varDecl.type);
-            localIndex[varDecl.name] = cast(uint)localTypes.length;
+            uint wasmIdx = cast(uint)localTypes.length;
+            localIndex[varDecl.name] = wasmIdx;  // Legacy name-based lookup
+            if (varDecl.uniqueLocalId != uint.max) {
+                localIdToWasmIdx[varDecl.uniqueLocalId] = wasmIdx;
+            }
             localTypes ~= vt;
         } else if (auto ifStmt = cast(IfStatement)stmt) {
             collectLocals(ifStmt.thenStatement);
@@ -386,14 +437,137 @@ class FuncContext {
     }
     
     void emitReturn(ref Appender!(ubyte[]) out_, ReturnStatement stmt) {
-        if (stmt.value) {
-            emitExpression(out_, stmt.value);
+        if (hasLargeReturn && stmt.value) {
+            // Large return: copy value to hidden result pointer
+            emitLargeReturnCopy(out_, stmt.value);
+            
+            // Restore shadow stack before returning (void return)
+            emitEpilogue(out_);
+            out_ ~= Op.return_;
+        } else {
+            // Regular return
+            if (stmt.value) {
+                emitExpression(out_, stmt.value);
+            }
+            
+            // Restore shadow stack before returning
+            emitEpilogue(out_);
+            out_ ~= Op.return_;
+        }
+    }
+    
+    /**
+     * Copy a large return value to the hidden result pointer.
+     * Works for structs and static arrays.
+     */
+    void emitLargeReturnCopy(ref Appender!(ubyte[]) out_, Expression value) {
+        // Get source address onto stack
+        // For identifiers (struct/array locals), emitExpression gives us the address
+        // For struct literals or array literals, we'd need to handle separately
+        
+        if (auto ident = cast(IdentifierExpression)value) {
+            // Check if it's a static array local
+            if (auto info = ident.name in staticArrayLocals) {
+                // Copy static array to result pointer
+                // Use memory.copy if available, or loop
+                emitMemoryCopy(out_, resultPtrLocalIdx, info.frameOffset, returnValueSize);
+                return;
+            }
+            
+            // Check if it's a struct local
+            if (auto info = ident.name in structLocals) {
+                // Copy struct to result pointer
+                emitMemoryCopy(out_, resultPtrLocalIdx, info.frameOffset, returnValueSize);
+                return;
+            }
         }
         
-        // Restore shadow stack before returning
-        emitEpilogue(out_);
+        // Fallback: emit expression (gets address), then copy
+        // This handles cases like returning a field or more complex expressions
+        emitExpression(out_, value);  // Stack: [src_addr]
         
-        out_ ~= Op.return_;
+        // For now, assume it's an address and copy
+        // dst = result pointer, src = top of stack
+        // We need to pop src into a temp, then do the copy
+        
+        // Store src address to temp local
+        uint tempLocal = cast(uint)localTypes.length;
+        localTypes ~= ValType.i32;  // Add temp local
+        out_ ~= Op.local_set;
+        leb128u(out_, tempLocal);
+        
+        // Now copy from temp to result pointer
+        emitMemoryCopyFromLocal(out_, resultPtrLocalIdx, tempLocal, returnValueSize);
+    }
+    
+    /**
+     * Emit memory copy from frame offset to result pointer.
+     */
+    void emitMemoryCopy(ref Appender!(ubyte[]) out_, uint dstLocalIdx, uint srcFrameOffset, uint size) {
+        // Copy 4 bytes at a time (assuming aligned)
+        // For each 4-byte chunk:
+        //   1. Push dst address (result ptr + offset)
+        //   2. Load value from src (FP + srcOffset + offset)
+        //   3. Store
+        
+        for (uint offset = 0; offset < size; offset += 4) {
+            // Dst address
+            out_ ~= Op.local_get;
+            leb128u(out_, dstLocalIdx);
+            if (offset > 0) {
+                out_ ~= Op.i32_const;
+                leb128s(out_, offset);
+                out_ ~= Op.i32_add;
+            }
+            
+            // Src value
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, srcFrameOffset + offset);
+            out_ ~= Op.i32_add;
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            
+            // Store: [dst_addr, value] -> memory
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+        }
+    }
+    
+    /**
+     * Emit memory copy from one local (address) to another.
+     */
+    void emitMemoryCopyFromLocal(ref Appender!(ubyte[]) out_, uint dstLocalIdx, uint srcLocalIdx, uint size) {
+        for (uint offset = 0; offset < size; offset += 4) {
+            // Dst address
+            out_ ~= Op.local_get;
+            leb128u(out_, dstLocalIdx);
+            if (offset > 0) {
+                out_ ~= Op.i32_const;
+                leb128s(out_, offset);
+                out_ ~= Op.i32_add;
+            }
+            
+            // Src value
+            out_ ~= Op.local_get;
+            leb128u(out_, srcLocalIdx);
+            if (offset > 0) {
+                out_ ~= Op.i32_const;
+                leb128s(out_, offset);
+                out_ ~= Op.i32_add;
+            }
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            
+            // Store
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+        }
     }
     
     void emitExpressionStatement(ref Appender!(ubyte[]) out_, ExpressionStatement stmt) {
@@ -535,7 +709,13 @@ class FuncContext {
     }
     
     void emitVarDecl(ref Appender!(ubyte[]) out_, VariableDeclarationStatement stmt) {
-        auto idx = localIndex[stmt.name];
+        // Use uniqueLocalId if available, fall back to name lookup
+        uint idx;
+        if (stmt.uniqueLocalId != uint.max && stmt.uniqueLocalId in localIdToWasmIdx) {
+            idx = localIdToWasmIdx[stmt.uniqueLocalId];
+        } else {
+            idx = localIndex[stmt.name];
+        }
         
         if (stmt.initializer) {
             emitExpression(out_, stmt.initializer);
@@ -2169,15 +2349,19 @@ class FuncContext {
     void emitLiteral(ref Appender!(ubyte[]) out_, LiteralExpression expr) {
         if (expr.value.type == typeid(long)) {
             long value = expr.value.get!long();
-            // Check for i32 overflow
-            if (value > int.max || value < int.min) {
+            // Handle 32-bit values: allow both signed i32 and unsigned u32 range
+            // Values like 0xEDB88320 (3988292384) are valid u32 but exceed i32.max
+            // Convert to signed i32 via two's complement for WASM encoding
+            if (value > uint.max || value < int.min) {
                 throw new EmitError(
-                    format("Integer literal %d exceeds i32 range [%d, %d]", value, int.min, int.max),
+                    format("Integer literal %d exceeds 32-bit range [%d, %d]", value, int.min, uint.max),
                     "literal emission"
                 );
             }
+            // If value is in unsigned range but above signed max, convert to signed
+            int i32Value = (value > int.max) ? cast(int)(value & 0xFFFFFFFF) : cast(int)value;
             out_ ~= Op.i32_const;
-            leb128s(out_, value);
+            leb128s(out_, i32Value);
         } else if (expr.value.type == typeid(bool)) {
             out_ ~= Op.i32_const;
             leb128s(out_, expr.value.get!bool() ? 1 : 0);
@@ -2197,12 +2381,24 @@ class FuncContext {
     }
     
     void emitIdentifier(ref Appender!(ubyte[]) out_, IdentifierExpression expr) {
-        // First check if it's a local variable
+        // First check if type checker resolved this to a local variable
+        if (expr.resolvedLocalId != uint.max) {
+            if (auto wasmIdx = expr.resolvedLocalId in localIdToWasmIdx) {
+                out_ ~= Op.local_get;
+                leb128u(out_, *wasmIdx);
+                return;
+            }
+        }
+        
+        // Fallback to legacy name-based lookup
         if (auto idx = expr.name in localIndex) {
             out_ ~= Op.local_get;
             leb128u(out_, *idx);
             return;
         }
+        
+        // For symbol table lookup (constants, globals), do it now
+        Symbol symbol = emitter.symbolTable.lookupSymbol(expr.name);
         
         // Check if it's a struct local - emit address
         if (auto info = expr.name in structLocals) {
@@ -2249,7 +2445,10 @@ class FuncContext {
         }
         
         // Check if it's a manifest constant (CTFE-evaluated lazily)
-        auto symbol = emitter.symbolTable.lookupSymbol(expr.name);
+        // Reuse symbol lookup from above (or do fresh lookup if symbol is null)
+        if (symbol is null) {
+            symbol = emitter.symbolTable.lookupSymbol(expr.name);
+        }
         if (symbol && symbol.isConstant) {
             if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
                 // Trigger lazy evaluation if needed, then emit
@@ -2312,6 +2511,7 @@ class FuncContext {
             case BinaryExpression.Operator.BitwiseXor: op = Op.i32_xor; break;
             case BinaryExpression.Operator.ShiftLeft: op = Op.i32_shl; break;
             case BinaryExpression.Operator.ShiftRight: op = Op.i32_shr_s; break;
+            case BinaryExpression.Operator.UnsignedShiftRight: op = Op.i32_shr_u; break;
             case BinaryExpression.Operator.Concat:
                 assert(false, "Concat should be handled above");
         }
@@ -2947,13 +3147,28 @@ class FuncContext {
         }
         
         // Regular local variable assignment
-        if (auto idxPtr = ident.name in localIndex) {
+        // Look up symbol to get uniqueLocalId
+        auto symbol = emitter.symbolTable.lookupSymbol(ident.name);
+        uint wasmIdx = uint.max;
+        if (symbol && symbol.uniqueLocalId != uint.max) {
+            if (auto idx = symbol.uniqueLocalId in localIdToWasmIdx) {
+                wasmIdx = *idx;
+            }
+        }
+        // Fallback to legacy name-based lookup
+        if (wasmIdx == uint.max) {
+            if (auto idxPtr = ident.name in localIndex) {
+                wasmIdx = *idxPtr;
+            }
+        }
+        
+        if (wasmIdx != uint.max) {
             // Emit value
             emitExpression(out_, expr.right);
             
             // Store and leave value on stack (assignment is an expression)
             out_ ~= Op.local_tee;
-            leb128u(out_, *idxPtr);
+            leb128u(out_, wasmIdx);
         } else {
             throw new EmitError("Unknown identifier in assignment: " ~ ident.name);
         }

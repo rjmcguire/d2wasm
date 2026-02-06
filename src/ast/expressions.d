@@ -28,7 +28,7 @@ class BinaryExpression : Expression {
         
         // Bitwise
         BitwiseAnd, BitwiseOr, BitwiseXor,
-        ShiftLeft, ShiftRight,
+        ShiftLeft, ShiftRight, UnsignedShiftRight,
         
         // Array/String
         Concat  // ~ operator
@@ -78,6 +78,7 @@ class BinaryExpression : Expression {
             case Operator.BitwiseXor: return "^";
             case Operator.ShiftLeft: return "<<";
             case Operator.ShiftRight: return ">>";
+            case Operator.UnsignedShiftRight: return ">>>";
             case Operator.Concat: return "~";
         }
     }
@@ -266,6 +267,10 @@ class MemberExpression : Expression {
 class IdentifierExpression : Expression {
     string name;
     Declaration declaration;  // Set during semantic analysis
+    
+    // Set by type checker - the uniqueLocalId of the resolved variable/parameter
+    // uint.max means not resolved or not a local variable
+    uint resolvedLocalId = uint.max;
     
     this(SourceLocation loc, string name) {
         super(loc);

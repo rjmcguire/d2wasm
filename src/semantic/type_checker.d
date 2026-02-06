@@ -58,8 +58,60 @@ class TypeChecker {
     private Type currentFunctionReturnType;
     private StructDecl currentStructDecl;  // Non-null when inside a method
     
+    // Unique local ID counter - reset per function
+    private uint nextLocalId;
+    
+    // Stack of scope variable lists for RAII unwind tracking
+    // Each entry is a list of local IDs declared in that scope
+    private uint[][] scopeVarStack;
+    
     this(SymbolTable symbolTable) {
         this.symbolTable = symbolTable;
+    }
+    
+    /**
+     * Allocate the next unique local ID (for variables/parameters)
+     */
+    private uint allocateLocalId() {
+        return nextLocalId++;
+    }
+    
+    /**
+     * Push a new scope onto the variable tracking stack
+     */
+    private void pushScopeVars() {
+        scopeVarStack ~= [];
+    }
+    
+    /**
+     * Pop the current scope from the variable tracking stack
+     */
+    private uint[] popScopeVars() {
+        if (scopeVarStack.length == 0) return [];
+        auto vars = scopeVarStack[$-1];
+        scopeVarStack = scopeVarStack[0..$-1];
+        return vars;
+    }
+    
+    /**
+     * Add a variable to the current scope's tracking list
+     */
+    private void trackScopeVar(uint localId) {
+        if (scopeVarStack.length > 0) {
+            scopeVarStack[$-1] ~= localId;
+        }
+    }
+    
+    /**
+     * Get the current unwind chain (all scope vars from innermost to outermost)
+     */
+    private uint[][] getUnwindChain() {
+        // Return a copy of the stack (innermost is at index 0)
+        uint[][] chain;
+        foreach_reverse (scope_; scopeVarStack) {
+            chain ~= scope_.dup;
+        }
+        return chain;
     }
     
     /**
@@ -113,6 +165,12 @@ class TypeChecker {
         symbolTable.enterScope("function:" ~ decl.name);
         scope(exit) symbolTable.exitScope();
         
+        // Reset unique local ID counter and scope tracking for this function
+        nextLocalId = 0;
+        scopeVarStack = [];
+        pushScopeVars();  // Function scope
+        scope(exit) popScopeVars();
+        
         // Set current return type for return statement checking
         Type oldReturnType = currentFunctionReturnType;
         currentFunctionReturnType = decl.returnType;
@@ -125,10 +183,13 @@ class TypeChecker {
         }
         scope(exit) currentStructDecl = oldStructDecl;
         
-        // Add parameters to scope
+        // Add parameters to scope and assign unique IDs
         log(3, "Checking parameters for ", decl.name);
-        foreach (param; decl.parameters) {
+        foreach (i, ref param; decl.parameters) {
             log(3, "  Parameter: ", param.name);
+            
+            // Assign unique local ID
+            param.uniqueLocalId = allocateLocalId();
             
             // Check if parameter type is null (from parsing issues)
             if (!param.type) {
@@ -146,6 +207,7 @@ class TypeChecker {
                 decl.location,
                 false
             );
+            symbol.uniqueLocalId = param.uniqueLocalId;
             symbolTable.addSymbol(symbol);
             
             // Type check default value if present
@@ -299,7 +361,11 @@ class TypeChecker {
         
         if (auto compound = cast(CompoundStatement)stmt) {
             symbolTable.enterScope("block");
-            scope(exit) symbolTable.exitScope();
+            pushScopeVars();
+            scope(exit) {
+                compound.destructOnExit = popScopeVars();
+                symbolTable.exitScope();
+            }
             
             foreach (s; compound.statements) {
                 checkStatement(s);
@@ -350,6 +416,9 @@ class TypeChecker {
             
             checkStatement(forStmt.body_);
         } else if (auto returnStmt = cast(ReturnStatement)stmt) {
+            // Capture unwind chain for RAII destruction
+            returnStmt.unwindChain = getUnwindChain();
+            
             if (returnStmt.value) {
                 Type returnType = checkExpression(returnStmt.value);
                 if (!currentFunctionReturnType) {
@@ -376,6 +445,12 @@ class TypeChecker {
         } else if (auto exprStmt = cast(ExpressionStatement)stmt) {
             checkExpression(exprStmt.expression);
         } else if (auto varDeclStmt = cast(VariableDeclarationStatement)stmt) {
+            // Assign unique local ID
+            varDeclStmt.uniqueLocalId = allocateLocalId();
+            
+            // Track for RAII unwind
+            trackScopeVar(varDeclStmt.uniqueLocalId);
+            
             // Type check initializer if present
             if (varDeclStmt.initializer) {
                 Type initType = checkExpression(varDeclStmt.initializer);
@@ -391,6 +466,7 @@ class TypeChecker {
             // Add the variable to the symbol table
             auto symbol = new Symbol(varDeclStmt.name, SymbolKind.Variable, varDeclStmt.type, 
                                      null, varDeclStmt.location, false);
+            symbol.uniqueLocalId = varDeclStmt.uniqueLocalId;
             symbolTable.addSymbol(symbol);
         }
     }
@@ -506,7 +582,8 @@ class TypeChecker {
             expr.operator == BinaryExpression.Operator.BitwiseOr ||
             expr.operator == BinaryExpression.Operator.BitwiseXor ||
             expr.operator == BinaryExpression.Operator.ShiftLeft ||
-            expr.operator == BinaryExpression.Operator.ShiftRight) {
+            expr.operator == BinaryExpression.Operator.ShiftRight ||
+            expr.operator == BinaryExpression.Operator.UnsignedShiftRight) {
             
             if (!isIntegerType(cast(BasicType)leftType) || !isIntegerType(cast(BasicType)rightType)) {
                 throw new TypeError(
@@ -553,6 +630,11 @@ class TypeChecker {
                 format("Undefined identifier '%s'", expr.name),
                 expr.location
             );
+        }
+        
+        // Store the resolved uniqueLocalId for codegen
+        if (symbol.kind == SymbolKind.Variable || symbol.kind == SymbolKind.Parameter) {
+            expr.resolvedLocalId = symbol.uniqueLocalId;
         }
         
         return symbol.type;

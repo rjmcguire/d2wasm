@@ -472,6 +472,7 @@ class BinaryEmitter {
                 case BinaryExpression.Operator.BitwiseXor: return left ^ right;
                 case BinaryExpression.Operator.ShiftLeft: return left << right;
                 case BinaryExpression.Operator.ShiftRight: return left >> right;
+                case BinaryExpression.Operator.UnsignedShiftRight: return left >>> right;
                 case BinaryExpression.Operator.Concat: return 0;  // Not applicable
             }
         }
@@ -762,7 +763,7 @@ class BinaryEmitter {
      * Check if a return type requires hidden __result parameter
      * (structs and static arrays are too large to return in a register)
      */
-    private bool isLargeReturnType(Type t) {
+    bool isLargeReturnType(Type t) {
         if (t is null) return false;
         
         // UserType (struct)
@@ -1927,6 +1928,7 @@ private class EvalContext {
                 case BinaryExpression.Operator.BitwiseXor: return left ^ right;
                 case BinaryExpression.Operator.ShiftLeft: return left << right;
                 case BinaryExpression.Operator.ShiftRight: return left >> right;
+                case BinaryExpression.Operator.UnsignedShiftRight: return left >>> right;
                 case BinaryExpression.Operator.Concat: 
                     throw new EmitError("Concat not supported in __text argument");
             }

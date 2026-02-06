@@ -50,6 +50,37 @@ private string unescapeString(string s) {
 }
 
 /**
+ * Parse an integer literal, handling hex (0x), binary (0b), octal (0o), and decimal formats.
+ * Also strips underscores (D allows 1_000_000).
+ */
+private long parseIntLiteral(string text) {
+    import std.string : replace;
+    import std.algorithm : startsWith;
+    import std.conv : parse;
+    
+    // Strip underscores (D allows them for readability)
+    string clean = text.replace("_", "");
+    
+    // Handle hex (0x/0X)
+    if (clean.startsWith("0x") || clean.startsWith("0X")) {
+        string digits = clean[2..$];
+        return parse!long(digits, 16);
+    }
+    // Handle binary (0b/0B)
+    if (clean.startsWith("0b") || clean.startsWith("0B")) {
+        string digits = clean[2..$];
+        return parse!long(digits, 2);
+    }
+    // Handle octal (0o) - D uses 0o prefix, not bare 0
+    if (clean.startsWith("0o") || clean.startsWith("0O")) {
+        string digits = clean[2..$];
+        return parse!long(digits, 8);
+    }
+    // Decimal
+    return parse!long(clean);
+}
+
+/**
  * Parser error with location information
  */
 class ParseError : Exception {
@@ -1569,7 +1600,7 @@ class TreeSitterBridge {
             case "this":
                 return new IdentifierExpression(loc, "this");
             case "int_literal":
-                return LiteralExpression.integer(loc, to!long(TreeSitterParser.getNodeText(node, sourceText)));
+                return LiteralExpression.integer(loc, parseIntLiteral(TreeSitterParser.getNodeText(node, sourceText)));
             case "float_literal":
                 return LiteralExpression.floating(loc, to!double(TreeSitterParser.getNodeText(node, sourceText)));
             case "string_literal": {
@@ -1685,6 +1716,7 @@ class TreeSitterBridge {
             case "^": return BinaryExpression.Operator.BitwiseXor;
             case "<<": return BinaryExpression.Operator.ShiftLeft;
             case ">>": return BinaryExpression.Operator.ShiftRight;
+            case ">>>": return BinaryExpression.Operator.UnsignedShiftRight;
             case "~": return BinaryExpression.Operator.Concat;
             default:
                 throw new ParseError("Unknown binary operator: " ~ opStr, SourceLocation());

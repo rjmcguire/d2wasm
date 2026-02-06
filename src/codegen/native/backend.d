@@ -591,6 +591,10 @@ class NativeCompiledFunction : CompiledFunction {
                 case BinaryExpression.Operator.ShiftRight:
                     gen.emit(stencil_shr_i32);
                     break;
+                case BinaryExpression.Operator.UnsignedShiftRight:
+                    // TODO: implement unsigned shift (for now use signed)
+                    gen.emit(stencil_shr_i32);
+                    break;
                 case BinaryExpression.Operator.LogicalAnd:
                 case BinaryExpression.Operator.LogicalOr:
                 case BinaryExpression.Operator.Concat:

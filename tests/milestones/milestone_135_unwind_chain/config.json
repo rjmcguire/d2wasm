@@ -1,0 +1,5 @@
+{
+    "description": "ReturnStatement unwindChain - tracks all scopes for RAII unwinding",
+    "expected_result": 10,
+    "type": "run"
+}
