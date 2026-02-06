@@ -1,0 +1,6 @@
+{
+  "name": "incremental_flags",
+  "description": "Incremental compilation: --cache and --json command-line flags",
+  "type": "compile_only",
+  "note": "Feature test: d2wasm test.d --cache=/tmp/cache --json outputs JSON summary"
+}

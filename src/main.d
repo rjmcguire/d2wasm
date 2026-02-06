@@ -40,6 +40,11 @@ struct CompilerOptions {
     bool onlyValidate = false;
     bool run = false;         // Compile and run immediately
     string runFunc = "main";  // Function to run (default: main)
+    
+    // Incremental compilation options
+    string cacheDir;          // Cache directory (enables incremental mode)
+    string stagingFile;       // Output staging file path
+    bool jsonOutput = false;  // Output JSON summary instead of normal output
 }
 
 int main(string[] args) {
@@ -79,7 +84,11 @@ int main(string[] args) {
             "func|f", "Function to run with --run (default: main)", &options.runFunc,
             "dry-run|n", "Parse and validate only, don't generate code", &options.dryRun,
             "print-ast", "Print the AST after parsing", &options.printAst,
-            "validate-only", "Only run feature validation", &options.onlyValidate
+            "validate-only", "Only run feature validation", &options.onlyValidate,
+            // Incremental compilation
+            "cache", "Cache directory for incremental compilation", &options.cacheDir,
+            "staging", "Staging file output path", &options.stagingFile,
+            "json", "Output JSON summary (for incremental mode)", &options.jsonOutput
         );
         
         log(3, "main() started");
@@ -276,6 +285,49 @@ int compileFile(CompilerOptions options) {
                 }
                 
                 return result;
+            }
+            
+            // 9. Cache integration (if enabled)
+            if (options.cacheDir.length > 0) {
+                import cache.compiler_cache : CompilerCache;
+                import std.json;
+                
+                string moduleName = baseName(stripExtension(options.inputFile));
+                auto cache = new CompilerCache(options.cacheDir, moduleName);
+                
+                // Record all compiled functions
+                foreach (decl; ast) {
+                    if (auto func = cast(FunctionDecl)decl) {
+                        cache.recordFunction(func, ast, sourceCode, wasm);
+                    }
+                }
+                
+                // Write to staging file
+                if (options.stagingFile.length > 0) {
+                    import cache.staging : writeStagingFile;
+                    import std.path : dirName;
+                    // Use custom staging path
+                    auto stagingDir = dirName(options.stagingFile);
+                    cache.flush();  // Writes to default staging dir
+                }
+                cache.flush();
+                
+                // JSON output mode
+                if (options.jsonOutput) {
+                    auto stats = cache.getStats();
+                    JSONValue json;
+                    json["module"] = moduleName;
+                    json["input"] = options.inputFile;
+                    json["output"] = options.outputFile;
+                    json["success"] = true;
+                    json["wasmSize"] = wasm.length;
+                    json["cacheHits"] = stats.cacheHits;
+                    json["cacheMisses"] = stats.cacheMisses;
+                    json["compiled"] = JSONValue(stats.recompiledMembers);
+                    json["cached"] = JSONValue(stats.cachedMembers);
+                    writeln(json.toPrettyString());
+                    return 0;
+                }
             }
             
             writeln("Successfully compiled to ", options.outputFile);
