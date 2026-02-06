@@ -130,6 +130,9 @@ class NativeCompiledFunction : CompiledFunction {
             throw new Exception("Failed to allocate data section");
         }
         
+        // Reserve space for inline call stack (must be before adding other data)
+        dataSection.reserveInlineStack();
+        
         // Store parameter count for call()
         this.paramCount = func.parameters.length;
         
@@ -158,6 +161,9 @@ class NativeCompiledFunction : CompiledFunction {
         if (!dataSection.base) {
             throw new Exception("Failed to allocate data section");
         }
+        
+        // Reserve space for inline call stack (must be before adding other data)
+        dataSection.reserveInlineStack();
         
         // Store all function decls for call resolution
         foreach (func; funcs) {
@@ -251,13 +257,11 @@ class NativeCompiledFunction : CompiledFunction {
             }
         }
         
-        // Emit call stack push (for error reporting)
-        // Note: disabled by default due to FFI overhead (~15x slowdown for recursive code)
-        // TODO: implement inline stack tracking without host calls
-        static if (false) {
-            string fileName = func.location.filename ? func.location.filename : "";
-            emitPushCall(func.name, fileName, func.location.line);
-        }
+        // Emit inline call stack push (for error reporting)
+        // TODO: Fix ARM64 encoding bugs in emitInlineStackPush, then re-enable
+        // For now, stack tracking is disabled for performance (15x faster without FFI)
+        // string fileName = func.location.filename ? func.location.filename : "";
+        // emitInlinePushCall(func.name, fileName, func.location.line);
         
         // Compile body
         if (func.body_) {
@@ -267,13 +271,9 @@ class NativeCompiledFunction : CompiledFunction {
         // Bind epilogue label - return statements jump here
         gen.bindLabel(epilogueLabel);
         
-        // Emit call stack pop (before return)
-        // Note: disabled by default due to FFI overhead
-        static if (false) {
-            gen.emitStoreLocal32(tempSlot);
-            emitPopCall();
-            gen.emitLoadLocal32(tempSlot);
-        }
+        // Emit inline call stack pop (before return)
+        // TODO: Re-enable when inline push is fixed
+        // emitInlinePopCall();
         
         // Emit epilogue
         if (totalLocalBytes > 0) {
@@ -940,6 +940,69 @@ class NativeCompiledFunction : CompiledFunction {
         ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_pop_call");
         ulong ctxSlot = hostFunctions.getContextSlotAddress();
         gen.emitHostCall(slot, ctxSlot);
+    }
+    
+    /**
+     * Emit inline call stack push - writes directly to data section, no FFI
+     * Uses x8, x9, x10, x11, x12, x13 as scratch (saves/restores x0)
+     */
+    private void emitInlinePushCall(string funcName, string fileName, uint line) {
+        import codegen.native.codegen_interface : InlineFrame, INLINE_STACK_DEPTH_OFFSET,
+            INLINE_STACK_MAX_DEPTH, INLINE_STACK_FRAMES_OFFSET, INLINE_FRAME_SIZE;
+        
+        // Add strings to data section, get their offsets
+        size_t nameOffset = dataSection.bytesUsed;
+        auto namePtr = dataSection.addString(funcName);
+        if (namePtr is null) return;
+        
+        size_t fileOffset = dataSection.bytesUsed;
+        auto filePtr = dataSection.addString(fileName);
+        if (filePtr is null) return;
+        
+        // Build InlineFrame in data section
+        InlineFrame frame;
+        frame.nameOffset = cast(uint)nameOffset;
+        frame.nameLen = cast(uint)funcName.length;
+        frame.fileOffset = cast(uint)fileOffset;
+        frame.fileLen = cast(uint)fileName.length;
+        frame.line = line;
+        frame.column = 0;
+        
+        size_t frameDataOffset = dataSection.bytesUsed;
+        auto framePtr = dataSection.addData((cast(ubyte*)&frame)[0..InlineFrame.sizeof]);
+        if (framePtr is null) return;
+        
+        // Save x0 (might contain important value)
+        gen.emitStoreLocal32(tempSlot);
+        
+        // Load data section base into x10
+        gen.emitLoadImm64(cast(ulong)dataSection.base);
+        gen.emitMoveX0ToX10();
+        
+        // Emit inline push code
+        gen.emitInlineStackPush(cast(uint)frameDataOffset);
+        
+        // Restore x0
+        gen.emitLoadLocal32(tempSlot);
+    }
+    
+    /**
+     * Emit inline call stack pop - decrements depth in data section, no FFI
+     * Uses x8, x10 as scratch (does NOT touch x0, safe for return values)
+     */
+    private void emitInlinePopCall() {
+        // Load data section base into x10
+        gen.emitLoadImm64(cast(ulong)dataSection.base);
+        gen.emitMoveX0ToX10();
+        
+        // Save x0 (return value)
+        gen.emitMoveX0ToX8();
+        
+        // Emit inline pop code
+        gen.emitInlineStackPop();
+        
+        // Restore x0 (return value)
+        gen.emitMoveX8ToX0();
     }
     
     /**

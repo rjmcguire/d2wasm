@@ -83,7 +83,53 @@ string ctfeErrorMessage(CTFEErrorKind kind) {
  */
 string ctfeErrorMessageWithStack(NativeCTFEContext* ctx) {
     if (ctx is null) return "CTFE error (no context)";
+    
+    // Prefer inline stack from data section (faster, no FFI overhead)
+    if (ctx.dataSection !is null && ctx.dataSection.stackReserved) {
+        auto frames = ctx.dataSection.getInlineCallStack();
+        if (frames.length > 0) {
+            // Use inline stack for error message
+            string result = ctfeErrorMessage(ctx.errorKind);
+            result ~= formatInlineCallStack(ctx, frames);
+            return result;
+        }
+    }
+    
+    // Fall back to D-side callStack
     return ctfeErrorMessage(ctx.errorKind) ~ ctx.formatCallStack();
+}
+
+/// Format inline call stack frames for error message
+private string formatInlineCallStack(NativeCTFEContext* ctx, CallFrame[] frames) nothrow {
+    import std.conv : to;
+    import std.path : baseName;
+    
+    string result;
+    try {
+        // Show call stack
+        if (frames.length > 0) {
+            foreach_reverse (i, frame; frames) {
+                string file = frame.fileName.length > 0 ? baseName(frame.fileName) : "<unknown>";
+                string lineNum = to!string(frame.line);
+                
+                if (i == frames.length - 1) {
+                    // Top of stack - show with source context if available
+                    result ~= "\n --> " ~ file ~ ":" ~ lineNum;
+                    string sourceLine = getSourceLine(frame.fileName, frame.line);
+                    if (sourceLine.length > 0) {
+                        result ~= "\n  |";
+                        result ~= "\n" ~ padLeft(lineNum, 3) ~ " | " ~ sourceLine;
+                    }
+                    result ~= "\n  |";
+                    result ~= "\nnote: in `" ~ frame.funcName ~ "()`";
+                } else {
+                    result ~= "\nnote: called from `" ~ frame.funcName ~ "()` at " ~ file ~ ":" ~ lineNum;
+                }
+            }
+        }
+    } catch (Exception) {}
+    
+    return result;
 }
 
 // ============================================================================
@@ -98,10 +144,32 @@ string ctfeErrorMessageWithStack(NativeCTFEContext* ctx) {
  * - Can be made read-only after initialization
  * - Stable pointers that persist for the lifetime of compilation
  */
+// ============================================================================
+// Inline Call Stack Constants
+// ============================================================================
+// Data section layout for inline stack tracking (no FFI overhead)
+enum INLINE_STACK_DEPTH_OFFSET = 0;     // i32: current stack depth
+enum INLINE_STACK_MAX_OFFSET = 4;       // i32: max depth (64)
+enum INLINE_STACK_FRAMES_OFFSET = 8;    // InlineFrame[64] array
+enum INLINE_FRAME_SIZE = 24;            // bytes per frame
+enum INLINE_STACK_MAX_DEPTH = 64;       // maximum call depth
+enum INLINE_STACK_RESERVED = INLINE_STACK_FRAMES_OFFSET + INLINE_STACK_MAX_DEPTH * INLINE_FRAME_SIZE;  // 1544 bytes
+
+/// Inline call frame stored in data section (no GC, no FFI)
+struct InlineFrame {
+    uint nameOffset;    // offset of name string in data section
+    uint nameLen;
+    uint fileOffset;    // offset of file string in data section
+    uint fileLen;
+    uint line;
+    uint column;
+}
+
 struct NativeDataSection {
     ubyte* base;
     size_t capacity;
     size_t used;
+    bool stackReserved;  // whether inline call stack is reserved
     
     /// Allocate a data section with the given capacity
     static NativeDataSection alloc(size_t size) {
@@ -161,6 +229,73 @@ struct NativeDataSection {
             capacity = 0;
             used = 0;
         }
+    }
+    
+    /// Reserve space for inline call stack at the start of data section
+    /// Must be called before any other data is added
+    void reserveInlineStack() {
+        if (stackReserved) return;
+        if (used > 0) {
+            assert(false, "Must reserve inline stack before adding data");
+        }
+        
+        // Initialize header
+        *cast(uint*)(base + INLINE_STACK_DEPTH_OFFSET) = 0;  // depth = 0
+        *cast(uint*)(base + INLINE_STACK_MAX_OFFSET) = INLINE_STACK_MAX_DEPTH;
+        
+        // Reserve space
+        used = INLINE_STACK_RESERVED;
+        stackReserved = true;
+    }
+    
+    /// Get current inline stack depth
+    uint getInlineStackDepth() nothrow {
+        if (!stackReserved || base is null) return 0;
+        return *cast(uint*)(base + INLINE_STACK_DEPTH_OFFSET);
+    }
+    
+    /// Get inline frame at index (0 = bottom of stack)
+    InlineFrame* getInlineFrame(uint index) nothrow {
+        if (!stackReserved || base is null) return null;
+        if (index >= INLINE_STACK_MAX_DEPTH) return null;
+        return cast(InlineFrame*)(base + INLINE_STACK_FRAMES_OFFSET + index * INLINE_FRAME_SIZE);
+    }
+    
+    /// Convert inline frame to CallFrame (resolves string offsets)
+    CallFrame resolveInlineFrame(InlineFrame* frame) nothrow {
+        CallFrame result;
+        if (frame is null || base is null) return result;
+        
+        try {
+            if (frame.nameLen > 0 && frame.nameOffset < used) {
+                result.funcName = cast(string)(base + frame.nameOffset)[0..frame.nameLen];
+            }
+            if (frame.fileLen > 0 && frame.fileOffset < used) {
+                result.fileName = cast(string)(base + frame.fileOffset)[0..frame.fileLen];
+            }
+            result.line = frame.line;
+        } catch (Exception) {}
+        
+        return result;
+    }
+    
+    /// Build CallFrame array from inline stack (for error reporting)
+    CallFrame[] getInlineCallStack() nothrow {
+        CallFrame[] result;
+        if (!stackReserved || base is null) return result;
+        
+        try {
+            uint depth = getInlineStackDepth();
+            result.reserve(depth);
+            for (uint i = 0; i < depth; i++) {
+                auto frame = getInlineFrame(i);
+                if (frame !is null) {
+                    result ~= resolveInlineFrame(frame);
+                }
+            }
+        } catch (Exception) {}
+        
+        return result;
     }
 }
 

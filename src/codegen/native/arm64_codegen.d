@@ -341,6 +341,90 @@ struct NativeCodeGen {
         emitRaw32(0xAA0203E3);
     }
     
+    /// Move x0 to x10 (for data section base)
+    void emitMoveX0ToX10() {
+        // MOV x10, x0: ORR x10, xzr, x0 = 0xAA0003EA
+        emitRaw32(0xAA0003EA);
+    }
+    
+    /// Move x10 to x0
+    void emitMoveX10ToX0() {
+        // MOV x0, x10: ORR x0, xzr, x10 = 0xAA0A03E0
+        emitRaw32(0xAA0A03E0);
+    }
+    
+    // ========== Inline Call Stack (no FFI) ==========
+    // These methods emit inline code to track the call stack directly
+    // in the data section, avoiding expensive FFI crossings.
+    //
+    // Data section layout at offset 0:
+    //   [0]:  depth (i32)
+    //   [4]:  maxDepth (i32) = 64
+    //   [8]:  frames[64] - array of InlineFrame (24 bytes each)
+    //
+    // x10 must contain the data section base address
+    
+    /// Emit inline call stack push (x10 = data section base, uses x8,x9,x11)
+    /// frameDataAddr is the address of the InlineFrame data in the data section
+    void emitInlineStackPush(uint frameDataOffset) {
+        import codegen.native.codegen_interface : INLINE_STACK_DEPTH_OFFSET,
+            INLINE_STACK_MAX_DEPTH, INLINE_STACK_FRAMES_OFFSET, INLINE_FRAME_SIZE;
+        
+        // LDR w8, [x10, #0]          ; load current depth
+        emitRaw32(0xB9400148);
+        
+        // CMP w8, #64                 ; check overflow
+        emitRaw32(0x7101001F | (INLINE_STACK_MAX_DEPTH << 10));
+        
+        // B.GE skip (6 instructions = 24 bytes forward)
+        emitRaw32(0x5400006A | (6 << 5));  // B.GE +6
+        
+        // Calculate frame address: x9 = x10 + 8 + depth * 24
+        // MOV w9, #24
+        emitRaw32(0x52800309);  // MOVZ w9, #24
+        // MUL w9, w8, w9
+        emitRaw32(0x1B097D09);  // MUL w9, w8, w9
+        // ADD x9, x10, x9
+        emitRaw32(0x8B090149);
+        // ADD x9, x9, #8
+        emitRaw32(0x91002129);
+        
+        // Copy InlineFrame from data section (x11 = source addr)
+        // ADD x11, x10, #frameDataOffset
+        if (frameDataOffset < 4096) {
+            emitRaw32(0x9100014B | (frameDataOffset << 10));
+        } else {
+            // For larger offsets, use MOVZ + ADD
+            emitRaw32(0xD280000B | ((frameDataOffset & 0xFFFF) << 5));  // MOVZ x11, #offset
+            emitRaw32(0x8B0B014B);  // ADD x11, x10, x11
+        }
+        
+        // LDP x12, x13, [x11]        ; load first 16 bytes
+        emitRaw32(0xA940316C);
+        // STP x12, x13, [x9]         ; store to frame
+        emitRaw32(0xA900312C);
+        // LDR x12, [x11, #16]        ; load last 8 bytes
+        emitRaw32(0xF940096C);
+        // STR x12, [x9, #16]         ; store to frame
+        emitRaw32(0xF900052C);
+        
+        // Increment depth: ADD w8, w8, #1; STR w8, [x10]
+        emitRaw32(0x11000508);  // ADD w8, w8, #1
+        emitRaw32(0xB9000148);  // STR w8, [x10]
+    }
+    
+    /// Emit inline call stack pop (x10 = data section base, uses x8)
+    void emitInlineStackPop() {
+        // LDR w8, [x10]              ; load depth
+        emitRaw32(0xB9400148);
+        // SUBS w8, w8, #1            ; decrement
+        emitRaw32(0x71000508);
+        // B.LT skip (1 instruction)
+        emitRaw32(0x5400002B);  // B.LT +1
+        // STR w8, [x10]
+        emitRaw32(0xB9000148);
+    }
+    
     // ===== Abstract Aliases (for architecture-agnostic code) =====
     // These map abstract operation names to ARM64-specific implementations
     
