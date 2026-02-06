@@ -21,11 +21,13 @@ import ast.nodes;
 import ast.statements;
 import ast.expressions;
 import semantic.symbol_table;
+import cache.entry : SourceHash, CacheEntry;
 
 import std.array : Appender, array;
 import std.algorithm : map, canFind;
 import std.conv : to;
 import std.format : format;
+import std.digest.murmurhash;
 
 //==============================================================================
 // Error Handling
@@ -167,11 +169,111 @@ class BinaryEmitter {
         // Whether we need array support (allocator, etc.)
         bool needsArraySupport = false;
         bool[string] neededCTFEImports;  // CTFE-only functions that need to be imported
+        
+        // Code caching for incremental compilation
+        string sourceText;  // Full source text (for extracting function bodies)
+        ubyte[][string] codeCache;  // function name -> cached code bytes
+        SourceHash[string] sourceHashes;  // function name -> source hash
+        bool[string] cacheHits;  // Track which functions used cache
     }
     
     this(SymbolTable symbolTable) {
         this.symbolTable = symbolTable;
         this.nextDataOffset = MEMORY_RESERVED;  // Start after reserved area
+    }
+    
+    //==========================================================================
+    // Code Caching Interface
+    //==========================================================================
+    
+    /**
+     * Set the source text for extracting function bodies.
+     * Call this before emit() to enable source hashing.
+     */
+    void setSourceText(string source) {
+        this.sourceText = source;
+    }
+    
+    /**
+     * Pre-populate the code cache with previously compiled function code.
+     * The cache maps function name to (source_hash, code_bytes).
+     */
+    void setCodeCache(CacheEntry[] entries) {
+        foreach (entry; entries) {
+            codeCache[entry.memberName] = entry.wasmBytes.dup;
+            sourceHashes[entry.memberName] = entry.sourceHash;
+        }
+    }
+    
+    /**
+     * Get the emitted code for a function (for caching).
+     * Returns null if function not found.
+     */
+    CacheEntry[] getEmittedCode() {
+        CacheEntry[] results;
+        foreach (f; functions) {
+            if (f.name in codeCache) {
+                CacheEntry entry;
+                entry.memberName = f.name;
+                entry.sourceHash = sourceHashes.get(f.name, SourceHash.init);
+                entry.wasmBytes = codeCache[f.name].dup;
+                results ~= entry;
+            }
+        }
+        return results;
+    }
+    
+    /**
+     * Get cache statistics.
+     */
+    struct CacheStats {
+        size_t totalFunctions;
+        size_t cacheHits;
+        size_t cacheMisses;
+    }
+    
+    CacheStats getCacheStats() {
+        CacheStats stats;
+        stats.totalFunctions = functions.length;
+        stats.cacheHits = cacheHits.length;
+        stats.cacheMisses = stats.totalFunctions - stats.cacheHits;
+        return stats;
+    }
+    
+    /**
+     * Compute source hash for a function by extracting its source text.
+     */
+    private SourceHash computeFunctionHash(FuncInfo f) {
+        if (sourceText.length == 0 || f.decl is null) {
+            return SourceHash.init;
+        }
+        
+        auto loc = f.decl.location;
+        if (loc.endOffset <= loc.startOffset || loc.endOffset > sourceText.length) {
+            return SourceHash.init;
+        }
+        
+        string funcSource = sourceText[loc.startOffset .. loc.endOffset];
+        return computeSourceHash(funcSource);
+    }
+    
+    /**
+     * Compute hash from source text using MurmurHash3.
+     */
+    private static SourceHash computeSourceHash(string source) {
+        SourceHash result;
+        auto hash1 = MurmurHash3!128(0);
+        auto hash2 = MurmurHash3!128(0x9E3779B9);
+        
+        hash1.put(cast(const(ubyte)[])source);
+        hash2.put(cast(const(ubyte)[])source);
+        
+        auto h1 = hash1.finish();
+        auto h2 = hash2.finish();
+        
+        result[0..16] = h1[];
+        result[16..32] = h2[];
+        return result;
     }
     
     //==========================================================================
@@ -1413,6 +1515,17 @@ class BinaryEmitter {
             return emitBuiltinBody(f);
         }
         
+        // Check code cache
+        auto currentHash = computeFunctionHash(f);
+        if (f.name in codeCache && f.name in sourceHashes) {
+            if (sourceHashes[f.name] == currentHash) {
+                // Cache hit - source unchanged
+                cacheHits[f.name] = true;
+                return codeCache[f.name].dup;
+            }
+        }
+        
+        // Cache miss - emit fresh
         Appender!(ubyte[]) body_;
         
         // Create context for this function
@@ -1443,7 +1556,12 @@ class BinaryEmitter {
         // End opcode
         body_ ~= Op.end;
         
-        return body_.data;
+        // Store in cache for next time
+        auto result = body_.data;
+        codeCache[f.name] = result.dup;
+        sourceHashes[f.name] = currentHash;
+        
+        return result;
     }
     
     /**
@@ -5325,4 +5443,36 @@ private class EvalContext {
         out_ ~= Op.call;
         leb128u(out_, emitter.concatFuncIndex);
     }
+}
+
+//==============================================================================
+// Unit Tests for Code Caching
+//==============================================================================
+
+unittest {
+    import std.stdio : writeln;
+    
+    // Test source hash computation
+    auto hash1 = BinaryEmitter.computeSourceHash("int foo() { return 42; }");
+    auto hash2 = BinaryEmitter.computeSourceHash("int foo() { return 42; }");
+    auto hash3 = BinaryEmitter.computeSourceHash("int foo() { return 43; }");
+    
+    assert(hash1 == hash2, "Same source should produce same hash");
+    assert(hash1 != hash3, "Different source should produce different hash");
+    
+    writeln("✓ Source hash computation test passed");
+}
+
+unittest {
+    import std.stdio : writeln;
+    
+    // Test CacheStats initialization
+    auto emitter = new BinaryEmitter(null);
+    auto stats = emitter.getCacheStats();
+    
+    assert(stats.totalFunctions == 0, "Initial totalFunctions should be 0");
+    assert(stats.cacheHits == 0, "Initial cacheHits should be 0");
+    assert(stats.cacheMisses == 0, "Initial cacheMisses should be 0");
+    
+    writeln("✓ CacheStats initialization test passed");
 }

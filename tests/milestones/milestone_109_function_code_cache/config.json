@@ -1,0 +1,6 @@
+{
+  "name": "function_code_cache",
+  "description": "Per-function code caching in emitter",
+  "type": "unittest",
+  "module": "codegen.emitter"
+}
