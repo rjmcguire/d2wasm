@@ -77,6 +77,15 @@ class FuncContext {
     // Block depth for br instructions
     uint blockDepth = 0;
     
+    // RAII tracking: struct locals that need destructor calls
+    struct RAIIVarInfo {
+        string name;           // Variable name
+        uint frameOffset;      // Offset on shadow stack
+        StructDecl structDecl; // Struct type (for destructor lookup)
+        uint uniqueLocalId;    // Unique ID from type checker
+    }
+    RAIIVarInfo[uint] raiiVars;  // uniqueLocalId -> info
+    
     // Method info: non-null structParent means we're in a method with hidden 'this'
     uint thisLocalIndex;  // Local index of hidden 'this' parameter (for methods)
     
@@ -238,6 +247,16 @@ class FuncContext {
                     info.frameOffset = frameSize;
                     info.structDecl = structDecl;
                     structLocals[varDecl.name] = info;
+                    
+                    // Track for RAII if struct has destructor
+                    if (structDecl.hasDestructor()) {
+                        RAIIVarInfo raiiInfo;
+                        raiiInfo.name = varDecl.name;
+                        raiiInfo.frameOffset = frameSize;
+                        raiiInfo.structDecl = structDecl;
+                        raiiInfo.uniqueLocalId = varDecl.uniqueLocalId;
+                        raiiVars[varDecl.uniqueLocalId] = raiiInfo;
+                    }
                     
                     frameSize += structDecl.structSize;
                     return;
@@ -600,6 +619,59 @@ class FuncContext {
     }
     
     /**
+     * Emit destructor calls for variables going out of scope.
+     * Called at the end of compound statements and before return.
+     * Variables are destructed in reverse declaration order.
+     */
+    void emitScopeDestructors(ref Appender!(ubyte[]) out_, uint[] varIds) {
+        // Destruct in reverse order (last declared first)
+        foreach_reverse (varId; varIds) {
+            if (auto raiiInfo = varId in raiiVars) {
+                emitDestructorCall(out_, *raiiInfo);
+            }
+        }
+    }
+    
+    /**
+     * Emit a destructor call for a single struct variable.
+     * The destructor is called with a pointer to the struct (this).
+     */
+    void emitDestructorCall(ref Appender!(ubyte[]) out_, RAIIVarInfo info) {
+        // Get the destructor function
+        auto dtor = info.structDecl.destructor;
+        if (dtor is null) return;
+        
+        // Push the address of the struct (this pointer)
+        // FP + frameOffset
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128u(out_, info.frameOffset);
+        out_ ~= Op.i32_add;
+        
+        // Call the destructor
+        string dtorName = info.structDecl.name ~ "_~this";
+        if (auto funcIdx = dtorName in emitter.funcIndex) {
+            out_ ~= Op.call;
+            leb128u(out_, *funcIdx);
+        } else {
+            // Destructor not registered - this shouldn't happen
+            // For now, just drop the this pointer
+            out_ ~= Op.drop;
+        }
+    }
+    
+    /**
+     * Emit destructor calls for all scopes being unwound (on return).
+     * unwindChain[0] is innermost scope, [n-1] is function scope.
+     */
+    void emitUnwindDestructors(ref Appender!(ubyte[]) out_, uint[][] unwindChain) {
+        foreach (scopeVars; unwindChain) {
+            emitScopeDestructors(out_, scopeVars);
+        }
+    }
+    
+    /**
      * Emit local declarations (non-parameter locals)
      */
     void emitLocalDecls(ref Appender!(ubyte[]) out_) {
@@ -645,6 +717,8 @@ class FuncContext {
             foreach (s; compound.statements) {
                 emitStatement(out_, s);
             }
+            // Emit destructor calls for variables going out of scope (RAII)
+            emitScopeDestructors(out_, compound.destructOnExit);
         } else if (auto returnStmt = cast(ReturnStatement)stmt) {
             emitReturn(out_, returnStmt);
         } else if (auto exprStmt = cast(ExpressionStatement)stmt) {
@@ -676,6 +750,9 @@ class FuncContext {
             // Large return: copy value to hidden result pointer
             emitLargeReturnCopy(out_, stmt.value);
             
+            // Call destructors for all scopes being unwound (RAII)
+            emitUnwindDestructors(out_, stmt.unwindChain);
+            
             // Restore shadow stack before returning (void return)
             emitEpilogue(out_);
             out_ ~= Op.return_;
@@ -684,6 +761,9 @@ class FuncContext {
             if (stmt.value) {
                 emitExpression(out_, stmt.value);
             }
+            
+            // Call destructors for all scopes being unwound (RAII)
+            emitUnwindDestructors(out_, stmt.unwindChain);
             
             // Restore shadow stack before returning
             emitEpilogue(out_);

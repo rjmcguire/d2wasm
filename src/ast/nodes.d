@@ -130,7 +130,8 @@ class FunctionDecl : Declaration {
         bool, "isCTFE",        1,  // CTFE-only function
         bool, "isIntrinsic",   1,  // compiler emits inline code instead of call
         bool, "isTypeChecked", 1,  // already type-checked (avoid redundant passes)
-        uint, "",              2,  // padding to byte boundary
+        bool, "isDestructor",  1,  // ~this() destructor
+        uint, "",              1,  // padding to byte boundary
     ));
     
     Declaration parent;  // enclosing struct/class, null for free functions
@@ -234,6 +235,9 @@ struct StructField {
 class StructDecl : Declaration {
     Declaration[] members;
     
+    // Destructor (if present) - for RAII support
+    FunctionDecl destructor;
+    
     // Layout info (populated during semantic analysis)
     StructField[] fields;
     size_t structSize;
@@ -255,8 +259,16 @@ class StructDecl : Declaration {
         return null;
     }
     
+    /**
+     * Check if this struct has a destructor (needs RAII cleanup)
+     */
+    bool hasDestructor() const {
+        return destructor !is null;
+    }
+    
     override string toString() const {
-        return format("StructDecl(%s, size=%d, align=%d)", name, structSize, structAlign);
+        return format("StructDecl(%s, size=%d, align=%d%s)", name, structSize, structAlign,
+                      destructor ? ", has ~this" : "");
     }
 }
 

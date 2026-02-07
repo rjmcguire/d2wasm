@@ -80,7 +80,8 @@ class TypeChecker {
      * Push a new scope onto the variable tracking stack
      */
     private void pushScopeVars() {
-        scopeVarStack ~= [];
+        uint[] empty;
+        scopeVarStack ~= empty;
     }
     
     /**

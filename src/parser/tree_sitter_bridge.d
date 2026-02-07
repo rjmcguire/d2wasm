@@ -550,10 +550,16 @@ class TreeSitterBridge {
         auto structDecl = new StructDecl(loc, name, members);
         
         // Mark any FunctionDecl members as methods and set their parent
+        // Extract destructor if present
         foreach (member; members) {
             if (auto funcDecl = cast(FunctionDecl)member) {
                 funcDecl.isMethod = true;
                 funcDecl.parent = structDecl;
+                
+                // Check if this is a destructor
+                if (funcDecl.isDestructor) {
+                    structDecl.destructor = funcDecl;
+                }
             }
         }
         
@@ -575,11 +581,54 @@ class TreeSitterBridge {
                 members ~= parseVariableDeclaration(child);
             } else if (childType == "function_declaration") {
                 members ~= parseFunctionDeclaration(child);
+            } else if (childType == "destructor") {
+                members ~= parseDestructor(child);
             }
             // Skip braces, semicolons, etc.
         }
         
         return members;
+    }
+    
+    /**
+     * Parse destructor (~this() { ... })
+     */
+    FunctionDecl parseDestructor(TSNode node) {
+        SourceLocation loc = makeSourceLocation(node);
+        
+        // Find the function body
+        TSNode bodyNode = TreeSitterParser.getChildByFieldName(node, "function_body");
+        if (!TreeSitterParser.isValid(bodyNode)) {
+            // Try getting by type instead
+            uint childCount = TreeSitterParser.getChildCount(node);
+            for (uint i = 0; i < childCount; i++) {
+                TSNode child = TreeSitterParser.getChild(node, i);
+                string childType = TreeSitterParser.getNodeType(child);
+                if (childType == "function_body") {
+                    bodyNode = child;
+                    break;
+                }
+            }
+        }
+        
+        Statement body_ = null;
+        if (TreeSitterParser.isValid(bodyNode)) {
+            body_ = parseFunctionBody(bodyNode);
+        }
+        
+        // Create destructor as a special function named "~this"
+        auto dtor = new FunctionDecl(
+            loc,
+            "~this",
+            new BasicType(loc, BasicType.Kind.Void),  // Destructors return void
+            [],  // No parameters
+            body_,
+            [],   // No attributes
+            false  // Not public
+        );
+        dtor.isDestructor = true;
+        
+        return dtor;
     }
     
     /**

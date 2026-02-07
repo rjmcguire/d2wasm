@@ -1,0 +1,8 @@
+{
+  "name": "raii_destructor",
+  "description": "RAII: struct destructors called at scope exit and early return",
+  "type": "wasm_exec",
+  "expected_result": 0,
+  "entry": "test",
+  "capability": "RAII destructor calls"
+}
