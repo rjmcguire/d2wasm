@@ -105,6 +105,26 @@ private string formatInlineCallStack(NativeCTFEContext* ctx, CallFrame[] frames)
     
     string result;
     try {
+        // Show precise error location first (from errorLoc, set by trap handler)
+        if (ctx.errorLoc.line > 0) {
+            string file = ctx.errorLoc.fileName.length > 0 ? baseName(ctx.errorLoc.fileName) : "<unknown>";
+            string lineNum = to!string(ctx.errorLoc.line);
+            string colNum = to!string(ctx.errorLoc.column);
+            
+            result ~= "\n --> " ~ file ~ ":" ~ lineNum ~ ":" ~ colNum;
+            
+            string sourceLine = getSourceLine(ctx.errorLoc.fileName, ctx.errorLoc.line);
+            if (sourceLine.length > 0) {
+                result ~= "\n  |";
+                result ~= "\n" ~ padLeft(lineNum, 3) ~ " | " ~ sourceLine;
+                
+                // Add caret at column position
+                if (ctx.errorLoc.column > 0) {
+                    result ~= "\n  | " ~ spaces(ctx.errorLoc.column - 1) ~ "^^^";
+                }
+            }
+        }
+        
         // Show call stack
         if (frames.length > 0) {
             foreach_reverse (i, frame; frames) {
@@ -112,13 +132,7 @@ private string formatInlineCallStack(NativeCTFEContext* ctx, CallFrame[] frames)
                 string lineNum = to!string(frame.line);
                 
                 if (i == frames.length - 1) {
-                    // Top of stack - show with source context if available
-                    result ~= "\n --> " ~ file ~ ":" ~ lineNum;
-                    string sourceLine = getSourceLine(frame.fileName, frame.line);
-                    if (sourceLine.length > 0) {
-                        result ~= "\n  |";
-                        result ~= "\n" ~ padLeft(lineNum, 3) ~ " | " ~ sourceLine;
-                    }
+                    // Top of stack - just note the function name
                     result ~= "\n  |";
                     result ~= "\nnote: in `" ~ frame.funcName ~ "()`";
                 } else {
