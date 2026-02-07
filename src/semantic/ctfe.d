@@ -77,6 +77,7 @@ class CTFEEvaluator {
     private SymbolTable symbolTable;
     private Declaration[] allDeclarations;
     private Backend backend;  // Code generation backend (WASM or Native)
+    private bool enableStackTrace;
     
     // Persistent CTFE context - accumulates compiled functions
     private bool[string] compiledFunctions;  // functions already in context
@@ -91,7 +92,7 @@ class CTFEEvaluator {
     
     // CTFE Arena for __ctfe_runtime memory allocation
     private static struct CTFEArena {
-        enum MEMORY_RESERVED = 1024;  // First 1KB reserved for future use
+        enum MEMORY_RESERVED = 2048;  // First 2KB reserved (call stack buffer + scratch)
         uint offset = MEMORY_RESERVED;
         uint[] savedOffsets;  // Stack for push/pop
         
@@ -127,10 +128,11 @@ class CTFEEvaluator {
     }
     private CTFEArena arena;
     
-    this(SymbolTable symbolTable, Declaration[] declarations, string backendName = "wasm") {
+    this(SymbolTable symbolTable, Declaration[] declarations, string backendName = "wasm", bool enableStackTrace = true) {
         this.symbolTable = symbolTable;
         this.allDeclarations = declarations;
-        this.backend = createBackend(backendName, symbolTable);
+        this.enableStackTrace = enableStackTrace;
+        this.backend = createBackend(backendName, symbolTable, enableStackTrace);
         
         // Register lazy resolver with symbol table
         symbolTable.ctfeResolver = &this.evaluateManifestConstant;
@@ -399,7 +401,7 @@ class CTFEEvaluator {
         ensureDependenciesEvaluated(expr);
         
         // Emit a WASM module that evaluates this expression
-        auto emitter = new BinaryEmitter(symbolTable);
+        auto emitter = new BinaryEmitter(symbolTable, enableStackTrace);
         ubyte[] wasmBytes = emitter.emitArrayExpressionModule(expr);
         
         if (wasmBytes is null) {
@@ -1592,7 +1594,7 @@ class CTFEEvaluator {
         }
         
         // Create a minimal compilation with just this function
-        auto emitter = new BinaryEmitter(symbolTable);
+        auto emitter = new BinaryEmitter(symbolTable, enableStackTrace);
         auto result = emitter.emit([funcDecl]);
         
         if (result is null) {

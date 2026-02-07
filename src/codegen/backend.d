@@ -119,20 +119,25 @@ interface Backend {
 
 /**
  * Backend factory - creates the appropriate backend based on configuration.
+ * 
+ * Params:
+ *   backendName = "wasm" or "native" (auto-detects architecture)
+ *   symbolTable = Symbol table for lookups
+ *   enableStackTrace = Emit call stack tracking for CTFE errors (default: true)
  */
-Backend createBackend(string backendName, SymbolTable symbolTable) {
+Backend createBackend(string backendName, SymbolTable symbolTable, bool enableStackTrace = true) {
     import codegen.native.codegen_interface : hostArchitecture;
     
     switch (backendName) {
         case "wasm":
-            return new WASMBackend(symbolTable);
+            return new WASMBackend(symbolTable, enableStackTrace);
         
         case "native":
             // Auto-detect host architecture
             string arch = hostArchitecture();
             switch (arch) {
                 case "arm64":
-                    return new NativeBackend(symbolTable);
+                    return new NativeBackend(symbolTable, enableStackTrace);
                 
                 case "x86_64":
                     throw new Exception(
@@ -147,7 +152,7 @@ Backend createBackend(string backendName, SymbolTable symbolTable) {
         
         // Allow explicit architecture selection for testing/development
         case "native-arm64":
-            return new NativeBackend(symbolTable);
+            return new NativeBackend(symbolTable, enableStackTrace);
         
         // Future: case "native-x86_64": return new X86_64NativeBackend(symbolTable);
         

@@ -17,13 +17,15 @@ import semantic.symbol_table;
 class WASMBackend : Backend {
     private SymbolTable symbolTable;
     private string lastError;
+    private bool enableStackTrace;
     
-    this(SymbolTable st) {
+    this(SymbolTable st, bool enableStackTrace = true) {
         this.symbolTable = st;
+        this.enableStackTrace = enableStackTrace;
     }
     
     override CompiledFunction compile(FunctionDecl func) {
-        auto emitter = new BinaryEmitter(symbolTable);
+        auto emitter = new BinaryEmitter(symbolTable, enableStackTrace);
         auto wasmBytes = emitter.emit([func]);
         
         if (wasmBytes is null) {
@@ -41,7 +43,7 @@ class WASMBackend : Backend {
         // Convert FunctionDecl[] to Declaration[] for the emitter
         Declaration[] decls = funcs.map!(f => cast(Declaration)f).array;
         
-        auto emitter = new BinaryEmitter(symbolTable);
+        auto emitter = new BinaryEmitter(symbolTable, enableStackTrace);
         auto wasmBytes = emitter.emit(decls);
         
         if (wasmBytes is null) {
@@ -53,7 +55,7 @@ class WASMBackend : Backend {
     }
     
     override ubyte[] compileModule(Declaration[] decls) {
-        auto emitter = new BinaryEmitter(symbolTable);
+        auto emitter = new BinaryEmitter(symbolTable, enableStackTrace);
         auto result = emitter.emit(decls);
         if (result is null) {
             lastError = emitter.error();

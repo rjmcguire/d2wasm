@@ -70,13 +70,29 @@ enum : uint {
 // Memory Layout
 //==============================================================================
 // Memory is organized as:
-//   0-1023:     Reserved (null guard, scratch space)
-//   1024+:      Data section (string literals, array structs)
+//   0-2047:     Reserved (call stack buffer + scratch space)
+//   2048+:      Data section (string literals, array structs)
 //   heap_start: After data section, managed by arena allocator
+//
+// Call Stack Buffer Layout (when enabled):
+//   0-3:        depth (u32) - current stack depth
+//   4-7:        maxDepth (u32) - constant 64
+//   8-1543:     frames[64] - InlineFrame (24 bytes each)
+//               Per frame: nameOffset(4), nameLen(4), fileOffset(4),
+//                          fileLen(4), line(4), column(4)
+//   1544-2047:  String pool for function/file names
 
 enum : uint {
-    MEMORY_RESERVED = 1024,   // Reserved bytes at start
+    MEMORY_RESERVED = 2048,   // Reserved bytes at start (includes call stack buffer)
     MEMORY_ALIGNMENT = 8,     // Alignment for allocations
+    
+    // Call stack buffer layout
+    CALL_STACK_DEPTH_OFFSET = 0,
+    CALL_STACK_MAX_DEPTH_OFFSET = 4,
+    CALL_STACK_FRAMES_OFFSET = 8,
+    CALL_STACK_FRAME_SIZE = 24,   // 6 × u32 fields
+    CALL_STACK_MAX_FRAMES = 64,
+    CALL_STACK_STRING_POOL_OFFSET = 1544,  // 8 + 64*24
 }
 
 //==============================================================================

@@ -1,0 +1,8 @@
+{
+  "name": "call_stack_buffer",
+  "description": "WASM call stack buffer reservation - memory layout with 2KB reserved",
+  "type": "wasm_exec",
+  "expected_result": 0,
+  "entry": "test",
+  "capability": "Linear memory reservation for call stack tracking"
+}

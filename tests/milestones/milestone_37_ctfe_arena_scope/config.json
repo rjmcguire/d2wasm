@@ -2,7 +2,7 @@
   "name": "ctfe_arena_scope",
   "description": "Arena push/pop reclaims memory",
   "type": "wasm_exec",
-  "expected_result": 1024,
+  "expected_result": 2048,
   "entry": "result",
   "capability": "__ctfe_runtime.push/pop, arena scope management"
 }

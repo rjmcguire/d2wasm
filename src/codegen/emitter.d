@@ -156,10 +156,14 @@ class BinaryEmitter {
         ubyte[][string] codeCache;  // function name -> cached code bytes
         SourceHash[string] sourceHashes;  // function name -> source hash
         bool[string] cacheHits;  // Track which functions used cache
+        
+        // Stack trace option
+        bool enableStackTrace;
     }
     
-    this(SymbolTable symbolTable) {
+    this(SymbolTable symbolTable, bool enableStackTrace = true) {
         this.symbolTable = symbolTable;
+        this.enableStackTrace = enableStackTrace;
         this.nextDataOffset = MEMORY_RESERVED;  // Start after reserved area
     }
     

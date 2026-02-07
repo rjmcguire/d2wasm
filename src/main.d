@@ -53,6 +53,9 @@ struct CompilerOptions {
     
     // Watch mode options
     bool watch = false;       // Watch files and recompile on change
+    
+    // Debug options
+    bool stackTrace = true;   // Emit call stack tracking for CTFE errors (default: on)
 }
 
 int main(string[] args) {
@@ -101,7 +104,9 @@ int main(string[] args) {
             // Parallel compilation
             "jobs|j", "Max parallel compilations (0 = auto)", &options.maxParallel,
             // Watch mode
-            "watch|w", "Watch files and recompile on change", &options.watch
+            "watch|w", "Watch files and recompile on change", &options.watch,
+            // Debug options
+            "stack-trace", "Emit call stack tracking for CTFE errors (default: on)", &options.stackTrace
         );
         
         log(3, "main() started");
@@ -258,7 +263,7 @@ int compileFile(CompilerOptions options) {
         import semantic.ctfe;
         // Create evaluator - registers lazy resolver with symbol table
         // Actual evaluation happens when manifest constant values are accessed
-        auto ctfeEvaluator = new CTFEEvaluator(symbolTable, ast, options.backend);
+        auto ctfeEvaluator = new CTFEEvaluator(symbolTable, ast, options.backend, options.stackTrace);
         
         log(2, "CTFE resolver ready");
         
@@ -279,7 +284,7 @@ int compileFile(CompilerOptions options) {
         if (!options.dryRun) {
             log(1, "Generating binary WASM...");
             
-            auto emitter = new BinaryEmitter(symbolTable);
+            auto emitter = new BinaryEmitter(symbolTable, options.stackTrace);
             
             // Load cache if enabled
             import cache.compiler_cache : CompilerCache;

@@ -24,9 +24,11 @@ alias ArrayType = ast.nodes.ArrayType;
 class NativeBackend : Backend {
     private SymbolTable symbolTable;
     private string lastError;
+    private bool enableStackTrace;
     
-    this(SymbolTable st) {
+    this(SymbolTable st, bool enableStackTrace = true) {
         this.symbolTable = st;
+        this.enableStackTrace = enableStackTrace;
     }
     
     override CompiledFunction compile(FunctionDecl func) {
@@ -40,7 +42,7 @@ class NativeBackend : Backend {
         }
         
         try {
-            return new NativeCompiledFunction(func, symbolTable);
+            return new NativeCompiledFunction(func, symbolTable, enableStackTrace);
         } catch (Exception e) {
             lastError = "Native compile error: " ~ e.msg;
             return null;
@@ -60,7 +62,7 @@ class NativeBackend : Backend {
         }
         
         try {
-            return new NativeCompiledFunction(funcs, entryFuncName, symbolTable);
+            return new NativeCompiledFunction(funcs, entryFuncName, symbolTable, enableStackTrace);
         } catch (Exception e) {
             lastError = "Native compile error: " ~ e.msg;
             return null;
@@ -113,12 +115,16 @@ class NativeCompiledFunction : CompiledFunction {
     // Host function table for CTFE intrinsics - Milestone 87/88
     private HostFunctionTable hostFunctions;
     
+    // Stack trace option
+    private bool enableStackTrace;
+    
     /// Single function constructor (original)
-    this(FunctionDecl func, SymbolTable st) {
+    this(FunctionDecl func, SymbolTable st, bool enableStackTrace = true) {
         import std.stdio : writeln;
         
         this.funcName = func.name;
         this.symbolTable = st;
+        this.enableStackTrace = enableStackTrace;
         this.gen = NativeCodeGen.alloc(64 * 1024);  // 64KB code buffer
         this.dataSection = NativeDataSection.alloc(64 * 1024);  // 64KB data section
         this.hostFunctions = createCTFEHostFunctions();  // Milestone 88
@@ -131,7 +137,9 @@ class NativeCompiledFunction : CompiledFunction {
         }
         
         // Reserve space for inline call stack (must be before adding other data)
-        dataSection.reserveInlineStack();
+        if (enableStackTrace) {
+            dataSection.reserveInlineStack();
+        }
         
         // Store parameter count for call()
         this.paramCount = func.parameters.length;
@@ -146,11 +154,12 @@ class NativeCompiledFunction : CompiledFunction {
     }
     
     /// Multi-function constructor for CTFE with dependencies
-    this(FunctionDecl[] funcs, string entryFuncName, SymbolTable st) {
+    this(FunctionDecl[] funcs, string entryFuncName, SymbolTable st, bool enableStackTrace = true) {
         import std.stdio : writeln;
         
         this.funcName = entryFuncName;
         this.symbolTable = st;
+        this.enableStackTrace = enableStackTrace;
         this.gen = NativeCodeGen.alloc(64 * 1024);  // 64KB code buffer
         this.dataSection = NativeDataSection.alloc(64 * 1024);  // 64KB data section
         this.hostFunctions = createCTFEHostFunctions();  // Milestone 88
@@ -163,7 +172,9 @@ class NativeCompiledFunction : CompiledFunction {
         }
         
         // Reserve space for inline call stack (must be before adding other data)
-        dataSection.reserveInlineStack();
+        if (enableStackTrace) {
+            dataSection.reserveInlineStack();
+        }
         
         // Store all function decls for call resolution
         foreach (func; funcs) {
