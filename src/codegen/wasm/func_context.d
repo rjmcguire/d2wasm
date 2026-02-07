@@ -85,6 +85,15 @@ class FuncContext {
     uint resultPtrLocalIdx;          // WASM local index of hidden result pointer
     uint returnValueSize;            // Size of return value in bytes
     
+    // Call stack frame info (milestone 144)
+    bool enableStackTrace = false;
+    uint frameNameOffset;
+    uint frameNameLen;
+    uint frameFileOffset;
+    uint frameFileLen;
+    uint frameLine;
+    uint frameColumn;
+    
     this(FuncInfo f, BinaryEmitter e) {
         this.func = f;
         this.emitter = e;
@@ -179,6 +188,26 @@ class FuncContext {
             }
         }
         paramCount = cast(uint)(f.decl.parameters.length + localOffset);
+        
+        // Register call stack frame info if stack trace is enabled
+        if (e.enableStackTrace) {
+            enableStackTrace = true;
+            string fileName = f.decl.location.filename;
+            if (fileName.length == 0) fileName = "<unknown>";
+            
+            auto frameInfo = e.registerCallStackFrame(
+                f.name,
+                fileName,
+                f.decl.location.line,
+                f.decl.location.column
+            );
+            frameNameOffset = frameInfo.nameOffset;
+            frameNameLen = frameInfo.nameLen;
+            frameFileOffset = frameInfo.fileOffset;
+            frameFileLen = frameInfo.fileLen;
+            frameLine = frameInfo.line;
+            frameColumn = frameInfo.column;
+        }
     }
     
     /**
@@ -325,6 +354,11 @@ class FuncContext {
      * FP = $sp   (frame pointer - stable reference for locals)
      */
     void emitPrologue(ref Appender!(ubyte[]) out_) {
+        // First, emit call stack push if enabled
+        if (enableStackTrace) {
+            emitCallStackPush(out_);
+        }
+        
         if (frameSize == 0) return;
         
         // savedSp = global.get $sp
@@ -355,6 +389,11 @@ class FuncContext {
      * $sp = savedSp
      */
     void emitEpilogue(ref Appender!(ubyte[]) out_) {
+        // First, emit call stack pop if enabled
+        if (enableStackTrace) {
+            emitCallStackPop(out_);
+        }
+        
         if (frameSize == 0) return;
         
         // $sp = savedSp
@@ -362,6 +401,165 @@ class FuncContext {
         leb128u(out_, savedSpLocal);
         out_ ~= Op.global_set;
         leb128u(out_, emitter.spGlobal);
+    }
+    
+    /**
+     * Emit call stack push - called at function entry.
+     * 
+     * if (depth < 64) {
+     *     frameAddr = 8 + depth * 24
+     *     store nameOffset, nameLen, fileOffset, fileLen, line, column
+     *     depth++
+     * }
+     */
+    void emitCallStackPush(ref Appender!(ubyte[]) out_) {
+        import codegen.wasm.types : CALL_STACK_FRAMES_OFFSET, CALL_STACK_FRAME_SIZE,
+                                    CALL_STACK_MAX_FRAMES;
+        
+        // Get current depth
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.callStackDepthGlobal);
+        
+        // Check if depth < 64
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_MAX_FRAMES);
+        out_ ~= Op.i32_lt_u;
+        
+        // if (depth < 64) {
+        out_ ~= Op.if_;
+        out_ ~= BlockType.void_;  // No result
+        
+        // Calculate frame address: 8 + depth * 24
+        // frameAddr = CALL_STACK_FRAMES_OFFSET + depth * CALL_STACK_FRAME_SIZE
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_FRAMES_OFFSET);
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.callStackDepthGlobal);
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_FRAME_SIZE);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_add;
+        // Stack: [frameAddr]
+        
+        // Store nameOffset at frameAddr + 0
+        out_ ~= Op.i32_const;
+        leb128u(out_, frameNameOffset);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;  // alignment = 4
+        out_ ~= cast(ubyte)0x00;  // offset = 0
+        
+        // Recalculate frameAddr for next store
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_FRAMES_OFFSET);
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.callStackDepthGlobal);
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_FRAME_SIZE);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_add;
+        
+        // Store nameLen at frameAddr + 4
+        out_ ~= Op.i32_const;
+        leb128u(out_, frameNameLen);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;  // alignment = 4
+        out_ ~= cast(ubyte)0x04;  // offset = 4
+        
+        // Recalculate frameAddr for next store
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_FRAMES_OFFSET);
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.callStackDepthGlobal);
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_FRAME_SIZE);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_add;
+        
+        // Store fileOffset at frameAddr + 8
+        out_ ~= Op.i32_const;
+        leb128u(out_, frameFileOffset);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;  // alignment = 4
+        out_ ~= cast(ubyte)0x08;  // offset = 8
+        
+        // Recalculate frameAddr for next store
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_FRAMES_OFFSET);
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.callStackDepthGlobal);
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_FRAME_SIZE);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_add;
+        
+        // Store fileLen at frameAddr + 12
+        out_ ~= Op.i32_const;
+        leb128u(out_, frameFileLen);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;  // alignment = 4
+        out_ ~= cast(ubyte)0x0C;  // offset = 12
+        
+        // Recalculate frameAddr for next store
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_FRAMES_OFFSET);
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.callStackDepthGlobal);
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_FRAME_SIZE);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_add;
+        
+        // Store line at frameAddr + 16
+        out_ ~= Op.i32_const;
+        leb128u(out_, frameLine);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;  // alignment = 4
+        out_ ~= cast(ubyte)0x10;  // offset = 16
+        
+        // Recalculate frameAddr for next store
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_FRAMES_OFFSET);
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.callStackDepthGlobal);
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_FRAME_SIZE);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_add;
+        
+        // Store column at frameAddr + 20
+        out_ ~= Op.i32_const;
+        leb128u(out_, frameColumn);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;  // alignment = 4
+        out_ ~= cast(ubyte)0x14;  // offset = 20
+        
+        // Increment depth
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.callStackDepthGlobal);
+        out_ ~= Op.i32_const;
+        leb128u(out_, 1);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.global_set;
+        leb128u(out_, emitter.callStackDepthGlobal);
+        
+        // end if
+        out_ ~= Op.end;
+    }
+    
+    /**
+     * Emit call stack pop - called at function exit.
+     * 
+     * depth--
+     */
+    void emitCallStackPop(ref Appender!(ubyte[]) out_) {
+        // Decrement depth (no bounds check needed - we only pop what we pushed)
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.callStackDepthGlobal);
+        out_ ~= Op.i32_const;
+        leb128u(out_, 1);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.global_set;
+        leb128u(out_, emitter.callStackDepthGlobal);
     }
     
     /**

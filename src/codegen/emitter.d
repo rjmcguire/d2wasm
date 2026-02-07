@@ -100,8 +100,10 @@ class BinaryEmitter {
         uint concatFuncIndex;
         SymbolTable symbolTable;
         uint spGlobal;
+        uint callStackDepthGlobal;  // Global for call stack depth (milestone 144)
         bool needsArraySupport;
         bool[string] neededCTFEImports;
+        bool enableStackTrace;  // Stack trace option (milestone 144)
     }
     
     private {
@@ -157,14 +159,26 @@ class BinaryEmitter {
         SourceHash[string] sourceHashes;  // function name -> source hash
         bool[string] cacheHits;  // Track which functions used cache
         
-        // Stack trace option
-        bool enableStackTrace;
+        // Call stack frame info (milestone 144)
+        // Maps function name to its frame info in the data section
+        struct CallStackFrameInfo {
+            uint nameOffset;   // Offset of function name in data section
+            uint nameLen;      // Length of function name
+            uint fileOffset;   // Offset of file name in data section
+            uint fileLen;      // Length of file name
+            uint line;         // Line number of function definition
+            uint column;       // Column number
+        }
+        CallStackFrameInfo[string] callStackFrameInfos;
+        uint callStackStringPoolOffset;  // Next offset in string pool area
     }
     
     this(SymbolTable symbolTable, bool enableStackTrace = true) {
+        import codegen.wasm.types : CALL_STACK_STRING_POOL_OFFSET;
         this.symbolTable = symbolTable;
         this.enableStackTrace = enableStackTrace;
         this.nextDataOffset = MEMORY_RESERVED;  // Start after reserved area
+        this.callStackStringPoolOffset = CALL_STACK_STRING_POOL_OFFSET;
     }
     
     //==========================================================================
@@ -282,6 +296,11 @@ class BinaryEmitter {
             
             // Always add shadow stack for struct locals
             addShadowStackGlobal();
+            
+            // Add call stack tracking global if enabled
+            if (enableStackTrace) {
+                addCallStackGlobal();
+            }
             
             // Add imports for CTFE-only functions that are called
             addCTFEImports();
@@ -1152,6 +1171,86 @@ class BinaryEmitter {
         sp.initValue = 65536;  // Top of first memory page (stack grows down)
         sp.name = "__sp";
         globals ~= sp;
+    }
+    
+    /**
+     * Add call stack depth global and initialize data section.
+     * Used for CTFE error stack traces (milestone 144).
+     * 
+     * Memory layout (first 2KB):
+     *   0-3:      depth (u32) - current stack depth, starts at 0
+     *   4-7:      maxDepth (u32) - constant 64
+     *   8-1543:   frames[64] (24 bytes each)
+     *   1544-2047: String pool for function/file names
+     */
+    private void addCallStackGlobal() {
+        import codegen.wasm.types : CALL_STACK_DEPTH_OFFSET, CALL_STACK_MAX_DEPTH_OFFSET,
+                                    CALL_STACK_MAX_FRAMES;
+        
+        // Add global for depth (mutable, starts at 0)
+        callStackDepthGlobal = cast(uint)globals.length;
+        GlobalInfo depth;
+        depth.type = ValType.i32;
+        depth.mutable = true;
+        depth.initValue = 0;
+        depth.name = "__call_stack_depth";
+        globals ~= depth;
+        
+        // Initialize maxDepth in data section (constant 64)
+        ubyte[4] maxDepthData;
+        uint maxDepth = CALL_STACK_MAX_FRAMES;
+        maxDepthData[0] = cast(ubyte)(maxDepth & 0xFF);
+        maxDepthData[1] = cast(ubyte)((maxDepth >> 8) & 0xFF);
+        maxDepthData[2] = cast(ubyte)((maxDepth >> 16) & 0xFF);
+        maxDepthData[3] = cast(ubyte)((maxDepth >> 24) & 0xFF);
+        
+        // Add to data section at the correct offset
+        dataEntries ~= DataEntry(CALL_STACK_MAX_DEPTH_OFFSET, maxDepthData[].dup);
+    }
+    
+    /**
+     * Register a function's frame info for call stack tracking.
+     * Stores the function name and source location in the string pool.
+     * Returns the frame info with offsets into the data section.
+     */
+    package CallStackFrameInfo registerCallStackFrame(string funcName, string fileName, uint line, uint column) {
+        import codegen.wasm.types : CALL_STACK_STRING_POOL_OFFSET, MEMORY_RESERVED;
+        
+        // Check if already registered
+        if (auto existing = funcName in callStackFrameInfos) {
+            return *existing;
+        }
+        
+        // Add function name to string pool
+        uint nameOffset = callStackStringPoolOffset;
+        uint nameLen = cast(uint)funcName.length;
+        
+        // Ensure we don't overflow into the reserved area
+        if (callStackStringPoolOffset + nameLen > MEMORY_RESERVED) {
+            // Fall back to using regular data section
+            nameOffset = addData(cast(ubyte[])funcName.dup);
+        } else {
+            dataEntries ~= DataEntry(nameOffset, cast(ubyte[])funcName.dup);
+            callStackStringPoolOffset += nameLen;
+            // Align to 4 bytes
+            callStackStringPoolOffset = (callStackStringPoolOffset + 3) & ~3;
+        }
+        
+        // Add file name to string pool  
+        uint fileOffset = callStackStringPoolOffset;
+        uint fileLen = cast(uint)fileName.length;
+        
+        if (callStackStringPoolOffset + fileLen > MEMORY_RESERVED) {
+            fileOffset = addData(cast(ubyte[])fileName.dup);
+        } else {
+            dataEntries ~= DataEntry(fileOffset, cast(ubyte[])fileName.dup);
+            callStackStringPoolOffset += fileLen;
+            callStackStringPoolOffset = (callStackStringPoolOffset + 3) & ~3;
+        }
+        
+        auto info = CallStackFrameInfo(nameOffset, nameLen, fileOffset, fileLen, line, column);
+        callStackFrameInfos[funcName] = info;
+        return info;
     }
     
     /**

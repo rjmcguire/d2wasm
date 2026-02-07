@@ -1,0 +1,8 @@
+{
+  "name": "call_stack_push_pop",
+  "description": "WASM call stack push/pop opcodes at function entry/exit",
+  "type": "wasm_exec",
+  "expected_result": 0,
+  "entry": "test",
+  "capability": "Call stack tracking opcodes for CTFE error stack traces"
+}
