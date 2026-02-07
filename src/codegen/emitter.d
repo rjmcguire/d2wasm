@@ -1174,7 +1174,7 @@ class BinaryEmitter {
     }
     
     /**
-     * Add call stack depth global and initialize data section.
+     * Initialize call stack tracking data section.
      * Used for CTFE error stack traces (milestone 144).
      * 
      * Memory layout (first 2KB):
@@ -1182,19 +1182,17 @@ class BinaryEmitter {
      *   4-7:      maxDepth (u32) - constant 64
      *   8-1543:   frames[64] (24 bytes each)
      *   1544-2047: String pool for function/file names
+     * 
+     * Note: depth is stored in memory (not a global) so it can be read
+     * by the host after a trap.
      */
     private void addCallStackGlobal() {
         import codegen.wasm.types : CALL_STACK_DEPTH_OFFSET, CALL_STACK_MAX_DEPTH_OFFSET,
                                     CALL_STACK_MAX_FRAMES;
         
-        // Add global for depth (mutable, starts at 0)
-        callStackDepthGlobal = cast(uint)globals.length;
-        GlobalInfo depth;
-        depth.type = ValType.i32;
-        depth.mutable = true;
-        depth.initValue = 0;
-        depth.name = "__call_stack_depth";
-        globals ~= depth;
+        // Initialize depth in data section (starts at 0)
+        ubyte[4] depthData = [0, 0, 0, 0];
+        dataEntries ~= DataEntry(CALL_STACK_DEPTH_OFFSET, depthData[].dup);
         
         // Initialize maxDepth in data section (constant 64)
         ubyte[4] maxDepthData;
@@ -1203,9 +1201,11 @@ class BinaryEmitter {
         maxDepthData[1] = cast(ubyte)((maxDepth >> 8) & 0xFF);
         maxDepthData[2] = cast(ubyte)((maxDepth >> 16) & 0xFF);
         maxDepthData[3] = cast(ubyte)((maxDepth >> 24) & 0xFF);
-        
-        // Add to data section at the correct offset
         dataEntries ~= DataEntry(CALL_STACK_MAX_DEPTH_OFFSET, maxDepthData[].dup);
+        
+        // callStackDepthGlobal is no longer used - depth is in memory
+        // But we keep the variable for compatibility (set to invalid value)
+        callStackDepthGlobal = uint.max;
     }
     
     /**

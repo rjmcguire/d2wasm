@@ -406,19 +406,25 @@ class FuncContext {
     /**
      * Emit call stack push - called at function entry.
      * 
-     * if (depth < 64) {
-     *     frameAddr = 8 + depth * 24
+     * Depth is stored in memory at offset 0 (not a global) so it can be
+     * read by the host after a trap.
+     * 
+     * if (mem[0] < 64) {
+     *     frameAddr = 8 + mem[0] * 24
      *     store nameOffset, nameLen, fileOffset, fileLen, line, column
-     *     depth++
+     *     mem[0]++
      * }
      */
     void emitCallStackPush(ref Appender!(ubyte[]) out_) {
-        import codegen.wasm.types : CALL_STACK_FRAMES_OFFSET, CALL_STACK_FRAME_SIZE,
-                                    CALL_STACK_MAX_FRAMES;
+        import codegen.wasm.types : CALL_STACK_DEPTH_OFFSET, CALL_STACK_FRAMES_OFFSET, 
+                                    CALL_STACK_FRAME_SIZE, CALL_STACK_MAX_FRAMES;
         
-        // Get current depth
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.callStackDepthGlobal);
+        // Load current depth from memory
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_DEPTH_OFFSET);  // address 0
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;  // alignment = 4
+        out_ ~= cast(ubyte)0x00;  // offset = 0
         
         // Check if depth < 64
         out_ ~= Op.i32_const;
@@ -430,11 +436,13 @@ class FuncContext {
         out_ ~= BlockType.void_;  // No result
         
         // Calculate frame address: 8 + depth * 24
-        // frameAddr = CALL_STACK_FRAMES_OFFSET + depth * CALL_STACK_FRAME_SIZE
         out_ ~= Op.i32_const;
         leb128u(out_, CALL_STACK_FRAMES_OFFSET);
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.callStackDepthGlobal);
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_DEPTH_OFFSET);
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        out_ ~= cast(ubyte)0x00;
         out_ ~= Op.i32_const;
         leb128u(out_, CALL_STACK_FRAME_SIZE);
         out_ ~= Op.i32_mul;
@@ -445,14 +453,17 @@ class FuncContext {
         out_ ~= Op.i32_const;
         leb128u(out_, frameNameOffset);
         out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;  // alignment = 4
-        out_ ~= cast(ubyte)0x00;  // offset = 0
+        out_ ~= cast(ubyte)0x02;
+        out_ ~= cast(ubyte)0x00;
         
-        // Recalculate frameAddr for next store
+        // Recalculate frameAddr for next store (depth still same)
         out_ ~= Op.i32_const;
         leb128u(out_, CALL_STACK_FRAMES_OFFSET);
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.callStackDepthGlobal);
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_DEPTH_OFFSET);
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        out_ ~= cast(ubyte)0x00;
         out_ ~= Op.i32_const;
         leb128u(out_, CALL_STACK_FRAME_SIZE);
         out_ ~= Op.i32_mul;
@@ -462,14 +473,17 @@ class FuncContext {
         out_ ~= Op.i32_const;
         leb128u(out_, frameNameLen);
         out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;  // alignment = 4
-        out_ ~= cast(ubyte)0x04;  // offset = 4
+        out_ ~= cast(ubyte)0x02;
+        out_ ~= cast(ubyte)0x04;
         
-        // Recalculate frameAddr for next store
+        // Recalculate frameAddr
         out_ ~= Op.i32_const;
         leb128u(out_, CALL_STACK_FRAMES_OFFSET);
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.callStackDepthGlobal);
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_DEPTH_OFFSET);
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        out_ ~= cast(ubyte)0x00;
         out_ ~= Op.i32_const;
         leb128u(out_, CALL_STACK_FRAME_SIZE);
         out_ ~= Op.i32_mul;
@@ -479,14 +493,17 @@ class FuncContext {
         out_ ~= Op.i32_const;
         leb128u(out_, frameFileOffset);
         out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;  // alignment = 4
-        out_ ~= cast(ubyte)0x08;  // offset = 8
+        out_ ~= cast(ubyte)0x02;
+        out_ ~= cast(ubyte)0x08;
         
-        // Recalculate frameAddr for next store
+        // Recalculate frameAddr
         out_ ~= Op.i32_const;
         leb128u(out_, CALL_STACK_FRAMES_OFFSET);
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.callStackDepthGlobal);
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_DEPTH_OFFSET);
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        out_ ~= cast(ubyte)0x00;
         out_ ~= Op.i32_const;
         leb128u(out_, CALL_STACK_FRAME_SIZE);
         out_ ~= Op.i32_mul;
@@ -496,14 +513,17 @@ class FuncContext {
         out_ ~= Op.i32_const;
         leb128u(out_, frameFileLen);
         out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;  // alignment = 4
-        out_ ~= cast(ubyte)0x0C;  // offset = 12
+        out_ ~= cast(ubyte)0x02;
+        out_ ~= cast(ubyte)0x0C;
         
-        // Recalculate frameAddr for next store
+        // Recalculate frameAddr
         out_ ~= Op.i32_const;
         leb128u(out_, CALL_STACK_FRAMES_OFFSET);
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.callStackDepthGlobal);
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_DEPTH_OFFSET);
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        out_ ~= cast(ubyte)0x00;
         out_ ~= Op.i32_const;
         leb128u(out_, CALL_STACK_FRAME_SIZE);
         out_ ~= Op.i32_mul;
@@ -513,14 +533,17 @@ class FuncContext {
         out_ ~= Op.i32_const;
         leb128u(out_, frameLine);
         out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;  // alignment = 4
-        out_ ~= cast(ubyte)0x10;  // offset = 16
+        out_ ~= cast(ubyte)0x02;
+        out_ ~= cast(ubyte)0x10;
         
-        // Recalculate frameAddr for next store
+        // Recalculate frameAddr
         out_ ~= Op.i32_const;
         leb128u(out_, CALL_STACK_FRAMES_OFFSET);
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.callStackDepthGlobal);
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_DEPTH_OFFSET);
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        out_ ~= cast(ubyte)0x00;
         out_ ~= Op.i32_const;
         leb128u(out_, CALL_STACK_FRAME_SIZE);
         out_ ~= Op.i32_mul;
@@ -530,17 +553,23 @@ class FuncContext {
         out_ ~= Op.i32_const;
         leb128u(out_, frameColumn);
         out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;  // alignment = 4
-        out_ ~= cast(ubyte)0x14;  // offset = 20
+        out_ ~= cast(ubyte)0x02;
+        out_ ~= cast(ubyte)0x14;
         
-        // Increment depth
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.callStackDepthGlobal);
+        // Increment depth: mem[0] = mem[0] + 1
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_DEPTH_OFFSET);  // address for store
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_DEPTH_OFFSET);  // address for load
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        out_ ~= cast(ubyte)0x00;
         out_ ~= Op.i32_const;
         leb128u(out_, 1);
         out_ ~= Op.i32_add;
-        out_ ~= Op.global_set;
-        leb128u(out_, emitter.callStackDepthGlobal);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        out_ ~= cast(ubyte)0x00;
         
         // end if
         out_ ~= Op.end;
@@ -549,17 +578,25 @@ class FuncContext {
     /**
      * Emit call stack pop - called at function exit.
      * 
-     * depth--
+     * mem[0]--
      */
     void emitCallStackPop(ref Appender!(ubyte[]) out_) {
-        // Decrement depth (no bounds check needed - we only pop what we pushed)
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.callStackDepthGlobal);
+        import codegen.wasm.types : CALL_STACK_DEPTH_OFFSET;
+        
+        // Decrement depth: mem[0] = mem[0] - 1
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_DEPTH_OFFSET);  // address for store
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_DEPTH_OFFSET);  // address for load
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        out_ ~= cast(ubyte)0x00;
         out_ ~= Op.i32_const;
         leb128u(out_, 1);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.global_set;
-        leb128u(out_, emitter.callStackDepthGlobal);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        out_ ~= cast(ubyte)0x00;
     }
     
     /**

@@ -1,0 +1,7 @@
+{
+  "name": "wasm_stack_trace",
+  "description": "WASM CTFE runtime error includes call stack trace",
+  "type": "compile_error",
+  "expected_error_contains": "Call stack",
+  "capability": "WASM CTFE stack trace on runtime errors"
+}

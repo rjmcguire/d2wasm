@@ -319,7 +319,8 @@ class CTFERuntime {
         }
         
         if (result !is null) {
-            throw new CTFERuntimeError("CTFE execution failed: " ~ fromStringz(result).idup);
+            string baseError = "CTFE execution failed: " ~ fromStringz(result).idup;
+            throw new CTFERuntimeError(formatErrorWithStack(baseError));
         }
         
         // Get return value from stack
@@ -349,7 +350,8 @@ class CTFERuntime {
         
         result = m3_CallV(func);
         if (result !is null) {
-            throw new CTFERuntimeError("CTFE execution failed: " ~ fromStringz(result).idup);
+            string baseError = "CTFE execution failed: " ~ fromStringz(result).idup;
+            throw new CTFERuntimeError(formatErrorWithStack(baseError));
         }
         
         return CTFEValue.void_();
@@ -408,6 +410,69 @@ class CTFERuntime {
     uint getMemorySize() {
         if (!initialized) return 0;
         return m3_GetMemorySize(runtime);
+    }
+    
+    /**
+     * Read call stack from linear memory and format error message.
+     * Called when CTFE execution fails to provide stack trace.
+     */
+    string formatErrorWithStack(string baseError) {
+        import codegen.wasm.types : CALL_STACK_DEPTH_OFFSET, CALL_STACK_FRAMES_OFFSET,
+                                    CALL_STACK_FRAME_SIZE, CALL_STACK_MAX_FRAMES;
+        
+        if (!initialized) return baseError;
+        
+        try {
+            // Read stack depth
+            uint depth = readU32(CALL_STACK_DEPTH_OFFSET);
+            if (depth == 0 || depth > CALL_STACK_MAX_FRAMES) {
+                return baseError;  // No stack or invalid
+            }
+            
+            // Build stack trace
+            string[] frames;
+            for (uint i = 0; i < depth; i++) {
+                uint frameAddr = CALL_STACK_FRAMES_OFFSET + i * CALL_STACK_FRAME_SIZE;
+                
+                uint nameOffset = readU32(frameAddr + 0);
+                uint nameLen = readU32(frameAddr + 4);
+                uint fileOffset = readU32(frameAddr + 8);
+                uint fileLen = readU32(frameAddr + 12);
+                uint line = readU32(frameAddr + 16);
+                uint column = readU32(frameAddr + 20);
+                
+                // Read function and file names
+                string funcName = "<unknown>";
+                string fileName = "<unknown>";
+                try {
+                    if (nameLen > 0 && nameLen < 256) {
+                        funcName = readString(nameOffset, nameLen);
+                    }
+                    if (fileLen > 0 && fileLen < 1024) {
+                        fileName = readString(fileOffset, fileLen);
+                    }
+                } catch (Exception) {
+                    // Ignore read errors
+                }
+                
+                frames ~= format("  --> %s:%d:%d in `%s()`", fileName, line, column, funcName);
+            }
+            
+            // Format final error message
+            if (frames.length == 0) {
+                return baseError;
+            }
+            
+            string result = baseError ~ "\n\nCall stack (most recent first):";
+            foreach_reverse (frame; frames) {
+                result ~= "\n" ~ frame;
+            }
+            return result;
+            
+        } catch (Exception e) {
+            // If anything fails, just return the base error
+            return baseError;
+        }
     }
 }
 
