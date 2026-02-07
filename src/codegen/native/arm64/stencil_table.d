@@ -578,6 +578,89 @@ immutable stencil_return_val = Stencil(
     []
 );
 
+// ----- Inline Call Stack Tracking -----
+// These assume x10 = data section base
+
+/**
+ * Push a call frame onto the inline stack.
+ * x10 = data section base (set by caller)
+ * HOLE: frameDataOffset (16-bit immediate for MOVZ)
+ * 
+ * Stack layout at data section offset 0:
+ *   [0]:  depth (i32)
+ *   [4]:  maxDepth = 64
+ *   [8]:  frames[64] (24 bytes each)
+ */
+immutable stencil_inline_stack_push = Stencil(
+    "inline_stack_push",
+    cast(immutable ubyte[])[
+        // LDR w8, [x10]           ; load depth
+        0x48, 0x01, 0x40, 0xB9,
+        // CMP w8, #64             ; check overflow
+        0x1F, 0x01, 0x01, 0x71,
+        // B.GE +12                ; skip 12 instructions if depth >= 64
+        0x8A, 0x01, 0x00, 0x54,
+        
+        // Calculate dest: x9 = x10 + 8 + depth * 24
+        // MOVZ w9, #24
+        0x09, 0x03, 0x80, 0x52,
+        // MUL w9, w8, w9
+        0x09, 0x7D, 0x09, 0x1B,
+        // ADD x9, x10, x9
+        0x49, 0x01, 0x09, 0x8B,
+        // ADD x9, x9, #8
+        0x29, 0x21, 0x00, 0x91,
+        
+        // Load source: x11 = x10 + frameDataOffset (HOLE at byte 28)
+        // MOVZ x11, #0            ; HOLE: bits 5-20 = offset
+        0x0B, 0x00, 0x80, 0xD2,
+        // ADD x11, x10, x11
+        0x4B, 0x01, 0x0B, 0x8B,
+        
+        // Copy 24 bytes from x11 to x9
+        // LDP x12, x13, [x11]
+        0x6C, 0x35, 0x40, 0xA9,
+        // STP x12, x13, [x9]
+        0x2C, 0x35, 0x00, 0xA9,
+        // LDR x12, [x11, #16]
+        0x6C, 0x09, 0x40, 0xF9,
+        // STR x12, [x9, #16]
+        0x2C, 0x09, 0x00, 0xF9,
+        
+        // Increment depth
+        // ADD w8, w8, #1
+        0x08, 0x05, 0x00, 0x11,
+        // STR w8, [x10]
+        0x48, 0x01, 0x00, 0xB9,
+        // (skip label lands here - 16 instructions total)
+    ],
+    [
+        // Hole at byte 28: frameDataOffset as 16-bit immediate in MOVZ
+        // MOVZ encodes imm16 in bits 5-20
+        StencilHole(28, HoleKind.imm16_0, 0)
+    ]
+);
+
+/**
+ * Pop a call frame from the inline stack.
+ * x10 = data section base (set by caller)
+ * No holes.
+ */
+immutable stencil_inline_stack_pop = Stencil(
+    "inline_stack_pop",
+    cast(immutable ubyte[])[
+        // LDR w8, [x10]           ; load depth
+        0x48, 0x01, 0x40, 0xB9,
+        // SUBS w8, w8, #1         ; decrement (sets flags)
+        0x08, 0x05, 0x00, 0x71,
+        // B.LT +1                 ; skip store if underflow
+        0x2B, 0x00, 0x00, 0x54,
+        // STR w8, [x10]
+        0x48, 0x01, 0x00, 0xB9,
+    ],
+    []
+);
+
 // ============================================================================
 // Stencil Lookup Table
 // ============================================================================
@@ -665,6 +748,10 @@ shared static this() {
     // Return
     stencilTable["return_void"] = &stencil_return_void;
     stencilTable["return_val"] = &stencil_return_val;
+    
+    // Inline call stack tracking
+    stencilTable["inline_stack_push"] = &stencil_inline_stack_push;
+    stencilTable["inline_stack_pop"] = &stencil_inline_stack_pop;
 }
 
 /// Get a stencil by name

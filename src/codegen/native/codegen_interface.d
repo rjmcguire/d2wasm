@@ -813,6 +813,17 @@ interface INativeCodeGen {
     
     /// Get the architecture name
     string architecture();
+    
+    // ===== Inline Call Stack Tracking =====
+    // These track function calls for error reporting without FFI overhead.
+    // scratch2 (x10 on ARM64) must be set to data section base before calling.
+    
+    /// Emit inline stack push - saves call frame to data section
+    /// frameDataOffset: offset in data section where frame data is stored
+    void emitInlineStackPush(uint frameDataOffset);
+    
+    /// Emit inline stack pop - decrements call stack depth
+    void emitInlineStackPop();
 }
 
 /**

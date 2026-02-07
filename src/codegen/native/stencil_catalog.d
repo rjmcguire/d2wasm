@@ -100,6 +100,26 @@ enum RequiredStencil : string {
     // ===== Return =====
     return_void = "return_void",
     return_val = "return_val",
+    
+    // ===== Inline Call Stack Tracking =====
+    // These track function calls for error reporting without FFI overhead.
+    // Data section base must be in a designated register (scratch2 on ARM64 = x10)
+    //
+    // Stack layout in data section:
+    //   [0]:   depth (i32)
+    //   [4]:   maxDepth (i32) = 64
+    //   [8]:   frames[64] - array of InlineFrame (24 bytes each)
+    //
+    // InlineFrame layout (24 bytes):
+    //   [0]:  nameOffset (i32)
+    //   [4]:  nameLen (i32)
+    //   [8]:  fileOffset (i32)
+    //   [12]: fileLen (i32)
+    //   [16]: line (i32)
+    //   [20]: column (i32)
+    
+    inline_stack_push = "inline_stack_push",  // hole: frameDataOffset
+    inline_stack_pop = "inline_stack_pop",    // no holes
 }
 
 /**

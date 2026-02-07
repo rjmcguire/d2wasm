@@ -413,4 +413,14 @@ class ARM64CodeGen : INativeCodeGen {
     // ===== Architecture Info =====
     
     override string architecture() { return "arm64"; }
+    
+    // ===== Inline Call Stack Tracking =====
+    
+    override void emitInlineStackPush(uint frameDataOffset) {
+        emitStencilImm32("inline_stack_push", cast(int)frameDataOffset);
+    }
+    
+    override void emitInlineStackPop() {
+        emitStencil("inline_stack_pop");
+    }
 }
