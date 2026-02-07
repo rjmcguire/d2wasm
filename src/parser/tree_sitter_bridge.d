@@ -154,10 +154,22 @@ class TreeSitterBridge {
                 log(3, "Processing child ", i, " of type: ", nodeType);
                 
                 try {
-                    if (nodeType == "function_declaration") {
+                    if (nodeType == "module_def") {
+                        // module_def contains the module declaration + all file declarations
+                        // Parse contents recursively
+                        auto moduleDeclsResult = parseModuleDef(child);
+                        declarations ~= moduleDeclsResult;
+                    } else if (nodeType == "module_declaration") {
+                        // Standalone module declaration (shouldn't happen at root, but handle it)
+                        auto modDecl = parseModuleDeclaration(child);
+                        if (modDecl !is null) {
+                            declarations ~= modDecl;
+                            log(2, "Parsed module declaration: ", modDecl.fullyQualifiedName());
+                        }
+                    } else if (nodeType == "function_declaration") {
                         auto decl = parseFunctionDeclaration(child);
                         declarations ~= decl;
-                        log(3, "Successfully parsed function declaration");
+                        log(3, "Successfully parsed function declaration: ", decl.name);
                     } else if (nodeType == "import_declaration") {
                         auto importDecl = parseImportDeclaration(child);
                         if (importDecl !is null) {
@@ -324,6 +336,153 @@ class TreeSitterBridge {
     private static immutable string[] MAGIC_MODULES = [
         "__ctfe_runtime",
     ];
+    
+    /**
+     * Parse module_def node, which contains:
+     *   - module_declaration (the module statement)
+     *   - All declarations in the module
+     * 
+     * Returns array with ModuleDecl first, then all other declarations.
+     */
+    Declaration[] parseModuleDef(TSNode node) {
+        Declaration[] result;
+        
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            
+            log(3, "module_def child ", i, ": type=", childType);
+            
+            if (childType == "module_declaration") {
+                auto modDecl = parseModuleDeclaration(child);
+                if (modDecl !is null) {
+                    result ~= modDecl;
+                    log(2, "Parsed module declaration: ", modDecl.fullyQualifiedName());
+                }
+            } else if (childType == "function_declaration") {
+                auto decl = parseFunctionDeclaration(child);
+                result ~= decl;
+                log(3, "Parsed function in module: ", decl.name);
+            } else if (childType == "struct_declaration") {
+                result ~= parseStructDeclaration(child);
+            } else if (childType == "class_declaration") {
+                result ~= parseClassDeclaration(child);
+            } else if (childType == "variable_declaration") {
+                result ~= parseVariableDeclaration(child);
+            } else if (childType == "enum_declaration") {
+                result ~= parseEnumDeclaration(child);
+            } else if (childType == "manifest_constant") {
+                result ~= parseManifestConstant(child);
+            } else if (childType == "static_assert") {
+                result ~= parseStaticAssert(child);
+            } else if (childType == "import_declaration") {
+                auto importDecl = parseImportDeclaration(child);
+                if (importDecl !is null) {
+                    result ~= importDecl;
+                }
+            } else if (childType == "mixin_declaration") {
+                result ~= parseMixinDeclaration(child);
+            } else if (childType == "conditional_declaration") {
+                result ~= parseConditionalDeclaration(child);
+            } else if (childType != "comment" && childType != "module" && 
+                       childType != ";" && childType.length > 0) {
+                log(2, "Warning: Skipping unknown node in module_def: ", childType);
+            }
+        }
+        
+        return result;
+    }
+    
+    /**
+     * Parse module declaration: module foo.bar.baz;
+     * 
+     * Tree-sitter structure:
+     *   module_declaration
+     *     └─ module (keyword)
+     *     └─ module_fqn (the path)
+     *         └─ identifier (each component)
+     *     └─ ; (semicolon)
+     */
+    ModuleDecl parseModuleDeclaration(TSNode node) {
+        SourceLocation loc = makeSourceLocation(node);
+        string[] modulePath;
+        
+        string nodeType = TreeSitterParser.getNodeType(node);
+        log(3, "Parsing module declaration, node type: ", nodeType);
+        
+        // If this is module_def, we need to find module_declaration inside
+        if (nodeType == "module_def") {
+            uint childCount = TreeSitterParser.getChildCount(node);
+            for (uint i = 0; i < childCount; i++) {
+                TSNode child = TreeSitterParser.getChild(node, i);
+                string childType = TreeSitterParser.getNodeType(child);
+                if (childType == "module_declaration") {
+                    return parseModuleDeclaration(child);  // Recurse into actual declaration
+                }
+            }
+            log(2, "Warning: module_def has no module_declaration child");
+            return null;
+        }
+        
+        // Parse module_declaration node
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            string text = TreeSitterParser.getNodeText(child, sourceText);
+            
+            log(3, "  Module decl child ", i, ": type=", childType, ", text='", text, "'");
+            
+            if (childType == "module_fqn") {
+                // Extract path components from module_fqn
+                modulePath = parseModuleFQN(child);
+            } else if (childType == "identifier" && modulePath.length == 0) {
+                // Single identifier module name
+                modulePath = [text];
+            }
+        }
+        
+        if (modulePath.length == 0) {
+            log(2, "Warning: Could not extract module path from declaration");
+            return null;
+        }
+        
+        log(2, "Parsed module: ", modulePath);
+        return new ModuleDecl(loc, modulePath);
+    }
+    
+    /**
+     * Parse module_fqn node to extract path components.
+     * module_fqn contains identifiers separated by dots.
+     */
+    private string[] parseModuleFQN(TSNode node) {
+        string[] path;
+        
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            string text = TreeSitterParser.getNodeText(child, sourceText);
+            
+            if (childType == "identifier") {
+                path ~= text;
+            } else if (childType == "module_fqn") {
+                // Nested module_fqn (recursive structure)
+                path ~= parseModuleFQN(child);
+            }
+        }
+        
+        // If no children extracted, try getting the whole text and splitting
+        if (path.length == 0) {
+            string fullText = TreeSitterParser.getNodeText(node, sourceText);
+            import std.algorithm : splitter;
+            import std.array : array;
+            path = fullText.splitter(".").array;
+        }
+        
+        return path;
+    }
     
     /**
      * Parse import declaration: import modulename;

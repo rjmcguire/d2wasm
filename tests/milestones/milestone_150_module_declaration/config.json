@@ -1,0 +1,5 @@
+{
+    "description": "Module declaration parsing",
+    "expected_result": 150,
+    "run_function": "getValue"
+}

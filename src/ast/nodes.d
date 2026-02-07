@@ -69,6 +69,34 @@ abstract class Declaration : ASTNode {
 }
 
 /**
+ * Module declaration: module foo.bar.baz;
+ * 
+ * Stores the module path as an array of identifiers.
+ * If no module declaration is present, the path defaults to the filename.
+ */
+class ModuleDecl : Declaration {
+    /// Module path components: ["foo", "bar", "baz"] for module foo.bar.baz;
+    string[] modulePath;
+    
+    this(SourceLocation loc, string[] modulePath) {
+        // The full module name is the last component (or joined path)
+        string moduleName = modulePath.length > 0 ? modulePath[$ - 1] : "";
+        super(loc, moduleName, true);  // Module names are always public
+        this.modulePath = modulePath;
+    }
+    
+    /// Get the fully qualified module name: "foo.bar.baz"
+    string fullyQualifiedName() const {
+        import std.array : join;
+        return modulePath.join(".");
+    }
+    
+    override string toString() const {
+        return format("module %s;", fullyQualifiedName());
+    }
+}
+
+/**
  * Abstract base for all type nodes
  */
 abstract class Type : ASTNode {
