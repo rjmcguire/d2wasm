@@ -251,6 +251,15 @@ int compileFile(CompilerOptions options) {
         auto symbolTable = new SymbolTable();
         symbolTable.addBuiltinSymbols();
         
+        // Extract module declaration if present
+        foreach (decl; ast) {
+            if (auto moduleDecl = cast(ModuleDecl)decl) {
+                symbolTable.setModulePath(moduleDecl.modulePath);
+                log(2, "Module: ", symbolTable.moduleFullyQualifiedName());
+                break;  // Only one module declaration per file
+            }
+        }
+        
         auto symbolCollector = new SymbolCollector(symbolTable);
         symbolCollector.collectSymbols(ast);
         

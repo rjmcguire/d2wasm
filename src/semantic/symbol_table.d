@@ -174,12 +174,41 @@ class SymbolTable {
     // typeKind is a string like "array", "string", etc.
     private FunctionDecl[string][string] builtinMethods;
     
+    // Current module path for name mangling (e.g., ["animals", "dog"])
+    // Set from ModuleDecl during compilation, empty if no module declaration
+    private string[] _modulePath;
+    
     // Lazy CTFE evaluation - callback set by CTFEEvaluator
     void delegate(ManifestConstantDecl) ctfeResolver;
     
     this() {
         globalScope = new Scope(null, "global");
         currentScope = globalScope;
+    }
+    
+    /**
+     * Set the current module path from a ModuleDecl.
+     * Called during compilation setup.
+     */
+    void setModulePath(string[] path) {
+        _modulePath = path.dup;
+    }
+    
+    /**
+     * Get the current module path.
+     * Returns empty array if no module declaration present.
+     */
+    @property const(string[]) modulePath() const {
+        return _modulePath;
+    }
+    
+    /**
+     * Get the fully qualified module name as a string.
+     * Returns empty string if no module declaration present.
+     */
+    string moduleFullyQualifiedName() const {
+        import std.array : join;
+        return _modulePath.join(".");
     }
     
     /**
