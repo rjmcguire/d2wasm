@@ -258,10 +258,9 @@ class NativeCompiledFunction : CompiledFunction {
         }
         
         // Emit inline call stack push (for error reporting)
-        // TODO: Fix ARM64 encoding bugs in emitInlineStackPush, then re-enable
-        // For now, stack tracking is disabled for performance (15x faster without FFI)
-        // string fileName = func.location.filename ? func.location.filename : "";
-        // emitInlinePushCall(func.name, fileName, func.location.line);
+        // Uses inline code to write directly to data section - no FFI overhead
+        string fileName = func.location.filename ? func.location.filename : "";
+        emitInlinePushCall(func.name, fileName, func.location.line);
         
         // Compile body
         if (func.body_) {
@@ -272,8 +271,7 @@ class NativeCompiledFunction : CompiledFunction {
         gen.bindLabel(epilogueLabel);
         
         // Emit inline call stack pop (before return)
-        // TODO: Re-enable when inline push is fixed
-        // emitInlinePopCall();
+        emitInlinePopCall();
         
         // Emit epilogue
         if (totalLocalBytes > 0) {
@@ -949,6 +947,7 @@ class NativeCompiledFunction : CompiledFunction {
     private void emitInlinePushCall(string funcName, string fileName, uint line) {
         import codegen.native.codegen_interface : InlineFrame, INLINE_STACK_DEPTH_OFFSET,
             INLINE_STACK_MAX_DEPTH, INLINE_STACK_FRAMES_OFFSET, INLINE_FRAME_SIZE;
+        import std.stdio : writefln;
         
         // Add strings to data section, get their offsets
         size_t nameOffset = dataSection.bytesUsed;
@@ -979,7 +978,7 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitLoadImm64(cast(ulong)dataSection.base);
         gen.emitMoveX0ToX10();
         
-        // Emit inline push code
+        // Emit inline push code  
         gen.emitInlineStackPush(cast(uint)frameDataOffset);
         
         // Restore x0

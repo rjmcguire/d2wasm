@@ -32,6 +32,7 @@ enum BranchKind {
     ifZero,          // CBZ
     ifNonZero,       // CBNZ
     call,            // BL
+    conditional,     // B.cond (condition in bits 0-3)
 }
 
 /// ARM64 Native Code Generator
@@ -364,20 +365,22 @@ struct NativeCodeGen {
     //
     // x10 must contain the data section base address
     
-    /// Emit inline call stack push (x10 = data section base, uses x8,x9,x11)
+    /// Emit inline call stack push (x10 = data section base, uses x8,x9,x11-x13)
     /// frameDataAddr is the address of the InlineFrame data in the data section
     void emitInlineStackPush(uint frameDataOffset) {
-        import codegen.native.codegen_interface : INLINE_STACK_DEPTH_OFFSET,
-            INLINE_STACK_MAX_DEPTH, INLINE_STACK_FRAMES_OFFSET, INLINE_FRAME_SIZE;
+        import codegen.native.codegen_interface : INLINE_STACK_MAX_DEPTH;
+        
+        auto skipLabel = newLabel();
         
         // LDR w8, [x10, #0]          ; load current depth
         emitRaw32(0xB9400148);
         
         // CMP w8, #64                 ; check overflow
-        emitRaw32(0x7101001F | (INLINE_STACK_MAX_DEPTH << 10));
+        // SUBS wzr, w8, #64: 0x71000000 | (64 << 10) | (8 << 5) | 31 = 0x7101011F
+        emitRaw32(0x7101011F);  // CMP w8, #64
         
-        // B.GE skip (6 instructions = 24 bytes forward)
-        emitRaw32(0x5400006A | (6 << 5));  // B.GE +6
+        // B.GE skip (use label, resolved later)
+        emitBranchIfGE(skipLabel);
         
         // Calculate frame address: x9 = x10 + 8 + depth * 24
         // MOV w9, #24
@@ -389,28 +392,44 @@ struct NativeCodeGen {
         // ADD x9, x9, #8
         emitRaw32(0x91002129);
         
-        // Copy InlineFrame from data section (x11 = source addr)
-        // ADD x11, x10, #frameDataOffset
+        // Load source address: x11 = x10 + frameDataOffset
+        // ADD x11, x10, #imm12: 0x91000000 | (imm12 << 10) | (Rn << 5) | Rd
+        // Rn=x10=10, Rd=x11=11
         if (frameDataOffset < 4096) {
-            emitRaw32(0x9100014B | (frameDataOffset << 10));
+            emitRaw32(0x91000000 | (frameDataOffset << 10) | (10 << 5) | 11);
         } else {
-            // For larger offsets, use MOVZ + ADD
-            emitRaw32(0xD280000B | ((frameDataOffset & 0xFFFF) << 5));  // MOVZ x11, #offset
-            emitRaw32(0x8B0B014B);  // ADD x11, x10, x11
+            // MOVZ x11, #(offset & 0xFFFF)
+            emitRaw32(0xD2800000 | ((frameDataOffset & 0xFFFF) << 5) | 11);
+            // ADD x11, x10, x11
+            emitRaw32(0x8B0B014A);
         }
         
-        // LDP x12, x13, [x11]        ; load first 16 bytes
-        emitRaw32(0xA940316C);
-        // STP x12, x13, [x9]         ; store to frame
-        emitRaw32(0xA900312C);
-        // LDR x12, [x11, #16]        ; load last 8 bytes
-        emitRaw32(0xF940096C);
-        // STR x12, [x9, #16]         ; store to frame
-        emitRaw32(0xF900052C);
+        // LDP x12, x13, [x11] - load first 16 bytes of frame
+        emitRaw32(0xA9400000 | (13 << 10) | (11 << 5) | 12);
+        
+        // STP x12, x13, [x9] - store to destination
+        emitRaw32(0xA9000000 | (13 << 10) | (9 << 5) | 12);
+        
+        // LDR x12, [x11, #16] - load last 8 bytes
+        // LDR (imm): 11 111 00 01 01 imm12 Rn Rt
+        // imm12 = 16/8 = 2 (scaled by 8 for 64-bit)
+        emitRaw32(0xF9400000 | (2 << 10) | (11 << 5) | 12);
+        
+        // STR x12, [x9, #16] - store last 8 bytes
+        emitRaw32(0xF9000000 | (2 << 10) | (9 << 5) | 12);
         
         // Increment depth: ADD w8, w8, #1; STR w8, [x10]
         emitRaw32(0x11000508);  // ADD w8, w8, #1
         emitRaw32(0xB9000148);  // STR w8, [x10]
+        
+        bindLabel(skipLabel);
+    }
+    
+    /// Emit B.GE (branch if greater or equal) to label
+    void emitBranchIfGE(Label target) {
+        uint branchOffset = pos;
+        emitRaw32(0x5400000A);  // B.GE placeholder (cond = 0xA for GE)
+        unresolved ~= UnresolvedBranch(branchOffset, target.id, BranchKind.conditional);
     }
     
     /// Emit inline call stack pop (x10 = data section base, uses x8)
@@ -643,6 +662,12 @@ struct NativeCodeGen {
                     // BL: imm26 = offset/4
                     int imm26_call = relOffset / 4;
                     *instr = 0x94000000 | (imm26_call & 0x03FFFFFF);
+                    break;
+                    
+                case BranchKind.conditional:
+                    // B.cond: imm19 in bits 5-23, preserve condition in bits 0-3
+                    int imm19_cond = relOffset / 4;
+                    *instr = (*instr & 0xF) | 0x54000000 | ((imm19_cond & 0x7FFFF) << 5);
                     break;
             }
         }

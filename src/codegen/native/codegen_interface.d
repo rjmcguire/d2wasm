@@ -88,7 +88,6 @@ string ctfeErrorMessageWithStack(NativeCTFEContext* ctx) {
     if (ctx.dataSection !is null && ctx.dataSection.stackReserved) {
         auto frames = ctx.dataSection.getInlineCallStack();
         if (frames.length > 0) {
-            // Use inline stack for error message
             string result = ctfeErrorMessage(ctx.errorKind);
             result ~= formatInlineCallStack(ctx, frames);
             return result;
