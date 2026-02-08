@@ -590,6 +590,19 @@ class SymbolCollector {
     }
     
     private void collectClassSymbol(ClassDecl decl) {
+        // First, resolve base class if present (needed for layout inheritance)
+        if (decl.baseClass && !decl.baseClassDecl) {
+            if (auto userType = cast(UserType)decl.baseClass) {
+                auto typeSymbol = symbolTable.lookupSymbol(userType.name);
+                if (typeSymbol && typeSymbol.kind == SymbolKind.Type) {
+                    if (auto baseClassDecl = cast(ClassDecl)typeSymbol.declaration) {
+                        decl.baseClassDecl = baseClassDecl;
+                        userType.declaration = baseClassDecl;
+                    }
+                }
+            }
+        }
+        
         // Compute class layout (with vtable pointer as first field)
         // Default to 4-byte pointers (wasm32)
         computeClassLayout(decl, 4);
@@ -698,7 +711,8 @@ class SymbolCollector {
      * 
      * Class layout differs from struct layout:
      * - Implicit vtable pointer as first field
-     * - Fields start after vtable pointer
+     * - For derived classes: base class fields come first
+     * - Derived fields start after base class fields
      * 
      * Params:
      *   decl = Class declaration to compute layout for
@@ -709,10 +723,27 @@ class SymbolCollector {
             return;
         }
         
-        // Start with vtable pointer as implicit first field
-        size_t currentOffset = pointerSize;  // Reserve space for vtable_ptr
-        size_t maxAlign = pointerSize;       // vtable_ptr sets minimum alignment
+        size_t currentOffset;
+        size_t maxAlign;
         
+        // If we have a base class, inherit its layout
+        if (decl.baseClassDecl) {
+            // Ensure base class layout is computed first
+            if (!decl.baseClassDecl.layoutComputed) {
+                computeClassLayout(decl.baseClassDecl, pointerSize);
+            }
+            
+            // Inherit base class fields (including vtable_ptr)
+            decl.fields = decl.baseClassDecl.fields.dup;
+            currentOffset = decl.baseClassDecl.classSize;
+            maxAlign = decl.baseClassDecl.classAlign;
+        } else {
+            // No base class - start with vtable pointer
+            currentOffset = pointerSize;  // Reserve space for vtable_ptr
+            maxAlign = pointerSize;       // vtable_ptr sets minimum alignment
+        }
+        
+        // Add this class's own fields
         foreach (member; decl.members) {
             if (auto varDecl = cast(VariableDecl)member) {
                 // For UserType fields, resolve and compute nested layout

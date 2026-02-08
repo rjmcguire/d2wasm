@@ -56,7 +56,8 @@ struct TypeCompatibility {
 class TypeChecker {
     private SymbolTable symbolTable;
     private Type currentFunctionReturnType;
-    private StructDecl currentStructDecl;  // Non-null when inside a method
+    private StructDecl currentStructDecl;  // Non-null when inside a struct method
+    private ClassDecl currentClassDecl;    // Non-null when inside a class method
     
     // Unique local ID counter - reset per function
     private uint nextLocalId;
@@ -177,12 +178,17 @@ class TypeChecker {
         currentFunctionReturnType = decl.returnType;
         scope(exit) currentFunctionReturnType = oldReturnType;
         
-        // Set current struct if this is a method
+        // Set current struct/class if this is a method
         StructDecl oldStructDecl = currentStructDecl;
+        ClassDecl oldClassDecl = currentClassDecl;
         if (decl.isMethod) {
             currentStructDecl = cast(StructDecl)decl.parent;
+            currentClassDecl = cast(ClassDecl)decl.parent;
         }
-        scope(exit) currentStructDecl = oldStructDecl;
+        scope(exit) {
+            currentStructDecl = oldStructDecl;
+            currentClassDecl = oldClassDecl;
+        }
         
         // Add parameters to scope and assign unique IDs
         log(3, "Checking parameters for ", decl.name);
@@ -720,20 +726,33 @@ class TypeChecker {
     Type checkIdentifierExpression(IdentifierExpression expr) {
         // Handle 'this' keyword inside methods
         if (expr.name == "this") {
-            if (!currentStructDecl) {
+            if (!currentStructDecl && !currentClassDecl) {
                 throw new TypeError("'this' can only be used inside a method", expr.location);
             }
-            // 'this' has the type of the enclosing struct
-            auto thisType = new UserType(expr.location, currentStructDecl.name);
-            thisType.declaration = currentStructDecl;
-            return thisType;
+            // 'this' has the type of the enclosing struct/class
+            if (currentClassDecl) {
+                auto thisType = new UserType(expr.location, currentClassDecl.name);
+                thisType.declaration = currentClassDecl;
+                return thisType;
+            } else {
+                auto thisType = new UserType(expr.location, currentStructDecl.name);
+                thisType.declaration = currentStructDecl;
+                return thisType;
+            }
         }
         
         Symbol symbol = symbolTable.lookupSymbol(expr.name);
         if (!symbol) {
-            // Inside a method, check if it's a field of the current struct (implicit this)
+            // Inside a method, check if it's a field of the current struct/class (implicit this)
             if (currentStructDecl) {
                 auto field = currentStructDecl.getField(expr.name);
+                if (field) {
+                    return field.type;
+                }
+            }
+            if (currentClassDecl) {
+                // Check class fields (including inherited fields)
+                auto field = currentClassDecl.getField(expr.name);
                 if (field) {
                     return field.type;
                 }
