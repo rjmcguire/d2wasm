@@ -678,7 +678,7 @@ class TreeSitterBridge {
                 name = TreeSitterParser.getNodeText(child, sourceText);
             } else if (childType == "aggregate_body") {
                 members = parseAggregateBody(child);
-            } else if (childType == "base_class_list" || childType == "super_class") {
+            } else if (childType == "base_class_list" || childType == "super_class" || childType == "base_class") {
                 // Parse inheritance - first item is base class, rest are interfaces
                 auto inheritTypes = parseBaseClassList(child);
                 if (inheritTypes.length > 0) {

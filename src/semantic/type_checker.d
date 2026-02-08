@@ -319,16 +319,127 @@ class TypeChecker {
     }
     
     /**
-     * Type check class declaration (basic implementation)
+     * Type check class declaration
      */
     void checkClassDeclaration(ClassDecl decl) {
         symbolTable.enterScope("class:" ~ decl.name);
         scope(exit) symbolTable.exitScope();
         
-        // TODO: Type check class members
+        // Resolve base class if present
+        if (decl.baseClass) {
+            if (auto userType = cast(UserType)decl.baseClass) {
+                auto typeSymbol = symbolTable.lookupSymbol(userType.name);
+                if (typeSymbol && typeSymbol.kind == SymbolKind.Type) {
+                    if (auto baseClassDecl = cast(ClassDecl)typeSymbol.declaration) {
+                        decl.baseClassDecl = baseClassDecl;
+                        userType.declaration = baseClassDecl;
+                        
+                        // Validate: can't inherit from self
+                        if (baseClassDecl is decl) {
+                            throw new TypeError("Class cannot inherit from itself: " ~ decl.name, decl.location);
+                        }
+                        
+                        // TODO: Check for circular inheritance
+                    } else {
+                        throw new TypeError("Base class must be a class, not a struct: " ~ userType.name, decl.location);
+                    }
+                } else {
+                    throw new TypeError("Unknown base class: " ~ userType.name, decl.location);
+                }
+            }
+        }
+        
+        // Type check members
         foreach (member; decl.members) {
             checkDeclaration(member);
         }
+        
+        // Validate method overrides if we have a base class
+        if (decl.baseClassDecl) {
+            validateOverrides(decl);
+        }
+    }
+    
+    /**
+     * Validate that method overrides have matching signatures
+     */
+    private void validateOverrides(ClassDecl decl) {
+        foreach (member; decl.members) {
+            if (auto method = cast(FunctionDecl)member) {
+                if (method.isConstructor || method.isDestructor) continue;
+                
+                // Check if base class has a method with the same name
+                auto baseMethod = findMethodInHierarchy(decl.baseClassDecl, method.name);
+                if (baseMethod) {
+                    // Validate signature matches (simple check for now)
+                    if (!signaturesMatch(method, baseMethod)) {
+                        throw new TypeError(
+                            "Override signature mismatch for method '" ~ method.name ~ 
+                            "' - must match base class", method.location);
+                    }
+                }
+            }
+        }
+    }
+    
+    /**
+     * Find a method by name in the class hierarchy
+     */
+    private FunctionDecl findMethodInHierarchy(ClassDecl classDecl, string methodName) {
+        while (classDecl) {
+            foreach (member; classDecl.members) {
+                if (auto method = cast(FunctionDecl)member) {
+                    if (method.name == methodName && !method.isConstructor && !method.isDestructor) {
+                        return method;
+                    }
+                }
+            }
+            classDecl = classDecl.baseClassDecl;
+        }
+        return null;
+    }
+    
+    /**
+     * Check if two method signatures match (return type and parameters)
+     */
+    private bool signaturesMatch(FunctionDecl a, FunctionDecl b) {
+        // Check parameter count
+        if (a.parameters.length != b.parameters.length) return false;
+        
+        // Check parameter types
+        foreach (i, param; a.parameters) {
+            if (!typesMatch(param.type, b.parameters[i].type)) return false;
+        }
+        
+        // Check return type
+        return typesMatch(a.returnType, b.returnType);
+    }
+    
+    /**
+     * Check if two types match (simple structural comparison)
+     */
+    private bool typesMatch(Type a, Type b) {
+        if (a is null && b is null) return true;
+        if (a is null || b is null) return false;
+        
+        // Compare basic types
+        if (auto pa = cast(BasicType)a) {
+            if (auto pb = cast(BasicType)b) {
+                return pa.kind == pb.kind;
+            }
+            return false;
+        }
+        
+        // Compare user types by name (could be more sophisticated)
+        if (auto ua = cast(UserType)a) {
+            if (auto ub = cast(UserType)b) {
+                return ua.name == ub.name;
+            }
+            return false;
+        }
+        
+        // For other types, fall back to string comparison
+        return a.toString() == b.toString();
     }
     
     /**

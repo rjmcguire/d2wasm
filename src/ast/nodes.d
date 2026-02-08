@@ -237,6 +237,9 @@ class ClassDecl : Declaration {
     Type[] interfaces;
     Declaration[] members;
     
+    // Resolved base class (set during type checking)
+    ClassDecl baseClassDecl;
+    
     // Constructor (if present)
     FunctionDecl constructor;
     
