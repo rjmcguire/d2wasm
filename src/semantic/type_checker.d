@@ -752,6 +752,38 @@ class TypeChecker {
                         return method.returnType;
                     }
                 }
+                
+                // Check for class methods
+                if (auto classDecl = cast(ClassDecl)userType.declaration) {
+                    auto method = getClassMethod(classDecl, memberExpr.memberName);
+                    if (method) {
+                        foundMethod = true;
+                        // Check argument types (method has no explicit 'this' parameter)
+                        if (expr.arguments.length != method.parameters.length) {
+                            throw new TypeError(
+                                format("Method '%s' expects %d arguments, got %d",
+                                       memberExpr.memberName, method.parameters.length, expr.arguments.length),
+                                expr.location
+                            );
+                        }
+                        
+                        for (size_t i = 0; i < expr.arguments.length; i++) {
+                            Type argType = checkExpression(expr.arguments[i]);
+                            Type paramType = method.parameters[i].type;
+                            
+                            auto compat = checkTypeCompatibility(argType, paramType);
+                            if (!compat.isCompatible) {
+                                throw new TypeError(
+                                    format("Argument %d: expected type '%s', got '%s'",
+                                           i + 1, paramType.toString(), argType.toString()),
+                                    expr.arguments[i].location
+                                );
+                            }
+                        }
+                        
+                        return method.returnType;
+                    }
+                }
             }
             
             // Check for built-in methods on array types
@@ -904,6 +936,20 @@ class TypeChecker {
      */
     FunctionDecl getStructMethod(StructDecl structDecl, string methodName) {
         foreach (member; structDecl.members) {
+            if (auto funcDecl = cast(FunctionDecl)member) {
+                if (funcDecl.name == methodName && funcDecl.isMethod) {
+                    return funcDecl;
+                }
+            }
+        }
+        return null;
+    }
+    
+    /**
+     * Get a method from a class by name, returns null if not found
+     */
+    FunctionDecl getClassMethod(ClassDecl classDecl, string methodName) {
+        foreach (member; classDecl.members) {
             if (auto funcDecl = cast(FunctionDecl)member) {
                 if (funcDecl.name == methodName && funcDecl.isMethod) {
                     return funcDecl;

@@ -74,6 +74,13 @@ class FuncContext {
     }
     StructParamInfo[string] structParams;
     
+    // Class parameters (passed as pointers, same as struct)
+    struct ClassParamInfo {
+        uint localIndex;       // WASM local index holding the pointer
+        ClassDecl classDecl;   // The class type
+    }
+    ClassParamInfo[string] classParams;
+    
     // Slice parameters (passed as pointers to slice struct)
     struct SliceParamInfo {
         uint localIndex;       // WASM local index holding the pointer to slice struct
@@ -127,6 +134,19 @@ class FuncContext {
             info.localIndex = 0;
             info.structDecl = f.structParent;
             structParams["this"] = info;
+        }
+        
+        // Same for class methods
+        if (f.classParent !is null) {
+            localTypes ~= ValType.i32;  // 'this' is a pointer (i32)
+            thisLocalIndex = 0;
+            localOffset = 1;
+            
+            // Register 'this' as a class param so this.x works
+            ClassParamInfo info;
+            info.localIndex = 0;
+            info.classDecl = f.classParent;
+            classParams["this"] = info;
         }
         
         // Check for large return type (struct or static array)
@@ -2892,6 +2912,27 @@ class FuncContext {
             }
         }
         
+        // Same for class methods
+        if (func.classParent !is null) {
+            auto field = func.classParent.getField(expr.name);
+            if (field) {
+                // Implicit this.fieldName - load from this pointer + field offset
+                if (auto thisInfo = "this" in classParams) {
+                    out_ ~= Op.local_get;
+                    leb128u(out_, thisInfo.localIndex);
+                    if (field.offset > 0) {
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, cast(int)field.offset);
+                        out_ ~= Op.i32_add;
+                    }
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;  // alignment log2(4)
+                    leb128u(out_, 0);          // offset
+                    return;
+                }
+            }
+        }
+        
         // Check if it's a manifest constant (CTFE-evaluated lazily)
         // Reuse symbol lookup from above (or do fresh lookup if symbol is null)
         if (symbol is null) {
@@ -3364,8 +3405,9 @@ class FuncContext {
             return;
         }
         
-        // Find the struct declaration to look up the method
+        // Find the struct or class declaration to look up the method
         StructDecl structDecl = null;
+        ClassDecl classDecl = null;
         
         // Check if it's a struct local
         if (auto localInfo = objIdent.name in structLocals) {
@@ -3375,28 +3417,47 @@ class FuncContext {
         else if (auto paramInfo = objIdent.name in structParams) {
             structDecl = paramInfo.structDecl;
         }
+        // Check if it's a class local
+        else if (auto localInfo = objIdent.name in classLocals) {
+            classDecl = localInfo.classDecl;
+        }
         
-        if (!structDecl) {
-            throw new EmitError("Cannot determine struct type for method call on " ~ objIdent.name);
+        if (!structDecl && !classDecl) {
+            throw new EmitError("Cannot determine type for method call on " ~ objIdent.name);
         }
         
         // Find the method
         FunctionDecl method = null;
-        foreach (member; structDecl.members) {
-            if (auto funcDecl = cast(FunctionDecl)member) {
-                if (funcDecl.name == memberExpr.memberName && funcDecl.isMethod) {
-                    method = funcDecl;
-                    break;
+        string typeName;
+        
+        if (structDecl) {
+            typeName = structDecl.name;
+            foreach (member; structDecl.members) {
+                if (auto funcDecl = cast(FunctionDecl)member) {
+                    if (funcDecl.name == memberExpr.memberName && funcDecl.isMethod) {
+                        method = funcDecl;
+                        break;
+                    }
+                }
+            }
+        } else if (classDecl) {
+            typeName = classDecl.name;
+            foreach (member; classDecl.members) {
+                if (auto funcDecl = cast(FunctionDecl)member) {
+                    if (funcDecl.name == memberExpr.memberName && funcDecl.isMethod) {
+                        method = funcDecl;
+                        break;
+                    }
                 }
             }
         }
         
         if (!method) {
-            throw new EmitError("Struct '" ~ structDecl.name ~ "' has no method '" ~ memberExpr.memberName ~ "'");
+            throw new EmitError("Type '" ~ typeName ~ "' has no method '" ~ memberExpr.memberName ~ "'");
         }
         
-        // Emit 'this' pointer as first argument (address of the struct instance)
-        // For a local struct: FP + frameOffset
+        // Emit 'this' pointer as first argument (address of the instance)
+        // For a local struct/class: FP + frameOffset
         // For a param struct: the param value itself (already a pointer)
         if (auto localInfo = objIdent.name in structLocals) {
             out_ ~= Op.local_get;
@@ -3407,6 +3468,13 @@ class FuncContext {
         } else if (auto paramInfo = objIdent.name in structParams) {
             out_ ~= Op.local_get;
             leb128u(out_, paramInfo.localIndex);
+        } else if (auto localInfo = objIdent.name in classLocals) {
+            // Class local: pass address (FP + frameOffset)
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, localInfo.frameOffset);
+            out_ ~= Op.i32_add;
         }
         
         // Emit the other arguments
@@ -3414,10 +3482,11 @@ class FuncContext {
             emitExpression(out_, arg);
         }
         
-        // Generate the mangled method name: StructName_methodName
-        string mangledName = structDecl.name ~ "_" ~ method.name;
+        // Generate the mangled method name: TypeName_methodName
+        // TODO: For virtual dispatch, use call_indirect through vtable
+        string mangledName = typeName ~ "_" ~ method.name;
         
-        // Call the method
+        // Call the method (direct call for now)
         uint funcIdx = emitter.getFuncIndex(mangledName);
         out_ ~= Op.call;
         leb128u(out_, funcIdx);
