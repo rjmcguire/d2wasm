@@ -198,18 +198,26 @@ class FuncContext {
             
             // Track struct parameters
             if (auto userType = cast(UserType)p.type) {
-                // Resolve struct declaration
+                // Resolve declaration
                 if (!userType.declaration) {
                     auto typeSymbol = e.symbolTable.lookupSymbol(userType.name);
                     if (typeSymbol && typeSymbol.kind == SymbolKind.Type) {
                         userType.declaration = typeSymbol.declaration;
                     }
                 }
+                // Track struct parameters
                 if (auto structDecl = cast(StructDecl)userType.declaration) {
                     StructParamInfo info;
                     info.localIndex = cast(uint)(i + localOffset);
                     info.structDecl = structDecl;
                     structParams[p.name] = info;
+                }
+                // Track class parameters
+                if (auto classDecl = cast(ClassDecl)userType.declaration) {
+                    ClassParamInfo info;
+                    info.localIndex = cast(uint)(i + localOffset);
+                    info.classDecl = classDecl;
+                    classParams[p.name] = info;
                 }
             }
             
@@ -2883,6 +2891,17 @@ class FuncContext {
             return;
         }
         
+        // Check if it's a class local - emit address (same as struct)
+        if (auto info = expr.name in classLocals) {
+            // Emit address: FP + frameOffset
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset);
+            out_ ~= Op.i32_add;
+            return;
+        }
+        
         // Check if it's a static array local - emit address
         if (auto info = expr.name in staticArrayLocals) {
             // Emit address: FP + frameOffset
@@ -3425,6 +3444,10 @@ class FuncContext {
         else if (auto localInfo = objIdent.name in classLocals) {
             classDecl = localInfo.classDecl;
         }
+        // Check if it's a class parameter
+        else if (auto paramInfo = objIdent.name in classParams) {
+            classDecl = paramInfo.classDecl;
+        }
         
         if (!structDecl && !classDecl) {
             throw new EmitError("Cannot determine type for method call on " ~ objIdent.name);
@@ -3490,6 +3513,10 @@ class FuncContext {
             out_ ~= Op.i32_const;
             leb128s(out_, localInfo.frameOffset);
             out_ ~= Op.i32_add;
+        } else if (auto paramInfo = objIdent.name in classParams) {
+            // Class parameter: already a pointer
+            out_ ~= Op.local_get;
+            leb128u(out_, paramInfo.localIndex);
         }
         
         // Emit the other arguments
