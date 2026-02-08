@@ -656,7 +656,7 @@ class BinaryEmitter {
      *   [nameOffset: u32, nameLen: u32]
      */
     private void collectClassMethods(ClassDecl classDecl) {
-        import std.algorithm : filter;
+        import std.algorithm : filter, countUntil;
         
         // Assign unique type ID
         classDecl.typeId = nextTypeId++;
@@ -664,18 +664,42 @@ class BinaryEmitter {
         // Assign tableBase = current end of function table
         classDecl.tableBase = cast(uint)tableFunctions.length;
         
-        // Collect all methods and build virtualMethods array
-        // Note: tableFunctions is built AFTER stabilizeIndices() to use final indices
-        classDecl.virtualMethods = [];
+        // Build virtualMethods array
+        // For inheritance: start with base class methods, then override/extend
+        if (classDecl.baseClassDecl) {
+            // Ensure base class is processed first
+            if (classDecl.baseClassDecl.virtualMethods.length == 0 && 
+                !classesWithVtables.canFind(classDecl.baseClassDecl)) {
+                collectClassMethods(classDecl.baseClassDecl);
+            }
+            
+            // Inherit base class virtual methods (will be replaced by overrides)
+            classDecl.virtualMethods = classDecl.baseClassDecl.virtualMethods.dup;
+        } else {
+            classDecl.virtualMethods = [];
+        }
+        
+        // Process this class's methods
         foreach (member; classDecl.members) {
             if (auto funcDecl = cast(FunctionDecl)member) {
                 if (funcDecl.isMethod) {
-                    // Register the method
+                    // Register the method (creates function entry)
                     collectClassMethod(classDecl, funcDecl);
                     
-                    // Track virtual methods (non-constructor, non-destructor)
+                    // Handle virtual methods (non-constructor, non-destructor)
                     if (!funcDecl.isConstructor && !funcDecl.isDestructor) {
-                        classDecl.virtualMethods ~= funcDecl;
+                        // Check if this overrides a base class method
+                        auto overrideIdx = classDecl.virtualMethods.countUntil!(
+                            m => m.name == funcDecl.name
+                        );
+                        
+                        if (overrideIdx >= 0) {
+                            // Override: replace the inherited slot
+                            classDecl.virtualMethods[overrideIdx] = funcDecl;
+                        } else {
+                            // New method: append to vtable
+                            classDecl.virtualMethods ~= funcDecl;
+                        }
                     }
                 }
             }
@@ -1530,7 +1554,10 @@ class BinaryEmitter {
             
             // Add virtual methods in declaration order
             foreach (method; classDecl.virtualMethods) {
-                string mangledName = classDecl.name ~ "_" ~ method.name;
+                // Use the method's actual parent class for the mangled name
+                // (inherited methods still use their defining class name)
+                ClassDecl definingClass = cast(ClassDecl)method.parent;
+                string mangledName = definingClass.name ~ "_" ~ method.name;
                 if (auto idx = mangledName in funcIndex) {
                     // funcIndex already includes import offset after stabilization
                     tableFunctions ~= cast(uint)imports.length + *idx;

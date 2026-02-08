@@ -1079,12 +1079,17 @@ class TypeChecker {
      * Get a method from a class by name, returns null if not found
      */
     FunctionDecl getClassMethod(ClassDecl classDecl, string methodName) {
-        foreach (member; classDecl.members) {
-            if (auto funcDecl = cast(FunctionDecl)member) {
-                if (funcDecl.name == methodName && funcDecl.isMethod) {
-                    return funcDecl;
+        // Search up the inheritance hierarchy
+        ClassDecl current = classDecl;
+        while (current) {
+            foreach (member; current.members) {
+                if (auto funcDecl = cast(FunctionDecl)member) {
+                    if (funcDecl.name == methodName && funcDecl.isMethod) {
+                        return funcDecl;
+                    }
                 }
             }
+            current = current.baseClassDecl;
         }
         return null;
     }

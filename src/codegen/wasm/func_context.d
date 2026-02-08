@@ -3446,13 +3446,24 @@ class FuncContext {
             }
         } else if (classDecl) {
             typeName = classDecl.name;
-            foreach (member; classDecl.members) {
-                if (auto funcDecl = cast(FunctionDecl)member) {
-                    if (funcDecl.name == memberExpr.memberName && funcDecl.isMethod) {
-                        method = funcDecl;
-                        break;
+            // Search up inheritance hierarchy for the method
+            ClassDecl definingClass = classDecl;
+            ClassDecl current = classDecl;
+            while (current && !method) {
+                foreach (member; current.members) {
+                    if (auto funcDecl = cast(FunctionDecl)member) {
+                        if (funcDecl.name == memberExpr.memberName && funcDecl.isMethod) {
+                            method = funcDecl;
+                            definingClass = current;  // Remember where it was defined
+                            break;
+                        }
                     }
                 }
+                current = current.baseClassDecl;
+            }
+            // Use defining class for mangled name lookup
+            if (method) {
+                typeName = definingClass.name;
             }
         }
         
