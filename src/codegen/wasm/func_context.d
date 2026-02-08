@@ -1153,14 +1153,15 @@ class FuncContext {
         auto info = classLocals[stmt.name];
         auto classDecl = info.classDecl;
         
-        // Always zero-init vtable_ptr at offset 0 (no vtable yet)
+        // Initialize vtable_ptr at offset 0 to point to class's vtable
+        // The vtable has TypeInfo at negative offset for error handling
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
         leb128s(out_, info.frameOffset);  // offset 0 = vtable_ptr
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_const;
-        leb128s(out_, 0);  // NULL vtable for now
+        leb128s(out_, cast(int)classDecl.vtableOffset);  // points to method[0] in vtable
         out_ ~= Op.i32_store;
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);

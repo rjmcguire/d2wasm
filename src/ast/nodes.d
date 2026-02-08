@@ -255,6 +255,9 @@ class ClassDecl : Declaration {
     // vtable index for this class (assigned during codegen)
     int vtableIndex = -1;
     
+    // vtable offset in data section (where method pointers start, after typeInfoPtr)
+    uint vtableOffset = 0;
+    
     this(SourceLocation loc, string name, Type baseClass, Type[] interfaces,
          Declaration[] members, bool isPublic = false) {
         super(loc, name, isPublic);

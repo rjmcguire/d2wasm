@@ -61,7 +61,8 @@ struct FuncInfo {
     FunctionDecl decl;
     bool exported;
     bool isImport;
-    StructDecl structParent;  // Non-null for methods
+    StructDecl structParent;  // Non-null for struct methods
+    ClassDecl classParent;    // Non-null for class methods
 }
 
 //==============================================================================
@@ -558,6 +559,9 @@ class BinaryEmitter {
             } else if (auto structDecl = cast(StructDecl)decl) {
                 // Collect methods from struct declarations
                 collectStructMethods(structDecl);
+            } else if (auto classDecl = cast(ClassDecl)decl) {
+                // Collect methods and generate vtable for class
+                collectClassMethods(classDecl);
             }
         }
     }
@@ -616,6 +620,131 @@ class BinaryEmitter {
         
         funcIndex[mangledName] = cast(uint)functions.length;
         functions ~= info;
+    }
+    
+    /**
+     * Collect methods from a class declaration and generate its vtable.
+     * 
+     * Vtable layout (negative offset for TypeInfo):
+     *   [typeInfoPtr]     ← vtableOffset - 4
+     *   [method0_ptr]     ← vtableOffset (what vtable_ptr points to)
+     *   [method1_ptr]
+     *   ...
+     * 
+     * TypeInfo layout:
+     *   [nameOffset: u32]  → class name string
+     *   [nameLen: u32]
+     */
+    private void collectClassMethods(ClassDecl classDecl) {
+        import std.algorithm : filter;
+        
+        // First, collect all methods (register them like struct methods)
+        foreach (member; classDecl.members) {
+            if (auto funcDecl = cast(FunctionDecl)member) {
+                if (funcDecl.isMethod) {
+                    collectClassMethod(classDecl, funcDecl);
+                }
+            }
+        }
+        
+        // Populate virtualMethods array (all methods are virtual for now)
+        classDecl.virtualMethods = [];
+        foreach (member; classDecl.members) {
+            if (auto funcDecl = cast(FunctionDecl)member) {
+                if (funcDecl.isMethod && !funcDecl.isConstructor && !funcDecl.isDestructor) {
+                    classDecl.virtualMethods ~= funcDecl;
+                }
+            }
+        }
+        
+        // Generate vtable in data section
+        generateVtable(classDecl);
+    }
+    
+    /**
+     * Collect a class method (same as struct method for now).
+     */
+    private void collectClassMethod(ClassDecl classDecl, FunctionDecl method) {
+        // Build signature with hidden 'this' pointer as first parameter
+        FuncSig sig;
+        sig.params = [ValType.i32];  // 'this' pointer
+        sig.params ~= method.parameters.map!(p => dTypeToValType(p.type)).array;
+        
+        if (!isVoidType(method.returnType)) {
+            sig.results = [dTypeToValType(method.returnType)];
+        }
+        
+        // Get or create type index
+        uint tIdx;
+        if (auto existing = sig in typeIndex) {
+            tIdx = *existing;
+        } else {
+            tIdx = cast(uint)types.length;
+            types ~= sig;
+            typeIndex[sig] = tIdx;
+        }
+        
+        // Generate mangled name: ClassName_methodName
+        string mangledName = classDecl.name ~ "_" ~ method.name;
+        
+        FuncInfo info;
+        info.name = mangledName;
+        info.decl = method;
+        info.typeIndex = tIdx;
+        info.isImport = false;
+        info.classParent = classDecl;
+        
+        funcIndex[mangledName] = cast(uint)functions.length;
+        functions ~= info;
+    }
+    
+    /**
+     * Generate vtable for a class in the data section.
+     * 
+     * Memory layout:
+     *   TypeInfo:     [nameOffset, nameLen] (8 bytes)
+     *   typeInfoPtr:  points to TypeInfo (4 bytes)
+     *   vtable:       [method0_ptr, method1_ptr, ...] ← vtableOffset points here
+     */
+    private void generateVtable(ClassDecl classDecl) {
+        // 1. Emit class name string
+        uint nameOffset = addData(cast(ubyte[])classDecl.name.dup);
+        uint nameLen = cast(uint)classDecl.name.length;
+        
+        // 2. Emit TypeInfo struct: {nameOffset, nameLen}
+        ubyte[8] typeInfo;
+        *cast(uint*)&typeInfo[0] = nameOffset;
+        *cast(uint*)&typeInfo[4] = nameLen;
+        uint typeInfoOffset = addData(typeInfo[]);
+        
+        // 3. Emit typeInfoPtr (points to TypeInfo) - this is vtable[-1]
+        ubyte[4] typeInfoPtr;
+        *cast(uint*)&typeInfoPtr[0] = typeInfoOffset;
+        addData(typeInfoPtr[]);
+        
+        // 4. Emit method pointers - this is where vtableOffset points
+        classDecl.vtableOffset = nextDataOffset;
+        
+        foreach (i, method; classDecl.virtualMethods) {
+            // Get function index for this method
+            string mangledName = classDecl.name ~ "_" ~ method.name;
+            
+            // Store placeholder for now (0) - will be patched during linking
+            // In WASM with call_indirect, we need table indices, not addresses
+            // For now, store the function index (will need table setup later)
+            ubyte[4] methodEntry;
+            if (auto idx = mangledName in funcIndex) {
+                *cast(uint*)&methodEntry[0] = *idx;
+            } else {
+                *cast(uint*)&methodEntry[0] = 0xFFFFFFFF;  // Invalid marker
+            }
+            addData(methodEntry[]);
+        }
+        
+        // If no virtual methods, still reserve space for empty vtable
+        if (classDecl.virtualMethods.length == 0) {
+            classDecl.vtableOffset = nextDataOffset;
+        }
     }
     
     /**
