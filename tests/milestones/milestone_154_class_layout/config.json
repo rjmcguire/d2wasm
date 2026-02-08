@@ -1,0 +1,7 @@
+{
+    "name": "class_layout",
+    "description": "Class layout computation with vtable pointer",
+    "type": "wasm_exec",
+    "entry": "getValue",
+    "expected_result": 154
+}

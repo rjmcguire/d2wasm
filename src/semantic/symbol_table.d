@@ -590,10 +590,17 @@ class SymbolCollector {
     }
     
     private void collectClassSymbol(ClassDecl decl) {
+        // Compute class layout (with vtable pointer as first field)
+        // Default to 4-byte pointers (wasm32)
+        computeClassLayout(decl, 4);
+        
+        auto userType = new UserType(decl.location, decl.name);
+        userType.declaration = decl;  // Link type to declaration for size lookup
+        
         auto symbol = new Symbol(
             decl.name,
             SymbolKind.Type,
-            new UserType(decl.location, decl.name),
+            userType,
             decl,
             decl.location,
             symbolTable.inGlobalScope(),
@@ -683,6 +690,82 @@ class SymbolCollector {
         
         decl.structSize = currentOffset;
         decl.structAlign = maxAlign;
+        decl.layoutComputed = true;
+    }
+    
+    /**
+     * Compute class layout: field offsets, alignment, and total size.
+     * 
+     * Class layout differs from struct layout:
+     * - Implicit vtable pointer as first field
+     * - Fields start after vtable pointer
+     * 
+     * Params:
+     *   decl = Class declaration to compute layout for
+     *   pointerSize = Size of pointers (4 for wasm32, 8 for wasm64/native)
+     */
+    private void computeClassLayout(ClassDecl decl, size_t pointerSize = 4) {
+        if (decl.layoutComputed) {
+            return;
+        }
+        
+        // Start with vtable pointer as implicit first field
+        size_t currentOffset = pointerSize;  // Reserve space for vtable_ptr
+        size_t maxAlign = pointerSize;       // vtable_ptr sets minimum alignment
+        
+        foreach (member; decl.members) {
+            if (auto varDecl = cast(VariableDecl)member) {
+                // For UserType fields, resolve and compute nested layout
+                if (auto userType = cast(UserType)varDecl.type) {
+                    if (!userType.declaration) {
+                        auto sym = symbolTable.lookupSymbol(userType.name);
+                        if (sym && sym.kind == SymbolKind.Type) {
+                            userType.declaration = sym.declaration;
+                        }
+                    }
+                    // Handle nested struct
+                    if (auto nestedStruct = cast(StructDecl)userType.declaration) {
+                        if (!nestedStruct.layoutComputed) {
+                            computeStructLayout(nestedStruct);
+                        }
+                    }
+                    // Handle nested class
+                    if (auto nestedClass = cast(ClassDecl)userType.declaration) {
+                        if (!nestedClass.layoutComputed) {
+                            computeClassLayout(nestedClass, pointerSize);
+                        }
+                    }
+                }
+                
+                size_t fieldSize = varDecl.type ? varDecl.type.size() : 4;
+                size_t fieldAlign = varDecl.type ? varDecl.type.alignment() : 4;
+                
+                // Align to field's requirement
+                if (fieldAlign > 0) {
+                    currentOffset = (currentOffset + fieldAlign - 1) & ~(fieldAlign - 1);
+                }
+                
+                // Record field info
+                StructField field;
+                field.name = varDecl.name;
+                field.type = varDecl.type;
+                field.offset = currentOffset;
+                field.size = fieldSize;
+                field.alignment = fieldAlign;
+                decl.fields ~= field;
+                
+                if (fieldAlign > maxAlign) maxAlign = fieldAlign;
+                currentOffset += fieldSize;
+            }
+        }
+        
+        // Pad to alignment
+        if (maxAlign > 0) {
+            currentOffset = (currentOffset + maxAlign - 1) & ~(maxAlign - 1);
+        }
+        
+        decl.classSize = currentOffset;
+        decl.classAlign = maxAlign;
         decl.layoutComputed = true;
     }
     
