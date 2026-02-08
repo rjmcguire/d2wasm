@@ -346,6 +346,12 @@ class TypeChecker {
                         }
                         
                         // TODO: Check for circular inheritance
+                    } else if (auto ifaceDecl = cast(InterfaceDecl)typeSymbol.declaration) {
+                        // First item is an interface, not a base class
+                        // Move it to interfaces list and clear baseClass
+                        decl.interfaces = [decl.baseClass] ~ decl.interfaces;
+                        decl.baseClass = null;
+                        userType.declaration = ifaceDecl;
                     } else {
                         throw new TypeError("Base class must be a class, not a struct: " ~ userType.name, decl.location);
                     }

@@ -552,6 +552,8 @@ class SymbolCollector {
             collectImportedFunctionSymbol(importedFunc);
         } else if (auto classDecl = cast(ClassDecl)decl) {
             collectClassSymbol(classDecl);
+        } else if (auto ifaceDecl = cast(InterfaceDecl)decl) {
+            collectInterfaceSymbol(ifaceDecl);
         } else if (auto structDecl = cast(StructDecl)decl) {
             collectStructSymbol(structDecl);
         } else if (auto varDecl = cast(VariableDecl)decl) {
@@ -609,6 +611,22 @@ class SymbolCollector {
         
         auto userType = new UserType(decl.location, decl.name);
         userType.declaration = decl;  // Link type to declaration for size lookup
+        
+        auto symbol = new Symbol(
+            decl.name,
+            SymbolKind.Type,
+            userType,
+            decl,
+            decl.location,
+            symbolTable.inGlobalScope(),
+            symbolTable.modulePath
+        );
+        symbolTable.addSymbol(symbol);
+    }
+    
+    private void collectInterfaceSymbol(InterfaceDecl decl) {
+        auto userType = new UserType(decl.location, decl.name);
+        userType.declaration = decl;  // Link type to declaration
         
         auto symbol = new Symbol(
             decl.name,

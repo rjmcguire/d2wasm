@@ -368,6 +368,8 @@ class TreeSitterBridge {
                 result ~= parseStructDeclaration(child);
             } else if (childType == "class_declaration") {
                 result ~= parseClassDeclaration(child);
+            } else if (childType == "interface_declaration") {
+                result ~= parseInterfaceDeclaration(child);
             } else if (childType == "variable_declaration") {
                 result ~= parseVariableDeclaration(child);
             } else if (childType == "enum_declaration") {
@@ -915,18 +917,88 @@ class TreeSitterBridge {
     InterfaceDecl parseInterfaceDeclaration(TSNode node) {
         SourceLocation loc = makeSourceLocation(node);
         
-        TSNode nameNode = TreeSitterParser.getChildByFieldName(node, "name");
-        if (!TreeSitterParser.isValid(nameNode)) {
-            throw new ParseError("Interface declaration missing name", loc);
-        }
-        
-        string name = TreeSitterParser.getNodeText(nameNode, sourceText);
-        
-        // TODO: Parse parent interfaces and methods
+        string name;
         Type[] parentInterfaces;
         FunctionDecl[] methods;
         
+        // Parse children to find name and body (similar to class parsing)
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            
+            if (childType == "identifier") {
+                name = TreeSitterParser.getNodeText(child, sourceText);
+            } else if (childType == "aggregate_body") {
+                // Parse interface methods
+                methods = parseInterfaceMethods(child);
+            }
+        }
+        
+        if (name.length == 0) {
+            throw new ParseError("Interface declaration missing name", loc);
+        }
+        
         return new InterfaceDecl(loc, name, parentInterfaces, methods);
+    }
+    
+    /**
+     * Parse interface method declarations (signatures only, no bodies)
+     */
+    private FunctionDecl[] parseInterfaceMethods(TSNode body) {
+        FunctionDecl[] methods;
+        
+        uint childCount = TreeSitterParser.getChildCount(body);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(body, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            
+            if (childType == "function_declaration" || childType == "function_signature") {
+                auto method = parseInterfaceMethod(child);
+                if (method) {
+                    method.isMethod = true;
+                    methods ~= method;
+                }
+            }
+        }
+        
+        return methods;
+    }
+    
+    /**
+     * Parse interface method (signature without body)
+     */
+    private FunctionDecl parseInterfaceMethod(TSNode node) {
+        SourceLocation loc = makeSourceLocation(node);
+        
+        Type returnType = null;
+        string name;
+        Parameter[] parameters;
+        
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            
+            if (childType == "type" || childType == "basic_type" || childType == "builtin_type") {
+                returnType = parseType(child);
+            } else if (childType == "identifier") {
+                name = TreeSitterParser.getNodeText(child, sourceText);
+            } else if (childType == "parameters") {
+                parameters = parseParameterList(child);
+            }
+        }
+        
+        if (name.length == 0) {
+            return null;
+        }
+        
+        if (returnType is null) {
+            returnType = new BasicType(loc, BasicType.Kind.Void);
+        }
+        
+        auto decl = new FunctionDecl(loc, name, returnType, parameters, null);
+        return decl;
     }
     
     /**
