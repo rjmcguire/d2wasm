@@ -1437,6 +1437,40 @@ class TypeChecker {
             return checkBasicTypeCompatibility(fromBasic, toBasic);
         }
         
+        // Class inheritance compatibility (upcasting)
+        auto fromUser = cast(UserType)from;
+        auto toUser = cast(UserType)to;
+        
+        if (fromUser && toUser) {
+            // Ensure declarations are resolved
+            if (!fromUser.declaration) {
+                auto sym = symbolTable.lookupSymbol(fromUser.name);
+                if (sym && sym.kind == SymbolKind.Type) {
+                    fromUser.declaration = sym.declaration;
+                }
+            }
+            if (!toUser.declaration) {
+                auto sym = symbolTable.lookupSymbol(toUser.name);
+                if (sym && sym.kind == SymbolKind.Type) {
+                    toUser.declaration = sym.declaration;
+                }
+            }
+            
+            auto fromClass = cast(ClassDecl)fromUser.declaration;
+            auto toClass = cast(ClassDecl)toUser.declaration;
+            
+            if (fromClass && toClass) {
+                // Check if fromClass is-a toClass (fromClass inherits from toClass)
+                ClassDecl current = fromClass;
+                while (current) {
+                    if (current is toClass) {
+                        return TypeCompatibility.compatible();
+                    }
+                    current = current.baseClassDecl;
+                }
+            }
+        }
+        
         // Array type compatibility
         auto fromArray = cast(ArrayType)from;
         auto toArray = cast(ArrayType)to;
