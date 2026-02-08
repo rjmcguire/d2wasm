@@ -40,6 +40,10 @@ class Symbol {
     bool isCTFEOnly;  // True for compile-time-only functions (__writeln, __traits, etc.)
     bool isVariadic;  // True for variadic functions (__writeln, etc.)
     
+    // Module path for this symbol (e.g., ["animals", "dog"])
+    // Used for name mangling and multi-module disambiguation
+    string[] modulePath;
+    
     // For local variables/parameters: unique ID assigned by type checker
     uint uniqueLocalId = uint.max;  // uint.max = not a local variable
     
@@ -50,6 +54,23 @@ class Symbol {
         this.declaration = decl;
         this.location = location;
         this.isGlobal = isGlobal;
+    }
+    
+    /// Constructor with module path
+    this(string name, SymbolKind kind, Type type, Declaration decl, SourceLocation location, 
+         bool isGlobal, const(string[]) modulePath) {
+        this(name, kind, type, decl, location, isGlobal);
+        this.modulePath = modulePath.dup;
+    }
+    
+    /**
+     * Get the fully qualified name: "module.path.symbolName"
+     */
+    string fullyQualifiedName() const {
+        if (modulePath.length == 0) {
+            return name;
+        }
+        return modulePath.join(".") ~ "." ~ name;
     }
     
     override string toString() {
@@ -549,7 +570,8 @@ class SymbolCollector {
             new FunctionType(decl.location, decl.returnType, getFunctionParameterTypes(decl)),
             decl,
             decl.location,
-            symbolTable.inGlobalScope()
+            symbolTable.inGlobalScope(),
+            symbolTable.modulePath
         );
         symbolTable.addSymbol(symbol);
     }
@@ -561,7 +583,8 @@ class SymbolCollector {
             new FunctionType(decl.location, decl.returnType, getImportedFunctionParameterTypes(decl)),
             decl,
             decl.location,
-            true  // Imported functions are always global
+            true,  // Imported functions are always global
+            symbolTable.modulePath
         );
         symbolTable.addSymbol(symbol);
     }
@@ -573,7 +596,8 @@ class SymbolCollector {
             new UserType(decl.location, decl.name),
             decl,
             decl.location,
-            symbolTable.inGlobalScope()
+            symbolTable.inGlobalScope(),
+            symbolTable.modulePath
         );
         symbolTable.addSymbol(symbol);
     }
@@ -591,7 +615,8 @@ class SymbolCollector {
             userType,
             decl,
             decl.location,
-            symbolTable.inGlobalScope()
+            symbolTable.inGlobalScope(),
+            symbolTable.modulePath
         );
         symbolTable.addSymbol(symbol);
     }
@@ -668,7 +693,8 @@ class SymbolCollector {
             decl.type,
             decl,
             decl.location,
-            symbolTable.inGlobalScope()
+            symbolTable.inGlobalScope(),
+            symbolTable.modulePath
         );
         symbolTable.addSymbol(symbol);
     }
@@ -680,7 +706,8 @@ class SymbolCollector {
             new UserType(decl.location, decl.name),
             decl,
             decl.location,
-            symbolTable.inGlobalScope()
+            symbolTable.inGlobalScope(),
+            symbolTable.modulePath
         );
         symbolTable.addSymbol(symbol);
     }
@@ -701,7 +728,8 @@ class SymbolCollector {
             symbolType,
             decl,
             decl.location,
-            symbolTable.inGlobalScope()
+            symbolTable.inGlobalScope(),
+            symbolTable.modulePath
         );
         symbol.isConstant = true;  // Mark as constant
         symbolTable.addSymbol(symbol);
