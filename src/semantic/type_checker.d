@@ -1135,6 +1135,17 @@ class TypeChecker {
                     format("Struct '%s' has no field '%s'", userType.name, expr.memberName),
                     expr.location);
             }
+            
+            // Handle class field access (same as struct, but layout includes vtable_ptr)
+            if (auto classDecl = cast(ClassDecl)userType.declaration) {
+                auto field = classDecl.getField(expr.memberName);
+                if (field) {
+                    return field.type;
+                }
+                throw new TypeError(
+                    format("Class '%s' has no field '%s'", userType.name, expr.memberName),
+                    expr.location);
+            }
         }
         
         // Handle array/slice .length, .ptr, .capacity
