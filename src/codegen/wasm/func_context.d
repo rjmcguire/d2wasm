@@ -38,6 +38,13 @@ class FuncContext {
     }
     StructLocalInfo[string] structLocals;
     
+    // Shadow stack for class locals (same layout pattern, but with vtable_ptr)
+    struct ClassLocalInfo {
+        uint frameOffset;      // Offset from frame pointer (FP)
+        ClassDecl classDecl;   // The class type
+    }
+    ClassLocalInfo[string] classLocals;
+    
     // Shadow stack for slice locals (ptr, length, capacity = 12 bytes)
     struct SliceLocalInfo {
         uint frameOffset;      // Offset from frame pointer (FP) for the slice struct
@@ -259,6 +266,21 @@ class FuncContext {
                     }
                     
                     frameSize += structDecl.structSize;
+                    return;
+                }
+                
+                // Class local - allocate on shadow stack (same as struct)
+                if (auto classDecl = cast(ClassDecl)userType.declaration) {
+                    frameSize = (frameSize + cast(uint)classDecl.classAlign - 1) & ~(cast(uint)classDecl.classAlign - 1);
+                    
+                    ClassLocalInfo info;
+                    info.frameOffset = frameSize;
+                    info.classDecl = classDecl;
+                    classLocals[varDecl.name] = info;
+                    
+                    // TODO: Track for RAII if class has destructor
+                    
+                    frameSize += cast(uint)classDecl.classSize;
                     return;
                 }
             }
@@ -733,6 +755,8 @@ class FuncContext {
             // Check if this is a struct local
             if (varDecl.name in structLocals) {
                 emitStructVarDecl(out_, varDecl);
+            } else if (varDecl.name in classLocals) {
+                emitClassVarDecl(out_, varDecl);
             } else if (varDecl.name in staticArrayLocals) {
                 emitStaticArrayVarDecl(out_, varDecl);
             } else if (varDecl.name in sliceLocals) {
@@ -1118,6 +1142,95 @@ class FuncContext {
         }
         
         throw new EmitError("Unsupported struct initializer", stmt.initializer.toString());
+    }
+    
+    /**
+     * Emit class local variable declaration.
+     * Classes are laid out like structs but with vtable_ptr at offset 0.
+     * For now, vtable_ptr is zeroed (no virtual dispatch yet).
+     */
+    void emitClassVarDecl(ref Appender!(ubyte[]) out_, VariableDeclarationStatement stmt) {
+        auto info = classLocals[stmt.name];
+        auto classDecl = info.classDecl;
+        
+        // Always zero-init vtable_ptr at offset 0 (no vtable yet)
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, info.frameOffset);  // offset 0 = vtable_ptr
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_const;
+        leb128s(out_, 0);  // NULL vtable for now
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        if (!stmt.initializer) {
+            // Zero-initialize all fields
+            foreach (field; classDecl.fields) {
+                out_ ~= Op.local_get;
+                leb128u(out_, fpLocal);
+                out_ ~= Op.i32_const;
+                leb128s(out_, info.frameOffset + cast(int)field.offset);
+                out_ ~= Op.i32_add;
+                out_ ~= Op.i32_const;
+                leb128s(out_, 0);
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+            }
+            return;
+        }
+        
+        // Constructor call: Dog(42)
+        if (auto callExpr = cast(CallExpression)stmt.initializer) {
+            // Initialize fields from constructor arguments (same as struct)
+            for (size_t i = 0; i < classDecl.fields.length && i < callExpr.arguments.length; i++) {
+                auto field = classDecl.fields[i];
+                out_ ~= Op.local_get;
+                leb128u(out_, fpLocal);
+                out_ ~= Op.i32_const;
+                leb128s(out_, info.frameOffset + cast(int)field.offset);
+                out_ ~= Op.i32_add;
+                emitExpression(out_, callExpr.arguments[i]);
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+            }
+            return;
+        }
+        
+        // Copy from another class local: Dog b = a
+        if (auto identExpr = cast(IdentifierExpression)stmt.initializer) {
+            if (auto srcInfo = identExpr.name in classLocals) {
+                // Copy entire class including vtable_ptr
+                uint totalSize = cast(uint)classDecl.classSize;
+                for (uint offset = 0; offset < totalSize; offset += 4) {
+                    // Dst address
+                    out_ ~= Op.local_get;
+                    leb128u(out_, fpLocal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, info.frameOffset + offset);
+                    out_ ~= Op.i32_add;
+                    // Src value
+                    out_ ~= Op.local_get;
+                    leb128u(out_, fpLocal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, srcInfo.frameOffset + offset);
+                    out_ ~= Op.i32_add;
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                    // Store
+                    out_ ~= Op.i32_store;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                }
+                return;
+            }
+        }
+        
+        throw new EmitError("Unsupported class initializer", stmt.initializer.toString());
     }
     
     /**
@@ -2484,6 +2597,25 @@ class FuncContext {
                 }
             }
             
+            // Check if it's a local class variable (on shadow stack, same as struct)
+            if (auto info = ident.name in classLocals) {
+                auto classDecl = info.classDecl;
+                auto field = classDecl.getField(expr.memberName);
+                if (field) {
+                    // Load i32 from frame at FP + frameOffset + fieldOffset
+                    // Note: field.offset already accounts for vtable_ptr (layout computed it)
+                    out_ ~= Op.local_get;
+                    leb128u(out_, fpLocal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, info.frameOffset + cast(int)field.offset);
+                    out_ ~= Op.i32_add;
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;  // alignment log2(4)
+                    leb128u(out_, 0);          // offset
+                    return;
+                }
+            }
+            
             // Check if it's a struct parameter (pointer passed as i32)
             if (auto info = ident.name in structParams) {
                 auto structDecl = info.structDecl;
@@ -3505,6 +3637,43 @@ class FuncContext {
             if (!field) {
                 throw new EmitError(format("Unknown field '%s' in struct '%s'",
                                           member.memberName, structDecl.name));
+            }
+            
+            // Calculate address: FP + frameOffset + fieldOffset
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset + cast(int)field.offset);
+            out_ ~= Op.i32_add;
+            
+            // Emit value
+            emitExpression(out_, value);
+            
+            // Store (assume i32 for now)
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;  // alignment log2(4)
+            leb128u(out_, 0);          // offset
+            
+            // Assignment is an expression - need to leave value on stack
+            // Re-load the value we just stored
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset + cast(int)field.offset);
+            out_ ~= Op.i32_add;
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            return;
+        }
+        
+        // Check if it's a local class (same as struct - field offset already includes vtable_ptr space)
+        if (auto info = objIdent.name in classLocals) {
+            auto classDecl = info.classDecl;
+            auto field = classDecl.getField(member.memberName);
+            if (!field) {
+                throw new EmitError(format("Unknown field '%s' in class '%s'",
+                                          member.memberName, classDecl.name));
             }
             
             // Calculate address: FP + frameOffset + fieldOffset
