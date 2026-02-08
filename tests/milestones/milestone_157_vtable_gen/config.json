@@ -1,0 +1,5 @@
+{
+    "type": "wasm_exec",
+    "entry": "getValue",
+    "expected_result": 8
+}
