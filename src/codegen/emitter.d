@@ -137,6 +137,14 @@ class BinaryEmitter {
         uint heapPtrGlobal;  // Index of $heap_ptr global
         bool needsShadowStack = false;  // Set when any function has struct locals
         
+        // Function table for call_indirect (virtual dispatch)
+        uint[] tableFunctions;        // function indices to put in table
+        uint nextTypeId = 0;          // next available type ID for classes
+        ClassDecl[] classesWithVtables;  // classes that need vtable entries
+        
+        // TypeInfo table: typeId -> offset in data section
+        uint[] typeInfoOffsets;
+        
         // Data section
         struct DataEntry {
             uint offset;
@@ -309,6 +317,9 @@ class BinaryEmitter {
             // Stabilize indices for incremental compilation
             stabilizeIndices();
             
+            // Build function table for virtual dispatch (must be after stabilization)
+            buildVtables();
+            
             phase = EmitPhase.init;
             emitHeader();
             
@@ -321,6 +332,9 @@ class BinaryEmitter {
             phase = EmitPhase.emittingFunctions;
             emitFunctionSection();
             
+            // Table section (for call_indirect / virtual dispatch)
+            emitTableSection();
+            
             phase = EmitPhase.emittingMemory;
             emitMemorySection();
             
@@ -329,6 +343,9 @@ class BinaryEmitter {
             
             phase = EmitPhase.emittingExports;
             emitExportSection();
+            
+            // Element section (populates function table) - must come after export
+            emitElementSection();
             
             phase = EmitPhase.emittingCode;
             emitCodeSection();
@@ -623,46 +640,56 @@ class BinaryEmitter {
     }
     
     /**
-     * Collect methods from a class declaration and generate its vtable.
+     * Collect methods from a class declaration and set up virtual dispatch.
      * 
-     * Vtable layout (negative offset for TypeInfo):
-     *   [typeInfoPtr]     ← vtableOffset - 4
-     *   [method0_ptr]     ← vtableOffset (what vtable_ptr points to)
-     *   [method1_ptr]
-     *   ...
+     * Packed vtable_ptr design:
+     *   vtable_ptr = (typeId << 16) | tableBase
+     *   
+     *   - typeId:    unique ID for this class (for RTTI/error messages)
+     *   - tableBase: starting index in WASM function table
+     *   
+     * Virtual call:
+     *   tableIndex = (vtable_ptr & 0xFFFF) + methodSlot
+     *   call_indirect tableIndex
      * 
-     * TypeInfo layout:
-     *   [nameOffset: u32]  → class name string
-     *   [nameLen: u32]
+     * TypeInfo (in data section, indexed by typeId):
+     *   [nameOffset: u32, nameLen: u32]
      */
     private void collectClassMethods(ClassDecl classDecl) {
         import std.algorithm : filter;
         
-        // First, collect all methods (register them like struct methods)
-        foreach (member; classDecl.members) {
-            if (auto funcDecl = cast(FunctionDecl)member) {
-                if (funcDecl.isMethod) {
-                    collectClassMethod(classDecl, funcDecl);
-                }
-            }
-        }
+        // Assign unique type ID
+        classDecl.typeId = nextTypeId++;
         
-        // Populate virtualMethods array (all methods are virtual for now)
+        // Assign tableBase = current end of function table
+        classDecl.tableBase = cast(uint)tableFunctions.length;
+        
+        // Collect all methods and build virtualMethods array
+        // Note: tableFunctions is built AFTER stabilizeIndices() to use final indices
         classDecl.virtualMethods = [];
         foreach (member; classDecl.members) {
             if (auto funcDecl = cast(FunctionDecl)member) {
-                if (funcDecl.isMethod && !funcDecl.isConstructor && !funcDecl.isDestructor) {
-                    classDecl.virtualMethods ~= funcDecl;
+                if (funcDecl.isMethod) {
+                    // Register the method
+                    collectClassMethod(classDecl, funcDecl);
+                    
+                    // Track virtual methods (non-constructor, non-destructor)
+                    if (!funcDecl.isConstructor && !funcDecl.isDestructor) {
+                        classDecl.virtualMethods ~= funcDecl;
+                    }
                 }
             }
         }
         
-        // Generate vtable in data section
-        generateVtable(classDecl);
+        // Track this class for post-stabilization table building
+        classesWithVtables ~= classDecl;
+        
+        // Generate TypeInfo in data section
+        generateTypeInfo(classDecl);
     }
     
     /**
-     * Collect a class method (same as struct method for now).
+     * Collect a class method, adding hidden 'this' parameter.
      */
     private void collectClassMethod(ClassDecl classDecl, FunctionDecl method) {
         // Build signature with hidden 'this' pointer as first parameter
@@ -699,52 +726,25 @@ class BinaryEmitter {
     }
     
     /**
-     * Generate vtable for a class in the data section.
-     * 
-     * Memory layout:
-     *   TypeInfo:     [nameOffset, nameLen] (8 bytes)
-     *   typeInfoPtr:  points to TypeInfo (4 bytes)
-     *   vtable:       [method0_ptr, method1_ptr, ...] ← vtableOffset points here
+     * Generate TypeInfo for a class in the data section.
+     * TypeInfo is indexed by typeId for error messages.
      */
-    private void generateVtable(ClassDecl classDecl) {
-        // 1. Emit class name string
+    private void generateTypeInfo(ClassDecl classDecl) {
+        // Emit class name string
         uint nameOffset = addData(cast(ubyte[])classDecl.name.dup);
         uint nameLen = cast(uint)classDecl.name.length;
         
-        // 2. Emit TypeInfo struct: {nameOffset, nameLen}
+        // Emit TypeInfo struct: {nameOffset, nameLen}
         ubyte[8] typeInfo;
         *cast(uint*)&typeInfo[0] = nameOffset;
         *cast(uint*)&typeInfo[4] = nameLen;
-        uint typeInfoOffset = addData(typeInfo[]);
+        classDecl.typeInfoOffset = addData(typeInfo[]);
         
-        // 3. Emit typeInfoPtr (points to TypeInfo) - this is vtable[-1]
-        ubyte[4] typeInfoPtr;
-        *cast(uint*)&typeInfoPtr[0] = typeInfoOffset;
-        addData(typeInfoPtr[]);
-        
-        // 4. Emit method pointers - this is where vtableOffset points
-        classDecl.vtableOffset = nextDataOffset;
-        
-        foreach (i, method; classDecl.virtualMethods) {
-            // Get function index for this method
-            string mangledName = classDecl.name ~ "_" ~ method.name;
-            
-            // Store placeholder for now (0) - will be patched during linking
-            // In WASM with call_indirect, we need table indices, not addresses
-            // For now, store the function index (will need table setup later)
-            ubyte[4] methodEntry;
-            if (auto idx = mangledName in funcIndex) {
-                *cast(uint*)&methodEntry[0] = *idx;
-            } else {
-                *cast(uint*)&methodEntry[0] = 0xFFFFFFFF;  // Invalid marker
-            }
-            addData(methodEntry[]);
+        // Track TypeInfo offset by typeId
+        while (typeInfoOffsets.length <= classDecl.typeId) {
+            typeInfoOffsets ~= 0;
         }
-        
-        // If no virtual methods, still reserve space for empty vtable
-        if (classDecl.virtualMethods.length == 0) {
-            classDecl.vtableOffset = nextDataOffset;
-        }
+        typeInfoOffsets[classDecl.typeId] = classDecl.typeInfoOffset;
     }
     
     /**
@@ -1517,6 +1517,28 @@ class BinaryEmitter {
         }
     }
     
+    /**
+     * Build function table entries for virtual dispatch.
+     * Called after stabilizeIndices() so we use the final sorted function indices.
+     */
+    private void buildVtables() {
+        tableFunctions = [];
+        
+        foreach (classDecl; classesWithVtables) {
+            // Assign tableBase = current position in table
+            classDecl.tableBase = cast(uint)tableFunctions.length;
+            
+            // Add virtual methods in declaration order
+            foreach (method; classDecl.virtualMethods) {
+                string mangledName = classDecl.name ~ "_" ~ method.name;
+                if (auto idx = mangledName in funcIndex) {
+                    // funcIndex already includes import offset after stabilization
+                    tableFunctions ~= cast(uint)imports.length + *idx;
+                }
+            }
+        }
+    }
+    
     /// Generate a canonical string key for a function signature (for sorting)
     private static string funcSigKey(FuncSig sig) {
         import std.conv : to;
@@ -1585,6 +1607,64 @@ class BinaryEmitter {
         auto typeIndices = functions.map!(f => f.typeIndex).array;
         if (auto content = buildFunctionSection(typeIndices))
             emitSection(Section.function_, content);
+    }
+    
+    //==========================================================================
+    // Table Section (for call_indirect / virtual dispatch)
+    //==========================================================================
+    
+    private void emitTableSection() {
+        if (tableFunctions.length == 0) return;
+        
+        // Build table section: one funcref table with enough slots
+        Appender!(ubyte[]) content;
+        
+        // Number of tables: 1
+        content ~= cast(ubyte)0x01;
+        
+        // Table type: funcref (0x70), limits
+        content ~= cast(ubyte)0x70;  // funcref
+        
+        // Limits: has max (0x01), min, max
+        uint tableSize = cast(uint)tableFunctions.length;
+        content ~= cast(ubyte)0x01;  // has max flag
+        leb128u(content, tableSize);  // min
+        leb128u(content, tableSize);  // max
+        
+        emitSection(Section.table, content.data);
+    }
+    
+    //==========================================================================
+    // Element Section (populates function table)
+    //==========================================================================
+    
+    private void emitElementSection() {
+        if (tableFunctions.length == 0) return;
+        
+        // Build element section: initialize table[0..n] with function indices
+        Appender!(ubyte[]) content;
+        
+        // Number of element segments: 1
+        content ~= cast(ubyte)0x01;
+        
+        // Element segment:
+        // - flags: 0x00 = active, table 0, offset expr
+        content ~= cast(ubyte)0x00;
+        
+        // - offset: i32.const 0, end
+        content ~= cast(ubyte)0x41;  // i32.const
+        leb128s(content, 0);  // offset 0
+        content ~= cast(ubyte)0x0B;  // end
+        
+        // - num functions
+        leb128u(content, cast(uint)tableFunctions.length);
+        
+        // - function indices
+        foreach (funcIdx; tableFunctions) {
+            leb128u(content, funcIdx);
+        }
+        
+        emitSection(Section.element, content.data);
     }
     
     //==========================================================================

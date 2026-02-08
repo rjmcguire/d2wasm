@@ -1173,15 +1173,19 @@ class FuncContext {
         auto info = classLocals[stmt.name];
         auto classDecl = info.classDecl;
         
-        // Initialize vtable_ptr at offset 0 to point to class's vtable
-        // The vtable has TypeInfo at negative offset for error handling
+        // Initialize vtable_ptr at offset 0 with packed value:
+        // vtable_ptr = (typeId << 16) | tableBase
+        // - typeId: for RTTI / error messages
+        // - tableBase: starting index in function table for virtual dispatch
+        uint packedVtablePtr = (classDecl.typeId << 16) | (classDecl.tableBase & 0xFFFF);
+        
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
         leb128s(out_, info.frameOffset);  // offset 0 = vtable_ptr
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_const;
-        leb128s(out_, cast(int)classDecl.vtableOffset);  // points to method[0] in vtable
+        leb128s(out_, cast(int)packedVtablePtr);
         out_ ~= Op.i32_store;
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);
@@ -3482,14 +3486,75 @@ class FuncContext {
             emitExpression(out_, arg);
         }
         
-        // Generate the mangled method name: TypeName_methodName
-        // TODO: For virtual dispatch, use call_indirect through vtable
-        string mangledName = typeName ~ "_" ~ method.name;
-        
-        // Call the method (direct call for now)
-        uint funcIdx = emitter.getFuncIndex(mangledName);
-        out_ ~= Op.call;
-        leb128u(out_, funcIdx);
+        // For structs: direct call (no polymorphism)
+        // For classes: call_indirect through vtable (virtual dispatch)
+        if (structDecl) {
+            // Struct method: direct call
+            string mangledName = typeName ~ "_" ~ method.name;
+            uint funcIdx = emitter.getFuncIndex(mangledName);
+            out_ ~= Op.call;
+            leb128u(out_, funcIdx);
+        } else if (classDecl) {
+            // Class method: virtual dispatch via call_indirect
+            // 1. Find method slot in virtualMethods
+            int methodSlot = -1;
+            foreach (i, vm; classDecl.virtualMethods) {
+                if (vm.name == method.name) {
+                    methodSlot = cast(int)i;
+                    break;
+                }
+            }
+            
+            if (methodSlot < 0) {
+                // Not a virtual method (constructor/destructor) - use direct call
+                string mangledName = typeName ~ "_" ~ method.name;
+                uint funcIdx = emitter.getFuncIndex(mangledName);
+                out_ ~= Op.call;
+                leb128u(out_, funcIdx);
+            } else {
+                // Virtual dispatch:
+                // tableIndex = (vtable_ptr & 0xFFFF) + methodSlot
+                
+                // Load vtable_ptr from object (at offset 0)
+                if (auto localInfo = objIdent.name in classLocals) {
+                    out_ ~= Op.local_get;
+                    leb128u(out_, fpLocal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, localInfo.frameOffset);
+                    out_ ~= Op.i32_add;
+                    out_ ~= Op.i32_load;  // load vtable_ptr
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                } else if (auto paramInfo = objIdent.name in classParams) {
+                    out_ ~= Op.local_get;
+                    leb128u(out_, paramInfo.localIndex);
+                    out_ ~= Op.i32_load;  // load vtable_ptr from this pointer
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                }
+                
+                // Mask to get tableBase: vtable_ptr & 0xFFFF
+                out_ ~= Op.i32_const;
+                leb128s(out_, 0xFFFF);
+                out_ ~= Op.i32_and;
+                
+                // Add method slot
+                if (methodSlot > 0) {
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, methodSlot);
+                    out_ ~= Op.i32_add;
+                }
+                
+                // call_indirect with type signature
+                string mangledName = typeName ~ "_" ~ method.name;
+                uint funcIdx = emitter.getFuncIndex(mangledName);
+                uint typeIdx = emitter.functions[funcIdx - cast(uint)emitter.imports.length].typeIndex;
+                
+                out_ ~= Op.call_indirect;
+                leb128u(out_, typeIdx);  // type index
+                leb128u(out_, 0);         // table index (always 0)
+            }
+        }
     }
     
     /**

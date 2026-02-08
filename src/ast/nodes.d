@@ -255,8 +255,13 @@ class ClassDecl : Declaration {
     // vtable index for this class (assigned during codegen)
     int vtableIndex = -1;
     
-    // vtable offset in data section (where method pointers start, after typeInfoPtr)
-    uint vtableOffset = 0;
+    // Packed vtable_ptr design:
+    // vtable_ptr = (typeId << 16) | tableBase
+    uint typeId = 0;       // Unique type ID for this class (for RTTI/error messages)
+    uint tableBase = 0;    // Starting index in WASM function table
+    
+    // TypeInfo offset in data section (for error messages, indexed by typeId)
+    uint typeInfoOffset = 0;
     
     this(SourceLocation loc, string name, Type baseClass, Type[] interfaces,
          Declaration[] members, bool isPublic = false) {
