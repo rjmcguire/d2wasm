@@ -1,7 +1,7 @@
 # Vtable Layout Design
 
 **Date:** 2026-02-08
-**Status:** Implementation
+**Status:** Implemented (Milestone 159)
 
 ## Goals
 
