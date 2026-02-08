@@ -664,21 +664,80 @@ class TreeSitterBridge {
     ClassDecl parseClassDeclaration(TSNode node) {
         SourceLocation loc = makeSourceLocation(node);
         
-        TSNode nameNode = TreeSitterParser.getChildByFieldName(node, "name");
-        if (!TreeSitterParser.isValid(nameNode)) {
+        string name;
+        Type baseClass = null;
+        Type[] interfaces;
+        Declaration[] members;
+        
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            
+            if (childType == "identifier") {
+                name = TreeSitterParser.getNodeText(child, sourceText);
+            } else if (childType == "aggregate_body") {
+                members = parseAggregateBody(child);
+            } else if (childType == "base_class_list" || childType == "super_class") {
+                // Parse inheritance - first item is base class, rest are interfaces
+                auto inheritTypes = parseBaseClassList(child);
+                if (inheritTypes.length > 0) {
+                    baseClass = inheritTypes[0];
+                    interfaces = inheritTypes[1 .. $];
+                }
+            }
+        }
+        
+        if (name.length == 0) {
             throw new ParseError("Class declaration missing name", loc);
         }
         
-        string name = TreeSitterParser.getNodeText(nameNode, sourceText);
+        auto classDecl = new ClassDecl(loc, name, baseClass, interfaces, members);
         
-        // TODO: Parse base class and interfaces
-        Type baseClass = null;
-        Type[] interfaces;
+        // Mark FunctionDecl members as methods and extract constructor/destructor
+        foreach (member; members) {
+            if (auto funcDecl = cast(FunctionDecl)member) {
+                funcDecl.isMethod = true;
+                funcDecl.parent = classDecl;
+                
+                // Check for constructor (this)
+                if (funcDecl.name == "this" || funcDecl.isConstructor) {
+                    classDecl.constructor = funcDecl;
+                }
+                
+                // Check for destructor (~this)
+                if (funcDecl.isDestructor) {
+                    classDecl.destructor = funcDecl;
+                }
+            }
+        }
         
-        // TODO: Parse class members
-        Declaration[] members;
+        return classDecl;
+    }
+    
+    /**
+     * Parse base class list for inheritance
+     */
+    private Type[] parseBaseClassList(TSNode node) {
+        Type[] types;
         
-        return new ClassDecl(loc, name, baseClass, interfaces, members);
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            
+            if (childType == "identifier" || childType == "type" || childType == "type_identifier") {
+                string typeName = TreeSitterParser.getNodeText(child, sourceText);
+                auto loc = makeSourceLocation(child);
+                types ~= new UserType(loc, typeName);
+            } else if (childType == "qualified_identifier") {
+                string typeName = TreeSitterParser.getNodeText(child, sourceText);
+                auto loc = makeSourceLocation(child);
+                types ~= new UserType(loc, typeName);
+            }
+        }
+        
+        return types;
     }
     
     /**
@@ -742,11 +801,71 @@ class TreeSitterBridge {
                 members ~= parseFunctionDeclaration(child);
             } else if (childType == "destructor") {
                 members ~= parseDestructor(child);
+            } else if (childType == "constructor") {
+                members ~= parseConstructor(child);
             }
             // Skip braces, semicolons, etc.
         }
         
         return members;
+    }
+    
+    /**
+     * Parse constructor (this(...) { ... })
+     */
+    FunctionDecl parseConstructor(TSNode node) {
+        SourceLocation loc = makeSourceLocation(node);
+        
+        // Parse parameters
+        Parameter[] parameters;
+        TSNode paramsNode = TreeSitterParser.getChildByFieldName(node, "parameters");
+        if (!TreeSitterParser.isValid(paramsNode)) {
+            // Try finding by type
+            uint childCount = TreeSitterParser.getChildCount(node);
+            for (uint i = 0; i < childCount; i++) {
+                TSNode child = TreeSitterParser.getChild(node, i);
+                if (TreeSitterParser.getNodeType(child) == "parameters") {
+                    paramsNode = child;
+                    break;
+                }
+            }
+        }
+        
+        if (TreeSitterParser.isValid(paramsNode)) {
+            parameters = parseParameterList(paramsNode);
+        }
+        
+        // Find the function body
+        TSNode bodyNode = TreeSitterParser.getChildByFieldName(node, "function_body");
+        if (!TreeSitterParser.isValid(bodyNode)) {
+            uint childCount = TreeSitterParser.getChildCount(node);
+            for (uint i = 0; i < childCount; i++) {
+                TSNode child = TreeSitterParser.getChild(node, i);
+                if (TreeSitterParser.getNodeType(child) == "function_body") {
+                    bodyNode = child;
+                    break;
+                }
+            }
+        }
+        
+        Statement body_ = null;
+        if (TreeSitterParser.isValid(bodyNode)) {
+            body_ = parseFunctionBody(bodyNode);
+        }
+        
+        // Create constructor as a special function named "this"
+        auto ctor = new FunctionDecl(
+            loc,
+            "this",
+            new BasicType(loc, BasicType.Kind.Void),  // Constructors return void
+            parameters,
+            body_,
+            [],   // No attributes
+            false  // Not public
+        );
+        ctor.isConstructor = true;
+        
+        return ctor;
     }
     
     /**

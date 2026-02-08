@@ -1,0 +1,7 @@
+{
+    "name": "class_declaration",
+    "description": "Class declaration parsing",
+    "type": "wasm_exec",
+    "entry": "getValue",
+    "expected_result": 153
+}

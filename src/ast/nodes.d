@@ -159,7 +159,7 @@ class FunctionDecl : Declaration {
         bool, "isIntrinsic",   1,  // compiler emits inline code instead of call
         bool, "isTypeChecked", 1,  // already type-checked (avoid redundant passes)
         bool, "isDestructor",  1,  // ~this() destructor
-        uint, "",              1,  // padding to byte boundary
+        bool, "isConstructor", 1,  // this() constructor
     ));
     
     Declaration parent;  // enclosing struct/class, null for free functions
@@ -226,11 +226,34 @@ class ImportedFunctionDecl : Declaration {
 
 /**
  * Class declaration: class Name : BaseClass, Interface { members }
+ * 
+ * Memory layout:
+ *   [vtable_ptr][base_fields][derived_fields]
+ * 
+ * The vtable_ptr is an implicit first field pointing to the class's vtable.
  */
 class ClassDecl : Declaration {
-    Type baseClass;  // null if no inheritance
+    Type baseClass;  // null if no inheritance (implicitly inherits Object)
     Type[] interfaces;
     Declaration[] members;
+    
+    // Constructor (if present)
+    FunctionDecl constructor;
+    
+    // Destructor (if present)
+    FunctionDecl destructor;
+    
+    // Virtual methods for vtable (populated during semantic analysis)
+    FunctionDecl[] virtualMethods;
+    
+    // Field layout (similar to StructDecl)
+    StructField[] fields;
+    size_t classSize;      // Total size including vtable pointer
+    size_t classAlign;
+    bool layoutComputed;
+    
+    // vtable index for this class (assigned during codegen)
+    int vtableIndex = -1;
     
     this(SourceLocation loc, string name, Type baseClass, Type[] interfaces,
          Declaration[] members, bool isPublic = false) {
@@ -240,9 +263,33 @@ class ClassDecl : Declaration {
         this.members = members;
     }
     
+    /**
+     * Get field by name, returns null if not found
+     */
+    StructField* getField(string fieldName) {
+        foreach (ref field; fields) {
+            if (field.name == fieldName) return &field;
+        }
+        return null;
+    }
+    
+    /**
+     * Check if this class has a destructor
+     */
+    bool hasDestructor() const {
+        return destructor !is null;
+    }
+    
+    /**
+     * Check if this class has any virtual methods
+     */
+    bool hasVirtualMethods() const {
+        return virtualMethods.length > 0;
+    }
     
     override string toString() const {
-        return format("ClassDecl(%s)", name);
+        return format("ClassDecl(%s, size=%d, vtable=%d methods)", 
+                      name, classSize, virtualMethods.length);
     }
 }
 
