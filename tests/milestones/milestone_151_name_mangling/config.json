@@ -1,5 +1,7 @@
 {
-    "description": "Name mangling infrastructure",
-    "expected_result": 151,
-    "run_function": "testValue"
+    "name": "name_mangling",
+    "description": "D-compatible name mangling",
+    "type": "wasm_exec",
+    "entry": "testValue",
+    "expected_result": 151
 }

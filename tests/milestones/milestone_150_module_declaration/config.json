@@ -1,5 +1,7 @@
 {
+    "name": "module_declaration",
     "description": "Module declaration parsing",
-    "expected_result": 150,
-    "run_function": "getValue"
+    "type": "wasm_exec",
+    "entry": "getValue",
+    "expected_result": 150
 }
