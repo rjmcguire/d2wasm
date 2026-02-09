@@ -1484,6 +1484,17 @@ class TypeChecker {
     
     Type checkCastExpression(CastExpression expr) {
         checkExpression(expr.expression);  // Verify source expression is valid
+        
+        // Resolve UserType declarations if not already resolved
+        if (auto userType = cast(UserType)expr.targetType) {
+            if (!userType.declaration) {
+                auto typeSymbol = symbolTable.lookupSymbol(userType.name);
+                if (typeSymbol && typeSymbol.kind == SymbolKind.Type) {
+                    userType.declaration = typeSymbol.declaration;
+                }
+            }
+        }
+        
         return expr.targetType;  // Cast always produces target type
     }
     

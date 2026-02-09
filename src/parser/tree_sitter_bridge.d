@@ -646,13 +646,12 @@ class TreeSitterBridge {
             
             // Skip braces and parse actual statements
             if (nodeType != "{" && nodeType != "}") {
-                try {
-                    auto stmt = parseStatement(child);
-                    if (stmt !is null) {  // Skip null statements (e.g., comments)
-                        statements ~= stmt;
-                    }
-                } catch (ParseError e) {
-                    log(2, "Warning: Skipping statement due to parse error: ", e.msg);
+                // NOTE: Previously had try/catch here that silently dropped statements on parse errors.
+                // Removed because it was hiding bugs (e.g., cast expressions failing to parse).
+                // If error recovery is needed, it should be at a higher level.
+                auto stmt = parseStatement(child);
+                if (stmt !is null) {  // Skip null statements (e.g., comments)
+                    statements ~= stmt;
                 }
             }
         }
@@ -1699,7 +1698,6 @@ class TreeSitterBridge {
                 }
             }
         }
-        
         return new CompoundStatement(loc, statements);
     }
     
@@ -2389,43 +2387,34 @@ class TreeSitterBridge {
      * Parse cast expression: cast(Type)expression
      */
     CastExpression parseCastExpression(TSNode node, SourceLocation loc) {
+        import std.exception : enforce;
+        
+        // Structure per tree-sitter-d grammar:
+        //   - child node of type "type" (the target type)
+        //   - field "operand" (the expression being cast)
+        
+        // Find type child by node type
+        TSNode typeNode;
         uint childCount = TreeSitterParser.getChildCount(node);
-        
-        // Try field-based access first
-        TSNode typeNode = TreeSitterParser.getChildByFieldName(node, "type");
-        TSNode exprNode = TreeSitterParser.getChildByFieldName(node, "expression");
-        
-        if (!TreeSitterParser.isValid(typeNode) || !TreeSitterParser.isValid(exprNode)) {
-            // Fall back to positional: cast ( type ) expression
-            // Typically: child 0 = "cast", child 1 = "(", child 2 = type, child 3 = ")", child 4 = expression
-            Type targetType;
-            Expression expression;
-            
-            for (uint i = 0; i < childCount; i++) {
-                TSNode child = TreeSitterParser.getChild(node, i);
-                string childType = TreeSitterParser.getNodeType(child);
-                
-                if (childType == "type" || childType == "primitive_type" || childType == "identifier") {
-                    if (targetType is null) {
-                        targetType = parseType(child);
-                    }
-                } else if (childType != "cast" && childType != "(" && childType != ")") {
-                    // Likely the expression
-                    if (expression is null && targetType !is null) {
-                        expression = parseExpression(child);
-                    }
-                }
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            if (TreeSitterParser.getNodeType(child) == "type") {
+                typeNode = child;
+                break;
             }
-            
-            if (targetType is null || expression is null) {
-                throw new ParseError("Cast expression missing type or expression", loc);
-            }
-            
-            return new CastExpression(loc, targetType, expression);
         }
         
+        // Get operand by field name
+        TSNode operandNode = TreeSitterParser.getChildByFieldName(node, "operand");
+        
+        // Enforce grammar expectations
+        enforce(TreeSitterParser.isValid(typeNode),
+            "cast_expression: expected 'type' child node (tree-sitter-d grammar may have changed)");
+        enforce(TreeSitterParser.isValid(operandNode),
+            "cast_expression: expected 'operand' field (tree-sitter-d grammar may have changed)");
+        
         Type targetType = parseType(typeNode);
-        Expression expression = parseExpression(exprNode);
+        Expression expression = parseExpression(operandNode);
         
         return new CastExpression(loc, targetType, expression);
     }
