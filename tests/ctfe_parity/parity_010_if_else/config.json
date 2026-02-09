@@ -1,0 +1,7 @@
+{
+  "name": "if_else",
+  "description": "CTFE parity: if/else control flow",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 25
+}

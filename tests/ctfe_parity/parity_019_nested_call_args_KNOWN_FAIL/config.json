@@ -1,0 +1,7 @@
+{
+  "name": "nested_call_args_BUG",
+  "description": "CTFE parity: nested calls in args (KNOWN NATIVE BUG)",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 42
+}

@@ -1,0 +1,7 @@
+{
+  "name": "static_array",
+  "description": "CTFE parity: static array init and indexing",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 50
+}

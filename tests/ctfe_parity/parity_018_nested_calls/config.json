@@ -1,0 +1,7 @@
+{
+  "name": "nested_calls",
+  "description": "CTFE parity: nested function calls",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 42
+}

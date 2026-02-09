@@ -1,0 +1,7 @@
+{
+  "name": "struct",
+  "description": "CTFE parity: struct construction and field access",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 42
+}

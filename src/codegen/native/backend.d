@@ -627,6 +627,9 @@ class NativeCompiledFunction : CompiledFunction {
                 gen.emitMoveX0ToX1();
                 gen.emitImm32(stencil_load_imm32, 0);
                 gen.emit(stencil_eq_i32);
+            } else if (unaryOp.operator == UnaryExpression.Operator.BitwiseNot) {
+                // ~x
+                gen.emit(stencil_not_i32);
             }
         } else if (auto ident = cast(IdentifierExpression)expr) {
             // Load variable from stack

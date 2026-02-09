@@ -1,0 +1,7 @@
+{
+  "name": "while_loop",
+  "description": "CTFE parity: while loop",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 55
+}

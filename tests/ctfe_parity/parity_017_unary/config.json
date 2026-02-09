@@ -1,0 +1,7 @@
+{
+  "name": "unary",
+  "description": "CTFE parity: unary operators (-, ~)",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": -43
+}
