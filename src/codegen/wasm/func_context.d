@@ -1457,6 +1457,61 @@ class FuncContext {
             return;
         }
         
+        // Handle cast expression: ISpeak s = cast(ISpeak)dog;
+        if (auto castExpr = cast(CastExpression)stmt.initializer) {
+            if (castExpr.sourceClassDecl && castExpr.targetInterfaceDecl) {
+                // Extract inner identifier and use same logic
+                if (auto identExpr = cast(IdentifierExpression)castExpr.expression) {
+                    ClassDecl srcClass = castExpr.sourceClassDecl;
+                    
+                    // Store obj_ptr at offset 0
+                    out_ ~= Op.local_get;
+                    leb128u(out_, fpLocal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, info.frameOffset);
+                    out_ ~= Op.i32_add;
+                    
+                    if (auto srcInfo = identExpr.name in classLocals) {
+                        out_ ~= Op.local_get;
+                        leb128u(out_, fpLocal);
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, srcInfo.frameOffset);
+                        out_ ~= Op.i32_add;
+                    } else if (auto srcInfo = identExpr.name in classParams) {
+                        out_ ~= Op.local_get;
+                        leb128u(out_, srcInfo.localIndex);
+                    } else {
+                        throw new EmitError("Unknown class in cast: " ~ identExpr.name);
+                    }
+                    
+                    out_ ~= Op.i32_store;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                    
+                    // Store itable_ptr at offset 4
+                    out_ ~= Op.local_get;
+                    leb128u(out_, fpLocal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, info.frameOffset + 4);
+                    out_ ~= Op.i32_add;
+                    
+                    string ifaceName = castExpr.targetInterfaceDecl.name;
+                    if (auto itableBase = ifaceName in srcClass.itableBases) {
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, cast(int)*itableBase);
+                    } else {
+                        throw new EmitError("Class " ~ srcClass.name ~ " has no itable for " ~ ifaceName);
+                    }
+                    
+                    out_ ~= Op.i32_store;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                    
+                    return;
+                }
+            }
+        }
+        
         throw new EmitError("Unsupported interface initializer");
     }
     
@@ -2684,9 +2739,54 @@ class FuncContext {
     }
     
     void emitCast(ref Appender!(ubyte[]) out_, CastExpression expr) {
+        // Check for class→interface cast (annotated by type checker)
+        if (expr.sourceClassDecl && expr.targetInterfaceDecl) {
+            // Emit fat pointer: (obj_ptr, itable_ptr)
+            emitClassToInterfaceCast(out_, expr);
+            return;
+        }
+        
         // Emit the expression being cast
         emitExpression(out_, expr.expression);
         // For now, most casts are no-ops at WASM level (everything is i32)
+    }
+    
+    /**
+     * Emit class→interface cast as fat pointer (obj_ptr, itable_ptr)
+     */
+    void emitClassToInterfaceCast(ref Appender!(ubyte[]) out_, CastExpression expr) {
+        auto srcClass = expr.sourceClassDecl;
+        auto targetIface = expr.targetInterfaceDecl;
+        
+        // Get the source expression - should be a class identifier
+        if (auto identExpr = cast(IdentifierExpression)expr.expression) {
+            // Emit obj_ptr
+            if (auto localInfo = identExpr.name in classLocals) {
+                // Class local: obj_ptr = FP + frameOffset
+                out_ ~= Op.local_get;
+                leb128u(out_, fpLocal);
+                out_ ~= Op.i32_const;
+                leb128s(out_, localInfo.frameOffset);
+                out_ ~= Op.i32_add;
+            } else if (auto paramInfo = identExpr.name in classParams) {
+                // Class param: obj_ptr = param value (already a pointer)
+                out_ ~= Op.local_get;
+                leb128u(out_, paramInfo.localIndex);
+            } else {
+                throw new EmitError("Unknown class variable in cast: " ~ identExpr.name);
+            }
+            
+            // Emit itable_ptr
+            string ifaceName = targetIface.name;
+            if (auto itableBase = ifaceName in srcClass.itableBases) {
+                out_ ~= Op.i32_const;
+                leb128s(out_, cast(int)*itableBase);
+            } else {
+                throw new EmitError("Class " ~ srcClass.name ~ " has no itable for interface " ~ ifaceName);
+            }
+        } else {
+            throw new EmitError("Class→interface cast requires identifier expression");
+        }
     }
     
     void emitMember(ref Appender!(ubyte[]) out_, MemberExpression expr) {

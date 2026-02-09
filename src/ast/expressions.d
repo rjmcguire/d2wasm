@@ -387,6 +387,10 @@ class CastExpression : Expression {
     Type targetType;
     Expression expression;
     
+    // Resolved by type checker for class→interface casts
+    ClassDecl sourceClassDecl;
+    InterfaceDecl targetInterfaceDecl;
+    
     this(SourceLocation loc, Type targetType, Expression expression) {
         super(loc);
         this.targetType = targetType;

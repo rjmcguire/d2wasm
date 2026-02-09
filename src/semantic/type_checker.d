@@ -1483,7 +1483,7 @@ class TypeChecker {
     }
     
     Type checkCastExpression(CastExpression expr) {
-        checkExpression(expr.expression);  // Verify source expression is valid
+        Type sourceType = checkExpression(expr.expression);  // Verify source expression is valid
         
         // Resolve UserType declarations if not already resolved
         if (auto userType = cast(UserType)expr.targetType) {
@@ -1491,6 +1491,33 @@ class TypeChecker {
                 auto typeSymbol = symbolTable.lookupSymbol(userType.name);
                 if (typeSymbol && typeSymbol.kind == SymbolKind.Type) {
                     userType.declaration = typeSymbol.declaration;
+                }
+            }
+            
+            // Check for class→interface cast
+            if (auto targetIface = cast(InterfaceDecl)userType.declaration) {
+                // Source must be a class that implements this interface
+                if (auto sourceUserType = cast(UserType)sourceType) {
+                    // Resolve source declaration if needed
+                    if (!sourceUserType.declaration) {
+                        auto srcSymbol = symbolTable.lookupSymbol(sourceUserType.name);
+                        if (srcSymbol && srcSymbol.kind == SymbolKind.Type) {
+                            sourceUserType.declaration = srcSymbol.declaration;
+                        }
+                    }
+                    if (auto sourceClass = cast(ClassDecl)sourceUserType.declaration) {
+                        // Verify class implements the interface
+                        if (classImplementsInterface(sourceClass, targetIface)) {
+                            // Annotate the cast for codegen
+                            expr.sourceClassDecl = sourceClass;
+                            expr.targetInterfaceDecl = targetIface;
+                        } else {
+                            throw new TypeError(
+                                format("Class '%s' does not implement interface '%s'",
+                                       sourceClass.name, targetIface.name),
+                                expr.location);
+                        }
+                    }
                 }
             }
         }
