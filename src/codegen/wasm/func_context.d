@@ -4282,8 +4282,56 @@ class FuncContext {
         }
         
         if (wasmIdx != uint.max) {
-            // Emit value
-            emitExpression(out_, expr.right);
+            // Handle compound assignment operators (+=, -=, etc.)
+            if (expr.operator != AssignmentExpression.Operator.Assign) {
+                // Load current value
+                out_ ~= Op.local_get;
+                leb128u(out_, wasmIdx);
+                
+                // Emit RHS value
+                emitExpression(out_, expr.right);
+                
+                // Apply operation based on operator
+                final switch (expr.operator) {
+                    case AssignmentExpression.Operator.Assign:
+                        assert(false); // Handled in else branch
+                    case AssignmentExpression.Operator.AddAssign:
+                        out_ ~= Op.i32_add;
+                        break;
+                    case AssignmentExpression.Operator.SubtractAssign:
+                        out_ ~= Op.i32_sub;
+                        break;
+                    case AssignmentExpression.Operator.MultiplyAssign:
+                        out_ ~= Op.i32_mul;
+                        break;
+                    case AssignmentExpression.Operator.DivideAssign:
+                        out_ ~= Op.i32_div_s;
+                        break;
+                    case AssignmentExpression.Operator.ModuloAssign:
+                        out_ ~= Op.i32_rem_s;
+                        break;
+                    case AssignmentExpression.Operator.AndAssign:
+                        out_ ~= Op.i32_and;
+                        break;
+                    case AssignmentExpression.Operator.OrAssign:
+                        out_ ~= Op.i32_or;
+                        break;
+                    case AssignmentExpression.Operator.XorAssign:
+                        out_ ~= Op.i32_xor;
+                        break;
+                    case AssignmentExpression.Operator.ShiftLeftAssign:
+                        out_ ~= Op.i32_shl;
+                        break;
+                    case AssignmentExpression.Operator.ShiftRightAssign:
+                        out_ ~= Op.i32_shr_s;
+                        break;
+                    case AssignmentExpression.Operator.ConcatAssign:
+                        throw new EmitError("~= on local should use slice path");
+                }
+            } else {
+                // Simple assignment: emit value
+                emitExpression(out_, expr.right);
+            }
             
             // Store and leave value on stack (assignment is an expression)
             out_ ~= Op.local_tee;
