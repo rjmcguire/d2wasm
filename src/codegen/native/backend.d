@@ -379,6 +379,9 @@ class NativeCompiledFunction : CompiledFunction {
             bytes += countLocalBytesInStatement(ifStmt.elseStatement);
         } else if (auto whileStmt = cast(WhileStatement)stmt) {
             bytes += countLocalBytesInStatement(whileStmt.body_);
+        } else if (auto forStmt = cast(ForStatement)stmt) {
+            bytes += countLocalBytesInStatement(forStmt.init);
+            bytes += countLocalBytesInStatement(forStmt.body_);
         }
         
         return bytes;
@@ -541,8 +544,40 @@ class NativeCompiledFunction : CompiledFunction {
             
             // Loop end
             gen.bindLabel(loopEnd);
+        } else if (auto forStmt = cast(ForStatement)stmt) {
+            // Compile: for (init; cond; update) { body }
+            auto loopStart = gen.newLabel();
+            auto loopEnd = gen.newLabel();
+            
+            // Compile init (if present)
+            if (forStmt.init) {
+                compileStatement(forStmt.init);
+            }
+            
+            // Loop start
+            gen.bindLabel(loopStart);
+            
+            // Compile condition (if present, result in x0)
+            if (forStmt.condition) {
+                compileExpression(forStmt.condition);
+                // Exit loop if condition is zero
+                gen.emitBranchIfZero(loopEnd);
+            }
+            
+            // Compile body
+            compileStatement(forStmt.body_);
+            
+            // Compile update (if present)
+            if (forStmt.update) {
+                compileExpression(forStmt.update);
+            }
+            
+            // Jump back to start
+            gen.emitBranch(loopStart);
+            
+            // Loop end
+            gen.bindLabel(loopEnd);
         }
-        // TODO: for
     }
     
     /// Check if an expression contains a function call (which would clobber registers)
