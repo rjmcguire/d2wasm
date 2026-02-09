@@ -1630,7 +1630,7 @@ class NativeCompiledFunction : CompiledFunction {
                 throw new Exception("Native backend: too many parameters (max 4 for now)");
         }
         
-        return ExecutionResult.fromInt(result);
+        return ExecutionResult.fromInt(cast(int)result);  // Sign-extend 32-bit to 64-bit
     }
     
     override ExecutionResult callByName(string targetFuncName, long[] args) {
@@ -1700,7 +1700,7 @@ class NativeCompiledFunction : CompiledFunction {
                 return ExecutionResult.failure("Too many parameters (max 4)");
         }
         
-        return ExecutionResult.fromInt(result);
+        return ExecutionResult.fromInt(cast(int)result);  // Sign-extend 32-bit to 64-bit
     }
     
     override ExecutionResult callWithLargeReturn(string targetFuncName, long[] args, uint resultSize) {
