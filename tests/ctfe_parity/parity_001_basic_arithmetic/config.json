@@ -1,0 +1,7 @@
+{
+  "name": "basic_arithmetic",
+  "description": "CTFE parity: basic arithmetic operations",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 25
+}

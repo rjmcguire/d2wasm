@@ -1006,18 +1006,19 @@ class NativeCompiledFunction : CompiledFunction {
      * Uses x8, x10 as scratch (does NOT touch x0, safe for return values)
      */
     private void emitInlinePopCall() {
-        // Load data section base into x10
+        // Save x0 (return value) to stack FIRST, before we clobber it
+        // Use tempSlot+4 to avoid conflicts with expression temps
+        gen.emitStoreLocal32(tempSlot + 4);
+        
+        // Load data section base into x10 (clobbers x0, but we saved it)
         gen.emitLoadImm64(cast(ulong)dataSection.base);
         gen.emitMoveX0ToX10();
         
-        // Save x0 (return value)
-        gen.emitMoveX0ToX8();
-        
-        // Emit inline pop code
+        // Emit inline pop code (uses x8, so we can't save return value there)
         gen.emitInlineStackPop();
         
-        // Restore x0 (return value)
-        gen.emitMoveX8ToX0();
+        // Restore x0 (return value) from stack
+        gen.emitLoadLocal32(tempSlot + 4);
     }
     
     /**
