@@ -11,7 +11,7 @@ module codegen.wasm.func_context;
 
 import codegen.wasm.types;
 import codegen.emitter : BinaryEmitter, FuncInfo, EmitError;
-import codegen.target : WasmSliceLayout;
+import codegen.target : WasmSliceLayout, WasmFatPointerLayout;
 import ast.nodes;
 import ast.statements;
 import ast.expressions;
@@ -3996,12 +3996,12 @@ class FuncContext {
             emitExpression(out_, arg);
         }
         
-        // Load itable_ptr (from fat pointer offset 4)
+        // Load itable_ptr (from fat pointer at ITABLE_OFFSET)
         // itable_ptr is packed: (typeId << 16) | itableBase
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, ifaceInfo.frameOffset + WasmSliceLayout.LENGTH_OFFSET);
+        leb128s(out_, ifaceInfo.frameOffset + WasmFatPointerLayout.ITABLE_OFFSET);
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;  // load packed itable_ptr
         out_ ~= cast(ubyte)0x02;

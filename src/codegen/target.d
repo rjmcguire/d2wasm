@@ -93,6 +93,24 @@ static assert(WasmSliceLayout.CAPACITY_OFFSET == 8);
 static assert(NativeSliceLayout.LENGTH_OFFSET == 8);
 static assert(NativeSliceLayout.CAPACITY_OFFSET == 12);
 
+/**
+ * Interface fat pointer layout: {obj_ptr, itable_ptr}
+ * Used for interface dispatch - NOT a slice!
+ */
+struct FatPointerLayout(T) {
+    typeof(T.ptr) obj_ptr;
+    typeof(T.ptr) itable_ptr;
+    
+    /// Offset of the itable_ptr field
+    enum uint ITABLE_OFFSET = cast(uint)(typeof(T.ptr).sizeof);
+}
+
+/// Fat pointer layout for WASM32
+alias WasmFatPointerLayout = FatPointerLayout!WASM32Target;
+
+static assert(WasmFatPointerLayout.sizeof == 8, "WASM32 fat pointer should be 8 bytes");
+static assert(WasmFatPointerLayout.ITABLE_OFFSET == 4);
+
 // ============================================================================
 // Unit Tests
 // ============================================================================
