@@ -192,6 +192,8 @@ class FuncContext {
                         userType.declaration = typeSymbol.declaration;
                     }
                 }
+                assert(userType.declaration !is null,
+                    "UserType '" ~ userType.name ~ "' has null declaration after resolution attempt");
                 if (auto structDecl = cast(StructDecl)userType.declaration) {
                     returnValueSize = cast(uint)structDecl.structSize;
                 } else {

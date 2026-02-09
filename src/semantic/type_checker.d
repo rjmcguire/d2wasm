@@ -670,6 +670,8 @@ class TypeChecker {
                         userType.declaration = typeSymbol.declaration;
                     }
                 }
+                assert(userType.declaration !is null,
+                    "Failed to resolve type '" ~ userType.name ~ "' for variable '" ~ varDeclStmt.name ~ "'");
             }
             
             // Type check initializer if present

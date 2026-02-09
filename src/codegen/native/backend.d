@@ -233,7 +233,11 @@ class NativeCompiledFunction : CompiledFunction {
             // Check if parameter is a struct type
             uint paramSize = 4;  // default for int, bool, etc.
             if (auto userType = cast(UserType)param.type) {
+                assert(userType.declaration !is null, 
+                    "UserType '" ~ userType.name ~ "' has null declaration - type linking failed");
                 if (auto structDecl = cast(StructDecl)userType.declaration) {
+                    assert(structDecl.structSize > 0,
+                        "StructDecl '" ~ structDecl.name ~ "' has zero size - layout not computed");
                     localStructTypes[param.name] = structDecl;
                     paramSize = cast(uint)structDecl.structSize;
                 }
@@ -338,7 +342,10 @@ class NativeCompiledFunction : CompiledFunction {
         } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
             // Check type to determine size
             if (auto userType = cast(UserType)varDecl.type) {
+                assert(userType.declaration !is null,
+                    "UserType '" ~ userType.name ~ "' has null declaration in countLocalBytes");
                 if (auto sd = cast(StructDecl)userType.declaration) {
+                    assert(sd.structSize > 0, "StructDecl has zero size");
                     bytes = cast(uint)sd.structSize;
                 } else {
                     bytes = 4;
@@ -387,7 +394,11 @@ class NativeCompiledFunction : CompiledFunction {
             uint varSize = 4;  // default to 4 bytes for int
             
             if (auto userType = cast(UserType)varDecl.type) {
+                assert(userType.declaration !is null,
+                    "UserType '" ~ userType.name ~ "' has null declaration for variable '" ~ varDecl.name ~ "'");
                 if (auto sd = cast(StructDecl)userType.declaration) {
+                    assert(sd.structSize > 0,
+                        "StructDecl '" ~ sd.name ~ "' has zero size - layout not computed");
                     structType = sd;
                     varSize = cast(uint)sd.structSize;
                 }

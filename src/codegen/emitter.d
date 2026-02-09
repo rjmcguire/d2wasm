@@ -784,6 +784,8 @@ class BinaryEmitter {
                     userType.declaration = typeSymbol.declaration;
                 }
             }
+            assert(userType.declaration !is null,
+                "UserType '" ~ userType.name ~ "' has null declaration for '" ~ decl.name ~ "'");
             
             if (auto structDecl = cast(StructDecl)userType.declaration) {
                 if (decl.initializer) {
