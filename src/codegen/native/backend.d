@@ -905,6 +905,11 @@ class NativeCompiledFunction : CompiledFunction {
                 }
             }
             throw new Exception("Slice indexing only supported for local variables");
+        } else if (auto castExpr = cast(CastExpression)expr) {
+            // Most casts are no-ops at native level (everything is 32/64-bit)
+            // Just compile the inner expression
+            // Note: class→interface casts would need special handling when classes are supported
+            compileExpression(castExpr.expression);
         } else {
             throw new Exception("Expression type not yet supported in native backend: " ~ 
                 typeid(expr).toString());
