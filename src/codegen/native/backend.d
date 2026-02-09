@@ -98,6 +98,7 @@ class NativeCompiledFunction : CompiledFunction {
     private uint[string] localOffsets;  // variable name → stack offset
     private StructDecl[string] localStructTypes;  // variable name → struct type (if struct)
     private bool[string] localSliceVars;  // variable name → true if slice (for ~= support)
+    private uint[string] localStaticArraySizes;  // variable name → array length (for static arrays)
     private uint nextLocalOffset;        // next available stack slot
     private uint totalLocalBytes;        // total stack space needed
     private uint tempSlot;               // stack offset for expression temporaries
@@ -224,6 +225,8 @@ class NativeCompiledFunction : CompiledFunction {
         // Reset local tracking for this function
         localOffsets.clear();
         localStructTypes.clear();
+        localSliceVars.clear();
+        localStaticArraySizes.clear();
         nextLocalOffset = 0;
         
         // Reserve space for parameters first (they come in registers x0-x7)
@@ -359,7 +362,14 @@ class NativeCompiledFunction : CompiledFunction {
                         bytes += cast(uint)(arrLit.elements.length * 4);
                     }
                 } else {
-                    bytes = 4;  // Fixed array pointer?
+                    // Static array: inline storage for N elements
+                    // arraySize is a LiteralExpression with the size
+                    if (auto sizeLit = cast(LiteralExpression)arrType.arraySize) {
+                        if (sizeLit.value.type == typeid(long)) {
+                            uint length = cast(uint)sizeLit.value.get!long();
+                            bytes = length * 4;  // 4 bytes per element
+                        }
+                    }
                 }
             } else {
                 bytes = 4;  // int, bool, etc.
@@ -411,6 +421,15 @@ class NativeCompiledFunction : CompiledFunction {
                     if (auto arrLit = cast(ArrayLiteralExpression)varDecl.initializer) {
                         varSize += cast(uint)(arrLit.elements.length * 4);
                     }
+                } else {
+                    // Static array: inline storage for N elements
+                    if (auto sizeLit = cast(LiteralExpression)arrType.arraySize) {
+                        if (sizeLit.value.type == typeid(long)) {
+                            uint length = cast(uint)sizeLit.value.get!long();
+                            varSize = length * 4;  // 4 bytes per element
+                            localStaticArraySizes[varDecl.name] = length;
+                        }
+                    }
                 }
             }
             
@@ -454,6 +473,17 @@ class NativeCompiledFunction : CompiledFunction {
                         compileImportInit(nextLocalOffset, importExpr);
                     } else {
                         throw new Exception("Slice can only be initialized from array literal or import()");
+                    }
+                } else if (varDecl.name in localStaticArraySizes) {
+                    // Static array initialization from array literal
+                    if (auto arrLit = cast(ArrayLiteralExpression)varDecl.initializer) {
+                        // Store each element directly on stack
+                        foreach (i, elem; arrLit.elements) {
+                            compileExpression(elem);
+                            gen.emitStoreLocal32(nextLocalOffset + cast(uint)(i * 4));
+                        }
+                    } else {
+                        throw new Exception("Static array can only be initialized from array literal");
                     }
                 } else {
                     compileExpression(varDecl.initializer);
@@ -925,15 +955,42 @@ class NativeCompiledFunction : CompiledFunction {
             
         } else if (auto indexExpr = cast(IndexExpression)expr) {
             // Array/slice indexing: arr[i]
-            // Native slice layout: { ptr: i64, length: i32, capacity: i32 }
             if (auto ident = cast(IdentifierExpression)indexExpr.array) {
-                if (auto sliceOffset = ident.name in localOffsets) {
+                if (auto arrOffset = ident.name in localOffsets) {
+                    // Check if it's a static array (inline storage)
+                    if (auto staticSize = ident.name in localStaticArraySizes) {
+                        // Static array: elements stored inline at arrOffset
+                        // For constant index, load directly
+                        if (auto indexLit = cast(LiteralExpression)indexExpr.index) {
+                            if (indexLit.value.type == typeid(long)) {
+                                uint idx = cast(uint)indexLit.value.get!long();
+                                // TODO: bounds check
+                                gen.emitLoadLocal32(*arrOffset + idx * 4);
+                                return;
+                            }
+                        }
+                        // For dynamic index, compute offset
+                        compileExpression(indexExpr.index);
+                        // x0 = index, compute index * 4
+                        gen.emitMoveX0ToX1();  // x1 = index
+                        gen.emitImm32(stencil_load_imm32, 4);
+                        gen.emit(stencil_mul_i32);  // x0 = index * 4
+                        gen.emitMoveX0ToX1();  // x1 = index * 4
+                        // Get base address of array
+                        gen.emitStackAddress(*arrOffset);  // x0 = SP + arrOffset
+                        gen.emit(stencil_add_i32);  // x0 = base + index * 4
+                        // Load from computed address
+                        gen.emitLoadFromPointer(0);
+                        return;
+                    }
+                    
+                    // Dynamic array (slice): { ptr: i64, length: i32, capacity: i32 }
                     // Compile index first (may clobber registers)
                     compileExpression(indexExpr.index);
                     // x0 = index
                     
                     // Bounds check: 0 <= index < length
-                    emitBoundsCheck(*sliceOffset,
+                    emitBoundsCheck(*arrOffset,
                                     indexExpr.location.filename ? indexExpr.location.filename : "",
                                     indexExpr.location.line, indexExpr.location.column);
                     // x0 still = index
@@ -945,7 +1002,7 @@ class NativeCompiledFunction : CompiledFunction {
                     gen.emitMoveX0ToX1();  // x1 = index * 4
                     
                     // Load 64-bit ptr from slice struct (offset 0)
-                    gen.emitLoadLocal(*sliceOffset);  // x0 = ptr (64-bit!)
+                    gen.emitLoadLocal(*arrOffset);  // x0 = ptr (64-bit!)
                     
                     // Compute address: ptr + index * 4
                     gen.emit(stencil_add_i32);  // x0 = ptr + index * 4
@@ -955,7 +1012,7 @@ class NativeCompiledFunction : CompiledFunction {
                     return;
                 }
             }
-            throw new Exception("Slice indexing only supported for local variables");
+            throw new Exception("Array indexing only supported for local variables");
         } else if (auto castExpr = cast(CastExpression)expr) {
             // Most casts are no-ops at native level (everything is 32/64-bit)
             // Just compile the inner expression
