@@ -823,17 +823,50 @@ class NativeCompiledFunction : CompiledFunction {
                         throw new Exception("Native backend: more than 4 arguments not yet supported");
                     }
                     
-                    // Compile arguments in reverse order into their target registers
-                    // This avoids clobbering: compile arg3→x3, arg2→x2, arg1→x1, arg0→x0
-                    for (long i = cast(long)call.arguments.length - 1; i >= 0; i--) {
-                        compileExpression(call.arguments[i]);
-                        // Move x0 to target register (x0 stays, others need mov)
-                        switch (i) {
-                            case 0: break;  // already in x0
-                            case 1: gen.emitMoveX0ToX1(); break;
-                            case 2: gen.emitMoveX0ToX2(); break;
-                            case 3: gen.emitMoveX0ToX3(); break;
-                            default: break;
+                    // Check if any argument contains a function call that would clobber registers
+                    bool hasNestedCalls = false;
+                    foreach (arg; call.arguments) {
+                        if (containsCall(arg)) {
+                            hasNestedCalls = true;
+                            break;
+                        }
+                    }
+                    
+                    if (hasNestedCalls && call.arguments.length > 1) {
+                        // Save arguments to temp slots, then load into registers
+                        // This prevents register clobbering from nested calls
+                        uint[] argSlots;
+                        foreach (i, arg; call.arguments) {
+                            compileExpression(arg);
+                            uint slot = tempSlot + cast(uint)(i * 4);
+                            gen.emitStoreLocal32(slot);
+                            argSlots ~= slot;
+                        }
+                        // Load from temp slots into argument registers (reverse order!)
+                        // Load x1/x2/x3 first, then x0 last (so we don't clobber x0)
+                        for (long i = cast(long)argSlots.length - 1; i >= 0; i--) {
+                            gen.emitLoadLocal32(argSlots[cast(size_t)i]);
+                            switch (i) {
+                                case 0: break;  // already in x0
+                                case 1: gen.emitMoveX0ToX1(); break;
+                                case 2: gen.emitMoveX0ToX2(); break;
+                                case 3: gen.emitMoveX0ToX3(); break;
+                                default: break;
+                            }
+                        }
+                    } else {
+                        // No nested calls - use the faster direct approach
+                        // Compile arguments in reverse order into their target registers
+                        for (long i = cast(long)call.arguments.length - 1; i >= 0; i--) {
+                            compileExpression(call.arguments[i]);
+                            // Move x0 to target register (x0 stays, others need mov)
+                            switch (i) {
+                                case 0: break;  // already in x0
+                                case 1: gen.emitMoveX0ToX1(); break;
+                                case 2: gen.emitMoveX0ToX2(); break;
+                                case 3: gen.emitMoveX0ToX3(); break;
+                                default: break;
+                            }
                         }
                     }
                     
@@ -1645,6 +1678,30 @@ class NativeCompiledFunction : CompiledFunction {
         ulong newlineSlot = hostFunctions.getFunctionSlotAddress("__ctfe_write_newline");
         ulong ctxSlot = hostFunctions.getContextSlotAddress();
         gen.emitHostCall(newlineSlot, ctxSlot);
+    }
+    
+    /**
+     * Check if an expression contains a function call (for register clobber detection)
+     */
+    private bool containsCall(Expression expr) {
+        if (cast(CallExpression)expr) return true;
+        
+        if (auto binOp = cast(BinaryExpression)expr) {
+            return containsCall(binOp.left) || containsCall(binOp.right);
+        }
+        if (auto unaryOp = cast(UnaryExpression)expr) {
+            return containsCall(unaryOp.operand);
+        }
+        if (auto indexExpr = cast(IndexExpression)expr) {
+            return containsCall(indexExpr.array) || containsCall(indexExpr.index);
+        }
+        if (auto memberExpr = cast(MemberExpression)expr) {
+            return containsCall(memberExpr.object);
+        }
+        if (auto castExpr = cast(CastExpression)expr) {
+            return containsCall(castExpr.expression);
+        }
+        return false;
     }
     
     /**
