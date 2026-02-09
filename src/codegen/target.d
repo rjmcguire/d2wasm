@@ -61,6 +61,65 @@ enum WASM_PTR_STORE = PTR_SIZE == 4 ? 0x36 : 0x37;
 enum WASM_PTR_TYPE_BYTE = PTR_SIZE == 4 ? 0x7F : 0x7E;
 
 // ============================================================================
+// Vtable Pointer Packing
+// ============================================================================
+
+/**
+ * Vtable/itable pointer packing constants.
+ * 
+ * Packed pointer design:
+ *   vtable_ptr = (typeId << TYPE_ID_SHIFT) | tableBase
+ * 
+ * Extract:
+ *   typeId = vtable_ptr >> TYPE_ID_SHIFT
+ *   tableBase = vtable_ptr & TABLE_BASE_MASK
+ * 
+ * For 32-bit targets: 16-bit typeId (65535 types), 16-bit tableBase
+ * For 64-bit targets: 32-bit typeId, 32-bit tableBase (future)
+ */
+struct VtablePacking(T) {
+    static if (typeof(T.ptr).sizeof == 4) {
+        // 32-bit pointer: 16/16 split
+        enum uint TYPE_ID_SHIFT = 16;
+        enum uint TABLE_BASE_MASK = 0xFFFF;
+        enum uint TYPE_ID_MASK = 0xFFFF0000;
+        enum uint MAX_TYPE_ID = 0xFFFF;
+        enum uint MAX_TABLE_BASE = 0xFFFF;
+    } else {
+        // 64-bit pointer: 32/32 split
+        enum uint TYPE_ID_SHIFT = 32;
+        enum ulong TABLE_BASE_MASK = 0xFFFFFFFF;
+        enum ulong TYPE_ID_MASK = 0xFFFFFFFF00000000;
+        enum uint MAX_TYPE_ID = 0xFFFFFFFF;
+        enum uint MAX_TABLE_BASE = 0xFFFFFFFF;
+    }
+    
+    /// Pack typeId and tableBase into a pointer-sized value
+    static typeof(T.ptr) pack(uint typeId, uint tableBase) {
+        return cast(typeof(T.ptr))((cast(typeof(T.ptr))typeId << TYPE_ID_SHIFT) | tableBase);
+    }
+    
+    /// Extract tableBase from packed pointer
+    static uint unpackTableBase(typeof(T.ptr) packed) {
+        return cast(uint)(packed & TABLE_BASE_MASK);
+    }
+    
+    /// Extract typeId from packed pointer  
+    static uint unpackTypeId(typeof(T.ptr) packed) {
+        return cast(uint)(packed >> TYPE_ID_SHIFT);
+    }
+}
+
+/// Vtable packing for WASM32 target
+alias WasmVtablePacking = VtablePacking!WASM32Target;
+
+/// Vtable packing for ARM64 native target (uses same 16/16 for WASM compat)
+alias NativeVtablePacking = VtablePacking!WASM32Target;  // WASM output is always 32-bit
+
+static assert(WasmVtablePacking.TYPE_ID_SHIFT == 16);
+static assert(WasmVtablePacking.TABLE_BASE_MASK == 0xFFFF);
+
+// ============================================================================
 // Layout Helpers
 // ============================================================================
 

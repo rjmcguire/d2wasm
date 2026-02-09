@@ -19,6 +19,7 @@ module codegen.emitter;
 import codegen.wasm.types;
 import codegen.wasm.func_context : FuncContext;
 import codegen.wasm.sections;
+import codegen.target : WasmVtablePacking;
 import ast.nodes;
 import ast.statements;
 import ast.expressions;
@@ -642,14 +643,14 @@ class BinaryEmitter {
     /**
      * Collect methods from a class declaration and set up virtual dispatch.
      * 
-     * Packed vtable_ptr design:
-     *   vtable_ptr = (typeId << 16) | tableBase
+     * Packed vtable_ptr design (see codegen.target.VtablePacking):
+     *   vtable_ptr = (typeId << TYPE_ID_SHIFT) | tableBase
      *   
      *   - typeId:    unique ID for this class (for RTTI/error messages)
      *   - tableBase: starting index in WASM function table
      *   
      * Virtual call:
-     *   tableIndex = (vtable_ptr & 0xFFFF) + methodSlot
+     *   tableIndex = (vtable_ptr & TABLE_BASE_MASK) + methodSlot
      *   call_indirect tableIndex
      * 
      * TypeInfo (in data section, indexed by typeId):
@@ -1622,8 +1623,8 @@ class BinaryEmitter {
      * Build interface tables for a class.
      * Each interface gets its own itable with methods in interface order.
      * 
-     * Packed itable_ptr design (same as class vtable_ptr):
-     *   itable_ptr = (typeId << 16) | itableBase
+     * Packed itable_ptr design (same as class vtable_ptr, see codegen.target.VtablePacking):
+     *   itable_ptr = (typeId << TYPE_ID_SHIFT) | itableBase
      */
     private void buildItables(ClassDecl classDecl) {
         foreach (ifaceType; classDecl.interfaces) {
@@ -1637,7 +1638,7 @@ class BinaryEmitter {
                     
                     // Record itable base with packed typeId
                     uint itableBase = cast(uint)tableFunctions.length;
-                    uint packedItablePtr = (ifaceDecl.typeId << 16) | itableBase;
+                    uint packedItablePtr = WasmVtablePacking.pack(ifaceDecl.typeId, itableBase);
                     classDecl.itableBases[ifaceDecl.name] = packedItablePtr;
                     
                     // Add methods in interface's method order

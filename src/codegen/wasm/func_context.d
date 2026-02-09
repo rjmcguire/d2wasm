@@ -11,7 +11,7 @@ module codegen.wasm.func_context;
 
 import codegen.wasm.types;
 import codegen.emitter : BinaryEmitter, FuncInfo, EmitError;
-import codegen.target : WasmSliceLayout, WasmFatPointerLayout;
+import codegen.target : WasmSliceLayout, WasmFatPointerLayout, WasmVtablePacking;
 import ast.nodes;
 import ast.statements;
 import ast.expressions;
@@ -1238,10 +1238,10 @@ class FuncContext {
         auto classDecl = info.classDecl;
         
         // Initialize vtable_ptr at offset 0 with packed value:
-        // vtable_ptr = (typeId << 16) | tableBase
+        // vtable_ptr = (typeId << TYPE_ID_SHIFT) | tableBase
         // - typeId: for RTTI / error messages
         // - tableBase: starting index in function table for virtual dispatch
-        uint packedVtablePtr = (classDecl.typeId << 16) | (classDecl.tableBase & 0xFFFF);
+        uint packedVtablePtr = WasmVtablePacking.pack(classDecl.typeId, classDecl.tableBase);
         
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
@@ -3915,7 +3915,7 @@ class FuncContext {
                 leb128u(out_, funcIdx);
             } else {
                 // Virtual dispatch:
-                // tableIndex = (vtable_ptr & 0xFFFF) + methodSlot
+                // tableIndex = (vtable_ptr & TABLE_BASE_MASK) + methodSlot
                 
                 // Load vtable_ptr from object (at offset 0)
                 if (auto localInfo = objIdent.name in classLocals) {
@@ -3935,9 +3935,9 @@ class FuncContext {
                     leb128u(out_, 0);
                 }
                 
-                // Mask to get tableBase: vtable_ptr & 0xFFFF
+                // Mask to get tableBase: vtable_ptr & TABLE_BASE_MASK
                 out_ ~= Op.i32_const;
-                leb128s(out_, 0xFFFF);
+                leb128s(out_, cast(int)WasmVtablePacking.TABLE_BASE_MASK);
                 out_ ~= Op.i32_and;
                 
                 // Add method slot
@@ -3999,7 +3999,7 @@ class FuncContext {
         }
         
         // Load itable_ptr (from fat pointer at ITABLE_OFFSET)
-        // itable_ptr is packed: (typeId << 16) | itableBase
+        // itable_ptr is packed: (typeId << TYPE_ID_SHIFT) | itableBase
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
@@ -4009,9 +4009,9 @@ class FuncContext {
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);
         
-        // Extract itableBase (lower 16 bits)
+        // Extract itableBase (lower bits via TABLE_BASE_MASK)
         out_ ~= Op.i32_const;
-        leb128s(out_, 0xFFFF);
+        leb128s(out_, cast(int)WasmVtablePacking.TABLE_BASE_MASK);
         out_ ~= Op.i32_and;
         
         // Add method slot to get final table index
@@ -4070,13 +4070,13 @@ class FuncContext {
         }
         
         // Load itable_ptr from parameter local
-        // itable_ptr is packed: (typeId << 16) | itableBase
+        // itable_ptr is packed: (typeId << TYPE_ID_SHIFT) | itableBase
         out_ ~= Op.local_get;
         leb128u(out_, ifaceInfo.itableLocalIndex);
         
-        // Extract itableBase (lower 16 bits)
+        // Extract itableBase (lower bits via TABLE_BASE_MASK)
         out_ ~= Op.i32_const;
-        leb128s(out_, 0xFFFF);
+        leb128s(out_, cast(int)WasmVtablePacking.TABLE_BASE_MASK);
         out_ ~= Op.i32_and;
         
         // Add method slot to get final table index
