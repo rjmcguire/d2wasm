@@ -1,0 +1,7 @@
+{
+  "name": "large_literal",
+  "description": "CTFE parity: large integer literals",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 3000
+}

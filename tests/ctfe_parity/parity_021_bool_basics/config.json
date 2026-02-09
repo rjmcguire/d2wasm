@@ -1,0 +1,7 @@
+{
+  "name": "bool_basics",
+  "description": "CTFE parity: bool type basics",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 4
+}

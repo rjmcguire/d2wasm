@@ -1,0 +1,7 @@
+{
+  "name": "for_loop",
+  "description": "Output parity: for loop",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 55
+}

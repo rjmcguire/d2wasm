@@ -1,0 +1,7 @@
+{
+  "name": "slice_literal",
+  "description": "CTFE parity: slice from array literal",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 6
+}

@@ -1,0 +1,7 @@
+{
+  "name": "large_numbers",
+  "description": "Output parity: large integer literals",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 3000
+}

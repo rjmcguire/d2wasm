@@ -1,0 +1,7 @@
+{
+  "name": "negative_numbers",
+  "description": "CTFE parity: negative number handling",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": -42
+}

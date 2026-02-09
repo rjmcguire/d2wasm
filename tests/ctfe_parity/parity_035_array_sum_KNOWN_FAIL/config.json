@@ -1,0 +1,7 @@
+{
+  "name": "array_sum",
+  "description": "CTFE parity: sum elements of static array",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 15
+}

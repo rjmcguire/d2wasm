@@ -1,0 +1,7 @@
+{
+  "name": "multiple_params",
+  "description": "CTFE parity: function with 4 parameters",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 100
+}

@@ -1,0 +1,7 @@
+{
+  "name": "negative",
+  "description": "Output parity: negative numbers",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": -42
+}

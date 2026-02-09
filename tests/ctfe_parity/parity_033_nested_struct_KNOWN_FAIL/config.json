@@ -1,0 +1,7 @@
+{
+  "name": "nested_struct",
+  "description": "CTFE parity: nested struct access",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 42
+}

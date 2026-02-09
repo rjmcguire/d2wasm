@@ -1,0 +1,7 @@
+{
+  "name": "if_chain",
+  "description": "Output parity: if-else-if chain",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 2
+}

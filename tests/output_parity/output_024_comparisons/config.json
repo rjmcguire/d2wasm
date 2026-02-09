@@ -1,0 +1,7 @@
+{
+  "name": "comparisons",
+  "description": "Output parity: comparison operators",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 6
+}

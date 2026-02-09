@@ -1,0 +1,7 @@
+{
+  "name": "logical_ops",
+  "description": "CTFE parity: logical operators",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 2
+}

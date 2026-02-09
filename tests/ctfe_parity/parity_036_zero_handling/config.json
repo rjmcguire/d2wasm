@@ -1,0 +1,7 @@
+{
+  "name": "zero_handling",
+  "description": "CTFE parity: operations with zero",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 42
+}

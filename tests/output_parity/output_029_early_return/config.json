@@ -1,0 +1,7 @@
+{
+  "name": "early_return",
+  "description": "Output parity: early return from loop",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 42
+}

@@ -1,0 +1,7 @@
+{
+  "name": "struct_return",
+  "description": "CTFE parity: function returning struct",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 42
+}

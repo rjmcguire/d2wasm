@@ -1,0 +1,7 @@
+{
+  "name": "struct_field_access",
+  "description": "CTFE parity: struct field access",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 60
+}

@@ -1,0 +1,7 @@
+{
+  "name": "local_reassign",
+  "description": "CTFE parity: local variable reassignment",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 30
+}

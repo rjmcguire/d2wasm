@@ -1,0 +1,7 @@
+{
+  "name": "bool",
+  "description": "Output parity: bool operations",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 2
+}

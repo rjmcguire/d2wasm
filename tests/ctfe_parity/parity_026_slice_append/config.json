@@ -1,0 +1,7 @@
+{
+  "name": "slice_append",
+  "description": "CTFE parity: slice append operator",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 8
+}

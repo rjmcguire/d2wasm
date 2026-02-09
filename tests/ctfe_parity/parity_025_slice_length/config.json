@@ -1,0 +1,7 @@
+{
+  "name": "slice_length",
+  "description": "CTFE parity: slice .length property",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 3
+}

@@ -1,0 +1,7 @@
+{
+  "name": "modulo",
+  "description": "CTFE parity: modulo operator",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 4
+}

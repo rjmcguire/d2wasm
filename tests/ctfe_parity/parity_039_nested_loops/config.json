@@ -1,0 +1,7 @@
+{
+  "name": "nested_loops",
+  "description": "CTFE parity: nested while loops",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 12
+}
