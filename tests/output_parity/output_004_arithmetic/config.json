@@ -1,0 +1,8 @@
+{
+  "name": "arithmetic",
+  "description": "Output parity: binary arithmetic",
+  "type": "wasm_exec",
+  "entry": "add",
+  "args": ["2", "3"],
+  "expected_result": 5
+}

@@ -1,0 +1,7 @@
+{
+  "name": "basic_function",
+  "description": "Output parity: basic function call",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 42
+}

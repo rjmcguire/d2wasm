@@ -1,0 +1,7 @@
+{
+  "name": "return_constant",
+  "description": "Output parity: return constant i32",
+  "type": "wasm_exec",
+  "entry": "answer",
+  "expected_result": 42
+}

@@ -1,0 +1,6 @@
+{
+  "name": "ctfe_writeln",
+  "description": "__writeln lowered to WASM imports via typed __ctfe_write_* calls",
+  "type": "compile_output",
+  "expected_output": "42"
+}

@@ -1,0 +1,6 @@
+{
+  "name": "compile_output",
+  "description": "CTFE parity: __writeln output during compilation",
+  "type": "compile_output",
+  "expected_output": "42"
+}

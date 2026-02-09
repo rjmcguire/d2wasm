@@ -1,0 +1,6 @@
+{
+  "name": "ctfe_writeln_str",
+  "description": "__writeln with string literal and integer argument",
+  "type": "compile_output",
+  "expected_output": "Value: 42"
+}
