@@ -112,12 +112,14 @@ immutable stencil_not_i32 = Stencil(
 );
 
 // ----- Comparison -----
+// All comparisons use 32-bit CMP (w0, w1) for correct signed integer handling.
+// Zero-extended 32-bit values in 64-bit registers would break signed comparisons.
 
 immutable stencil_eq_i32 = Stencil(
     "eq_i32",
     cast(immutable ubyte[])[
-        0x1f, 0x00, 0x01, 0xeb,  // CMP x0, x1
-        0xe0, 0x17, 0x9f, 0x1a   // CSET x0, eq
+        0x1f, 0x00, 0x01, 0x6b,  // CMP w0, w1 (32-bit)
+        0xe0, 0x17, 0x9f, 0x1a   // CSET w0, eq
     ],
     []
 );
@@ -125,8 +127,8 @@ immutable stencil_eq_i32 = Stencil(
 immutable stencil_ne_i32 = Stencil(
     "ne_i32",
     cast(immutable ubyte[])[
-        0x1f, 0x00, 0x01, 0xeb,  // CMP x0, x1
-        0xe0, 0x07, 0x9f, 0x1a   // CSET x0, ne
+        0x1f, 0x00, 0x01, 0x6b,  // CMP w0, w1 (32-bit)
+        0xe0, 0x07, 0x9f, 0x1a   // CSET w0, ne
     ],
     []
 );
@@ -134,8 +136,8 @@ immutable stencil_ne_i32 = Stencil(
 immutable stencil_lt_i32 = Stencil(
     "lt_i32",
     cast(immutable ubyte[])[
-        0x1f, 0x00, 0x01, 0xeb,  // CMP x0, x1
-        0xe0, 0xa7, 0x9f, 0x1a   // CSET x0, lt
+        0x1f, 0x00, 0x01, 0x6b,  // CMP w0, w1 (32-bit for signed comparison)
+        0xe0, 0xa7, 0x9f, 0x1a   // CSET w0, lt
     ],
     []
 );
@@ -143,8 +145,8 @@ immutable stencil_lt_i32 = Stencil(
 immutable stencil_le_i32 = Stencil(
     "le_i32",
     cast(immutable ubyte[])[
-        0x1f, 0x00, 0x01, 0xeb,  // CMP x0, x1
-        0xe0, 0xc7, 0x9f, 0x1a   // CSET x0, le
+        0x1f, 0x00, 0x01, 0x6b,  // CMP w0, w1 (32-bit for signed comparison)
+        0xe0, 0xc7, 0x9f, 0x1a   // CSET w0, le
     ],
     []
 );
@@ -157,8 +159,8 @@ immutable stencil_le_i32 = Stencil(
 immutable stencil_lt_u32 = Stencil(
     "lt_u32",
     cast(immutable ubyte[])[
-        0x1f, 0x00, 0x01, 0xeb,  // CMP x0, x1
-        0xe0, 0x27, 0x9f, 0x1a   // CSET x0, lo (encode inverted HS=0010)
+        0x1f, 0x00, 0x01, 0x6b,  // CMP w0, w1 (32-bit)
+        0xe0, 0x27, 0x9f, 0x1a   // CSET w0, lo (encode inverted HS=0010)
     ],
     []
 );
@@ -166,8 +168,8 @@ immutable stencil_lt_u32 = Stencil(
 immutable stencil_ge_u32 = Stencil(
     "ge_u32",
     cast(immutable ubyte[])[
-        0x1f, 0x00, 0x01, 0xeb,  // CMP x0, x1
-        0xe0, 0x37, 0x9f, 0x1a   // CSET x0, hs (encode inverted LO=0011)
+        0x1f, 0x00, 0x01, 0x6b,  // CMP w0, w1 (32-bit)
+        0xe0, 0x37, 0x9f, 0x1a   // CSET w0, hs (encode inverted LO=0011)
     ],
     []
 );
@@ -175,8 +177,8 @@ immutable stencil_ge_u32 = Stencil(
 immutable stencil_gt_i32 = Stencil(
     "gt_i32",
     cast(immutable ubyte[])[
-        0x1f, 0x00, 0x01, 0xeb,  // CMP x0, x1
-        0xe0, 0xd7, 0x9f, 0x1a   // CSET x0, gt
+        0x1f, 0x00, 0x01, 0x6b,  // CMP w0, w1 (32-bit for signed comparison)
+        0xe0, 0xd7, 0x9f, 0x1a   // CSET w0, gt
     ],
     []
 );
@@ -184,8 +186,8 @@ immutable stencil_gt_i32 = Stencil(
 immutable stencil_ge_i32 = Stencil(
     "ge_i32",
     cast(immutable ubyte[])[
-        0x1f, 0x00, 0x01, 0xeb,  // CMP x0, x1
-        0xe0, 0xb7, 0x9f, 0x1a   // CSET x0, ge
+        0x1f, 0x00, 0x01, 0x6b,  // CMP w0, w1 (32-bit for signed comparison)
+        0xe0, 0xb7, 0x9f, 0x1a   // CSET w0, ge
     ],
     []
 );
