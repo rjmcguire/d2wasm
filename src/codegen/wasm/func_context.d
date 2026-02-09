@@ -11,6 +11,7 @@ module codegen.wasm.func_context;
 
 import codegen.wasm.types;
 import codegen.emitter : BinaryEmitter, FuncInfo, EmitError;
+import codegen.target : WasmSliceLayout;
 import ast.nodes;
 import ast.statements;
 import ast.expressions;
@@ -52,7 +53,7 @@ class FuncContext {
     }
     InterfaceLocalInfo[string] interfaceLocals;
     
-    // Shadow stack for slice locals (ptr, length, capacity = 12 bytes)
+    // Shadow stack for slice locals (ptr, length, capacity = WasmSliceLayout.sizeof bytes)
     struct SliceLocalInfo {
         uint frameOffset;      // Offset from frame pointer (FP) for the slice struct
         uint dataOffset;       // Offset for the backing data (if literal initializer)
@@ -181,7 +182,7 @@ class FuncContext {
                     if (elemSize == 0) elemSize = 4;
                     returnValueSize = elemCount * cast(uint)elemSize;
                 } else {
-                    returnValueSize = 12;  // Slice struct
+                    returnValueSize = WasmSliceLayout.sizeof;  // Slice struct
                 }
             } else if (auto userType = cast(UserType)f.decl.returnType) {
                 // Struct - resolve and get size
@@ -387,7 +388,7 @@ class FuncContext {
                     return;
                 }
                 
-                // Dynamic array/slice - allocate 12 bytes for slice struct (ptr, length, capacity)
+                // Dynamic array/slice - allocate WasmSliceLayout.sizeof bytes for slice struct (ptr, length, capacity)
                 frameSize = (frameSize + 3) & ~3;  // Align to 4 bytes
                 
                 // Enable array support for __alloc, etc.
@@ -397,8 +398,8 @@ class FuncContext {
                 info.frameOffset = frameSize;
                 info.elementType = arrayType.elementType;
                 
-                // Slice struct is 12 bytes (ptr: i32, length: i32, capacity: i32)
-                frameSize += 12;
+                // Slice struct is WasmSliceLayout.sizeof bytes (ptr: i32, length: i32, capacity: i32)
+                frameSize += WasmSliceLayout.sizeof;
                 
                 // If initialized with array literal, also allocate space for data
                 if (auto arrayLit = cast(ArrayLiteralExpression)varDecl.initializer) {
@@ -1344,7 +1345,7 @@ class FuncContext {
             out_ ~= Op.local_get;
             leb128u(out_, fpLocal);
             out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset + 4);
+            leb128s(out_, info.frameOffset + WasmSliceLayout.LENGTH_OFFSET);
             out_ ~= Op.i32_add;
             out_ ~= Op.i32_const;
             leb128s(out_, 0);
@@ -1441,7 +1442,7 @@ class FuncContext {
                     out_ ~= Op.local_get;
                     leb128u(out_, fpLocal);
                     out_ ~= Op.i32_const;
-                    leb128s(out_, info.frameOffset + 4);
+                    leb128s(out_, info.frameOffset + WasmSliceLayout.LENGTH_OFFSET);
                     out_ ~= Op.i32_add;
                     
                     out_ ~= Op.i32_const;
@@ -1492,7 +1493,7 @@ class FuncContext {
                     out_ ~= Op.local_get;
                     leb128u(out_, fpLocal);
                     out_ ~= Op.i32_const;
-                    leb128s(out_, info.frameOffset + 4);
+                    leb128s(out_, info.frameOffset + WasmSliceLayout.LENGTH_OFFSET);
                     out_ ~= Op.i32_add;
                     
                     string ifaceName = castExpr.targetInterfaceDecl.name;
@@ -1517,7 +1518,7 @@ class FuncContext {
     
     /**
      * Emit slice local variable declaration
-     * Slice struct layout: { ptr: i32, length: i32, capacity: i32 } = 12 bytes
+     * Slice struct layout: { ptr: i32, length: i32, capacity: i32 } = WasmSliceLayout.sizeof bytes
      */
     void emitSliceVarDecl(ref Appender!(ubyte[]) out_, VariableDeclarationStatement stmt) {
         auto info = sliceLocals[stmt.name];
@@ -1585,7 +1586,7 @@ class FuncContext {
             out_ ~= Op.local_get;
             leb128u(out_, fpLocal);
             out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset + 4);  // slice.length offset = 4
+            leb128s(out_, info.frameOffset + WasmSliceLayout.LENGTH_OFFSET);  // slice.length offset = 4
             out_ ~= Op.i32_add;
             
             out_ ~= Op.i32_const;
@@ -1599,7 +1600,7 @@ class FuncContext {
             out_ ~= Op.local_get;
             leb128u(out_, fpLocal);
             out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset + 8);  // slice.capacity offset = 8
+            leb128s(out_, info.frameOffset + WasmSliceLayout.CAPACITY_OFFSET);  // slice.capacity offset = 8
             out_ ~= Op.i32_add;
             
             out_ ~= Op.i32_const;
@@ -1640,7 +1641,7 @@ class FuncContext {
                 out_ ~= Op.local_get;
                 leb128u(out_, fpLocal);
                 out_ ~= Op.i32_const;
-                leb128s(out_, info.frameOffset + 4);  // slice.length offset = 4
+                leb128s(out_, info.frameOffset + WasmSliceLayout.LENGTH_OFFSET);  // slice.length offset = 4
                 out_ ~= Op.i32_add;
                 
                 out_ ~= Op.i32_const;
@@ -1654,7 +1655,7 @@ class FuncContext {
                 out_ ~= Op.local_get;
                 leb128u(out_, fpLocal);
                 out_ ~= Op.i32_const;
-                leb128s(out_, info.frameOffset + 8);  // slice.capacity offset = 8
+                leb128s(out_, info.frameOffset + WasmSliceLayout.CAPACITY_OFFSET);  // slice.capacity offset = 8
                 out_ ~= Op.i32_add;
                 
                 out_ ~= Op.i32_const;
@@ -1705,7 +1706,7 @@ class FuncContext {
             out_ ~= Op.local_get;
             leb128u(out_, fpLocal);
             out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset + 4);
+            leb128s(out_, info.frameOffset + WasmSliceLayout.LENGTH_OFFSET);
             out_ ~= Op.i32_add;
             out_ ~= Op.i32_const;
             leb128s(out_, len);
@@ -1716,7 +1717,7 @@ class FuncContext {
             out_ ~= Op.local_get;
             leb128u(out_, fpLocal);
             out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset + 8);
+            leb128s(out_, info.frameOffset + WasmSliceLayout.CAPACITY_OFFSET);
             out_ ~= Op.i32_add;
             out_ ~= Op.i32_const;
             leb128s(out_, len);
@@ -1769,11 +1770,11 @@ class FuncContext {
             leb128u(out_, 0);
             
             // Calculate length = end - start
-            // Store at FP + frameOffset + 4 (slice.length)
+            // Store at FP + frameOffset + 4 (slice.length at LENGTH_OFFSET)
             out_ ~= Op.local_get;
             leb128u(out_, fpLocal);
             out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset + 4);
+            leb128s(out_, info.frameOffset + WasmSliceLayout.LENGTH_OFFSET);
             out_ ~= Op.i32_add;
             
             emitExpression(out_, sliceExpr.end);
@@ -1788,7 +1789,7 @@ class FuncContext {
             out_ ~= Op.local_get;
             leb128u(out_, fpLocal);
             out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset + 8);
+            leb128s(out_, info.frameOffset + WasmSliceLayout.CAPACITY_OFFSET);
             out_ ~= Op.i32_add;
             
             emitExpression(out_, sliceExpr.end);
@@ -2184,7 +2185,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + 8);  // capacity offset
+        leb128s(out_, sliceAddr + WasmSliceLayout.CAPACITY_OFFSET);  // capacity offset
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2263,7 +2264,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + 4);  // length offset
+        leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);  // length offset
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2385,7 +2386,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + 8);  // capacity offset
+        leb128s(out_, sliceAddr + WasmSliceLayout.CAPACITY_OFFSET);  // capacity offset
         out_ ~= Op.i32_add;
         
         emitExpression(out_, args[0]);  // newCapacity
@@ -2425,7 +2426,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + 4);  // length
+        leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);  // length
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2434,7 +2435,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + 8);  // capacity
+        leb128s(out_, sliceAddr + WasmSliceLayout.CAPACITY_OFFSET);  // capacity
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2458,7 +2459,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + 8);
+        leb128s(out_, sliceAddr + WasmSliceLayout.CAPACITY_OFFSET);
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2475,7 +2476,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + 8);
+        leb128s(out_, sliceAddr + WasmSliceLayout.CAPACITY_OFFSET);
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2548,7 +2549,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + 4);
+        leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2655,7 +2656,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + 8);
+        leb128s(out_, sliceAddr + WasmSliceLayout.CAPACITY_OFFSET);
         out_ ~= Op.i32_add;
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
@@ -2683,7 +2684,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + 4);
+        leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2710,12 +2711,12 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + 4);
+        leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);
         out_ ~= Op.i32_add;
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + 4);
+        leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2731,7 +2732,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + 4);
+        leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -3567,7 +3568,7 @@ class FuncContext {
                 // Check if argument is a slice local
                 if (auto sliceInfo = argIdent.name in sliceLocals) {
                     // Slice local - copy 12-byte slice struct to temp, pass temp address
-                    uint sliceSize = 12;  // ptr, length, capacity
+                    enum sliceSize = WasmSliceLayout.sizeof;  // ptr, length, capacity
                     
                     // Allocate temp: SP = SP - 12
                     out_ ~= Op.global_get;
@@ -4000,7 +4001,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, ifaceInfo.frameOffset + 4);
+        leb128s(out_, ifaceInfo.frameOffset + WasmSliceLayout.LENGTH_OFFSET);
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;  // load packed itable_ptr
         out_ ~= cast(ubyte)0x02;
@@ -4452,7 +4453,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + 8);
+        leb128s(out_, sliceAddr + WasmSliceLayout.CAPACITY_OFFSET);
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -4531,7 +4532,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + 4);
+        leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -4641,7 +4642,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + 8);
+        leb128s(out_, sliceAddr + WasmSliceLayout.CAPACITY_OFFSET);
         out_ ~= Op.i32_add;
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
@@ -4661,7 +4662,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + 4);
+        leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -4690,7 +4691,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + 4);
+        leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -4783,7 +4784,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + 4);
+        leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);
         out_ ~= Op.i32_add;
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
