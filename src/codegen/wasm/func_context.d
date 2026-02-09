@@ -3996,14 +3996,20 @@ class FuncContext {
         }
         
         // Load itable_ptr (from fat pointer offset 4)
+        // itable_ptr is packed: (typeId << 16) | itableBase
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
         leb128s(out_, ifaceInfo.frameOffset + 4);
         out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;  // load itable_ptr (table base index)
+        out_ ~= Op.i32_load;  // load packed itable_ptr
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);
+        
+        // Extract itableBase (lower 16 bits)
+        out_ ~= Op.i32_const;
+        leb128s(out_, 0xFFFF);
+        out_ ~= Op.i32_and;
         
         // Add method slot to get final table index
         if (methodSlot > 0) {
@@ -4013,8 +4019,6 @@ class FuncContext {
         }
         
         // call_indirect with method's type signature
-        // We need to find a function with matching signature for the type index
-        // For now, use a simple approach: look up any method with this signature
         uint typeIdx = getMethodTypeIndex(method);
         
         out_ ~= Op.call_indirect;
@@ -4063,8 +4067,14 @@ class FuncContext {
         }
         
         // Load itable_ptr from parameter local
+        // itable_ptr is packed: (typeId << 16) | itableBase
         out_ ~= Op.local_get;
         leb128u(out_, ifaceInfo.itableLocalIndex);
+        
+        // Extract itableBase (lower 16 bits)
+        out_ ~= Op.i32_const;
+        leb128s(out_, 0xFFFF);
+        out_ ~= Op.i32_and;
         
         // Add method slot to get final table index
         if (methodSlot > 0) {

@@ -368,6 +368,13 @@ class InterfaceDecl : Declaration {
     Type[] parentInterfaces;
     FunctionDecl[] methods;
     
+    // Packed itable_ptr design (same as class vtable_ptr):
+    // itable_ptr = (typeId << 16) | itableBase
+    uint typeId = 0;       // Unique type ID for this interface (for RTTI/error messages)
+    
+    // TypeInfo offset in data section (for error messages, indexed by typeId)
+    uint typeInfoOffset = 0;
+    
     this(SourceLocation loc, string name, Type[] parentInterfaces,
          FunctionDecl[] methods, bool isPublic = false) {
         super(loc, name, isPublic);

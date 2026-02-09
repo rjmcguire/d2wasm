@@ -680,11 +680,15 @@ class TreeSitterBridge {
             } else if (childType == "aggregate_body") {
                 members = parseAggregateBody(child);
             } else if (childType == "base_class_list" || childType == "super_class" || childType == "base_class") {
-                // Parse inheritance - first item is base class, rest are interfaces
+                // Parse inheritance - accumulate all base types
                 auto inheritTypes = parseBaseClassList(child);
-                if (inheritTypes.length > 0) {
-                    baseClass = inheritTypes[0];
-                    interfaces = inheritTypes[1 .. $];
+                foreach (t; inheritTypes) {
+                    if (baseClass is null) {
+                        // First type goes to baseClass (may be moved to interfaces later by type checker)
+                        baseClass = t;
+                    } else {
+                        interfaces ~= t;
+                    }
                 }
             }
         }

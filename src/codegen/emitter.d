@@ -1619,13 +1619,24 @@ class BinaryEmitter {
     /**
      * Build interface tables for a class.
      * Each interface gets its own itable with methods in interface order.
+     * 
+     * Packed itable_ptr design (same as class vtable_ptr):
+     *   itable_ptr = (typeId << 16) | itableBase
      */
     private void buildItables(ClassDecl classDecl) {
         foreach (ifaceType; classDecl.interfaces) {
             if (auto userType = cast(UserType)ifaceType) {
                 if (auto ifaceDecl = cast(InterfaceDecl)userType.declaration) {
-                    // Record itable base for this interface
-                    classDecl.itableBases[ifaceDecl.name] = cast(uint)tableFunctions.length;
+                    // Assign typeId and generate TypeInfo if not already done
+                    if (ifaceDecl.typeId == 0) {
+                        ifaceDecl.typeId = nextTypeId++;
+                        generateInterfaceTypeInfo(ifaceDecl);
+                    }
+                    
+                    // Record itable base with packed typeId
+                    uint itableBase = cast(uint)tableFunctions.length;
+                    uint packedItablePtr = (ifaceDecl.typeId << 16) | itableBase;
+                    classDecl.itableBases[ifaceDecl.name] = packedItablePtr;
                     
                     // Add methods in interface's method order
                     foreach (ifaceMethod; ifaceDecl.methods) {
@@ -1642,6 +1653,28 @@ class BinaryEmitter {
                 }
             }
         }
+    }
+    
+    /**
+     * Generate TypeInfo for an interface in the data section.
+     * TypeInfo is indexed by typeId for error messages.
+     */
+    private void generateInterfaceTypeInfo(InterfaceDecl ifaceDecl) {
+        // Add interface name to data section
+        uint nameOffset = addData(cast(ubyte[])ifaceDecl.name);
+        uint nameLen = cast(uint)ifaceDecl.name.length;
+        
+        // Emit TypeInfo struct: {nameOffset, nameLen}
+        ubyte[8] typeInfo;
+        *cast(uint*)&typeInfo[0] = nameOffset;
+        *cast(uint*)&typeInfo[4] = nameLen;
+        ifaceDecl.typeInfoOffset = addData(typeInfo[]);
+        
+        // Track TypeInfo offset by typeId
+        while (typeInfoOffsets.length <= ifaceDecl.typeId) {
+            typeInfoOffsets ~= 0;
+        }
+        typeInfoOffsets[ifaceDecl.typeId] = ifaceDecl.typeInfoOffset;
     }
     
     /**
