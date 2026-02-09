@@ -100,17 +100,6 @@ tests/ctfe_parity/parity_NNN_name/
 - `wasm_exec`: Compile and run, check return value
 - `compile_only`: Just verify compilation succeeds
 
-## Known Issues
-
-### Native CTFE Return Value Bug
-
-The native CTFE backend currently returns 0 for all function calls instead of
-the actual return value. This affects `wasm_exec` type tests but not
-`compile_output` tests (side effects like __writeln still work).
-
-**Tracked in**: MEMORY.md (search "Native CTFE")
-**Workaround**: Use `compile_output` tests for CTFE parity until fixed
-
 ## Policy
 
 1. **Milestones are not blocked by parity** — You can add a feature to one
