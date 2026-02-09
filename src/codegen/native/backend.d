@@ -7,6 +7,7 @@
 module codegen.native.backend;
 
 import codegen.backend : Backend, CompiledFunction, ExecutionResult;
+import codegen.target : NativeSliceLayout;
 import codegen.native.arm64_codegen : NativeCodeGen, CallFrameData, ErrorLocData,
     createCTFEHostFunctions;
 import codegen.native.arm64.stencil_table;
@@ -314,8 +315,8 @@ class NativeCompiledFunction : CompiledFunction {
                 }
             } else if (auto arrType = cast(ArrayType)varDecl.type) {
                 if (arrType.arraySize is null) {
-                    // Slice: 16 bytes for struct (64-bit ptr) + data
-                    bytes = 16;
+                    // Slice struct + data
+                    bytes = NativeSliceLayout.sizeof;
                     // Add data size if initialized with literal
                     if (auto arrLit = cast(ArrayLiteralExpression)varDecl.initializer) {
                         bytes += cast(uint)(arrLit.elements.length * 4);
@@ -362,9 +363,9 @@ class NativeCompiledFunction : CompiledFunction {
                 }
             } else if (auto arrType = cast(ArrayType)varDecl.type) {
                 if (arrType.arraySize is null) {
-                    // Dynamic array (slice) = 16 bytes on native (64-bit ptr)
+                    // Dynamic array (slice) = NativeSliceLayout.sizeof bytes on native (64-bit ptr)
                     isSlice = true;
-                    varSize = 16;
+                    varSize = NativeSliceLayout.sizeof;
                     // Add data size if initialized with literal
                     if (auto arrLit = cast(ArrayLiteralExpression)varDecl.initializer) {
                         varSize += cast(uint)(arrLit.elements.length * 4);
@@ -802,7 +803,7 @@ class NativeCompiledFunction : CompiledFunction {
                         if (ident.name !in localStructTypes) {
                             // Native slice layout: { ptr: i64, length: i32, capacity: i32 }
                             // length is at offset 8
-                            gen.emitLoadLocal32(*sliceOffset + 8);
+                            gen.emitLoadLocal32(*sliceOffset + NativeSliceLayout.LENGTH_OFFSET);
                             return;
                         }
                     }
@@ -840,7 +841,7 @@ class NativeCompiledFunction : CompiledFunction {
             // Allocate space for data + slice struct
             uint elemCount = cast(uint)arrLit.elements.length;
             uint dataSize = elemCount * 4;  // 4 bytes per int element
-            uint sliceSize = 12;  // ptr, length, capacity
+            enum sliceSize = NativeSliceLayout.sizeof;  // ptr, length, capacity
             
             uint dataOffset = nextLocalOffset;
             nextLocalOffset += dataSize;
@@ -863,11 +864,11 @@ class NativeCompiledFunction : CompiledFunction {
             
             // length = elemCount
             gen.emitImm32(stencil_load_imm32, cast(int)elemCount);
-            gen.emitStoreLocal32(sliceOffset + 4);  // store length
+            gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);  // store length
             
             // capacity = elemCount
             gen.emitImm32(stencil_load_imm32, cast(int)elemCount);
-            gen.emitStoreLocal32(sliceOffset + 8);  // store capacity
+            gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.CAPACITY_OFFSET);  // store capacity
             
             // Leave pointer to slice struct in x0
             gen.emitLoadStackPointer();
@@ -1044,7 +1045,7 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitStoreLocal32(myTempSlot);
         
         // Load length from slice (offset 8 = after 64-bit ptr)
-        gen.emitLoadLocal32(sliceOffset + 8);  // x0 = length
+        gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);  // x0 = length
         gen.emitMoveX0ToX1();  // x1 = length
         
         // Reload index
@@ -1194,7 +1195,7 @@ class NativeCompiledFunction : CompiledFunction {
     
     /**
      * Compile slice initialization from array literal directly to a stack location.
-     * Native slice layout: { ptr: i64, length: i32, capacity: i32 } = 16 bytes
+     * Native slice layout: { ptr: i64, length: i32, capacity: i32 } = NativeSliceLayout.sizeof bytes
      * (Unlike WASM which uses 32-bit pointers, native ARM64 needs 64-bit)
      */
     private void compileSliceInit(uint sliceOffset, ArrayLiteralExpression arrLit) {
@@ -1220,11 +1221,11 @@ class NativeCompiledFunction : CompiledFunction {
         
         // length = elemCount (32-bit at offset 8)
         gen.emitImm32(stencil_load_imm32, cast(int)elemCount);
-        gen.emitStoreLocal32(sliceOffset + 8);  // store length
+        gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);  // store length
         
         // capacity = elemCount (32-bit at offset 12)
         gen.emitImm32(stencil_load_imm32, cast(int)elemCount);
-        gen.emitStoreLocal32(sliceOffset + 12);  // store capacity
+        gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.CAPACITY_OFFSET);  // store capacity
     }
     
     /**
@@ -1265,7 +1266,7 @@ class NativeCompiledFunction : CompiledFunction {
         }
         
         // Initialize slice struct at sliceOffset
-        // Native slice layout: { ptr: i64, length: i32, capacity: i32 } = 16 bytes
+        // Native slice layout: { ptr: i64, length: i32, capacity: i32 } = NativeSliceLayout.sizeof bytes
         
         // ptr = dataPtr (64-bit host pointer)
         gen.emitLoadImm64(cast(ulong)dataPtr);
@@ -1273,17 +1274,17 @@ class NativeCompiledFunction : CompiledFunction {
         
         // length = len (32-bit at offset 8)
         gen.emitImm32(stencil_load_imm32, cast(int)len);
-        gen.emitStoreLocal32(sliceOffset + 8);  // store length
+        gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);  // store length
         
         // capacity = len (32-bit at offset 12)
         gen.emitImm32(stencil_load_imm32, cast(int)len);
-        gen.emitStoreLocal32(sliceOffset + 12);  // store capacity
+        gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.CAPACITY_OFFSET);  // store capacity
     }
     
     /**
      * Compile slice append: arr ~= element
      * 
-     * Native slice layout: { ptr: i64, length: i32, capacity: i32 } = 16 bytes
+     * Native slice layout: { ptr: i64, length: i32, capacity: i32 } = NativeSliceLayout.sizeof bytes
      * 
      * Algorithm (mirrors WASM emitter):
      * 1. Evaluate element, store to temp
@@ -1306,15 +1307,15 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitStoreLocal32(tempElement);
         
         // 2. Load length and capacity, compare
-        gen.emitLoadLocal32(sliceOffset + 8);   // x0 = length
+        gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);   // x0 = length
         gen.emitMoveX0ToX1();                   // x1 = length
-        gen.emitLoadLocal32(sliceOffset + 12);  // x0 = capacity
+        gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.CAPACITY_OFFSET);  // x0 = capacity
         // Now x0 = capacity, x1 = length
         // We want: if (length >= capacity) -> x0 = 1
         // Swap so we can use ge_i32 (x0 >= x1)
         gen.emit(stencil_move_arg1_to_result);  // x0 = length
         gen.emitMoveX0ToX1();                   // x1 = length (save)
-        gen.emitLoadLocal32(sliceOffset + 12);  // x0 = capacity
+        gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.CAPACITY_OFFSET);  // x0 = capacity
         gen.emitMoveX0ToX2();                   // x2 = capacity
         gen.emit(stencil_move_arg1_to_result);  // x0 = length
         gen.emit(stencil_move_arg2_to_arg1);    // x1 = capacity
@@ -1332,7 +1333,7 @@ class NativeCompiledFunction : CompiledFunction {
         gen.bindLabel(growLabel);
         
         // newCapacity = max(capacity * 2, 4)
-        gen.emitLoadLocal32(sliceOffset + 12);  // x0 = capacity
+        gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.CAPACITY_OFFSET);  // x0 = capacity
         gen.emitMoveX0ToX1();                   // x1 = capacity
         gen.emit(stencil_add_i32);              // x0 = capacity * 2 (capacity + capacity)
         gen.emitStoreLocal32(tempNewCap);       // save capacity * 2
@@ -1379,7 +1380,7 @@ class NativeCompiledFunction : CompiledFunction {
         // Check: if (i >= length) break
         gen.emitLoadLocal32(tempLoopIdx);       // x0 = i
         gen.emitMoveX0ToX1();                   // x1 = i
-        gen.emitLoadLocal32(sliceOffset + 8);   // x0 = length
+        gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);   // x0 = length
         gen.emitMoveX0ToX2();                   // x2 = length
         gen.emit(stencil_move_arg1_to_result);  // x0 = i
         gen.emit(stencil_move_arg2_to_arg1);    // x1 = length
@@ -1432,7 +1433,7 @@ class NativeCompiledFunction : CompiledFunction {
         
         // Update slice capacity = newCapacity
         gen.emitLoadLocal32(tempNewCap);
-        gen.emitStoreLocal32(sliceOffset + 12);
+        gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.CAPACITY_OFFSET);
         
         gen.emitBranch(doneGrowLabel);
         
@@ -1445,10 +1446,10 @@ class NativeCompiledFunction : CompiledFunction {
         // Calculate address: ptr + length * 4
         gen.emitLoadLocal(sliceOffset);         // x0 = ptr (64-bit)
         gen.emitMoveX0ToX1();                   // x1 = ptr
-        gen.emitLoadLocal32(sliceOffset + 8);   // x0 = length
+        gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);   // x0 = length
         gen.emitImm32(stencil_load_imm32, 4);
         gen.emitMoveX0ToX2();                   // x2 = 4
-        gen.emitLoadLocal32(sliceOffset + 8);   // x0 = length
+        gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);   // x0 = length
         gen.emit(stencil_move_arg2_to_arg1);    // x1 = 4
         gen.emit(stencil_mul_i32);              // x0 = length * 4
         gen.emitMoveX0ToX1();                   // x1 = length * 4
@@ -1462,14 +1463,14 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emit(stencil_store_i32);            // ptr[length] = element
         
         // 5. Increment length
-        gen.emitLoadLocal32(sliceOffset + 8);   // x0 = length
+        gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);   // x0 = length
         gen.emitMoveX0ToX1();                   // x1 = length
         gen.emitImm32(stencil_load_imm32, 1);
         gen.emitMoveX0ToX2();                   // x2 = 1
         gen.emit(stencil_move_arg1_to_result);  // x0 = length
         gen.emit(stencil_move_arg2_to_arg1);    // x1 = 1
         gen.emit(stencil_add_i32);              // x0 = length + 1
-        gen.emitStoreLocal32(sliceOffset + 8);  // store new length
+        gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);  // store new length
     }
     
     /**
