@@ -662,6 +662,16 @@ class TypeChecker {
             // Track for RAII unwind
             trackScopeVar(varDeclStmt.uniqueLocalId);
             
+            // Link UserType to its declaration
+            if (auto userType = cast(UserType)varDeclStmt.type) {
+                if (!userType.declaration) {
+                    auto typeSymbol = symbolTable.lookupSymbol(userType.name);
+                    if (typeSymbol && typeSymbol.kind == SymbolKind.Type) {
+                        userType.declaration = typeSymbol.declaration;
+                    }
+                }
+            }
+            
             // Type check initializer if present
             if (varDeclStmt.initializer) {
                 Type initType = checkExpression(varDeclStmt.initializer);

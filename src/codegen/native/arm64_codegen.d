@@ -172,6 +172,51 @@ struct NativeCodeGen {
         emitRaw32(0xF9400129);
     }
     
+    /// Load 32-bit value from [x9 + offset] into x0
+    void emitLoadFromX9Offset(uint offset) {
+        // LDR w0, [x9, #offset]
+        uint imm12 = offset / 4;  // Scaled offset for 32-bit load
+        emitRaw32(0xB9400120 | (imm12 << 10));  // LDR w0, [x9, #imm]
+    }
+    
+    /// Move x0 to x9
+    void emitMoveX0ToX9() {
+        // MOV x9, x0 = ORR x9, xzr, x0
+        emitRaw32(0xAA0003E9);
+    }
+    
+    /// Move x1 to x9
+    void emitMoveX1ToX9() {
+        // MOV x9, x1 = ORR x9, xzr, x1
+        emitRaw32(0xAA0103E9);
+    }
+    
+    /// Move x2 to x9
+    void emitMoveX2ToX9() {
+        // MOV x9, x2 = ORR x9, xzr, x2
+        emitRaw32(0xAA0203E9);
+    }
+    
+    /// Move x3 to x9
+    void emitMoveX3ToX9() {
+        // MOV x9, x3 = ORR x9, xzr, x3
+        emitRaw32(0xAA0303E9);
+    }
+    
+    /// Compute x0 = SP + offset (for getting address of stack variable)
+    void emitStackAddress(uint offset) {
+        // ADD x0, sp, #offset
+        // Encoding: 1001 0001 00 [imm12] [11111] [00000]
+        //           sf=1 op=0 S=0 imm12 Rn=sp Rd=x0
+        if (offset < 4096) {
+            emitRaw32(0x910003E0 | (offset << 10));
+        } else {
+            // For larger offsets, use MOV + ADD
+            emitLoadImm64(offset);          // x0 = offset
+            emitRaw32(0x8B0003E0);           // ADD x0, sp, x0
+        }
+    }
+    
     /// Call function at address in x9 (BLR x9)
     void emitCallIndirectX9() {
         // BLR x9 = 0xD63F0120

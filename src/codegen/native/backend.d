@@ -229,7 +229,16 @@ class NativeCompiledFunction : CompiledFunction {
         // Reserve space for parameters first (they come in registers x0-x7)
         foreach (param; func.parameters) {
             localOffsets[param.name] = nextLocalOffset;
-            nextLocalOffset += 4;  // 4 bytes per int (32-bit for now)
+            
+            // Check if parameter is a struct type
+            uint paramSize = 4;  // default for int, bool, etc.
+            if (auto userType = cast(UserType)param.type) {
+                if (auto structDecl = cast(StructDecl)userType.declaration) {
+                    localStructTypes[param.name] = structDecl;
+                    paramSize = cast(uint)structDecl.structSize;
+                }
+            }
+            nextLocalOffset += paramSize;
         }
         
         // Count bytes needed for locals in the body
@@ -260,12 +269,33 @@ class NativeCompiledFunction : CompiledFunction {
             }
             // Store parameter register to its stack slot
             uint offset = localOffsets[param.name];
-            switch (i) {
-                case 0: gen.emitStoreLocal32(offset); break;        // x0
-                case 1: gen.emitStoreLocal32FromX1(offset); break;  // x1
-                case 2: gen.emitStoreLocal32FromX2(offset); break;  // x2
-                case 3: gen.emitStoreLocal32FromX3(offset); break;  // x3
-                default: break;
+            
+            // Check if this is a struct parameter (passed as pointer)
+            if (auto structDecl = param.name in localStructTypes) {
+                // Register contains pointer to struct - copy struct data to our stack
+                // First, get the source pointer into x9 (scratch register)
+                switch (i) {
+                    case 0: gen.emitMoveX0ToX9(); break;
+                    case 1: gen.emitMoveX1ToX9(); break;
+                    case 2: gen.emitMoveX2ToX9(); break;
+                    case 3: gen.emitMoveX3ToX9(); break;
+                    default: break;
+                }
+                // Copy each field from source pointer to our local stack
+                uint structSize = cast(uint)(*structDecl).structSize;
+                for (uint fieldOff = 0; fieldOff < structSize; fieldOff += 4) {
+                    gen.emitLoadFromX9Offset(fieldOff);
+                    gen.emitStoreLocal32(offset + fieldOff);
+                }
+            } else {
+                // Simple scalar - just store the register value
+                switch (i) {
+                    case 0: gen.emitStoreLocal32(offset); break;        // x0
+                    case 1: gen.emitStoreLocal32FromX1(offset); break;  // x1
+                    case 2: gen.emitStoreLocal32FromX2(offset); break;  // x2
+                    case 3: gen.emitStoreLocal32FromX3(offset); break;  // x3
+                    default: break;
+                }
             }
         }
         
@@ -635,7 +665,13 @@ class NativeCompiledFunction : CompiledFunction {
         } else if (auto ident = cast(IdentifierExpression)expr) {
             // Load variable from stack
             if (auto offsetPtr = ident.name in localOffsets) {
-                gen.emitLoadLocal32(*offsetPtr);
+                // For struct types, emit address (pointer) instead of loading value
+                // This is needed when passing structs as function arguments
+                if (ident.name in localStructTypes) {
+                    gen.emitStackAddress(*offsetPtr);
+                } else {
+                    gen.emitLoadLocal32(*offsetPtr);
+                }
             } else {
                 throw new Exception("Unknown variable in native backend: " ~ ident.name);
             }
