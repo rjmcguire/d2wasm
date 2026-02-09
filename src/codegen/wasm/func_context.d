@@ -45,6 +45,13 @@ class FuncContext {
     }
     ClassLocalInfo[string] classLocals;
     
+    // Shadow stack for interface locals (fat pointer: obj_ptr + itable_ptr = 8 bytes)
+    struct InterfaceLocalInfo {
+        uint frameOffset;      // Offset from frame pointer (FP)
+        InterfaceDecl ifaceDecl;  // The interface type
+    }
+    InterfaceLocalInfo[string] interfaceLocals;
+    
     // Shadow stack for slice locals (ptr, length, capacity = 12 bytes)
     struct SliceLocalInfo {
         uint frameOffset;      // Offset from frame pointer (FP) for the slice struct
@@ -80,6 +87,14 @@ class FuncContext {
         ClassDecl classDecl;   // The class type
     }
     ClassParamInfo[string] classParams;
+    
+    // Interface parameters (passed as fat pointers: 2 i32s)
+    struct InterfaceParamInfo {
+        uint localIndex;       // WASM local index for obj_ptr
+        uint itableLocalIndex; // WASM local index for itable_ptr
+        InterfaceDecl ifaceDecl;
+    }
+    InterfaceParamInfo[string] interfaceParams;
     
     // Slice parameters (passed as pointers to slice struct)
     struct SliceParamInfo {
@@ -187,51 +202,74 @@ class FuncContext {
         }
         
         // Parameters are the next locals
+        // Use running wasmLocalIdx because interface params take 2 WASM locals
+        uint wasmLocalIdx = localOffset;
         foreach (i, p; f.decl.parameters) {
-            auto vt = e.dTypeToValType(p.type);
-            uint wasmIdx = cast(uint)(i + localOffset);
-            localIndex[p.name] = wasmIdx;  // Legacy name-based lookup
-            if (p.uniqueLocalId != uint.max) {
-                localIdToWasmIdx[p.uniqueLocalId] = wasmIdx;
-            }
-            localTypes ~= vt;
+            bool isInterfaceParam = false;
+            InterfaceDecl ifaceDecl = null;
             
-            // Track struct parameters
+            // Check if this is an interface parameter (needs 2 locals)
             if (auto userType = cast(UserType)p.type) {
-                // Resolve declaration
                 if (!userType.declaration) {
                     auto typeSymbol = e.symbolTable.lookupSymbol(userType.name);
                     if (typeSymbol && typeSymbol.kind == SymbolKind.Type) {
                         userType.declaration = typeSymbol.declaration;
                     }
                 }
-                // Track struct parameters
-                if (auto structDecl = cast(StructDecl)userType.declaration) {
-                    StructParamInfo info;
-                    info.localIndex = cast(uint)(i + localOffset);
-                    info.structDecl = structDecl;
-                    structParams[p.name] = info;
-                }
-                // Track class parameters
-                if (auto classDecl = cast(ClassDecl)userType.declaration) {
-                    ClassParamInfo info;
-                    info.localIndex = cast(uint)(i + localOffset);
-                    info.classDecl = classDecl;
-                    classParams[p.name] = info;
-                }
+                ifaceDecl = cast(InterfaceDecl)userType.declaration;
+                isInterfaceParam = (ifaceDecl !is null);
             }
             
-            // Track slice/array parameters
-            if (auto arrayType = cast(ArrayType)p.type) {
-                if (arrayType.arraySize is null) {  // Dynamic array (slice)
-                    SliceParamInfo info;
-                    info.localIndex = cast(uint)(i + localOffset);
-                    info.elementType = arrayType.elementType;
-                    sliceParams[p.name] = info;
+            localIndex[p.name] = wasmLocalIdx;  // Legacy name-based lookup
+            if (p.uniqueLocalId != uint.max) {
+                localIdToWasmIdx[p.uniqueLocalId] = wasmLocalIdx;
+            }
+            
+            if (isInterfaceParam) {
+                // Interface: fat pointer = 2 i32 locals (obj_ptr, itable_ptr)
+                localTypes ~= ValType.i32;
+                localTypes ~= ValType.i32;
+                
+                InterfaceParamInfo info;
+                info.localIndex = wasmLocalIdx;
+                info.itableLocalIndex = wasmLocalIdx + 1;
+                info.ifaceDecl = ifaceDecl;
+                interfaceParams[p.name] = info;
+                
+                wasmLocalIdx += 2;
+            } else {
+                auto vt = e.dTypeToValType(p.type);
+                localTypes ~= vt;
+                
+                // Track struct/class/slice parameters
+                if (auto userType = cast(UserType)p.type) {
+                    if (auto structDecl = cast(StructDecl)userType.declaration) {
+                        StructParamInfo info;
+                        info.localIndex = wasmLocalIdx;
+                        info.structDecl = structDecl;
+                        structParams[p.name] = info;
+                    }
+                    if (auto classDecl = cast(ClassDecl)userType.declaration) {
+                        ClassParamInfo info;
+                        info.localIndex = wasmLocalIdx;
+                        info.classDecl = classDecl;
+                        classParams[p.name] = info;
+                    }
                 }
+                
+                if (auto arrayType = cast(ArrayType)p.type) {
+                    if (arrayType.arraySize is null) {  // Dynamic array (slice)
+                        SliceParamInfo info;
+                        info.localIndex = wasmLocalIdx;
+                        info.elementType = arrayType.elementType;
+                        sliceParams[p.name] = info;
+                    }
+                }
+                
+                wasmLocalIdx += 1;
             }
         }
-        paramCount = cast(uint)(f.decl.parameters.length + localOffset);
+        paramCount = wasmLocalIdx;
         
         // Register call stack frame info if stack trace is enabled
         if (e.enableStackTrace) {
@@ -309,6 +347,19 @@ class FuncContext {
                     // TODO: Track for RAII if class has destructor
                     
                     frameSize += cast(uint)classDecl.classSize;
+                    return;
+                }
+                
+                // Interface local - allocate fat pointer on shadow stack (8 bytes)
+                if (auto ifaceDecl = cast(InterfaceDecl)userType.declaration) {
+                    frameSize = (frameSize + 3) & ~3;  // Align to 4 bytes
+                    
+                    InterfaceLocalInfo info;
+                    info.frameOffset = frameSize;
+                    info.ifaceDecl = ifaceDecl;
+                    interfaceLocals[varDecl.name] = info;
+                    
+                    frameSize += 8;  // Fat pointer: obj_ptr + itable_ptr
                     return;
                 }
             }
@@ -785,6 +836,8 @@ class FuncContext {
                 emitStructVarDecl(out_, varDecl);
             } else if (varDecl.name in classLocals) {
                 emitClassVarDecl(out_, varDecl);
+            } else if (varDecl.name in interfaceLocals) {
+                emitInterfaceVarDecl(out_, varDecl);
             } else if (varDecl.name in staticArrayLocals) {
                 emitStaticArrayVarDecl(out_, varDecl);
             } else if (varDecl.name in sliceLocals) {
@@ -1264,6 +1317,147 @@ class FuncContext {
         }
         
         throw new EmitError("Unsupported class initializer", stmt.initializer.toString());
+    }
+    
+    /**
+     * Emit interface local variable declaration
+     * Fat pointer layout: { obj_ptr: i32, itable_ptr: i32 } = 8 bytes
+     */
+    void emitInterfaceVarDecl(ref Appender!(ubyte[]) out_, VariableDeclarationStatement stmt) {
+        auto info = interfaceLocals[stmt.name];
+        
+        if (!stmt.initializer) {
+            // Zero-initialize the fat pointer (obj_ptr=0, itable_ptr=0)
+            // obj_ptr at offset 0
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset);
+            out_ ~= Op.i32_add;
+            out_ ~= Op.i32_const;
+            leb128s(out_, 0);
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            
+            // itable_ptr at offset 4
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset + 4);
+            out_ ~= Op.i32_add;
+            out_ ~= Op.i32_const;
+            leb128s(out_, 0);
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            return;
+        }
+        
+        // Initializer is a class reference: ISpeak s = dog;
+        // Need to create fat pointer: {obj_ptr, itable_ptr}
+        if (auto identExpr = cast(IdentifierExpression)stmt.initializer) {
+            // Find the source class
+            ClassDecl srcClass = null;
+            uint srcObjAddr = 0;  // Will emit code to compute this
+            
+            if (auto srcInfo = identExpr.name in classLocals) {
+                srcClass = srcInfo.classDecl;
+                // obj_ptr = FP + srcInfo.frameOffset
+                out_ ~= Op.local_get;
+                leb128u(out_, fpLocal);
+                out_ ~= Op.i32_const;
+                leb128s(out_, srcInfo.frameOffset);
+                out_ ~= Op.i32_add;
+            } else if (auto srcInfo = identExpr.name in classParams) {
+                srcClass = srcInfo.classDecl;
+                // obj_ptr = parameter value (already a pointer)
+                out_ ~= Op.local_get;
+                leb128u(out_, srcInfo.localIndex);
+            } else {
+                throw new EmitError("Unknown class for interface assignment: " ~ identExpr.name);
+            }
+            
+            // Stack now has obj_ptr. Store it at offset 0.
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset);
+            out_ ~= Op.i32_add;
+            // Swap: we need [dest, obj_ptr] but have [obj_ptr, dest]
+            // Actually let me redo this...
+        }
+        
+        // Actually, let me rewrite this more carefully
+        if (auto identExpr = cast(IdentifierExpression)stmt.initializer) {
+            ClassDecl srcClass = null;
+            
+            // Determine source class and emit obj_ptr store
+            if (auto srcInfo = identExpr.name in classLocals) {
+                srcClass = srcInfo.classDecl;
+                
+                // Store obj_ptr: fat_ptr.obj_ptr = FP + srcInfo.frameOffset
+                out_ ~= Op.local_get;
+                leb128u(out_, fpLocal);
+                out_ ~= Op.i32_const;
+                leb128s(out_, info.frameOffset);  // dest
+                out_ ~= Op.i32_add;
+                
+                out_ ~= Op.local_get;
+                leb128u(out_, fpLocal);
+                out_ ~= Op.i32_const;
+                leb128s(out_, srcInfo.frameOffset);  // src obj addr
+                out_ ~= Op.i32_add;
+                
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+                
+            } else if (auto srcInfo = identExpr.name in classParams) {
+                srcClass = srcInfo.classDecl;
+                
+                // Store obj_ptr: fat_ptr.obj_ptr = param value
+                out_ ~= Op.local_get;
+                leb128u(out_, fpLocal);
+                out_ ~= Op.i32_const;
+                leb128s(out_, info.frameOffset);
+                out_ ~= Op.i32_add;
+                
+                out_ ~= Op.local_get;
+                leb128u(out_, srcInfo.localIndex);
+                
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+            } else {
+                throw new EmitError("Unknown class for interface assignment: " ~ identExpr.name);
+            }
+            
+            // Now store itable_ptr at offset 4
+            if (srcClass) {
+                // Look up itable base for this interface
+                string ifaceName = info.ifaceDecl.name;
+                if (auto itableBase = ifaceName in srcClass.itableBases) {
+                    out_ ~= Op.local_get;
+                    leb128u(out_, fpLocal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, info.frameOffset + 4);
+                    out_ ~= Op.i32_add;
+                    
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, cast(int)*itableBase);
+                    
+                    out_ ~= Op.i32_store;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                } else {
+                    throw new EmitError("Class " ~ srcClass.name ~ " has no itable for interface " ~ ifaceName);
+                }
+            }
+            return;
+        }
+        
+        throw new EmitError("Unsupported interface initializer");
     }
     
     /**
@@ -3157,9 +3351,17 @@ class FuncContext {
             return;
         }
         
+        // Get callee's parameter types for interface conversion detection
+        FunctionDecl calleeDecl = null;
+        if (auto funcInfo = ident.name in emitter.funcIndex) {
+            if (*funcInfo < emitter.functions.length) {
+                calleeDecl = emitter.functions[*funcInfo].decl;
+            }
+        }
+        
         // Emit arguments (copy structs for pass-by-value semantics)
         uint totalCopySize = 0;
-        foreach (arg; expr.arguments) {
+        foreach (argIdx, arg; expr.arguments) {
             // Check if argument is a struct local that needs copying
             if (auto argIdent = cast(IdentifierExpression)arg) {
                 if (auto localInfo = argIdent.name in structLocals) {
@@ -3312,6 +3514,55 @@ class FuncContext {
                 }
             }
             
+            // Check for class→interface conversion (fat pointer)
+            if (calleeDecl && argIdx < calleeDecl.parameters.length) {
+                auto paramType = calleeDecl.parameters[argIdx].type;
+                if (auto userType = cast(UserType)paramType) {
+                    if (auto ifaceDecl = cast(InterfaceDecl)userType.declaration) {
+                        // Parameter expects interface - check if arg is a class
+                        if (auto argIdent = cast(IdentifierExpression)arg) {
+                            if (auto classLocal = argIdent.name in classLocals) {
+                                // Class local → interface: emit fat pointer
+                                // obj_ptr: address of class local
+                                out_ ~= Op.local_get;
+                                leb128u(out_, fpLocal);
+                                out_ ~= Op.i32_const;
+                                leb128s(out_, classLocal.frameOffset);
+                                out_ ~= Op.i32_add;
+                                
+                                // itable_ptr: lookup itable base for this class+interface
+                                auto classDecl = classLocal.classDecl;
+                                if (auto itableBase = ifaceDecl.name in classDecl.itableBases) {
+                                    out_ ~= Op.i32_const;
+                                    leb128u(out_, *itableBase);
+                                } else {
+                                    throw new EmitError("Class " ~ classDecl.name ~ 
+                                        " does not implement interface " ~ ifaceDecl.name);
+                                }
+                                continue;
+                            }
+                            if (auto classParam = argIdent.name in classParams) {
+                                // Class param → interface: emit fat pointer
+                                // obj_ptr: the parameter value (already a pointer)
+                                out_ ~= Op.local_get;
+                                leb128u(out_, classParam.localIndex);
+                                
+                                // itable_ptr
+                                auto classDecl = classParam.classDecl;
+                                if (auto itableBase = ifaceDecl.name in classDecl.itableBases) {
+                                    out_ ~= Op.i32_const;
+                                    leb128u(out_, *itableBase);
+                                } else {
+                                    throw new EmitError("Class " ~ classDecl.name ~ 
+                                        " does not implement interface " ~ ifaceDecl.name);
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            
             // Non-struct argument
             emitExpression(out_, arg);
         }
@@ -3447,6 +3698,16 @@ class FuncContext {
         // Check if it's a class parameter
         else if (auto paramInfo = objIdent.name in classParams) {
             classDecl = paramInfo.classDecl;
+        }
+        // Check if it's an interface local - handle separately
+        else if (auto ifaceInfo = objIdent.name in interfaceLocals) {
+            emitInterfaceMethodCall(out_, ifaceInfo, memberExpr.memberName, args);
+            return;
+        }
+        // Check if it's an interface parameter - handle separately
+        else if (auto ifaceInfo = objIdent.name in interfaceParams) {
+            emitInterfaceParamMethodCall(out_, ifaceInfo, memberExpr.memberName, args);
+            return;
         }
         
         if (!structDecl && !classDecl) {
@@ -3593,6 +3854,131 @@ class FuncContext {
                 leb128u(out_, 0);         // table index (always 0)
             }
         }
+    }
+    
+    /**
+     * Emit interface method call using fat pointer dispatch.
+     * Fat pointer layout: { obj_ptr: i32, itable_ptr: i32 }
+     * Dispatch: call_indirect at itable[methodSlot] with obj_ptr as 'this'
+     */
+    void emitInterfaceMethodCall(ref Appender!(ubyte[]) out_, InterfaceLocalInfo* ifaceInfo, 
+                                  string methodName, Expression[] args) {
+        auto ifaceDecl = ifaceInfo.ifaceDecl;
+        
+        // Find method slot in interface
+        int methodSlot = -1;
+        FunctionDecl method = null;
+        foreach (i, m; ifaceDecl.methods) {
+            if (m.name == methodName) {
+                methodSlot = cast(int)i;
+                method = m;
+                break;
+            }
+        }
+        
+        if (methodSlot < 0 || !method) {
+            throw new EmitError("Interface " ~ ifaceDecl.name ~ " has no method " ~ methodName);
+        }
+        
+        // Emit obj_ptr as 'this' argument (load from fat pointer offset 0)
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, ifaceInfo.frameOffset);  // fat pointer base
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;  // load obj_ptr
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // Emit other arguments
+        foreach (arg; args) {
+            emitExpression(out_, arg);
+        }
+        
+        // Load itable_ptr (from fat pointer offset 4)
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, ifaceInfo.frameOffset + 4);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;  // load itable_ptr (table base index)
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        
+        // Add method slot to get final table index
+        if (methodSlot > 0) {
+            out_ ~= Op.i32_const;
+            leb128s(out_, methodSlot);
+            out_ ~= Op.i32_add;
+        }
+        
+        // call_indirect with method's type signature
+        // We need to find a function with matching signature for the type index
+        // For now, use a simple approach: look up any method with this signature
+        uint typeIdx = getMethodTypeIndex(method);
+        
+        out_ ~= Op.call_indirect;
+        leb128u(out_, typeIdx);
+        leb128u(out_, 0);  // table index (always 0)
+    }
+    
+    /**
+     * Get or create a type index for a method signature
+     */
+    private uint getMethodTypeIndex(FunctionDecl method) {
+        // Use the emitter's getOrCreateMethodType function
+        return emitter.getOrCreateMethodType(method);
+    }
+    
+    /**
+     * Emit interface method call for interface parameter.
+     * Interface params are passed as two locals: obj_ptr, itable_ptr
+     */
+    void emitInterfaceParamMethodCall(ref Appender!(ubyte[]) out_, InterfaceParamInfo* ifaceInfo,
+                                       string methodName, Expression[] args) {
+        auto ifaceDecl = ifaceInfo.ifaceDecl;
+        
+        // Find method slot in interface
+        int methodSlot = -1;
+        FunctionDecl method = null;
+        foreach (i, m; ifaceDecl.methods) {
+            if (m.name == methodName) {
+                methodSlot = cast(int)i;
+                method = m;
+                break;
+            }
+        }
+        
+        if (methodSlot < 0 || !method) {
+            throw new EmitError("Interface " ~ ifaceDecl.name ~ " has no method " ~ methodName);
+        }
+        
+        // Emit obj_ptr as 'this' argument (from parameter local)
+        out_ ~= Op.local_get;
+        leb128u(out_, ifaceInfo.localIndex);
+        
+        // Emit other arguments
+        foreach (arg; args) {
+            emitExpression(out_, arg);
+        }
+        
+        // Load itable_ptr from parameter local
+        out_ ~= Op.local_get;
+        leb128u(out_, ifaceInfo.itableLocalIndex);
+        
+        // Add method slot to get final table index
+        if (methodSlot > 0) {
+            out_ ~= Op.i32_const;
+            leb128s(out_, methodSlot);
+            out_ ~= Op.i32_add;
+        }
+        
+        // call_indirect with method's type signature
+        uint typeIdx = getMethodTypeIndex(method);
+        
+        out_ ~= Op.call_indirect;
+        leb128u(out_, typeIdx);
+        leb128u(out_, 0);  // table index (always 0)
     }
     
     /**

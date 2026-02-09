@@ -370,6 +370,93 @@ class TypeChecker {
         if (decl.baseClassDecl) {
             validateOverrides(decl);
         }
+        
+        // Validate interface implementations
+        foreach (ifaceType; decl.interfaces) {
+            if (auto userType = cast(UserType)ifaceType) {
+                if (!userType.declaration) {
+                    auto sym = symbolTable.lookupSymbol(userType.name);
+                    if (sym && sym.kind == SymbolKind.Type) {
+                        userType.declaration = sym.declaration;
+                    }
+                }
+                if (auto ifaceDecl = cast(InterfaceDecl)userType.declaration) {
+                    validateInterfaceImplementation(decl, ifaceDecl);
+                }
+            }
+        }
+    }
+    
+    /**
+     * Validate that a class implements all methods of an interface
+     */
+    private void validateInterfaceImplementation(ClassDecl classDecl, InterfaceDecl ifaceDecl) {
+        foreach (ifaceMethod; ifaceDecl.methods) {
+            // Find matching method in class (including inherited)
+            auto classMethod = findMethodInClass(classDecl, ifaceMethod.name);
+            if (!classMethod) {
+                throw new TypeError(
+                    format("Class '%s' does not implement interface method '%s' from '%s'",
+                           classDecl.name, ifaceMethod.name, ifaceDecl.name),
+                    classDecl.location);
+            }
+            
+            // Validate signature matches
+            if (!signaturesMatch(classMethod, ifaceMethod)) {
+                throw new TypeError(
+                    format("Method '%s' in class '%s' has wrong signature for interface '%s'",
+                           ifaceMethod.name, classDecl.name, ifaceDecl.name),
+                    classMethod.location);
+            }
+        }
+    }
+    
+    /**
+     * Find a method in a class (including inherited methods)
+     */
+    private FunctionDecl findMethodInClass(ClassDecl classDecl, string methodName) {
+        // Check class's own methods first
+        foreach (member; classDecl.members) {
+            if (auto method = cast(FunctionDecl)member) {
+                if (method.name == methodName && !method.isConstructor && !method.isDestructor) {
+                    return method;
+                }
+            }
+        }
+        // Check inherited methods
+        if (classDecl.baseClassDecl) {
+            return findMethodInClass(classDecl.baseClassDecl, methodName);
+        }
+        return null;
+    }
+    
+    /**
+     * Check if a class implements an interface (directly or through inheritance)
+     */
+    private bool classImplementsInterface(ClassDecl classDecl, InterfaceDecl ifaceDecl) {
+        // Check class's direct interfaces
+        foreach (ifaceType; classDecl.interfaces) {
+            if (auto userType = cast(UserType)ifaceType) {
+                if (userType.declaration is ifaceDecl) {
+                    return true;
+                }
+                // Also resolve if not yet resolved
+                if (!userType.declaration) {
+                    auto sym = symbolTable.lookupSymbol(userType.name);
+                    if (sym && sym.kind == SymbolKind.Type) {
+                        userType.declaration = sym.declaration;
+                        if (userType.declaration is ifaceDecl) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        // Check base class
+        if (classDecl.baseClassDecl) {
+            return classImplementsInterface(classDecl.baseClassDecl, ifaceDecl);
+        }
+        return false;
     }
     
     /**
@@ -920,6 +1007,38 @@ class TypeChecker {
                         return method.returnType;
                     }
                 }
+                
+                // Check for interface methods
+                if (auto ifaceDecl = cast(InterfaceDecl)userType.declaration) {
+                    auto method = getInterfaceMethod(ifaceDecl, memberExpr.memberName);
+                    if (method) {
+                        foundMethod = true;
+                        // Check argument types
+                        if (expr.arguments.length != method.parameters.length) {
+                            throw new TypeError(
+                                format("Method '%s' expects %d arguments, got %d",
+                                       memberExpr.memberName, method.parameters.length, expr.arguments.length),
+                                expr.location
+                            );
+                        }
+                        
+                        for (size_t i = 0; i < expr.arguments.length; i++) {
+                            Type argType = checkExpression(expr.arguments[i]);
+                            Type paramType = method.parameters[i].type;
+                            
+                            auto compat = checkTypeCompatibility(argType, paramType);
+                            if (!compat.isCompatible) {
+                                throw new TypeError(
+                                    format("Argument %d: expected type '%s', got '%s'",
+                                           i + 1, paramType.toString(), argType.toString()),
+                                    expr.arguments[i].location
+                                );
+                            }
+                        }
+                        
+                        return method.returnType;
+                    }
+                }
             }
             
             // Check for built-in methods on array types
@@ -1096,6 +1215,18 @@ class TypeChecker {
                 }
             }
             current = current.baseClassDecl;
+        }
+        return null;
+    }
+    
+    /**
+     * Get a method from an interface by name
+     */
+    FunctionDecl getInterfaceMethod(InterfaceDecl ifaceDecl, string methodName) {
+        foreach (method; ifaceDecl.methods) {
+            if (method.name == methodName) {
+                return method;
+            }
         }
         return null;
     }
@@ -1464,6 +1595,7 @@ class TypeChecker {
             
             auto fromClass = cast(ClassDecl)fromUser.declaration;
             auto toClass = cast(ClassDecl)toUser.declaration;
+            auto toInterface = cast(InterfaceDecl)toUser.declaration;
             
             if (fromClass && toClass) {
                 // Check if fromClass is-a toClass (fromClass inherits from toClass)
@@ -1473,6 +1605,13 @@ class TypeChecker {
                         return TypeCompatibility.compatible();
                     }
                     current = current.baseClassDecl;
+                }
+            }
+            
+            // Class to interface: check if class implements the interface
+            if (fromClass && toInterface) {
+                if (classImplementsInterface(fromClass, toInterface)) {
+                    return TypeCompatibility.compatible();
                 }
             }
         }

@@ -263,6 +263,9 @@ class ClassDecl : Declaration {
     uint typeId = 0;       // Unique type ID for this class (for RTTI/error messages)
     uint tableBase = 0;    // Starting index in WASM function table
     
+    // Interface tables: interface name -> table base index
+    uint[string] itableBases;
+    
     // TypeInfo offset in data section (for error messages, indexed by typeId)
     uint typeInfoOffset = 0;
     
@@ -638,6 +641,10 @@ class UserType : Type {
                 if (structDecl.layoutComputed) {
                     return structDecl.structSize;
                 }
+            }
+            // Interface refs are fat pointers: {obj_ptr, itable_ptr} = 8 bytes
+            if (cast(InterfaceDecl)declaration) {
+                return 8;
             }
         }
         return 0;  // Layout not yet computed

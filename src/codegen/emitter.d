@@ -874,10 +874,10 @@ class BinaryEmitter {
         if (largeReturn) {
             // Add hidden __result pointer as first parameter
             sig.params = [ValType.i32];
-            sig.params ~= decl.parameters.map!(p => dTypeToValType(p.type)).array;
+            sig.params ~= paramsToValTypes(decl.parameters);
             // No result - caller reads from __result address
         } else {
-            sig.params = decl.parameters.map!(p => dTypeToValType(p.type)).array;
+            sig.params = paramsToValTypes(decl.parameters);
             
             auto retType = dTypeToValType(decl.returnType);
             if (retType != ValType.i32 || !isVoidType(decl.returnType)) {
@@ -930,7 +930,7 @@ class BinaryEmitter {
         return false;
     }
     
-    private bool isVoidType(Type t) {
+    package bool isVoidType(Type t) {
         auto basic = cast(BasicType)t;
         return basic && basic.kind == BasicType.Kind.Void;
     }
@@ -1187,6 +1187,26 @@ class BinaryEmitter {
         return false;  // Other statement types need WASM
     }
     
+    /**
+     * Convert D parameter list to WASM value types.
+     * Interface params expand to 2 i32s (fat pointer).
+     */
+    package ValType[] paramsToValTypes(Parameter[] params) {
+        ValType[] result;
+        foreach (p; params) {
+            if (auto userType = cast(UserType)p.type) {
+                if (cast(InterfaceDecl)userType.declaration) {
+                    // Interface: fat pointer = 2 i32s
+                    result ~= ValType.i32;
+                    result ~= ValType.i32;
+                    continue;
+                }
+            }
+            result ~= dTypeToValType(p.type);
+        }
+        return result;
+    }
+    
     package ValType dTypeToValType(Type t) {
         // Struct types are passed as i32 pointers
         if (auto userType = cast(UserType)t) {
@@ -1227,6 +1247,33 @@ class BinaryEmitter {
             case BasicType.Kind.Void:
                 return ValType.i32;  // Placeholder, caller should check isVoidType
         }
+    }
+    
+    /**
+     * Get or create a type index for a method signature.
+     * Used for interface dispatch where we need the type signature.
+     */
+    package uint getOrCreateMethodType(FunctionDecl method) {
+        import std.algorithm : map;
+        import std.array : array;
+        
+        FuncSig sig;
+        sig.params = [ValType.i32];  // 'this' pointer
+        sig.params ~= method.parameters.map!(p => dTypeToValType(p.type)).array;
+        
+        if (!isVoidType(method.returnType)) {
+            sig.results = [dTypeToValType(method.returnType)];
+        }
+        
+        if (auto existing = sig in typeIndex) {
+            return *existing;
+        }
+        
+        // Create new type
+        uint tIdx = cast(uint)types.length;
+        types ~= sig;
+        typeIndex[sig] = tIdx;
+        return tIdx;
     }
     
     //==========================================================================
@@ -1563,7 +1610,57 @@ class BinaryEmitter {
                     tableFunctions ~= cast(uint)imports.length + *idx;
                 }
             }
+            
+            // Build itables for each interface this class implements
+            buildItables(classDecl);
         }
+    }
+    
+    /**
+     * Build interface tables for a class.
+     * Each interface gets its own itable with methods in interface order.
+     */
+    private void buildItables(ClassDecl classDecl) {
+        foreach (ifaceType; classDecl.interfaces) {
+            if (auto userType = cast(UserType)ifaceType) {
+                if (auto ifaceDecl = cast(InterfaceDecl)userType.declaration) {
+                    // Record itable base for this interface
+                    classDecl.itableBases[ifaceDecl.name] = cast(uint)tableFunctions.length;
+                    
+                    // Add methods in interface's method order
+                    foreach (ifaceMethod; ifaceDecl.methods) {
+                        // Find the implementing method in the class
+                        auto implMethod = findImplementingMethod(classDecl, ifaceMethod.name);
+                        if (implMethod) {
+                            ClassDecl definingClass = cast(ClassDecl)implMethod.parent;
+                            string mangledName = definingClass.name ~ "_" ~ implMethod.name;
+                            if (auto idx = mangledName in funcIndex) {
+                                tableFunctions ~= cast(uint)imports.length + *idx;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    /**
+     * Find method implementing an interface method (searches class and base classes)
+     */
+    private FunctionDecl findImplementingMethod(ClassDecl classDecl, string methodName) {
+        // Check class's own methods
+        foreach (member; classDecl.members) {
+            if (auto method = cast(FunctionDecl)member) {
+                if (method.name == methodName && !method.isConstructor && !method.isDestructor) {
+                    return method;
+                }
+            }
+        }
+        // Check base class
+        if (classDecl.baseClassDecl) {
+            return findImplementingMethod(classDecl.baseClassDecl, methodName);
+        }
+        return null;
     }
     
     /// Generate a canonical string key for a function signature (for sorting)

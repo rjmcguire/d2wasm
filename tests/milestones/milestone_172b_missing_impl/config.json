@@ -1,0 +1,4 @@
+{
+    "type": "compile_error",
+    "expected_error": "does not implement interface method"
+}
