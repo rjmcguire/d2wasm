@@ -1500,8 +1500,8 @@ class TreeSitterBridge {
             case "char":
                 return new BasicType(loc, BasicType.Kind.Char);
             case "string":
-                // String is represented as a user-defined type for now
-                return new UserType(loc, "string");
+                // string is an alias for immutable(ubyte)[] — desugar at parse time
+                return new ArrayType(loc, new BasicType(loc, BasicType.Kind.UInt8));
             case "array_type":
                 return parseArrayType(node, loc);
             case "pointer_type":

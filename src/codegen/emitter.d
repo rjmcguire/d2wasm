@@ -848,10 +848,9 @@ class BinaryEmitter {
             }
         }
         
-        // Skip functions that return non-basic types (e.g., string-returning CTFE functions)
-        if (!canEmitType(decl.returnType)) {
-            return;
-        }
+        // Resolve return type if needed
+        if (auto ut = cast(UserType)decl.returnType)
+            ut.ensureResolved(symbolTable);
         
         // Scan for slice types to enable array support (__alloc, etc.)
         scanForSliceTypes(decl);
@@ -905,24 +904,6 @@ class BinaryEmitter {
     /**
      * Check if a type can be emitted to WASM (basic types only for now)
      */
-    private bool canEmitType(Type t) {
-        // Void is OK
-        if (isVoidType(t)) return true;
-        
-        // Basic types are OK
-        if (cast(BasicType)t) return true;
-        
-        // Array/slice types are OK (emitted as pointer to slice struct)
-        if (cast(ArrayType)t) return true;
-        
-        // UserTypes (structs) are OK - returned via hidden pointer
-        if (auto userType = cast(UserType)t) {
-            return true;
-        }
-        
-        return false;
-    }
-    
     package bool isVoidType(Type t) {
         auto basic = cast(BasicType)t;
         return basic && basic.kind == BasicType.Kind.Void;

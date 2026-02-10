@@ -2779,8 +2779,8 @@ class FuncContext {
             // Check if it's a string constant (MSG.length, MSG.ptr)
             if (symbol && symbol.kind == SymbolKind.Variable) {
                 if (auto varDecl = cast(VariableDecl)symbol.declaration) {
-                    if (auto userType = cast(UserType)varDecl.type) {
-                        if (userType.name == "string" && varDecl.initializer) {
+                    if (cast(ArrayType)varDecl.type) {
+                        if (varDecl.initializer) {
                             if (auto lit = cast(LiteralExpression)varDecl.initializer) {
                                 if (lit.value.type == typeid(string)) {
                                     string strValue = lit.value.get!string();

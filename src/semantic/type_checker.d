@@ -153,14 +153,8 @@ class TypeChecker {
         
         log(3, "Type checking function: ", decl.name);
         
-        // Skip CTFE-only functions (functions that return string type)
-        // These are only used at compile time for mixin expansion
-        if (auto userType = cast(UserType)decl.returnType) {
-            if (userType.name == "string") {
-                log(3, "Skipping type check for CTFE-only function: ", decl.name);
-                return;
-            }
-        }
+        // Note: CTFE-only functions (e.g. those returning ubyte[] for mixin)
+        // are still type-checked normally — no special skipping needed.
         
         // Enter function scope
         if (!symbolTable) { log(1, "Error: symbolTable is null!"); return; }
@@ -1439,15 +1433,6 @@ class TypeChecker {
         
         // Handle struct field access
         if (auto userType = cast(UserType)objectType) {
-            // Special handling for string type (.length, .ptr)
-            if (userType.name == "string") {
-                if (expr.memberName == "length") {
-                    return new BasicType(expr.location, BasicType.Kind.UInt64);
-                } else if (expr.memberName == "ptr") {
-                    return new PointerType(expr.location, new BasicType(expr.location, BasicType.Kind.Char));
-                }
-            }
-            
             // Resolve the UserType's declaration if not already linked
             if (!userType.declaration) {
                 auto typeSymbol = symbolTable.lookupSymbol(userType.name);

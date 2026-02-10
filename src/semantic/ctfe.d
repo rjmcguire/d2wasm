@@ -82,6 +82,19 @@ struct CTFEResult {
  * 
  * Evaluates compile-time expressions by compiling to WASM and running with wasm3.
  */
+/// Check if a type represents a string (dynamic ubyte[]).
+/// Used by CTFE to detect string-returning functions and string locals.
+private bool isStringType(Type t) {
+    if (auto arrType = cast(ArrayType)t) {
+        if (arrType.arraySize is null) { // dynamic array (slice), not static
+            if (auto basic = cast(BasicType)arrType.elementType) {
+                return basic.kind == BasicType.Kind.UInt8;
+            }
+        }
+    }
+    return false;
+}
+
 class CTFEEvaluator {
     private SymbolTable symbolTable;
     private Declaration[] allDeclarations;
@@ -761,13 +774,8 @@ class CTFEEvaluator {
             }
         }
         
-        // Check if function returns a string
-        bool returnsString = false;
-        if (auto userType = cast(UserType)funcDecl.returnType) {
-            if (userType.name == "string") {
-                returnsString = true;
-            }
-        }
+        // Check if function returns a string (dynamic ubyte[])
+        bool returnsString = isStringType(funcDecl.returnType);
         
         log(3, "CTFE: Calling ", funcName, " (returns string: ", returnsString, ")");
         
@@ -1129,13 +1137,8 @@ class CTFEEvaluator {
     private void executeVarDecl(VariableDeclarationStatement varDecl,
                                 ref string[string] localStrings,
                                 ref long[string] localInts) {
-        // Check if this is a string variable
-        bool isString = false;
-        if (auto userType = cast(UserType)varDecl.type) {
-            if (userType.name == "string") {
-                isString = true;
-            }
-        }
+        // Check if this is a string variable (dynamic ubyte[])
+        bool isString = isStringType(varDecl.type);
         
         if (isString && varDecl.initializer) {
             string value = evaluateStringExpressionWithLocals(varDecl.initializer, localStrings, localInts);

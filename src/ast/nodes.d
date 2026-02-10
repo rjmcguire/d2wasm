@@ -658,8 +658,12 @@ class UserType : Type {
             if (sym && sym.kind == SymbolKind.Type)
                 declaration = sym.declaration;
         }
-        // Note: declaration may remain null for built-in type aliases
-        // like "string" that aren't in the symbol table as type declarations.
+        if (declaration is null) {
+            import semantic.symbol_table : SemanticError;
+            throw new SemanticError(
+                "Unknown type '" ~ name ~ "'",
+                location);
+        }
     }
 
     override bool isBasicType() const { return false; }
