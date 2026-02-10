@@ -15,6 +15,7 @@ module ast.nodes;
 import std.string;
 import std.conv;
 import std.bitmanip : bitfields;
+import semantic.symbol_table : SymbolTable, SymbolKind;
 
 // Source location for error reporting
 struct SourceLocation {
@@ -120,6 +121,24 @@ abstract class Type : ASTNode {
     bool isAggregate() const {
         return false;  // Override in aggregate types
     }
+
+    /// Returns the StructDecl if this type resolves to a struct, null otherwise.
+    StructDecl asStruct() { return null; }
+
+    /// Returns the ClassDecl if this type resolves to a class, null otherwise.
+    ClassDecl asClass() { return null; }
+
+    /// Returns the InterfaceDecl if this type resolves to an interface, null otherwise.
+    InterfaceDecl asInterface() { return null; }
+
+    /// True if this type is passed/returned via hidden pointer (struct, static array).
+    bool isLargeReturn() const { return false; }
+
+    /// Aggregate byte size (struct size, class size, static array total size), or 0.
+    size_t aggregateSize() const { return 0; }
+
+    /// Aggregate alignment, or 1.
+    size_t aggregateAlignment() const { return 1; }
 }
 
 /**
@@ -231,50 +250,71 @@ class ImportedFunctionDecl : Declaration {
 }
 
 /**
+ * Common base for struct and class declarations (aggregate types with fields).
+ */
+abstract class AggregateDecl : Declaration {
+    Declaration[] members;
+    StructField[] fields;
+    size_t aggregateSize_;
+    size_t aggregateAlign_;
+    bool layoutComputed;
+    FunctionDecl destructor;
+
+    this(SourceLocation loc, string name, bool isPublic) {
+        super(loc, name, isPublic);
+    }
+
+    StructField* getField(string fieldName) {
+        foreach (ref field; fields) {
+            if (field.name == fieldName) return &field;
+        }
+        return null;
+    }
+
+    bool hasDestructor() const {
+        return destructor !is null;
+    }
+}
+
+/**
  * Class declaration: class Name : BaseClass, Interface { members }
- * 
+ *
  * Memory layout:
  *   [vtable_ptr][base_fields][derived_fields]
- * 
+ *
  * The vtable_ptr is an implicit first field pointing to the class's vtable.
  */
-class ClassDecl : Declaration {
+class ClassDecl : AggregateDecl {
     Type baseClass;  // null if no inheritance (implicitly inherits Object)
     Type[] interfaces;
-    Declaration[] members;
-    
+
     // Resolved base class (set during type checking)
     ClassDecl baseClassDecl;
-    
+
     // Constructor (if present)
     FunctionDecl constructor;
-    
-    // Destructor (if present)
-    FunctionDecl destructor;
-    
+
     // Virtual methods for vtable (populated during semantic analysis)
     FunctionDecl[] virtualMethods;
-    
-    // Field layout (similar to StructDecl)
-    StructField[] fields;
-    size_t classSize;      // Total size including vtable pointer
-    size_t classAlign;
-    bool layoutComputed;
-    
+
+    // Backward-compat aliases
+    alias classSize = aggregateSize_;
+    alias classAlign = aggregateAlign_;
+
     // vtable index for this class (assigned during codegen)
     int vtableIndex = -1;
-    
+
     // Packed vtable_ptr design:
     // vtable_ptr = (typeId << 16) | tableBase
     uint typeId = 0;       // Unique type ID for this class (for RTTI/error messages)
     uint tableBase = 0;    // Starting index in WASM function table
-    
+
     // Interface tables: interface name -> table base index
     uint[string] itableBases;
-    
+
     // TypeInfo offset in data section (for error messages, indexed by typeId)
     uint typeInfoOffset = 0;
-    
+
     this(SourceLocation loc, string name, Type baseClass, Type[] interfaces,
          Declaration[] members, bool isPublic = false) {
         super(loc, name, isPublic);
@@ -282,33 +322,16 @@ class ClassDecl : Declaration {
         this.interfaces = interfaces;
         this.members = members;
     }
-    
-    /**
-     * Get field by name, returns null if not found
-     */
-    StructField* getField(string fieldName) {
-        foreach (ref field; fields) {
-            if (field.name == fieldName) return &field;
-        }
-        return null;
-    }
-    
-    /**
-     * Check if this class has a destructor
-     */
-    bool hasDestructor() const {
-        return destructor !is null;
-    }
-    
+
     /**
      * Check if this class has any virtual methods
      */
     bool hasVirtualMethods() const {
         return virtualMethods.length > 0;
     }
-    
+
     override string toString() const {
-        return format("ClassDecl(%s, size=%d, vtable=%d methods)", 
+        return format("ClassDecl(%s, size=%d, vtable=%d methods)",
                       name, classSize, virtualMethods.length);
     }
 }
@@ -327,40 +350,16 @@ struct StructField {
 /**
  * Struct declaration: struct Name { members }
  */
-class StructDecl : Declaration {
-    Declaration[] members;
-    
-    // Destructor (if present) - for RAII support
-    FunctionDecl destructor;
-    
-    // Layout info (populated during semantic analysis)
-    StructField[] fields;
-    size_t structSize;
-    size_t structAlign;
-    bool layoutComputed;
-    
+class StructDecl : AggregateDecl {
+    // Backward-compat aliases
+    alias structSize = aggregateSize_;
+    alias structAlign = aggregateAlign_;
+
     this(SourceLocation loc, string name, Declaration[] members, bool isPublic = false) {
         super(loc, name, isPublic);
         this.members = members;
     }
-    
-    /**
-     * Get field by name, returns null if not found
-     */
-    StructField* getField(string fieldName) {
-        foreach (ref field; fields) {
-            if (field.name == fieldName) return &field;
-        }
-        return null;
-    }
-    
-    /**
-     * Check if this struct has a destructor (needs RAII cleanup)
-     */
-    bool hasDestructor() const {
-        return destructor !is null;
-    }
-    
+
     override string toString() const {
         return format("StructDecl(%s, size=%d, align=%d%s)", name, structSize, structAlign,
                       destructor ? ", has ~this" : "");
@@ -549,20 +548,25 @@ class BasicType : Type {
 class ArrayType : Type {
     Type elementType;
     Expression arraySize;  // null for dynamic arrays
-    
+
     this(SourceLocation loc, Type elementType, Expression arraySize = null) {
         super(loc);
         this.elementType = elementType;
         this.arraySize = arraySize;
     }
-    
+
     override bool isBasicType() const { return false; }
     override bool isPointer() const { return false; }
     override bool isArray() const { return true; }
     override bool isFunction() const { return false; }
-    
+
     /// Arrays (both static and dynamic/slices) are aggregates
     override bool isAggregate() const { return true; }
+
+    /// Static arrays are large returns (passed via hidden pointer)
+    override bool isLargeReturn() const {
+        return arraySize !is null;
+    }
     
     override size_t size() const {
         // Dynamic arrays are just pointers (8 bytes on 64-bit)
@@ -640,36 +644,67 @@ class FunctionType : Type {
 class UserType : Type {
     string name;
     Declaration declaration;  // Set during semantic analysis
-    
+
     this(SourceLocation loc, string name) {
         super(loc);
         this.name = name;
     }
-    
+
+    /// Resolve this UserType's declaration from the symbol table if not already linked.
+    /// Uses lookupGlobalSymbol to avoid triggering CTFE evaluation.
+    void ensureResolved(SymbolTable symTab) {
+        if (declaration is null) {
+            auto sym = symTab.lookupGlobalSymbol(name);
+            if (sym && sym.kind == SymbolKind.Type)
+                declaration = sym.declaration;
+        }
+        // Note: declaration may remain null for built-in type aliases
+        // like "string" that aren't in the symbol table as type declarations.
+    }
+
     override bool isBasicType() const { return false; }
     override bool isPointer() const { return false; }
     override bool isArray() const { return false; }
     override bool isFunction() const { return false; }
-    
+
     /// Structs and classes are aggregates (passed by address)
     override bool isAggregate() const {
         if (declaration) {
-            return cast(StructDecl)declaration !is null || 
+            return cast(StructDecl)declaration !is null ||
                    cast(ClassDecl)declaration !is null;
         }
         return false;
     }
-    
+
+    override StructDecl asStruct() {
+        return cast(StructDecl)declaration;
+    }
+
+    override ClassDecl asClass() {
+        return cast(ClassDecl)declaration;
+    }
+
+    override InterfaceDecl asInterface() {
+        return cast(InterfaceDecl)declaration;
+    }
+
+    override bool isLargeReturn() const {
+        return cast(StructDecl)declaration !is null;
+    }
+
+    override size_t aggregateSize() const {
+        return size();
+    }
+
+    override size_t aggregateAlignment() const {
+        return alignment();
+    }
+
     override size_t size() const {
         if (declaration) {
-            if (auto structDecl = cast(StructDecl)declaration) {
-                if (structDecl.layoutComputed) {
-                    return structDecl.structSize;
-                }
-            }
-            if (auto classDecl = cast(ClassDecl)declaration) {
-                if (classDecl.layoutComputed) {
-                    return classDecl.classSize;
+            if (auto aggr = cast(AggregateDecl)declaration) {
+                if (aggr.layoutComputed) {
+                    return aggr.aggregateSize_;
                 }
             }
             // Interface refs are fat pointers: {obj_ptr, itable_ptr} = 8 bytes
@@ -679,18 +714,18 @@ class UserType : Type {
         }
         return 0;  // Layout not yet computed
     }
-    
+
     override size_t alignment() const {
         if (declaration) {
-            if (auto structDecl = cast(StructDecl)declaration) {
-                if (structDecl.layoutComputed) {
-                    return structDecl.structAlign;
+            if (auto aggr = cast(AggregateDecl)declaration) {
+                if (aggr.layoutComputed) {
+                    return aggr.aggregateAlign_;
                 }
             }
         }
         return 1;  // Default alignment
     }
-    
+
     override string toString() const {
         return name;
     }

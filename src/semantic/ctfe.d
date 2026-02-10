@@ -785,13 +785,9 @@ class CTFEEvaluator {
         }
         
         // Check if function returns a struct (uses hidden result pointer)
-        if (auto userType = cast(UserType)funcDecl.returnType) {
-            if (userType.name != "string") {
-                if (auto structDecl = cast(StructDecl)userType.declaration) {
-                    log(3, "CTFE: Function returns struct, evaluating with hidden param");
-                    return evaluateStructReturningFunction(funcDecl, callExpr.arguments, structDecl);
-                }
-            }
+        if (auto structDecl = funcDecl.returnType.asStruct()) {
+            log(3, "CTFE: Function returns struct, evaluating with hidden param");
+            return evaluateStructReturningFunction(funcDecl, callExpr.arguments, structDecl);
         }
         
         // Check if this is a simple function that only contains CTFE intrinsics

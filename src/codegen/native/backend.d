@@ -94,13 +94,19 @@ class NativeCompiledFunction : CompiledFunction {
     private size_t paramCount;           // number of function parameters
     private SymbolTable symbolTable;     // for looking up struct types
     
-    // Local variable tracking
-    private uint[string] localOffsets;  // variable name → stack offset
-    private StructDecl[string] localStructTypes;  // variable name → struct type (if struct)
-    private bool[string] localSliceVars;  // variable name → true if slice (for ~= support)
-    private uint[string] localStaticArraySizes;  // variable name → array length (for static arrays)
-    private uint nextLocalOffset;        // next available stack slot
-    private uint totalLocalBytes;        // total stack space needed
+    // Unified local variable info
+    struct NativeLocalInfo {
+        uint offset;              // Stack offset
+        StructDecl structDecl;    // Non-null if struct type
+        bool isSlice;             // true if dynamic array/slice
+        uint staticArraySize;     // >0 if static array (element count)
+
+        bool isStruct() const { return structDecl !is null; }
+        bool isStaticArray() const { return staticArraySize > 0; }
+    }
+    private NativeLocalInfo[string] localVars;
+    private uint nextLocalOffset;
+    private uint totalLocalBytes;
     private uint tempSlot;               // stack offset for expression temporaries
     private uint tempSlotDepth;          // nesting depth for temp slot usage
     
@@ -229,10 +235,7 @@ class NativeCompiledFunction : CompiledFunction {
         }
         
         // Reset local tracking for this function
-        localOffsets.clear();
-        localStructTypes.clear();
-        localSliceVars.clear();
-        localStaticArraySizes.clear();
+        localVars.clear();
         nextLocalOffset = 0;
         
         // Check if function returns a struct (uses hidden result pointer)
@@ -240,10 +243,8 @@ class NativeCompiledFunction : CompiledFunction {
         uint resultPtrOffset = 0;
         StructDecl returnStructDecl = null;
         if (auto userType = cast(UserType)func.returnType) {
-            resolveUserType(userType);
-            assert(userType.declaration !is null,
-                "UserType '" ~ userType.name ~ "' has null declaration for return type of '" ~ func.name ~ "'");
-            if (auto sd = cast(StructDecl)userType.declaration) {
+            userType.ensureResolved(symbolTable);
+            if (auto sd = userType.asStruct()) {
                 hasHiddenResultPtr = true;
                 returnStructDecl = sd;
                 // Hidden result pointer is passed in x0, save it
@@ -261,21 +262,21 @@ class NativeCompiledFunction : CompiledFunction {
         
         // Reserve space for parameters (x0/x1/x2... depending on hidden ptr)
         foreach (param; func.parameters) {
-            localOffsets[param.name] = nextLocalOffset;
-            
+            NativeLocalInfo nli;
+            nli.offset = nextLocalOffset;
+
             // Check if parameter is a struct type
             uint paramSize = 4;  // default for int, bool, etc.
             if (auto userType = cast(UserType)param.type) {
-                resolveUserType(userType);
-                assert(userType.declaration !is null,
-                    "UserType '" ~ userType.name ~ "' has null declaration - type linking failed");
-                if (auto structDecl = cast(StructDecl)userType.declaration) {
+                userType.ensureResolved(symbolTable);
+                if (auto structDecl = userType.asStruct()) {
                     assert(structDecl.structSize > 0,
                         "StructDecl '" ~ structDecl.name ~ "' has zero size - layout not computed");
-                    localStructTypes[param.name] = structDecl;
+                    nli.structDecl = structDecl;
                     paramSize = cast(uint)structDecl.structSize;
                 }
             }
+            localVars[param.name] = nli;
             nextLocalOffset += paramSize;
         }
         
@@ -315,10 +316,12 @@ class NativeCompiledFunction : CompiledFunction {
                 throw new Exception("Native backend: more than 4 parameters not yet supported");
             }
             // Store parameter register to its stack slot
-            uint offset = localOffsets[param.name];
-            
+            auto nli = param.name in localVars;
+            assert(nli !is null, "Parameter '" ~ param.name ~ "' not in localVars");
+            uint offset = nli.offset;
+
             // Check if this is a struct parameter (passed as pointer)
-            if (auto structDecl = param.name in localStructTypes) {
+            if (nli.isStruct) {
                 // Register contains pointer to struct - copy struct data to our stack
                 // First, get the source pointer into x9 (scratch register)
                 switch (regIdx) {
@@ -329,7 +332,7 @@ class NativeCompiledFunction : CompiledFunction {
                     default: break;
                 }
                 // Copy each field from source pointer to our local stack
-                uint structSize = cast(uint)(*structDecl).structSize;
+                uint structSize = cast(uint)nli.structDecl.structSize;
                 for (uint fieldOff = 0; fieldOff < structSize; fieldOff += 4) {
                     gen.emitLoadFromX9Offset(fieldOff);
                     gen.emitStoreLocal32(offset + fieldOff);
@@ -385,10 +388,8 @@ class NativeCompiledFunction : CompiledFunction {
         } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
             // Check type to determine size
             if (auto userType = cast(UserType)varDecl.type) {
-                resolveUserType(userType);
-                assert(userType.declaration !is null,
-                    "UserType '" ~ userType.name ~ "' has null declaration in countLocalBytes");
-                if (auto sd = cast(StructDecl)userType.declaration) {
+                userType.ensureResolved(symbolTable);
+                if (auto sd = userType.asStruct()) {
                     assert(sd.structSize > 0, "StructDecl has zero size");
                     bytes = cast(uint)sd.structSize;
                 } else {
@@ -472,13 +473,12 @@ class NativeCompiledFunction : CompiledFunction {
             // Check if this is a struct type or slice type
             StructDecl structType = null;
             bool isSlice = false;
+            uint staticArrayLength = 0;
             uint varSize = 4;  // default to 4 bytes for int
             
             if (auto userType = cast(UserType)varDecl.type) {
-                resolveUserType(userType);
-                assert(userType.declaration !is null,
-                    "UserType '" ~ userType.name ~ "' has null declaration for variable '" ~ varDecl.name ~ "'");
-                if (auto sd = cast(StructDecl)userType.declaration) {
+                userType.ensureResolved(symbolTable);
+                if (auto sd = userType.asStruct()) {
                     assert(sd.structSize > 0,
                         "StructDecl '" ~ sd.name ~ "' has zero size - layout not computed");
                     structType = sd;
@@ -499,20 +499,25 @@ class NativeCompiledFunction : CompiledFunction {
                         if (sizeLit.value.type == typeid(long)) {
                             uint length = cast(uint)sizeLit.value.get!long();
                             varSize = length * 4;  // 4 bytes per element
-                            localStaticArraySizes[varDecl.name] = length;
+                            staticArrayLength = length;
                         }
                     }
                 }
             }
             
             // Allocate stack slot for this variable
-            localOffsets[varDecl.name] = nextLocalOffset;
+            NativeLocalInfo nli;
+            nli.offset = nextLocalOffset;
             if (structType) {
-                localStructTypes[varDecl.name] = structType;
+                nli.structDecl = structType;
             }
             if (isSlice) {
-                localSliceVars[varDecl.name] = true;
+                nli.isSlice = true;
             }
+            if (staticArrayLength > 0) {
+                nli.staticArraySize = staticArrayLength;
+            }
+            localVars[varDecl.name] = nli;
             
             // Compile initializer if present
             if (varDecl.initializer) {
@@ -528,8 +533,7 @@ class NativeCompiledFunction : CompiledFunction {
                                 "Struct var '" ~ varDecl.name ~ "' initializer calls '" ~
                                 funcIdent.name ~ "' which is neither Type nor Function");
                             if (symbol && symbol.kind == SymbolKind.Type) {
-                                if (auto ut = cast(UserType)symbol.type) {
-                                    if (auto sd = cast(StructDecl)ut.declaration) {
+                                if (auto sd = symbol.type.asStruct()) {
                                         // Initialize struct fields directly at our variable's location
                                         for (size_t i = 0; i < sd.fields.length && i < call.arguments.length; i++) {
                                             auto field = sd.fields[i];
@@ -554,7 +558,6 @@ class NativeCompiledFunction : CompiledFunction {
                                             compileExpression(call.arguments[i]);
                                             gen.emitStoreLocal32(fieldOffset);
                                         }
-                                    }
                                 }
                             } else if (symbol && symbol.kind == SymbolKind.Function) {
                                 // Function call returning struct — hidden result pointer pattern
@@ -611,7 +614,7 @@ class NativeCompiledFunction : CompiledFunction {
                     } else {
                         throw new Exception("Slice can only be initialized from array literal or import()");
                     }
-                } else if (varDecl.name in localStaticArraySizes) {
+                } else if (nli.isStaticArray) {
                     // Static array initialization from array literal
                     if (auto arrLit = cast(ArrayLiteralExpression)varDecl.initializer) {
                         // Store each element directly on stack
@@ -874,13 +877,12 @@ class NativeCompiledFunction : CompiledFunction {
             }
         } else if (auto ident = cast(IdentifierExpression)expr) {
             // Load variable from stack
-            if (auto offsetPtr = ident.name in localOffsets) {
+            if (auto info = ident.name in localVars) {
                 // For struct types, emit address (pointer) instead of loading value
-                // This is needed when passing structs as function arguments
-                if (ident.name in localStructTypes) {
-                    gen.emitStackAddress(*offsetPtr);
+                if (info.isStruct) {
+                    gen.emitStackAddress(info.offset);
                 } else {
-                    gen.emitLoadLocal32(*offsetPtr);
+                    gen.emitLoadLocal32(info.offset);
                 }
             } else {
                 throw new Exception("Unknown variable in native backend: " ~ ident.name);
@@ -892,15 +894,15 @@ class NativeCompiledFunction : CompiledFunction {
                 throw new Exception("Assignment to non-identifier not yet supported in native backend");
             }
             
-            auto offsetPtr = targetIdent.name in localOffsets;
-            if (offsetPtr is null) {
+            auto info = targetIdent.name in localVars;
+            if (info is null) {
                 throw new Exception("Unknown variable in native backend: " ~ targetIdent.name);
             }
-            
+
             // Handle slice append specially (~=)
             if (assign.operator == AssignmentExpression.Operator.ConcatAssign) {
-                if (targetIdent.name in localSliceVars) {
-                    compileSliceAppend(*offsetPtr, assign.right);
+                if (info.isSlice) {
+                    compileSliceAppend(info.offset, assign.right);
                     return;
                 } else {
                     throw new Exception("~= only supported on slice types");
@@ -910,7 +912,7 @@ class NativeCompiledFunction : CompiledFunction {
             if (assign.operator == AssignmentExpression.Operator.Assign) {
                 // Simple assignment: x = expr
                 compileExpression(assign.right);
-                gen.emitStoreLocal32(*offsetPtr);
+                gen.emitStoreLocal32(info.offset);
             } else {
                 // Compound assignment: x op= expr
                 // First compile right side to x0
@@ -918,7 +920,7 @@ class NativeCompiledFunction : CompiledFunction {
                 gen.emitMoveX0ToX1();  // x1 = right value
                 
                 // Load current value to x0
-                gen.emitLoadLocal32(*offsetPtr);
+                gen.emitLoadLocal32(info.offset);
                 // Now x0 = current (left), x1 = right
                 
                 // Apply operation based on operator
@@ -963,7 +965,7 @@ class NativeCompiledFunction : CompiledFunction {
                 }
                 
                 // Store result back
-                gen.emitStoreLocal32(*offsetPtr);
+                gen.emitStoreLocal32(info.offset);
             }
             // Result of assignment is the assigned value (already in x0)
         } else if (auto call = cast(CallExpression)expr) {
@@ -971,12 +973,10 @@ class NativeCompiledFunction : CompiledFunction {
             if (auto funcIdent = cast(IdentifierExpression)call.function_) {
                 auto symbol = symbolTable.lookupSymbol(funcIdent.name);
                 if (symbol && symbol.kind == SymbolKind.Type) {
-                    if (auto userType = cast(UserType)symbol.type) {
-                        if (auto structDecl = cast(StructDecl)userType.declaration) {
-                            // Struct construction: allocate space and init fields
-                            compileStructConstruction(structDecl, call.arguments);
-                            return;
-                        }
+                    if (auto structDecl = symbol.type.asStruct()) {
+                        // Struct construction: allocate space and init fields
+                        compileStructConstruction(structDecl, call.arguments);
+                        return;
                     }
                 }
                 
@@ -1077,33 +1077,30 @@ class NativeCompiledFunction : CompiledFunction {
             // Check for slice.length first
             if (member.memberName == "length") {
                 if (auto ident = cast(IdentifierExpression)member.object) {
-                    if (auto sliceOffset = ident.name in localOffsets) {
-                        // Check if it's a slice (not a struct)
-                        if (ident.name !in localStructTypes) {
-                            // Native slice layout: { ptr: i64, length: i32, capacity: i32 }
-                            // length is at offset 8
-                            gen.emitLoadLocal32(*sliceOffset + NativeSliceLayout.LENGTH_OFFSET);
+                    if (auto varInfo = ident.name in localVars) {
+                        if (varInfo.isSlice) {
+                            gen.emitLoadLocal32(varInfo.offset + NativeSliceLayout.LENGTH_OFFSET);
                             return;
                         }
                     }
                 }
             }
-            
+
             // Field access: obj.field (for structs)
             auto structDecl = getStructDeclFromExpr(member.object);
             if (structDecl is null) {
                 throw new Exception("Cannot determine struct type for member access");
             }
-            
+
             auto field = structDecl.getField(member.memberName);
             if (field is null) {
                 throw new Exception("Unknown field: " ~ member.memberName);
             }
-            
+
             // For local struct variables, compute address and load field
             if (auto ident = cast(IdentifierExpression)member.object) {
-                if (auto baseOffset = ident.name in localOffsets) {
-                    uint totalOffset = *baseOffset + cast(uint)field.offset;
+                if (auto varInfo = ident.name in localVars) {
+                    uint totalOffset = varInfo.offset + cast(uint)field.offset;
                     // Aggregate fields: emit address (for nested access or passing)
                     // Scalar fields: load the value
                     if (field.type.isAggregate()) {
@@ -1175,16 +1172,16 @@ class NativeCompiledFunction : CompiledFunction {
         } else if (auto indexExpr = cast(IndexExpression)expr) {
             // Array/slice indexing: arr[i]
             if (auto ident = cast(IdentifierExpression)indexExpr.array) {
-                if (auto arrOffset = ident.name in localOffsets) {
+                if (auto info = ident.name in localVars) {
                     // Check if it's a static array (inline storage)
-                    if (auto staticSize = ident.name in localStaticArraySizes) {
-                        // Static array: elements stored inline at arrOffset
+                    if (info.isStaticArray) {
+                        // Static array: elements stored inline at offset
                         // For constant index, load directly
                         if (auto indexLit = cast(LiteralExpression)indexExpr.index) {
                             if (indexLit.value.type == typeid(long)) {
                                 uint idx = cast(uint)indexLit.value.get!long();
                                 // TODO: bounds check
-                                gen.emitLoadLocal32(*arrOffset + idx * 4);
+                                gen.emitLoadLocal32(info.offset + idx * 4);
                                 return;
                             }
                         }
@@ -1196,36 +1193,36 @@ class NativeCompiledFunction : CompiledFunction {
                         gen.emit(stencil_mul_i32);  // x0 = index * 4
                         gen.emitMoveX0ToX1();  // x1 = index * 4
                         // Get base address of array
-                        gen.emitStackAddress(*arrOffset);  // x0 = SP + arrOffset
+                        gen.emitStackAddress(info.offset);  // x0 = SP + offset
                         gen.emit(stencil_add_i32);  // x0 = base + index * 4
                         // Load from computed address
                         gen.emitLoadFromPointer(0);
                         return;
                     }
-                    
+
                     // Dynamic array (slice): { ptr: i64, length: i32, capacity: i32 }
                     // Compile index first (may clobber registers)
                     compileExpression(indexExpr.index);
                     // x0 = index
-                    
+
                     // Bounds check: 0 <= index < length
-                    emitBoundsCheck(*arrOffset,
+                    emitBoundsCheck(info.offset,
                                     indexExpr.location.filename ? indexExpr.location.filename : "",
                                     indexExpr.location.line, indexExpr.location.column);
                     // x0 still = index
-                    
+
                     // Compute index * 4 (element size)
                     gen.emitMoveX0ToX1();  // x1 = index
                     gen.emitImm32(stencil_load_imm32, 4);  // x0 = 4
                     gen.emit(stencil_mul_i32);  // x0 = index * 4
                     gen.emitMoveX0ToX1();  // x1 = index * 4
-                    
+
                     // Load 64-bit ptr from slice struct (offset 0)
-                    gen.emitLoadLocal(*arrOffset);  // x0 = ptr (64-bit!)
-                    
+                    gen.emitLoadLocal(info.offset);  // x0 = ptr (64-bit!)
+
                     // Compute address: ptr + index * 4
                     gen.emit(stencil_add_i32);  // x0 = ptr + index * 4
-                    
+
                     // Load value from computed address
                     gen.emitLoadFromPointer(0);
                     return;
@@ -1902,17 +1899,14 @@ class NativeCompiledFunction : CompiledFunction {
     private StructDecl getStructDeclFromExpr(Expression expr) {
         // For identifier expressions, check our local struct types first
         if (auto ident = cast(IdentifierExpression)expr) {
-            // Check local struct variables
-            if (auto sd = ident.name in localStructTypes) {
-                return *sd;
+            // Check local variables
+            if (auto info = ident.name in localVars) {
+                if (info.isStruct) return info.structDecl;
             }
             // Fall back to symbol table
             auto symbol = symbolTable.lookupSymbol(ident.name);
             if (symbol) {
-                if (auto userType = cast(UserType)symbol.type) {
-                    resolveUserType(userType);
-                    return cast(StructDecl)userType.declaration;
-                }
+                return symbol.type.asStruct();
             }
         }
         // For member expressions (nested struct access like o.inner),
@@ -1924,10 +1918,7 @@ class NativeCompiledFunction : CompiledFunction {
                 // Find the field and check if it's a struct type
                 auto field = baseDecl.getField(member.memberName);
                 if (field !is null) {
-                    if (auto userType = cast(UserType)field.type) {
-                        resolveUserType(userType);
-                        return cast(StructDecl)userType.declaration;
-                    }
+                    return field.type.asStruct();
                 }
             }
         }
@@ -1936,23 +1927,11 @@ class NativeCompiledFunction : CompiledFunction {
             if (auto funcIdent = cast(IdentifierExpression)call.function_) {
                 auto symbol = symbolTable.lookupSymbol(funcIdent.name);
                 if (symbol && symbol.kind == SymbolKind.Type) {
-                    if (auto userType = cast(UserType)symbol.type) {
-                        resolveUserType(userType);
-                        return cast(StructDecl)userType.declaration;
-                    }
+                    return symbol.type.asStruct();
                 }
             }
         }
         return null;
-    }
-    
-    /// Resolve a UserType's declaration from the symbol table if not already linked.
-    private void resolveUserType(UserType userType) {
-        if (userType.declaration is null && symbolTable !is null) {
-            auto sym = symbolTable.lookupSymbol(userType.name);
-            if (sym && sym.kind == SymbolKind.Type)
-                userType.declaration = sym.declaration;
-        }
     }
 
     override ExecutionResult call(long[] args) {

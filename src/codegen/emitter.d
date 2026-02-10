@@ -777,40 +777,30 @@ class BinaryEmitter {
      */
     private void collectGlobalVariable(VariableDecl decl) {
         // Check if it's a struct type with an initializer
-        if (auto userType = cast(UserType)decl.type) {
-            // Resolve declaration if needed
-            if (!userType.declaration) {
-                auto typeSymbol = symbolTable.lookupSymbol(userType.name);
-                if (typeSymbol && typeSymbol.kind == SymbolKind.Type) {
-                    userType.declaration = typeSymbol.declaration;
-                }
-            }
-            assert(userType.declaration !is null,
-                "UserType '" ~ userType.name ~ "' has null declaration for '" ~ decl.name ~ "'");
-            
-            if (auto structDecl = cast(StructDecl)userType.declaration) {
-                if (decl.initializer) {
-                    // Try to evaluate the initializer as a struct literal
-                    if (auto callExpr = cast(CallExpression)decl.initializer) {
-                        // Point(42, 10) looks like a call
-                        int[] fieldValues;
-                        foreach (arg; callExpr.arguments) {
-                            if (auto lit = cast(LiteralExpression)arg) {
-                                if (lit.value.type == typeid(long)) {
-                                    fieldValues ~= cast(int)lit.value.get!long();
-                                } else if (lit.value.type == typeid(bool)) {
-                                    fieldValues ~= lit.value.get!bool() ? 1 : 0;
-                                }
-                            } else {
-                                // Complex expression - try CTFE evaluation
-                                fieldValues ~= cast(int)evaluateConstantIntExpr(arg);
+        if (auto ut = cast(UserType)decl.type)
+            ut.ensureResolved(symbolTable);
+        if (auto structDecl = decl.type.asStruct()) {
+            if (decl.initializer) {
+                // Try to evaluate the initializer as a struct literal
+                if (auto callExpr = cast(CallExpression)decl.initializer) {
+                    // Point(42, 10) looks like a call
+                    int[] fieldValues;
+                    foreach (arg; callExpr.arguments) {
+                        if (auto lit = cast(LiteralExpression)arg) {
+                            if (lit.value.type == typeid(long)) {
+                                fieldValues ~= cast(int)lit.value.get!long();
+                            } else if (lit.value.type == typeid(bool)) {
+                                fieldValues ~= lit.value.get!bool() ? 1 : 0;
                             }
+                        } else {
+                            // Complex expression - try CTFE evaluation
+                            fieldValues ~= cast(int)evaluateConstantIntExpr(arg);
                         }
-                        
-                        if (fieldValues.length == structDecl.fields.length) {
-                            decl.ctfeStructAddress = registerStructLiteral(structDecl, fieldValues);
-                            decl.ctfeComplete = true;
-                        }
+                    }
+
+                    if (fieldValues.length == structDecl.fields.length) {
+                        decl.ctfeStructAddress = registerStructLiteral(structDecl, fieldValues);
+                        decl.ctfeComplete = true;
                     }
                 }
             }
@@ -944,28 +934,18 @@ class BinaryEmitter {
      */
     bool isLargeReturnType(Type t) {
         if (t is null) return false;
-        
-        // UserType (struct)
+
+        // Ensure UserType is resolved before checking
         if (auto userType = cast(UserType)t) {
             if (!userType.declaration) {
-                auto sym = symbolTable.lookupSymbol(userType.name);
+                auto sym = symbolTable.lookupGlobalSymbol(userType.name);
                 if (sym && sym.kind == SymbolKind.Type) {
                     userType.declaration = sym.declaration;
                 }
             }
-            if (cast(StructDecl)userType.declaration) {
-                return true;
-            }
         }
-        
-        // Static array (int[4])
-        if (auto arrType = cast(ArrayType)t) {
-            if (arrType.arraySize !is null) {
-                return true;  // Static array
-            }
-        }
-        
-        return false;
+
+        return t.isLargeReturn();
     }
     
     /**
@@ -1197,13 +1177,11 @@ class BinaryEmitter {
     package ValType[] paramsToValTypes(Parameter[] params) {
         ValType[] result;
         foreach (p; params) {
-            if (auto userType = cast(UserType)p.type) {
-                if (cast(InterfaceDecl)userType.declaration) {
-                    // Interface: fat pointer = 2 i32s
-                    result ~= ValType.i32;
-                    result ~= ValType.i32;
-                    continue;
-                }
+            if (p.type.asInterface()) {
+                // Interface: fat pointer = 2 i32s
+                result ~= ValType.i32;
+                result ~= ValType.i32;
+                continue;
             }
             result ~= dTypeToValType(p.type);
         }
@@ -1628,29 +1606,27 @@ class BinaryEmitter {
      */
     private void buildItables(ClassDecl classDecl) {
         foreach (ifaceType; classDecl.interfaces) {
-            if (auto userType = cast(UserType)ifaceType) {
-                if (auto ifaceDecl = cast(InterfaceDecl)userType.declaration) {
-                    // Assign typeId and generate TypeInfo if not already done
-                    if (ifaceDecl.typeId == 0) {
-                        ifaceDecl.typeId = nextTypeId++;
-                        generateInterfaceTypeInfo(ifaceDecl);
-                    }
-                    
-                    // Record itable base with packed typeId
-                    uint itableBase = cast(uint)tableFunctions.length;
-                    uint packedItablePtr = WasmVtablePacking.pack(ifaceDecl.typeId, itableBase);
-                    classDecl.itableBases[ifaceDecl.name] = packedItablePtr;
-                    
-                    // Add methods in interface's method order
-                    foreach (ifaceMethod; ifaceDecl.methods) {
-                        // Find the implementing method in the class
-                        auto implMethod = findImplementingMethod(classDecl, ifaceMethod.name);
-                        if (implMethod) {
-                            ClassDecl definingClass = cast(ClassDecl)implMethod.parent;
-                            string mangledName = definingClass.name ~ "_" ~ implMethod.name;
-                            if (auto idx = mangledName in funcIndex) {
-                                tableFunctions ~= cast(uint)imports.length + *idx;
-                            }
+            if (auto ifaceDecl = ifaceType.asInterface()) {
+                // Assign typeId and generate TypeInfo if not already done
+                if (ifaceDecl.typeId == 0) {
+                    ifaceDecl.typeId = nextTypeId++;
+                    generateInterfaceTypeInfo(ifaceDecl);
+                }
+
+                // Record itable base with packed typeId
+                uint itableBase = cast(uint)tableFunctions.length;
+                uint packedItablePtr = WasmVtablePacking.pack(ifaceDecl.typeId, itableBase);
+                classDecl.itableBases[ifaceDecl.name] = packedItablePtr;
+
+                // Add methods in interface's method order
+                foreach (ifaceMethod; ifaceDecl.methods) {
+                    // Find the implementing method in the class
+                    auto implMethod = findImplementingMethod(classDecl, ifaceMethod.name);
+                    if (implMethod) {
+                        ClassDecl definingClass = cast(ClassDecl)implMethod.parent;
+                        string mangledName = definingClass.name ~ "_" ~ implMethod.name;
+                        if (auto idx = mangledName in funcIndex) {
+                            tableFunctions ~= cast(uint)imports.length + *idx;
                         }
                     }
                 }

@@ -662,18 +662,19 @@ class SymbolCollector {
     /**
      * Compute struct layout: field offsets, alignment, and total size
      */
-    private void computeStructLayout(StructDecl decl) {
-        // Skip if already computed (avoid double-counting fields)
-        if (decl.layoutComputed) {
-            return;
-        }
-        
-        size_t currentOffset = 0;
-        size_t maxAlign = 1;
-        
+    /**
+     * Compute field layout for an aggregate type (struct or class).
+     * Iterates over members, resolves nested types, computes offsets/alignment.
+     *
+     * Returns: tuple of (finalOffset, maxAlignment)
+     */
+    private void computeFieldLayout(AggregateDecl decl, size_t startOffset, size_t startAlign) {
+        size_t currentOffset = startOffset;
+        size_t maxAlign = startAlign;
+
         foreach (member; decl.members) {
             if (auto varDecl = cast(VariableDecl)member) {
-                // For UserType fields, resolve the declaration and ensure layout is computed
+                // For UserType fields, resolve and ensure nested layout is computed
                 if (auto userType = cast(UserType)varDecl.type) {
                     if (!userType.declaration) {
                         auto sym = symbolTable.lookupSymbol(userType.name);
@@ -681,22 +682,22 @@ class SymbolCollector {
                             userType.declaration = sym.declaration;
                         }
                     }
-                    // Ensure nested struct layout is computed
-                    if (auto nestedStruct = cast(StructDecl)userType.declaration) {
-                        if (!nestedStruct.layoutComputed) {
-                            computeStructLayout(nestedStruct);
+                    // Ensure nested aggregate layout is computed
+                    if (auto nested = cast(AggregateDecl)userType.declaration) {
+                        if (!nested.layoutComputed) {
+                            computeAggregateLayout(nested);
                         }
                     }
                 }
-                
+
                 size_t fieldSize = varDecl.type ? varDecl.type.size() : 4;
                 size_t fieldAlign = varDecl.type ? varDecl.type.alignment() : 4;
-                
+
                 // Align current offset to field's alignment requirement
                 if (fieldAlign > 0) {
                     currentOffset = (currentOffset + fieldAlign - 1) & ~(fieldAlign - 1);
                 }
-                
+
                 // Record field info
                 StructField field;
                 field.name = varDecl.name;
@@ -705,117 +706,73 @@ class SymbolCollector {
                 field.size = fieldSize;
                 field.alignment = fieldAlign;
                 decl.fields ~= field;
-                
-                // Track max alignment for struct alignment
+
                 if (fieldAlign > maxAlign) maxAlign = fieldAlign;
-                
-                // Advance offset
                 currentOffset += fieldSize;
             }
         }
-        
-        // Pad struct size to alignment
+
+        // Pad to alignment
         if (maxAlign > 0) {
             currentOffset = (currentOffset + maxAlign - 1) & ~(maxAlign - 1);
         }
-        
-        decl.structSize = currentOffset;
-        decl.structAlign = maxAlign;
+
+        decl.aggregateSize_ = currentOffset;
+        decl.aggregateAlign_ = maxAlign;
         decl.layoutComputed = true;
     }
-    
+
+    /**
+     * Dispatch to struct or class layout computation.
+     */
+    private void computeAggregateLayout(AggregateDecl decl) {
+        if (decl.layoutComputed) return;
+        if (auto sd = cast(StructDecl)decl) {
+            computeStructLayout(sd);
+        } else if (auto cd = cast(ClassDecl)decl) {
+            computeClassLayout(cd);
+        }
+    }
+
+    private void computeStructLayout(StructDecl decl) {
+        if (decl.layoutComputed) return;
+        computeFieldLayout(decl, 0, 1);
+    }
+
     /**
      * Compute class layout: field offsets, alignment, and total size.
-     * 
+     *
      * Class layout differs from struct layout:
      * - Implicit vtable pointer as first field
      * - For derived classes: base class fields come first
      * - Derived fields start after base class fields
-     * 
+     *
      * Params:
      *   decl = Class declaration to compute layout for
      *   pointerSize = Size of pointers (4 for wasm32, 8 for wasm64/native)
      */
     private void computeClassLayout(ClassDecl decl, size_t pointerSize = 4) {
-        if (decl.layoutComputed) {
-            return;
-        }
-        
-        size_t currentOffset;
-        size_t maxAlign;
-        
+        if (decl.layoutComputed) return;
+
+        size_t startOffset;
+        size_t startAlign;
+
         // If we have a base class, inherit its layout
         if (decl.baseClassDecl) {
-            // Ensure base class layout is computed first
             if (!decl.baseClassDecl.layoutComputed) {
                 computeClassLayout(decl.baseClassDecl, pointerSize);
             }
-            
             // Inherit base class fields (including vtable_ptr)
             decl.fields = decl.baseClassDecl.fields.dup;
-            currentOffset = decl.baseClassDecl.classSize;
-            maxAlign = decl.baseClassDecl.classAlign;
+            startOffset = decl.baseClassDecl.classSize;
+            startAlign = decl.baseClassDecl.classAlign;
         } else {
             // No base class - start with vtable pointer
-            currentOffset = pointerSize;  // Reserve space for vtable_ptr
-            maxAlign = pointerSize;       // vtable_ptr sets minimum alignment
+            startOffset = pointerSize;
+            startAlign = pointerSize;
         }
-        
-        // Add this class's own fields
-        foreach (member; decl.members) {
-            if (auto varDecl = cast(VariableDecl)member) {
-                // For UserType fields, resolve and compute nested layout
-                if (auto userType = cast(UserType)varDecl.type) {
-                    if (!userType.declaration) {
-                        auto sym = symbolTable.lookupSymbol(userType.name);
-                        if (sym && sym.kind == SymbolKind.Type) {
-                            userType.declaration = sym.declaration;
-                        }
-                    }
-                    // Handle nested struct
-                    if (auto nestedStruct = cast(StructDecl)userType.declaration) {
-                        if (!nestedStruct.layoutComputed) {
-                            computeStructLayout(nestedStruct);
-                        }
-                    }
-                    // Handle nested class
-                    if (auto nestedClass = cast(ClassDecl)userType.declaration) {
-                        if (!nestedClass.layoutComputed) {
-                            computeClassLayout(nestedClass, pointerSize);
-                        }
-                    }
-                }
-                
-                size_t fieldSize = varDecl.type ? varDecl.type.size() : 4;
-                size_t fieldAlign = varDecl.type ? varDecl.type.alignment() : 4;
-                
-                // Align to field's requirement
-                if (fieldAlign > 0) {
-                    currentOffset = (currentOffset + fieldAlign - 1) & ~(fieldAlign - 1);
-                }
-                
-                // Record field info
-                StructField field;
-                field.name = varDecl.name;
-                field.type = varDecl.type;
-                field.offset = currentOffset;
-                field.size = fieldSize;
-                field.alignment = fieldAlign;
-                decl.fields ~= field;
-                
-                if (fieldAlign > maxAlign) maxAlign = fieldAlign;
-                currentOffset += fieldSize;
-            }
-        }
-        
-        // Pad to alignment
-        if (maxAlign > 0) {
-            currentOffset = (currentOffset + maxAlign - 1) & ~(maxAlign - 1);
-        }
-        
-        decl.classSize = currentOffset;
-        decl.classAlign = maxAlign;
-        decl.layoutComputed = true;
+
+        computeFieldLayout(decl, startOffset, startAlign);
     }
     
     private void collectVariableSymbol(VariableDecl decl) {
