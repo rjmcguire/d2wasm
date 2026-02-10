@@ -114,6 +114,12 @@ abstract class Type : ASTNode {
     size_t alignment() const {
         return size();
     }
+    
+    /// Is this an aggregate type (struct, class, static array)?
+    /// Aggregates are passed by address, not by value.
+    bool isAggregate() const {
+        return false;  // Override in aggregate types
+    }
 }
 
 /**
@@ -555,6 +561,9 @@ class ArrayType : Type {
     override bool isArray() const { return true; }
     override bool isFunction() const { return false; }
     
+    /// Arrays (both static and dynamic/slices) are aggregates
+    override bool isAggregate() const { return true; }
+    
     override size_t size() const {
         // Dynamic arrays are just pointers (8 bytes on 64-bit)
         if (!arraySize) return 8;
@@ -642,11 +651,25 @@ class UserType : Type {
     override bool isArray() const { return false; }
     override bool isFunction() const { return false; }
     
+    /// Structs and classes are aggregates (passed by address)
+    override bool isAggregate() const {
+        if (declaration) {
+            return cast(StructDecl)declaration !is null || 
+                   cast(ClassDecl)declaration !is null;
+        }
+        return false;
+    }
+    
     override size_t size() const {
         if (declaration) {
             if (auto structDecl = cast(StructDecl)declaration) {
                 if (structDecl.layoutComputed) {
                     return structDecl.structSize;
+                }
+            }
+            if (auto classDecl = cast(ClassDecl)declaration) {
+                if (classDecl.layoutComputed) {
+                    return classDecl.classSize;
                 }
             }
             // Interface refs are fat pointers: {obj_ptr, itable_ptr} = 8 bytes

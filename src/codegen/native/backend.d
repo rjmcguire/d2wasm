@@ -104,6 +104,11 @@ class NativeCompiledFunction : CompiledFunction {
     private uint tempSlot;               // stack offset for expression temporaries
     private uint tempSlotDepth;          // nesting depth for temp slot usage
     
+    // Struct return tracking (hidden result pointer pattern)
+    private bool currentFunctionHasHiddenResult;
+    private uint currentFunctionResultPtrOffset;
+    private StructDecl currentFunctionReturnStructDecl;
+    
     // For return statements to jump to
     private Label epilogueLabel;
     
@@ -229,7 +234,24 @@ class NativeCompiledFunction : CompiledFunction {
         localStaticArraySizes.clear();
         nextLocalOffset = 0;
         
-        // Reserve space for parameters first (they come in registers x0-x7)
+        // Check if function returns a struct (uses hidden result pointer)
+        bool hasHiddenResultPtr = false;
+        uint resultPtrOffset = 0;
+        StructDecl returnStructDecl = null;
+        if (auto userType = cast(UserType)func.returnType) {
+            if (auto sd = cast(StructDecl)userType.declaration) {
+                hasHiddenResultPtr = true;
+                returnStructDecl = sd;
+                // Hidden result pointer is passed in x0, save it
+                resultPtrOffset = nextLocalOffset;
+                nextLocalOffset += 8;  // 64-bit pointer
+            }
+        }
+        currentFunctionHasHiddenResult = hasHiddenResultPtr;
+        currentFunctionResultPtrOffset = resultPtrOffset;
+        currentFunctionReturnStructDecl = returnStructDecl;
+        
+        // Reserve space for parameters (x0/x1/x2... depending on hidden ptr)
         foreach (param; func.parameters) {
             localOffsets[param.name] = nextLocalOffset;
             
@@ -253,9 +275,10 @@ class NativeCompiledFunction : CompiledFunction {
         
         // Reserve extra space for expression temporaries
         // Need 40 bytes for slice append temps: element(4) + newCap(4) + newPtr(8) + loopIdx(4) + loopVal(4) + padding
+        // Plus space for struct construction temps (at tempSlot + 16 onwards)
         uint tempSlotOffset = nextLocalOffset + bodyLocalBytes;
         tempSlot = tempSlotOffset;  // Store for use in compileExpression
-        uint totalNeeded = tempSlotOffset + 48;  // 48 bytes for temps (slice append needs more)
+        uint totalNeeded = tempSlotOffset + 64;  // 64 bytes for temps (struct construction + slice append)
         totalLocalBytes = (totalNeeded + 15) & ~15;  // 16-byte aligned
         
         // Create epilogue label for return statements
@@ -268,10 +291,18 @@ class NativeCompiledFunction : CompiledFunction {
             gen.emitPrologue();
         }
         
+        // If function has hidden result pointer, spill it first (from x0)
+        if (currentFunctionHasHiddenResult) {
+            gen.emitStoreLocal(currentFunctionResultPtrOffset);  // Save x0 (64-bit ptr)
+        }
+        
         // Spill parameters from registers to stack
         // ARM64 calling convention: first 8 args in x0-x7
+        // If hidden result ptr, params are shifted: x1, x2, x3... instead of x0, x1, x2...
+        int regOffset = currentFunctionHasHiddenResult ? 1 : 0;
         foreach (i, param; func.parameters) {
-            if (i >= 4) {
+            int regIdx = cast(int)i + regOffset;
+            if (regIdx >= 4) {
                 throw new Exception("Native backend: more than 4 parameters not yet supported");
             }
             // Store parameter register to its stack slot
@@ -281,7 +312,7 @@ class NativeCompiledFunction : CompiledFunction {
             if (auto structDecl = param.name in localStructTypes) {
                 // Register contains pointer to struct - copy struct data to our stack
                 // First, get the source pointer into x9 (scratch register)
-                switch (i) {
+                switch (regIdx) {
                     case 0: gen.emitMoveX0ToX9(); break;
                     case 1: gen.emitMoveX1ToX9(); break;
                     case 2: gen.emitMoveX2ToX9(); break;
@@ -296,7 +327,7 @@ class NativeCompiledFunction : CompiledFunction {
                 }
             } else {
                 // Simple scalar - just store the register value
-                switch (i) {
+                switch (regIdx) {
                     case 0: gen.emitStoreLocal32(offset); break;        // x0
                     case 1: gen.emitStoreLocal32FromX1(offset); break;  // x1
                     case 2: gen.emitStoreLocal32FromX2(offset); break;  // x2
@@ -394,7 +425,30 @@ class NativeCompiledFunction : CompiledFunction {
             }
         } else if (auto ret = cast(ReturnStatement)stmt) {
             if (ret.value) {
-                compileExpression(ret.value);
+                if (currentFunctionHasHiddenResult && currentFunctionReturnStructDecl !is null) {
+                    // Struct return: copy result to hidden result pointer
+                    // First compile the expression once to get source address
+                    compileExpression(ret.value);  // x0 = address of result struct
+                    
+                    // Save source pointer to a temp slot
+                    uint srcTempSlot = tempSlot + 8;  // Use temp slot area
+                    gen.emitStoreLocal(srcTempSlot);  // Save 64-bit ptr
+                    
+                    // Copy struct data word by word
+                    uint structSize = cast(uint)currentFunctionReturnStructDecl.structSize;
+                    for (uint off = 0; off < structSize; off += 4) {
+                        // Load from source
+                        gen.emitLoadLocal(srcTempSlot);      // x0 = src ptr
+                        gen.emitLoadFromPointer(off);        // x0 = *(src + off)
+                        gen.emitMoveX0ToX9();                // x9 = value
+                        
+                        // Store to dest
+                        gen.emitLoadLocal(currentFunctionResultPtrOffset);  // x0 = dest ptr
+                        gen.emitStoreToPointerFromX9(off);   // *(dest + off) = x9
+                    }
+                } else {
+                    compileExpression(ret.value);
+                }
             }
             // Jump to epilogue (which will restore stack and return)
             gen.emitBranch(epilogueLabel);
@@ -459,11 +513,67 @@ class NativeCompiledFunction : CompiledFunction {
                                         for (size_t i = 0; i < sd.fields.length && i < call.arguments.length; i++) {
                                             auto field = sd.fields[i];
                                             uint fieldOffset = nextLocalOffset + cast(uint)field.offset;
+                                            uint valueSize = cast(uint)field.type.size();
+                                            
+                                            // Aggregate types (struct, class, static array) are passed
+                                            // by address — need to copy their data, not store address
+                                            if (field.type.isAggregate() && valueSize > 0) {
+                                                compileExpression(call.arguments[i]);  // x0 = address of source
+                                                // Copy word by word
+                                                for (uint off = 0; off < valueSize; off += 4) {
+                                                    gen.emitLoadFromPointer(off);
+                                                    gen.emitStoreLocal32(fieldOffset + off);
+                                                    if (off + 4 < valueSize) {
+                                                        compileExpression(call.arguments[i]);  // reload src addr
+                                                    }
+                                                }
+                                                continue;
+                                            }
+                                            
                                             compileExpression(call.arguments[i]);
                                             gen.emitStoreLocal32(fieldOffset);
                                         }
                                     }
                                 }
+                            } else if (symbol && symbol.kind == SymbolKind.Function) {
+                                // Function call returning struct — hidden result pointer pattern
+                                // ARM64: x0 = result ptr, x1..xN = actual args
+                                
+                                // First, compile and save all arguments to temp slots
+                                uint tempOffset = nextLocalOffset + varSize;
+                                uint[] argTemps;
+                                foreach (arg; call.arguments) {
+                                    compileExpression(arg);
+                                    gen.emitStoreLocal32(tempOffset);
+                                    argTemps ~= tempOffset;
+                                    tempOffset += 4;
+                                }
+                                
+                                // Load args into registers in reverse order (x3, x2, x1)
+                                // to avoid clobbering
+                                if (argTemps.length > 2) {
+                                    gen.emitLoadLocal32(argTemps[2]);
+                                    gen.emitMoveX0ToX3();
+                                }
+                                if (argTemps.length > 1) {
+                                    gen.emitLoadLocal32(argTemps[1]);
+                                    gen.emitMoveX0ToX2();
+                                }
+                                if (argTemps.length > 0) {
+                                    gen.emitLoadLocal32(argTemps[0]);
+                                    gen.emitMoveX0ToX1();
+                                }
+                                
+                                // Load result address into x0 (first arg)
+                                gen.emitStackAddress(nextLocalOffset);
+                                
+                                // Call the function
+                                auto funcLabelPtr = funcIdent.name in functionLabels;
+                                if (funcLabelPtr is null) {
+                                    throw new Exception("Function not compiled: " ~ funcIdent.name);
+                                }
+                                gen.emitCall(*funcLabelPtr);
+                                // Result is now written to nextLocalOffset
                             }
                         }
                     }
@@ -969,9 +1079,14 @@ class NativeCompiledFunction : CompiledFunction {
             // For local struct variables, compute address and load field
             if (auto ident = cast(IdentifierExpression)member.object) {
                 if (auto baseOffset = ident.name in localOffsets) {
-                    // Load from stack: local offset + field offset
                     uint totalOffset = *baseOffset + cast(uint)field.offset;
-                    gen.emitLoadLocal32(totalOffset);
+                    // Aggregate fields: emit address (for nested access or passing)
+                    // Scalar fields: load the value
+                    if (field.type.isAggregate()) {
+                        gen.emitStackAddress(totalOffset);
+                    } else {
+                        gen.emitLoadLocal32(totalOffset);
+                    }
                     return;
                 }
             }
@@ -980,7 +1095,19 @@ class NativeCompiledFunction : CompiledFunction {
             compileExpression(member.object);
             // x0 now has pointer to struct
             uint fieldOffset = cast(uint)field.offset;
-            gen.emitLoadFromPointer(fieldOffset);
+            // Aggregate fields: compute address (for further nested access)
+            // Scalar fields: load the value
+            if (field.type.isAggregate()) {
+                // Add offset to pointer: x0 = x0 + fieldOffset
+                if (fieldOffset > 0) {
+                    gen.emitMoveX0ToX1();
+                    gen.emitImm32(stencil_load_imm32, cast(int)fieldOffset);
+                    gen.emit(stencil_add_i32);
+                }
+                // x0 now has address of nested aggregate
+            } else {
+                gen.emitLoadFromPointer(fieldOffset);
+            }
         } else if (auto arrLit = cast(ArrayLiteralExpression)expr) {
             // Array literal: [1, 2, 3]
             // Allocate space for data + slice struct
@@ -1337,10 +1464,10 @@ class NativeCompiledFunction : CompiledFunction {
      * Compile struct construction: allocate space on stack, initialize fields
      */
     private void compileStructConstruction(StructDecl structDecl, Expression[] args) {
-        // Allocate space for struct on the stack
+        // Use temp slot area for struct (don't grow nextLocalOffset during emission)
+        // tempSlot + 16 onwards is available for struct construction temps
         uint structSize = cast(uint)structDecl.structSize;
-        uint structOffset = nextLocalOffset;
-        nextLocalOffset += structSize;
+        uint structOffset = tempSlot + 16;  // After other temp slots
         
         // Initialize each field from arguments
         for (size_t i = 0; i < structDecl.fields.length && i < args.length; i++) {
@@ -1754,6 +1881,21 @@ class NativeCompiledFunction : CompiledFunction {
             if (symbol) {
                 if (auto userType = cast(UserType)symbol.type) {
                     return cast(StructDecl)userType.declaration;
+                }
+            }
+        }
+        // For member expressions (nested struct access like o.inner), 
+        // get the struct type of the field
+        if (auto member = cast(MemberExpression)expr) {
+            // First get the struct decl of the base object
+            auto baseDecl = getStructDeclFromExpr(member.object);
+            if (baseDecl !is null) {
+                // Find the field and check if it's a struct type
+                auto field = baseDecl.getField(member.memberName);
+                if (field !is null) {
+                    if (auto userType = cast(UserType)field.type) {
+                        return cast(StructDecl)userType.declaration;
+                    }
                 }
             }
         }

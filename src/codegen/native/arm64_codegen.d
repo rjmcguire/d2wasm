@@ -601,6 +601,13 @@ struct NativeCodeGen {
         emitRaw32(0xB9000001 | (imm12 << 10));
     }
     
+    /// Store 32-bit value from x9 to pointer in x0 with offset: STR w9, [x0, #offset]
+    void emitStoreToPointerFromX9(uint offset) {
+        // STR w9, [x0, #offset] where offset is scaled by 4
+        uint imm12 = offset / 4;
+        emitRaw32(0xB9000009 | (imm12 << 10));  // Rt = w9 = 9
+    }
+    
     // ========== Finalization ==========
     
     /// Resolve all branch targets and make code executable

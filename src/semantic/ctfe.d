@@ -41,6 +41,7 @@ class CTFEError : Exception {
 struct CTFEResult {
     bool isString;
     bool isArray;
+    bool isStruct;
     string stringValue;
     long intValue;
     long[] arrayValues;
@@ -64,6 +65,14 @@ struct CTFEResult {
         r.isArray = true;
         r.arrayValues = values;
         r.arrayBytes = bytes;
+        return r;
+    }
+    
+    static CTFEResult fromStruct(long[] fieldValues, ubyte[] bytes) {
+        CTFEResult r;
+        r.isStruct = true;
+        r.arrayValues = fieldValues;  // Struct field values (as ints)
+        r.arrayBytes = bytes;         // Raw bytes
         return r;
     }
 }
@@ -775,6 +784,16 @@ class CTFEEvaluator {
             }
         }
         
+        // Check if function returns a struct (uses hidden result pointer)
+        if (auto userType = cast(UserType)funcDecl.returnType) {
+            if (userType.name != "string") {
+                if (auto structDecl = cast(StructDecl)userType.declaration) {
+                    log(3, "CTFE: Function returns struct, evaluating with hidden param");
+                    return evaluateStructReturningFunction(funcDecl, callExpr.arguments, structDecl);
+                }
+            }
+        }
+        
         // Check if this is a simple function that only contains CTFE intrinsics
         if (canInterpretDirectly(funcDecl)) {
             log(3, "CTFE: Interpreting ", funcName, " directly");
@@ -918,6 +937,85 @@ class CTFEEvaluator {
         }
         
         return CTFEResult.fromArray(values, result.arrayBytes);
+    }
+    
+    /**
+     * Evaluate a function that returns a struct via hidden result pointer.
+     */
+    CTFEResult evaluateStructReturningFunction(FunctionDecl funcDecl, Expression[] argExprs, StructDecl structDecl) {
+        import semantic.dependency_analyzer : DependencyAnalyzer;
+        import std.algorithm : filter;
+        import std.array : array;
+        
+        // Evaluate arguments
+        long[] args;
+        foreach (arg; argExprs) {
+            args ~= evaluateSimpleExpression(arg);
+        }
+        
+        uint structSize = cast(uint)structDecl.structSize;
+        log(3, "CTFE: Calling ", funcDecl.name, " with args ", args, " returning struct of ", structSize, " bytes");
+        
+        // Find dependencies and compile if needed
+        auto analyzer = new DependencyAnalyzer(symbolTable, allDeclarations);
+        auto dependencies = analyzer.findDependencies(funcDecl);
+        auto newFuncs = dependencies.filter!(f => f.name !in compiledFunctions).array;
+        
+        if (!newFuncs.empty) {
+            statCacheMisses++;
+            statFunctionsCompiled += cast(uint)newFuncs.length;
+            log(3, "CTFE: Compiling ", newFuncs.length, " new functions for ", funcDecl.name);
+            
+            auto typeChecker = new TypeChecker(symbolTable);
+            foreach (dep; newFuncs) {
+                try {
+                    typeChecker.checkFunctionDeclaration(dep);
+                } catch (TypeError e) {
+                    throw new CTFEError("CTFE type check error in " ~ dep.name ~ ": " ~ e.msg);
+                }
+            }
+            
+            if (cachedContext !is null) {
+                cachedContext.dispose();
+                cachedContext = null;
+            }
+            
+            auto allFuncs = contextFunctions ~ newFuncs;
+            cachedContext = backend.compileWithDependencies(allFuncs, funcDecl.name);
+            if (cachedContext is null) {
+                throw new CTFEError("CTFE compile error: " ~ backend.error());
+            }
+            
+            contextFunctions = allFuncs;
+            foreach (f; newFuncs) {
+                compiledFunctions[f.name] = true;
+            }
+        } else {
+            statCacheHits++;
+        }
+        
+        // Execute with large return - struct is written to result buffer
+        auto result = cachedContext.callWithLargeReturn(funcDecl.name, args, structSize);
+        
+        if (!result.success) {
+            throw new CTFEError("CTFE execution error: " ~ result.error);
+        }
+        
+        log(3, "CTFE: ", funcDecl.name, " returned ", result.arrayBytes.length, " bytes");
+        
+        // Return struct as array of field values (assuming 4-byte fields for now)
+        long[] values;
+        for (uint i = 0; i < result.arrayBytes.length; i += 4) {
+            if (i + 4 <= result.arrayBytes.length) {
+                int v = (cast(int)result.arrayBytes[i]) |
+                       (cast(int)result.arrayBytes[i+1] << 8) |
+                       (cast(int)result.arrayBytes[i+2] << 16) |
+                       (cast(int)result.arrayBytes[i+3] << 24);
+                values ~= v;
+            }
+        }
+        
+        return CTFEResult.fromStruct(values, result.arrayBytes);
     }
     
     /**

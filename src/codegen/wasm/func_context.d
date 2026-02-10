@@ -123,6 +123,7 @@ class FuncContext {
     bool hasLargeReturn = false;     // Function returns via hidden pointer
     uint resultPtrLocalIdx;          // WASM local index of hidden result pointer
     uint returnValueSize;            // Size of return value in bytes
+    uint returnTempLocalIdx;         // Temp local for struct return copy (pre-allocated)
     
     // Call stack frame info (milestone 144)
     bool enableStackTrace = false;
@@ -273,6 +274,12 @@ class FuncContext {
             }
         }
         paramCount = wasmLocalIdx;
+        
+        // Pre-allocate temp local for struct return copy (must be after paramCount)
+        if (hasLargeReturn) {
+            returnTempLocalIdx = cast(uint)localTypes.length;
+            localTypes ~= ValType.i32;
+        }
         
         // Register call stack frame info if stack trace is enabled
         if (e.enableStackTrace) {
@@ -913,14 +920,12 @@ class FuncContext {
         // dst = result pointer, src = top of stack
         // We need to pop src into a temp, then do the copy
         
-        // Store src address to temp local
-        uint tempLocal = cast(uint)localTypes.length;
-        localTypes ~= ValType.i32;  // Add temp local
+        // Store src address to pre-allocated temp local
         out_ ~= Op.local_set;
-        leb128u(out_, tempLocal);
+        leb128u(out_, returnTempLocalIdx);
         
         // Now copy from temp to result pointer
-        emitMemoryCopyFromLocal(out_, resultPtrLocalIdx, tempLocal, returnValueSize);
+        emitMemoryCopyFromLocal(out_, resultPtrLocalIdx, returnTempLocalIdx, returnValueSize);
     }
     
     /**
@@ -1181,10 +1186,39 @@ class FuncContext {
             return;
         }
         
-        // Struct construction: Point(10, 20) or Outer(Inner(1,2), 3)
+        // Struct construction or function call returning struct
         if (auto callExpr = cast(CallExpression)stmt.initializer) {
-            // Use unified struct init that handles nested structs
-            emitStructFieldsInit(out_, structDecl, callExpr.arguments, 
+            if (auto ident = cast(IdentifierExpression)callExpr.function_) {
+                auto sym = emitter.symbolTable.lookupSymbol(ident.name);
+                if (sym && sym.kind == SymbolKind.Type) {
+                    // Struct construction: Point(10, 20) or Outer(Inner(1,2), 3)
+                    // Guard against opCall overloads (not yet supported)
+                    if (auto userType = cast(UserType)sym.type) {
+                        if (!userType.declaration) {
+                            auto ts = emitter.symbolTable.lookupSymbol(userType.name);
+                            if (ts && ts.kind == SymbolKind.Type)
+                                userType.declaration = ts.declaration;
+                        }
+                        if (auto sd = cast(StructDecl)userType.declaration) {
+                            foreach (member; sd.members) {
+                                if (auto fd = cast(FunctionDecl)member) {
+                                    assert(fd.name != "opCall",
+                                        "opCall overloads not yet supported");
+                                }
+                            }
+                        }
+                    }
+                    emitStructFieldsInit(out_, structDecl, callExpr.arguments,
+                                        EmitAddrMode.fromFP, info.frameOffset);
+                    return;
+                }
+                // Function call returning aggregate — pass struct local's
+                // frame address directly as hidden result pointer
+                emitStructReturnCall(out_, ident.name, callExpr.arguments, info.frameOffset);
+                return;
+            }
+            // Fallback: assume struct construction (e.g. complex expression as target)
+            emitStructFieldsInit(out_, structDecl, callExpr.arguments,
                                 EmitAddrMode.fromFP, info.frameOffset);
             return;
         }
@@ -3441,6 +3475,13 @@ class FuncContext {
                     }
                 }
                 if (auto structDecl = cast(StructDecl)userType.declaration) {
+                    // Guard: opCall overloads not yet supported
+                    foreach (member; structDecl.members) {
+                        if (auto fd = cast(FunctionDecl)member) {
+                            assert(fd.name != "opCall",
+                                "opCall overloads not yet supported");
+                        }
+                    }
                     // Allocate temp, initialize, return pointer
                     emitStructConstructionToTemp(out_, structDecl, expr.arguments);
                     return;
@@ -3461,7 +3502,28 @@ class FuncContext {
                 calleeDecl = emitter.functions[*funcInfo].decl;
             }
         }
-        
+
+        // Check if callee returns aggregate via hidden pointer
+        bool calleeHasLargeReturn = false;
+        uint resultTempSize = 0;
+        if (calleeDecl && emitter.isLargeReturnType(calleeDecl.returnType)) {
+            calleeHasLargeReturn = true;
+            resultTempSize = computeLargeReturnSize(calleeDecl.returnType);
+
+            // Allocate temp for result: SP = SP - resultSize
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.spGlobal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, resultTempSize);
+            out_ ~= Op.i32_sub;
+            out_ ~= Op.global_set;
+            leb128u(out_, emitter.spGlobal);
+
+            // Push result pointer as first hidden argument
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.spGlobal);
+        }
+
         // Emit arguments (copy structs for pass-by-value semantics)
         uint totalCopySize = 0;
         foreach (argIdx, arg; expr.arguments) {
@@ -3675,7 +3737,7 @@ class FuncContext {
         out_ ~= Op.call;
         leb128u(out_, funcIdx);
         
-        // Restore SP after call (deallocate copies)
+        // Restore SP after call (deallocate arg copies only, not result temp)
         if (totalCopySize > 0) {
             out_ ~= Op.global_get;
             leb128u(out_, emitter.spGlobal);
@@ -3683,6 +3745,13 @@ class FuncContext {
             leb128s(out_, totalCopySize);
             out_ ~= Op.i32_add;
             out_ ~= Op.global_set;
+            leb128u(out_, emitter.spGlobal);
+        }
+
+        // For aggregate-returning functions, leave result address on WASM stack
+        // (result temp persists until function epilogue, like emitStructConstructionToTemp)
+        if (calleeHasLargeReturn) {
+            out_ ~= Op.global_get;
             leb128u(out_, emitter.spGlobal);
         }
     }
@@ -4114,6 +4183,158 @@ class FuncContext {
     }
     
     /**
+     * Compute the size in bytes for a large return type (struct or static array).
+     * Used by both emitCall and emitStructReturnCall to allocate result space.
+     */
+    uint computeLargeReturnSize(Type returnType) {
+        if (auto arrType = cast(ArrayType)returnType) {
+            if (arrType.arraySize !is null) {
+                uint elemCount = evaluateStaticArraySize(arrType.arraySize);
+                size_t elemSize = arrType.elementType.size();
+                if (elemSize == 0) elemSize = 4;
+                return elemCount * cast(uint)elemSize;
+            }
+            return WasmSliceLayout.sizeof;
+        }
+        if (auto userType = cast(UserType)returnType) {
+            if (!userType.declaration) {
+                auto sym = emitter.symbolTable.lookupSymbol(userType.name);
+                if (sym && sym.kind == SymbolKind.Type)
+                    userType.declaration = sym.declaration;
+            }
+            if (auto sd = cast(StructDecl)userType.declaration)
+                return cast(uint)sd.structSize;
+        }
+        return cast(uint)returnType.size();
+    }
+
+    /**
+     * Emit a call to a function that returns an aggregate (struct/static array)
+     * via hidden result pointer. The destination frame address is passed directly
+     * as the hidden first parameter, so the callee writes into the caller's frame.
+     */
+    void emitStructReturnCall(ref Appender!(ubyte[]) out_, string funcName,
+                              Expression[] args, int resultFrameOffset) {
+        // Push hidden result pointer as first argument: FP + resultFrameOffset
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        if (resultFrameOffset != 0) {
+            out_ ~= Op.i32_const;
+            leb128s(out_, resultFrameOffset);
+            out_ ~= Op.i32_add;
+        }
+
+        // Emit arguments (with struct/slice pass-by-value handling)
+        uint totalCopySize = 0;
+        foreach (arg; args) {
+            if (auto argIdent = cast(IdentifierExpression)arg) {
+                // Struct local: copy to temp, pass temp address
+                if (auto localInfo = argIdent.name in structLocals) {
+                    auto argStructDecl = localInfo.structDecl;
+                    uint structSize = cast(uint)argStructDecl.structSize;
+
+                    // Allocate temp: SP = SP - structSize
+                    out_ ~= Op.global_get;
+                    leb128u(out_, emitter.spGlobal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, structSize);
+                    out_ ~= Op.i32_sub;
+                    out_ ~= Op.global_set;
+                    leb128u(out_, emitter.spGlobal);
+
+                    // Copy from FP+offset to SP
+                    foreach (field; argStructDecl.fields) {
+                        out_ ~= Op.global_get;
+                        leb128u(out_, emitter.spGlobal);
+                        if (field.offset > 0) {
+                            out_ ~= Op.i32_const;
+                            leb128s(out_, cast(int)field.offset);
+                            out_ ~= Op.i32_add;
+                        }
+                        out_ ~= Op.local_get;
+                        leb128u(out_, fpLocal);
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, localInfo.frameOffset + cast(int)field.offset);
+                        out_ ~= Op.i32_add;
+                        out_ ~= Op.i32_load;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                        out_ ~= Op.i32_store;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                    }
+
+                    out_ ~= Op.global_get;
+                    leb128u(out_, emitter.spGlobal);
+                    totalCopySize += structSize;
+                    continue;
+                }
+
+                // Struct param: already a pointer, copy from it
+                if (auto paramInfo = argIdent.name in structParams) {
+                    auto argStructDecl = paramInfo.structDecl;
+                    uint structSize = cast(uint)argStructDecl.structSize;
+
+                    out_ ~= Op.global_get;
+                    leb128u(out_, emitter.spGlobal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, structSize);
+                    out_ ~= Op.i32_sub;
+                    out_ ~= Op.global_set;
+                    leb128u(out_, emitter.spGlobal);
+
+                    foreach (field; argStructDecl.fields) {
+                        out_ ~= Op.global_get;
+                        leb128u(out_, emitter.spGlobal);
+                        if (field.offset > 0) {
+                            out_ ~= Op.i32_const;
+                            leb128s(out_, cast(int)field.offset);
+                            out_ ~= Op.i32_add;
+                        }
+                        out_ ~= Op.local_get;
+                        leb128u(out_, paramInfo.localIndex);
+                        if (field.offset > 0) {
+                            out_ ~= Op.i32_const;
+                            leb128s(out_, cast(int)field.offset);
+                            out_ ~= Op.i32_add;
+                        }
+                        out_ ~= Op.i32_load;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                        out_ ~= Op.i32_store;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                    }
+
+                    out_ ~= Op.global_get;
+                    leb128u(out_, emitter.spGlobal);
+                    totalCopySize += structSize;
+                    continue;
+                }
+            }
+
+            // Non-aggregate argument
+            emitExpression(out_, arg);
+        }
+
+        // Call
+        uint funcIdx = emitter.getFuncIndex(funcName);
+        out_ ~= Op.call;
+        leb128u(out_, funcIdx);
+
+        // Deallocate arg copies (not the result — that lives in the caller's frame)
+        if (totalCopySize > 0) {
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.spGlobal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, totalCopySize);
+            out_ ~= Op.i32_add;
+            out_ ~= Op.global_set;
+            leb128u(out_, emitter.spGlobal);
+        }
+    }
+
+    /**
      * Emit struct construction to a temporary on shadow stack.
      * Leaves pointer to the struct on the value stack.
      */
@@ -4169,6 +4390,49 @@ class FuncContext {
                         }
                     }
                 }
+            }
+            
+            // Aggregate types (structs, classes, static arrays) are passed by address
+            // emitExpression for these types yields an ADDRESS, not a value
+            uint valueSize = cast(uint)field.type.size();
+            if (field.type.isAggregate() && valueSize > 0) {
+                // Emit source address
+                emitExpression(out_, args[i]);  // Stack: [src_addr]
+                
+                // Copy word by word
+                for (uint off = 0; off < valueSize; off += 4) {
+                    // Destination address
+                    if (baseMode == EmitAddrMode.fromFP) {
+                        out_ ~= Op.local_get;
+                        leb128u(out_, fpLocal);
+                    } else {
+                        out_ ~= Op.global_get;
+                        leb128u(out_, emitter.spGlobal);
+                    }
+                    int destOff = fieldAddr + cast(int)off;
+                    if (destOff != 0) {
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, destOff);
+                        out_ ~= Op.i32_add;
+                    }
+                    
+                    // Load from source: duplicate src_addr, add offset, load
+                    emitExpression(out_, args[i]);  // Stack: [dest_addr, src_addr]
+                    if (off != 0) {
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, cast(int)off);
+                        out_ ~= Op.i32_add;
+                    }
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                    
+                    // Store to destination: Stack: [dest_addr, value]
+                    out_ ~= Op.i32_store;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                }
+                continue;
             }
             
             // Emit destination address based on mode
