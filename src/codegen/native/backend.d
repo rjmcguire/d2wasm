@@ -212,8 +212,9 @@ class NativeCompiledFunction : CompiledFunction {
         if (!gen.finalize()) {
             throw new Exception("Failed to finalize native code");
         }
+
     }
-    
+
     private void compileFunction(FunctionDecl func) {
         import std.stdio : writeln;
         
@@ -239,6 +240,9 @@ class NativeCompiledFunction : CompiledFunction {
         uint resultPtrOffset = 0;
         StructDecl returnStructDecl = null;
         if (auto userType = cast(UserType)func.returnType) {
+            resolveUserType(userType);
+            assert(userType.declaration !is null,
+                "UserType '" ~ userType.name ~ "' has null declaration for return type of '" ~ func.name ~ "'");
             if (auto sd = cast(StructDecl)userType.declaration) {
                 hasHiddenResultPtr = true;
                 returnStructDecl = sd;
@@ -250,6 +254,10 @@ class NativeCompiledFunction : CompiledFunction {
         currentFunctionHasHiddenResult = hasHiddenResultPtr;
         currentFunctionResultPtrOffset = resultPtrOffset;
         currentFunctionReturnStructDecl = returnStructDecl;
+        if (hasHiddenResultPtr) {
+            assert(resultPtrOffset % 8 == 0,
+                "Hidden result pointer offset must be 8-byte aligned for STR x0");
+        }
         
         // Reserve space for parameters (x0/x1/x2... depending on hidden ptr)
         foreach (param; func.parameters) {
@@ -258,7 +266,8 @@ class NativeCompiledFunction : CompiledFunction {
             // Check if parameter is a struct type
             uint paramSize = 4;  // default for int, bool, etc.
             if (auto userType = cast(UserType)param.type) {
-                assert(userType.declaration !is null, 
+                resolveUserType(userType);
+                assert(userType.declaration !is null,
                     "UserType '" ~ userType.name ~ "' has null declaration - type linking failed");
                 if (auto structDecl = cast(StructDecl)userType.declaration) {
                     assert(structDecl.structSize > 0,
@@ -376,6 +385,7 @@ class NativeCompiledFunction : CompiledFunction {
         } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
             // Check type to determine size
             if (auto userType = cast(UserType)varDecl.type) {
+                resolveUserType(userType);
                 assert(userType.declaration !is null,
                     "UserType '" ~ userType.name ~ "' has null declaration in countLocalBytes");
                 if (auto sd = cast(StructDecl)userType.declaration) {
@@ -427,6 +437,10 @@ class NativeCompiledFunction : CompiledFunction {
             if (ret.value) {
                 if (currentFunctionHasHiddenResult && currentFunctionReturnStructDecl !is null) {
                     // Struct return: copy result to hidden result pointer
+                    assert(currentFunctionReturnStructDecl.structSize > 0,
+                        "Struct return with zero-size struct");
+                    assert(tempSlot + 8 + 8 <= totalLocalBytes,
+                        "srcTempSlot overflows frame");
                     // First compile the expression once to get source address
                     compileExpression(ret.value);  // x0 = address of result struct
                     
@@ -461,6 +475,7 @@ class NativeCompiledFunction : CompiledFunction {
             uint varSize = 4;  // default to 4 bytes for int
             
             if (auto userType = cast(UserType)varDecl.type) {
+                resolveUserType(userType);
                 assert(userType.declaration !is null,
                     "UserType '" ~ userType.name ~ "' has null declaration for variable '" ~ varDecl.name ~ "'");
                 if (auto sd = cast(StructDecl)userType.declaration) {
@@ -506,6 +521,12 @@ class NativeCompiledFunction : CompiledFunction {
                     if (auto call = cast(CallExpression)varDecl.initializer) {
                         if (auto funcIdent = cast(IdentifierExpression)call.function_) {
                             auto symbol = symbolTable.lookupSymbol(funcIdent.name);
+                            assert(symbol !is null,
+                                "Struct var '" ~ varDecl.name ~ "' initializer calls '" ~
+                                funcIdent.name ~ "' which is not in symbol table");
+                            assert(symbol.kind == SymbolKind.Type || symbol.kind == SymbolKind.Function,
+                                "Struct var '" ~ varDecl.name ~ "' initializer calls '" ~
+                                funcIdent.name ~ "' which is neither Type nor Function");
                             if (symbol && symbol.kind == SymbolKind.Type) {
                                 if (auto ut = cast(UserType)symbol.type) {
                                     if (auto sd = cast(StructDecl)ut.declaration) {
@@ -538,7 +559,10 @@ class NativeCompiledFunction : CompiledFunction {
                             } else if (symbol && symbol.kind == SymbolKind.Function) {
                                 // Function call returning struct — hidden result pointer pattern
                                 // ARM64: x0 = result ptr, x1..xN = actual args
-                                
+                                assert((funcIdent.name in functionLabels) !is null,
+                                    "Struct return call to '" ~ funcIdent.name ~
+                                    "' but no function label exists");
+
                                 // First, compile and save all arguments to temp slots
                                 uint tempOffset = nextLocalOffset + varSize;
                                 uint[] argTemps;
@@ -1468,6 +1492,12 @@ class NativeCompiledFunction : CompiledFunction {
         // tempSlot + 16 onwards is available for struct construction temps
         uint structSize = cast(uint)structDecl.structSize;
         uint structOffset = tempSlot + 16;  // After other temp slots
+        import std.format : format;
+        assert(structOffset + structSize <= totalLocalBytes,
+            format("Struct construction temp overflows frame: offset=%d size=%d frame=%d",
+                structOffset, structSize, totalLocalBytes));
+        assert(structDecl.fields.length > 0,
+            "Struct '" ~ structDecl.name ~ "' has no fields");
         
         // Initialize each field from arguments
         for (size_t i = 0; i < structDecl.fields.length && i < args.length; i++) {
@@ -1880,11 +1910,12 @@ class NativeCompiledFunction : CompiledFunction {
             auto symbol = symbolTable.lookupSymbol(ident.name);
             if (symbol) {
                 if (auto userType = cast(UserType)symbol.type) {
+                    resolveUserType(userType);
                     return cast(StructDecl)userType.declaration;
                 }
             }
         }
-        // For member expressions (nested struct access like o.inner), 
+        // For member expressions (nested struct access like o.inner),
         // get the struct type of the field
         if (auto member = cast(MemberExpression)expr) {
             // First get the struct decl of the base object
@@ -1894,6 +1925,7 @@ class NativeCompiledFunction : CompiledFunction {
                 auto field = baseDecl.getField(member.memberName);
                 if (field !is null) {
                     if (auto userType = cast(UserType)field.type) {
+                        resolveUserType(userType);
                         return cast(StructDecl)userType.declaration;
                     }
                 }
@@ -1905,6 +1937,7 @@ class NativeCompiledFunction : CompiledFunction {
                 auto symbol = symbolTable.lookupSymbol(funcIdent.name);
                 if (symbol && symbol.kind == SymbolKind.Type) {
                     if (auto userType = cast(UserType)symbol.type) {
+                        resolveUserType(userType);
                         return cast(StructDecl)userType.declaration;
                     }
                 }
@@ -1913,6 +1946,15 @@ class NativeCompiledFunction : CompiledFunction {
         return null;
     }
     
+    /// Resolve a UserType's declaration from the symbol table if not already linked.
+    private void resolveUserType(UserType userType) {
+        if (userType.declaration is null && symbolTable !is null) {
+            auto sym = symbolTable.lookupSymbol(userType.name);
+            if (sym && sym.kind == SymbolKind.Type)
+                userType.declaration = sym.declaration;
+        }
+    }
+
     override ExecutionResult call(long[] args) {
         import codegen.native.codegen_interface : setjmp;
         
