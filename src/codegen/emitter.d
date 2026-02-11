@@ -838,6 +838,12 @@ class BinaryEmitter {
     }
     
     private void collectFunction(FunctionDecl decl) {
+        // Skip methods — they are collected via collectStructMethods/collectClassMethods
+        // when their parent StructDecl/ClassDecl is processed (which sets structParent/classParent)
+        if (decl.isMethod && decl.parent !is null) {
+            return;
+        }
+
         // Skip CTFE-only functions that use:
         // - variadic intrinsics (like __writeln) - until we implement variadic args struct
         // - __ctfe_runtime module - until we implement host linking for it
