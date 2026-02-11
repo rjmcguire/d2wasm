@@ -94,6 +94,18 @@ private bool isStringType(Type t) {
     return false;
 }
 
+/// Compute a unique key for a function (mangled name for methods).
+/// Same logic as DependencyAnalyzer.funcKey — duplicated here to avoid coupling.
+private string ctfeFuncKey(FunctionDecl func) {
+    if (func.isMethod && func.parent !is null) {
+        if (auto sd = cast(StructDecl)func.parent)
+            return sd.name ~ "_" ~ func.name;
+        if (auto cd = cast(ClassDecl)func.parent)
+            return cd.name ~ "_" ~ func.name;
+    }
+    return func.name;
+}
+
 class CTFEEvaluator {
     private SymbolTable symbolTable;
     private Declaration[] allDeclarations;
@@ -892,7 +904,7 @@ class CTFEEvaluator {
         auto dependencies = analyzer.findDependencies(funcDecl);
         
         // Check which functions are new (not yet in context)
-        auto newFuncs = dependencies.filter!(f => f.name !in compiledFunctions).array;
+        auto newFuncs = dependencies.filter!(f => ctfeFuncKey(f) !in compiledFunctions).array;
         
         // Recompile if we have new functions
         if (!newFuncs.empty) {
@@ -923,7 +935,7 @@ class CTFEEvaluator {
             
             contextFunctions = allFuncs;
             foreach (f; newFuncs) {
-                compiledFunctions[f.name] = true;
+                compiledFunctions[ctfeFuncKey(f)] = true;
             }
         } else {
             statCacheHits++;
@@ -974,7 +986,7 @@ class CTFEEvaluator {
         // Find dependencies and compile if needed
         auto analyzer = new DependencyAnalyzer(symbolTable, allDeclarations);
         auto dependencies = analyzer.findDependencies(funcDecl);
-        auto newFuncs = dependencies.filter!(f => f.name !in compiledFunctions).array;
+        auto newFuncs = dependencies.filter!(f => ctfeFuncKey(f) !in compiledFunctions).array;
         
         if (!newFuncs.empty) {
             statCacheMisses++;
@@ -1003,7 +1015,7 @@ class CTFEEvaluator {
             
             contextFunctions = allFuncs;
             foreach (f; newFuncs) {
-                compiledFunctions[f.name] = true;
+                compiledFunctions[ctfeFuncKey(f)] = true;
             }
         } else {
             statCacheHits++;
@@ -1436,7 +1448,7 @@ class CTFEEvaluator {
         statCallCount++;
         
         // Check which functions are new (not yet in context)
-        auto newFuncs = dependencies.filter!(f => f.name !in compiledFunctions).array;
+        auto newFuncs = dependencies.filter!(f => ctfeFuncKey(f) !in compiledFunctions).array;
         bool needsRecompile = newFuncs.length > 0;
         
         if (needsRecompile) {
@@ -1472,7 +1484,7 @@ class CTFEEvaluator {
             // Only mark as compiled after successful compilation
             contextFunctions = allFuncs;
             foreach (f; newFuncs) {
-                compiledFunctions[f.name] = true;
+                compiledFunctions[ctfeFuncKey(f)] = true;
             }
         } else {
             statCacheHits++;

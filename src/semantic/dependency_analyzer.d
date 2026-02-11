@@ -141,6 +141,12 @@ class DependencyAnalyzer {
             if (varDecl.initializer) {
                 calls ~= findCallsInExpression(varDecl.initializer);
             }
+        } else if (auto mixinStmt = cast(MixinStatement)stmt) {
+            if (mixinStmt.isExpanded) {
+                foreach (s; mixinStmt.expandedStatements) {
+                    calls ~= findCallsInStatement(s);
+                }
+            }
         }
         // Note: AssignmentStatement doesn't exist - assignments are expressions
 
@@ -180,8 +186,12 @@ class DependencyAnalyzer {
         } else if (auto assign = cast(AssignmentExpression)expr) {
             calls ~= findCallsInExpression(assign.left);
             calls ~= findCallsInExpression(assign.right);
+        } else if (auto slice = cast(SliceExpression)expr) {
+            calls ~= findCallsInExpression(slice.array);
+            calls ~= findCallsInExpression(slice.start);
+            calls ~= findCallsInExpression(slice.end);
         }
-        // IdentifierExpression, LiteralExpression - no calls inside
+        // IdentifierExpression, LiteralExpression, ImportExpression - no calls inside
 
         return calls;
     }

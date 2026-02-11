@@ -220,6 +220,8 @@ class NativeCompiledFunction : CompiledFunction {
         // Find entry function and store its param count
         if (auto entryFunc = entryFuncName in functionDecls) {
             this.paramCount = (*entryFunc).parameters.length;
+        } else {
+            assert(0, "Entry function not found: " ~ entryFuncName);
         }
         
         // Compile all functions
@@ -230,6 +232,8 @@ class NativeCompiledFunction : CompiledFunction {
         // Set entry point to the entry function
         if (auto entryLabel = entryFuncName in functionLabels) {
             entryPoint = (*entryLabel).offset;
+        } else {
+            assert(0, "Entry function label not found: " ~ entryFuncName);
         }
         
         // Finalize (resolve branches, make executable)
@@ -339,12 +343,12 @@ class NativeCompiledFunction : CompiledFunction {
                     // Static array param — register holds pointer to caller's data
                     nli.kind = VarKind.staticArray;
                     // Evaluate array size
-                    if (auto sizeLit = cast(LiteralExpression)arrayType.arraySize) {
-                        uint elemCount = cast(uint)sizeLit.value.get!long();
-                        nli.staticArraySize = elemCount;
-                        nli.staticArrayElemSize = 4;  // assume int elements for now
-                        paramSize = elemCount * 4;
-                    }
+                    auto sizeLit = cast(LiteralExpression)arrayType.arraySize;
+                    assert(sizeLit !is null, "Static array param size is not a LiteralExpression");
+                    uint elemCount = cast(uint)sizeLit.value.get!long();
+                    nli.staticArraySize = elemCount;
+                    nli.staticArrayElemSize = 4;  // assume int elements for now
+                    paramSize = elemCount * 4;
                 } else {
                     // Dynamic array (slice) param
                     nli.kind = VarKind.slice;
@@ -388,7 +392,7 @@ class NativeCompiledFunction : CompiledFunction {
             switch (thisReg) {
                 case 0: break;  // already in x0
                 case 1: gen.emitMoveX1ToX0(); break;
-                default: break;
+                default: assert(0, "this register > 1 not supported");
             }
             gen.emitStoreLocal(currentThisOffset);  // Save 64-bit pointer
         }
@@ -511,12 +515,11 @@ class NativeCompiledFunction : CompiledFunction {
                 } else {
                     // Static array: inline storage for N elements
                     // arraySize is a LiteralExpression with the size
-                    if (auto sizeLit = cast(LiteralExpression)arrType.arraySize) {
-                        if (sizeLit.value.type == typeid(long)) {
-                            uint length = cast(uint)sizeLit.value.get!long();
-                            bytes = length * 4;  // 4 bytes per element
-                        }
-                    }
+                    auto sizeLit = cast(LiteralExpression)arrType.arraySize;
+                    assert(sizeLit !is null, "Static array size is not a LiteralExpression");
+                    assert(sizeLit.value.type == typeid(long), "Static array size literal is not a long");
+                    uint length = cast(uint)sizeLit.value.get!long();
+                    bytes = length * 4;  // 4 bytes per element
                 }
             } else {
                 bytes = 4;  // int, bool, etc.
@@ -617,13 +620,12 @@ class NativeCompiledFunction : CompiledFunction {
                     }
                 } else {
                     // Static array: inline storage for N elements
-                    if (auto sizeLit = cast(LiteralExpression)arrType.arraySize) {
-                        if (sizeLit.value.type == typeid(long)) {
-                            uint length = cast(uint)sizeLit.value.get!long();
-                            varSize = length * 4;  // 4 bytes per element
-                            staticArrayLength = length;
-                        }
-                    }
+                    auto sizeLit = cast(LiteralExpression)arrType.arraySize;
+                    assert(sizeLit !is null, "Static array size is not a LiteralExpression");
+                    assert(sizeLit.value.type == typeid(long), "Static array size literal is not a long");
+                    uint length = cast(uint)sizeLit.value.get!long();
+                    varSize = length * 4;  // 4 bytes per element
+                    staticArrayLength = length;
                 }
             }
             
@@ -1220,7 +1222,7 @@ class NativeCompiledFunction : CompiledFunction {
                                 case 1: gen.emitMoveX0ToX1(); break;
                                 case 2: gen.emitMoveX0ToX2(); break;
                                 case 3: gen.emitMoveX0ToX3(); break;
-                                default: break;
+                                default: assert(0, "argument register > 3");
                             }
                         }
                     } else {
@@ -1234,7 +1236,7 @@ class NativeCompiledFunction : CompiledFunction {
                                 case 1: gen.emitMoveX0ToX1(); break;
                                 case 2: gen.emitMoveX0ToX2(); break;
                                 case 3: gen.emitMoveX0ToX3(); break;
-                                default: break;
+                                default: assert(0, "argument register > 3");
                             }
                         }
                     }
@@ -1573,7 +1575,7 @@ class NativeCompiledFunction : CompiledFunction {
                     case 0: gen.emitMoveX0ToX1(); break;
                     case 1: gen.emitMoveX0ToX2(); break;
                     case 2: gen.emitMoveX0ToX3(); break;
-                    default: break;
+                    default: assert(0, "method argument register > 3");
                 }
             }
         } else {
@@ -1584,7 +1586,7 @@ class NativeCompiledFunction : CompiledFunction {
                     case 0: gen.emitMoveX0ToX1(); break;
                     case 1: gen.emitMoveX0ToX2(); break;
                     case 2: gen.emitMoveX0ToX3(); break;
-                    default: break;
+                    default: assert(0, "method argument register > 3");
                 }
             }
         }

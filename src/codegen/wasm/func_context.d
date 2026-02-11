@@ -439,6 +439,12 @@ class FuncContext {
         } else if (auto forStmt = cast(ForStatement)stmt) {
             if (forStmt.init) collectLocals(forStmt.init);
             collectLocals(forStmt.body_);
+        } else if (auto mixinStmt = cast(MixinStatement)stmt) {
+            if (mixinStmt.isExpanded) {
+                foreach (s; mixinStmt.expandedStatements) {
+                    collectLocals(s);
+                }
+            }
         }
     }
     
