@@ -1498,8 +1498,8 @@ class NativeCompiledFunction : CompiledFunction {
                 throw new Exception("Can only sub-slice a slice variable in native backend");
 
             uint elemSize = info.elemSize;
-            uint tempOffset = nextLocalOffset;
-            nextLocalOffset += NativeSliceLayout.sizeof;
+            uint tempOffset = (nextLocalOffset + 7) & ~7;  // 8-byte align for 64-bit ptr store
+            nextLocalOffset = tempOffset + cast(uint)NativeSliceLayout.sizeof;
 
             // Compute new ptr = source.ptr + start * elemSize
             // Load source.ptr (64-bit)

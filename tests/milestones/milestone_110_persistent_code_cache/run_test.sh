@@ -30,11 +30,11 @@ OUTPUT1=$("$COMPILER" "$TEST_FILE" -o "$CACHE_DIR/test.wasm" --cache="$CACHE_DIR
 HITS1=$(echo "$OUTPUT1" | grep -o '"cacheHits": [0-9]*' | grep -o '[0-9]*')
 MISSES1=$(echo "$OUTPUT1" | grep -o '"cacheMisses": [0-9]*' | grep -o '[0-9]*')
 
-if [ "$HITS1" != "0" ] || [ "$MISSES1" != "2" ]; then
-    echo "FAIL: First compile should have 0 hits, 2 misses. Got hits=$HITS1 misses=$MISSES1"
+if [ "$HITS1" != "0" ] || [ "$MISSES1" != "7" ]; then
+    echo "FAIL: First compile should have 0 hits, 7 misses. Got hits=$HITS1 misses=$MISSES1"
     exit 1
 fi
-echo "  OK: 0 hits, 2 misses"
+echo "  OK: 0 hits, 7 misses"
 
 # Test 2: Second compilation (same source) - should have all cache hits
 echo "Test 2: Second compilation (same source)..."
@@ -42,11 +42,11 @@ OUTPUT2=$("$COMPILER" "$TEST_FILE" -o "$CACHE_DIR/test.wasm" --cache="$CACHE_DIR
 HITS2=$(echo "$OUTPUT2" | grep -o '"cacheHits": [0-9]*' | grep -o '[0-9]*')
 MISSES2=$(echo "$OUTPUT2" | grep -o '"cacheMisses": [0-9]*' | grep -o '[0-9]*')
 
-if [ "$HITS2" != "2" ] || [ "$MISSES2" != "0" ]; then
-    echo "FAIL: Second compile should have 2 hits, 0 misses. Got hits=$HITS2 misses=$MISSES2"
+if [ "$HITS2" != "7" ] || [ "$MISSES2" != "0" ]; then
+    echo "FAIL: Second compile should have 7 hits, 0 misses. Got hits=$HITS2 misses=$MISSES2"
     exit 1
 fi
-echo "  OK: 2 hits, 0 misses"
+echo "  OK: 7 hits, 0 misses"
 
 # Test 3: Modified source - only changed function should miss
 echo "Test 3: Modified source..."
@@ -64,11 +64,11 @@ OUTPUT3=$("$COMPILER" "$TEST_FILE" -o "$CACHE_DIR/test.wasm" --cache="$CACHE_DIR
 HITS3=$(echo "$OUTPUT3" | grep -o '"cacheHits": [0-9]*' | grep -o '[0-9]*')
 MISSES3=$(echo "$OUTPUT3" | grep -o '"cacheMisses": [0-9]*' | grep -o '[0-9]*')
 
-if [ "$HITS3" != "1" ] || [ "$MISSES3" != "1" ]; then
-    echo "FAIL: Modified source should have 1 hit, 1 miss. Got hits=$HITS3 misses=$MISSES3"
+if [ "$HITS3" != "6" ] || [ "$MISSES3" != "1" ]; then
+    echo "FAIL: Modified source should have 6 hits, 1 miss. Got hits=$HITS3 misses=$MISSES3"
     exit 1
 fi
-echo "  OK: 1 hit, 1 miss"
+echo "  OK: 6 hit, 1 miss"
 
 # Test 4: Verify correctness of output
 RESULT=$(wasm3 --func main "$CACHE_DIR/test.wasm" 2>&1 | grep -o 'Result: [0-9]*' | grep -o '[0-9]*')
