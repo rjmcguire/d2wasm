@@ -987,6 +987,14 @@ class NativeCompiledFunction : CompiledFunction {
                 gen.emitImm32(stencil_load_imm32, lit.value.get!bool ? 1 : 0);
             } else if (lit.value.type == typeid(char)) {
                 gen.emitImm32(stencil_load_imm32, cast(int)lit.value.get!char);
+            } else if (lit.value.type == typeid(string)) {
+                // String literal in expression context (e.g., as a call argument)
+                // Allocate a temp slice on the local stack, populate it, return pointer
+                string strVal = lit.value.get!string();
+                uint tempOffset = (nextLocalOffset + 7) & ~7;  // 8-byte align
+                nextLocalOffset = tempOffset + cast(uint)NativeSliceLayout.sizeof;
+                compileStringLiteralInit(tempOffset, strVal);
+                gen.emitStackAddress(tempOffset);
             } else {
                 throw new Exception("Literal type not supported: " ~ lit.value.type.toString());
             }

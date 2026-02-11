@@ -24,6 +24,7 @@ import std.conv;
 import std.format;
 import std.array;
 import std.string;
+import core.time : MonoTime, Duration;
 
 /**
  * CTFE evaluation error
@@ -122,6 +123,9 @@ class CTFEEvaluator {
     private uint statCacheHits;           // times we reused cached context
     private uint statCacheMisses;         // times we needed to compile new functions
     private uint statCallCount;           // total CTFE calls
+    private Duration statCompileTime;     // total time spent compiling
+    private Duration statExecTime;        // total time spent executing
+    private Duration statAnalysisTime;    // total time in dependency analysis
     
     // CTFE Arena for __ctfe_runtime memory allocation
     private static struct CTFEArena {
@@ -179,7 +183,18 @@ class CTFEEvaluator {
         return format("CTFE Stats: %d calls, %d functions compiled, %d cache hits, %d cache misses",
             statCallCount, statFunctionsCompiled, statCacheHits, statCacheMisses);
     }
-    
+
+    private static string fmtDuration(Duration d) {
+        import std.format : format;
+        auto usecs = d.total!"usecs";
+        if (usecs < 1000)
+            return format("%d us", usecs);
+        else if (usecs < 1_000_000)
+            return format("%.2f ms", usecs / 1000.0);
+        else
+            return format("%.3f s", usecs / 1_000_000.0);
+    }
+
     /**
      * Print CTFE statistics to stdout.
      */
@@ -191,6 +206,11 @@ class CTFEEvaluator {
                 auto hitRate = statCacheHits * 100 / statCallCount;
                 log(2, "  Cache hit rate: ", hitRate, "%");
             }
+            auto totalTime = statAnalysisTime + statCompileTime + statExecTime;
+            log(2, "  Timing: analysis=", fmtDuration(statAnalysisTime),
+                ", compile=", fmtDuration(statCompileTime),
+                ", exec=", fmtDuration(statExecTime),
+                ", total=", fmtDuration(totalTime));
         }
     }
     
@@ -900,18 +920,20 @@ class CTFEEvaluator {
         import std.array : array, join;
         
         // Find all functions this one depends on (transitive closure)
+        auto t0 = MonoTime.currTime;
         auto analyzer = new DependencyAnalyzer(symbolTable, allDeclarations);
         auto dependencies = analyzer.findDependencies(funcDecl);
-        
+        statAnalysisTime += MonoTime.currTime - t0;
+
         // Check which functions are new (not yet in context)
         auto newFuncs = dependencies.filter!(f => ctfeFuncKey(f) !in compiledFunctions).array;
-        
+
         // Recompile if we have new functions
         if (!newFuncs.empty) {
             statCacheMisses++;
             statFunctionsCompiled += cast(uint)newFuncs.length;
             log(3, "CTFE: Compiling ", newFuncs.length, " new functions for ", funcDecl.name);
-            
+
             // Type-check new functions
             auto typeChecker = new TypeChecker(symbolTable);
             foreach (dep; newFuncs) {
@@ -921,18 +943,20 @@ class CTFEEvaluator {
                     throw new CTFEError("CTFE type check error in " ~ dep.name ~ ": " ~ e.msg);
                 }
             }
-            
+
             if (cachedContext !is null) {
                 cachedContext.dispose();
                 cachedContext = null;
             }
-            
+
+            auto t1 = MonoTime.currTime;
             auto allFuncs = contextFunctions ~ newFuncs;
             cachedContext = backend.compileWithDependencies(allFuncs, funcDecl.name);
+            statCompileTime += MonoTime.currTime - t1;
             if (cachedContext is null) {
                 throw new CTFEError("CTFE compile error: " ~ backend.error());
             }
-            
+
             contextFunctions = allFuncs;
             foreach (f; newFuncs) {
                 compiledFunctions[ctfeFuncKey(f)] = true;
@@ -940,11 +964,13 @@ class CTFEEvaluator {
         } else {
             statCacheHits++;
         }
-        
+
         // Execute with large return - allocate result space and prepend address to args
         uint totalSize = elemCount * elemSize;
+        auto t2 = MonoTime.currTime;
         auto result = cachedContext.callWithLargeReturn(funcDecl.name, args, totalSize);
-        
+        statExecTime += MonoTime.currTime - t2;
+
         if (!result.success) {
             throw new CTFEError("CTFE execution error: " ~ result.error);
         }
@@ -984,15 +1010,17 @@ class CTFEEvaluator {
         log(3, "CTFE: Calling ", funcDecl.name, " with args ", args, " returning struct of ", structSize, " bytes");
         
         // Find dependencies and compile if needed
+        auto t0 = MonoTime.currTime;
         auto analyzer = new DependencyAnalyzer(symbolTable, allDeclarations);
         auto dependencies = analyzer.findDependencies(funcDecl);
+        statAnalysisTime += MonoTime.currTime - t0;
         auto newFuncs = dependencies.filter!(f => ctfeFuncKey(f) !in compiledFunctions).array;
-        
+
         if (!newFuncs.empty) {
             statCacheMisses++;
             statFunctionsCompiled += cast(uint)newFuncs.length;
             log(3, "CTFE: Compiling ", newFuncs.length, " new functions for ", funcDecl.name);
-            
+
             auto typeChecker = new TypeChecker(symbolTable);
             foreach (dep; newFuncs) {
                 try {
@@ -1001,18 +1029,20 @@ class CTFEEvaluator {
                     throw new CTFEError("CTFE type check error in " ~ dep.name ~ ": " ~ e.msg);
                 }
             }
-            
+
             if (cachedContext !is null) {
                 cachedContext.dispose();
                 cachedContext = null;
             }
-            
+
+            auto t1 = MonoTime.currTime;
             auto allFuncs = contextFunctions ~ newFuncs;
             cachedContext = backend.compileWithDependencies(allFuncs, funcDecl.name);
+            statCompileTime += MonoTime.currTime - t1;
             if (cachedContext is null) {
                 throw new CTFEError("CTFE compile error: " ~ backend.error());
             }
-            
+
             contextFunctions = allFuncs;
             foreach (f; newFuncs) {
                 compiledFunctions[ctfeFuncKey(f)] = true;
@@ -1020,10 +1050,12 @@ class CTFEEvaluator {
         } else {
             statCacheHits++;
         }
-        
+
         // Execute with large return - struct is written to result buffer
+        auto t2 = MonoTime.currTime;
         auto result = cachedContext.callWithLargeReturn(funcDecl.name, args, structSize);
-        
+        statExecTime += MonoTime.currTime - t2;
+
         if (!result.success) {
             throw new CTFEError("CTFE execution error: " ~ result.error);
         }
@@ -1441,24 +1473,26 @@ class CTFEEvaluator {
         expandFunctionMixins(funcDecl);
 
         // Find all functions this one depends on (transitive closure)
+        auto t0 = MonoTime.currTime;
         auto analyzer = new DependencyAnalyzer(symbolTable, allDeclarations);
         auto dependencies = analyzer.findDependencies(funcDecl);
-        
+        statAnalysisTime += MonoTime.currTime - t0;
+
         // Track call count
         statCallCount++;
-        
+
         // Check which functions are new (not yet in context)
         auto newFuncs = dependencies.filter!(f => ctfeFuncKey(f) !in compiledFunctions).array;
         bool needsRecompile = newFuncs.length > 0;
-        
+
         if (needsRecompile) {
             statCacheMisses++;
             statFunctionsCompiled += cast(uint)newFuncs.length;
-            log(3, "CTFE: ", funcDecl.name, " needs: [", 
+            log(3, "CTFE: ", funcDecl.name, " needs: [",
                 dependencies.map!(f => f.name).array.join(", "), "]");
             log(3, "CTFE: Adding ", newFuncs.length, " new function(s): [",
                 newFuncs.map!(f => f.name).array.join(", "), "]");
-            
+
             // Type-check only new functions
             auto typeChecker = new TypeChecker(symbolTable);
             foreach (dep; newFuncs) {
@@ -1468,19 +1502,21 @@ class CTFEEvaluator {
                     throw new CTFEError("CTFE type check error in " ~ dep.name ~ ": " ~ e.msg);
                 }
             }
-            
+
             // Dispose old context and recompile with all functions (old + new)
             if (cachedContext !is null) {
                 cachedContext.dispose();
                 cachedContext = null;
             }
-            
+
+            auto t1 = MonoTime.currTime;
             auto allFuncs = contextFunctions ~ newFuncs;
             cachedContext = backend.compileWithDependencies(allFuncs, funcDecl.name);
+            statCompileTime += MonoTime.currTime - t1;
             if (cachedContext is null) {
                 throw new CTFEError("CTFE compile error: " ~ backend.error());
             }
-            
+
             // Only mark as compiled after successful compilation
             contextFunctions = allFuncs;
             foreach (f; newFuncs) {
@@ -1490,13 +1526,15 @@ class CTFEEvaluator {
             statCacheHits++;
             log(3, "CTFE: Reusing cached context for ", funcDecl.name);
         }
-        
+
         // Execute - use callByName to call any function in the context
+        auto t2 = MonoTime.currTime;
         auto result = cachedContext.callByName(funcDecl.name, args);
+        statExecTime += MonoTime.currTime - t2;
         if (!result.success) {
             throw new CTFEError("CTFE execution error: " ~ result.error);
         }
-        
+
         log(3, "CTFE [", backend.name, "]: ", funcDecl.name, "(", args, ") = ", result.intValue);
         return result.intValue;
     }
