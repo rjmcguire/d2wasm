@@ -120,10 +120,11 @@ class NativeCompiledFunction : CompiledFunction {
     private uint tempSlot;               // stack offset for expression temporaries
     private uint tempSlotDepth;          // nesting depth for temp slot usage
     
-    // Struct return tracking (hidden result pointer pattern)
+    // Large return tracking (hidden result pointer pattern)
     private bool currentFunctionHasHiddenResult;
     private uint currentFunctionResultPtrOffset;
     private StructDecl currentFunctionReturnStructDecl;
+    private uint currentFunctionReturnArrayBytes;  // >0 for static array returns
     
     // For return statements to jump to
     private Label epilogueLabel;
@@ -252,12 +253,23 @@ class NativeCompiledFunction : CompiledFunction {
         bool hasHiddenResultPtr = false;
         uint resultPtrOffset = 0;
         StructDecl returnStructDecl = null;
+        uint returnArrayBytes = 0;
         if (auto userType = cast(UserType)func.returnType) {
             userType.ensureResolved(symbolTable);
             if (auto sd = userType.asStruct()) {
                 hasHiddenResultPtr = true;
                 returnStructDecl = sd;
-                // Hidden result pointer is passed in x0, save it
+                resultPtrOffset = nextLocalOffset;
+                nextLocalOffset += 8;  // 64-bit pointer
+            }
+        } else if (auto arrayType = cast(ArrayType)func.returnType) {
+            if (arrayType.arraySize !is null) {
+                hasHiddenResultPtr = true;
+                // Evaluate static array size
+                if (auto sizeLit = cast(LiteralExpression)arrayType.arraySize) {
+                    uint elemCount = cast(uint)sizeLit.value.get!long();
+                    returnArrayBytes = elemCount * 4;  // assume int elements
+                }
                 resultPtrOffset = nextLocalOffset;
                 nextLocalOffset += 8;  // 64-bit pointer
             }
@@ -265,6 +277,7 @@ class NativeCompiledFunction : CompiledFunction {
         currentFunctionHasHiddenResult = hasHiddenResultPtr;
         currentFunctionResultPtrOffset = resultPtrOffset;
         currentFunctionReturnStructDecl = returnStructDecl;
+        currentFunctionReturnArrayBytes = returnArrayBytes;
         if (hasHiddenResultPtr) {
             assert(resultPtrOffset % 8 == 0,
                 "Hidden result pointer offset must be 8-byte aligned for STR x0");
@@ -488,11 +501,11 @@ class NativeCompiledFunction : CompiledFunction {
                         "srcTempSlot overflows frame");
                     // First compile the expression once to get source address
                     compileExpression(ret.value);  // x0 = address of result struct
-                    
+
                     // Save source pointer to a temp slot
                     uint srcTempSlot = tempSlot + 8;  // Use temp slot area
                     gen.emitStoreLocal(srcTempSlot);  // Save 64-bit ptr
-                    
+
                     // Copy struct data word by word
                     uint structSize = cast(uint)currentFunctionReturnStructDecl.structSize;
                     for (uint off = 0; off < structSize; off += 4) {
@@ -500,8 +513,25 @@ class NativeCompiledFunction : CompiledFunction {
                         gen.emitLoadLocal(srcTempSlot);      // x0 = src ptr
                         gen.emitLoadFromPointer(off);        // x0 = *(src + off)
                         gen.emitMoveX0ToX9();                // x9 = value
-                        
+
                         // Store to dest
+                        gen.emitLoadLocal(currentFunctionResultPtrOffset);  // x0 = dest ptr
+                        gen.emitStoreToPointerFromX9(off);   // *(dest + off) = x9
+                    }
+                } else if (currentFunctionHasHiddenResult && currentFunctionReturnArrayBytes > 0) {
+                    // Static array return: copy array data to hidden result pointer
+                    assert(tempSlot + 8 + 8 <= totalLocalBytes,
+                        "srcTempSlot overflows frame");
+                    compileExpression(ret.value);  // x0 = address of source array
+
+                    uint srcTempSlot = tempSlot + 8;
+                    gen.emitStoreLocal(srcTempSlot);  // Save 64-bit ptr
+
+                    for (uint off = 0; off < currentFunctionReturnArrayBytes; off += 4) {
+                        gen.emitLoadLocal(srcTempSlot);      // x0 = src ptr
+                        gen.emitLoadFromPointer(off);        // x0 = *(src + off)
+                        gen.emitMoveX0ToX9();                // x9 = value
+
                         gen.emitLoadLocal(currentFunctionResultPtrOffset);  // x0 = dest ptr
                         gen.emitStoreToPointerFromX9(off);   // *(dest + off) = x9
                     }
@@ -668,8 +698,45 @@ class NativeCompiledFunction : CompiledFunction {
                             compileExpression(elem);
                             gen.emitStoreLocal32(nextLocalOffset + cast(uint)(i * 4));
                         }
+                    } else if (auto call = cast(CallExpression)varDecl.initializer) {
+                        // Function call returning static array — hidden result pointer
+                        if (auto funcIdent = cast(IdentifierExpression)call.function_) {
+                            auto funcLabelPtr = funcIdent.name in functionLabels;
+                            if (funcLabelPtr is null)
+                                throw new Exception("Function not compiled: " ~ funcIdent.name);
+
+                            // Compile and save all arguments to temp slots
+                            uint tempOffset = nextLocalOffset + varSize;
+                            uint[] argTemps;
+                            foreach (arg; call.arguments) {
+                                compileExpression(arg);
+                                gen.emitStoreLocal32(tempOffset);
+                                argTemps ~= tempOffset;
+                                tempOffset += 4;
+                            }
+
+                            // Load args into registers in reverse order
+                            if (argTemps.length > 2) {
+                                gen.emitLoadLocal32(argTemps[2]);
+                                gen.emitMoveX0ToX3();
+                            }
+                            if (argTemps.length > 1) {
+                                gen.emitLoadLocal32(argTemps[1]);
+                                gen.emitMoveX0ToX2();
+                            }
+                            if (argTemps.length > 0) {
+                                gen.emitLoadLocal32(argTemps[0]);
+                                gen.emitMoveX0ToX1();
+                            }
+
+                            // x0 = result address (stack address of static array)
+                            gen.emitStackAddress(nextLocalOffset);
+                            gen.emitCall(*funcLabelPtr);
+                        } else {
+                            throw new Exception("Static array init from non-identifier call not supported");
+                        }
                     } else {
-                        throw new Exception("Static array can only be initialized from array literal");
+                        throw new Exception("Static array can only be initialized from array literal or function call");
                     }
                 } else {
                     compileExpression(varDecl.initializer);

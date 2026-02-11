@@ -1850,7 +1850,15 @@ class FuncContext {
             return;
         }
         
-        throw new EmitError("Unsupported static array initializer", 
+        // Function call returning static array: int[3] arr = makeArray(...)
+        if (auto callExpr = cast(CallExpression)stmt.initializer) {
+            if (auto ident = cast(IdentifierExpression)callExpr.function_) {
+                emitStructReturnCall(out_, ident.name, callExpr.arguments, info.frameOffset);
+                return;
+            }
+        }
+
+        throw new EmitError("Unsupported static array initializer",
                            stmt.initializer ? stmt.initializer.toString() : "none");
     }
     
