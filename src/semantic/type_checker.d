@@ -722,8 +722,10 @@ class TypeChecker {
             return checkSliceExpression(slice);
         } else if (auto import_ = cast(ImportExpression)expr) {
             return checkImportExpression(import_);
+        } else if (auto traits = cast(TraitsExpression)expr) {
+            return checkTraitsExpression(traits);
         }
-        
+
         throw new TypeError("Unknown expression type", expr.location);
     }
     
@@ -1419,7 +1421,47 @@ class TypeChecker {
         auto ubyteType = new BasicType(expr.location, BasicType.Kind.UInt8);
         return new ArrayType(expr.location, ubyteType);
     }
-    
+
+    Type checkTraitsExpression(TraitsExpression expr) {
+        auto loc = expr.location;
+
+        // Resolve UserType via symbol table before evaluating
+        if (expr.typeArguments.length > 0 && expr.typeArguments[0] !is null) {
+            if (auto ut = cast(UserType)expr.typeArguments[0]) {
+                try { ut.ensureResolved(symbolTable); } catch (Exception) {}
+            }
+        }
+
+        // Special case: compiles needs type checker (try-check expression)
+        if (expr.traitName == "compiles") {
+            expr.boolResult = checkCompilesTrait(expr);
+            expr.evaluated = true;
+            return new BasicType(loc, BasicType.Kind.Bool);
+        }
+
+        // Special case: identifier returns string type
+        if (expr.traitName == "identifier") {
+            expr.evaluate();
+            auto charType = new BasicType(loc, BasicType.Kind.Char);
+            return new ArrayType(loc, charType);
+        }
+
+        expr.evaluate();
+        return new BasicType(loc, BasicType.Kind.Bool);
+    }
+
+    private bool checkCompilesTrait(TraitsExpression expr) {
+        if (expr.arguments.length == 0 || expr.arguments[0] is null) return false;
+        try {
+            checkExpression(expr.arguments[0]);
+            return true;
+        } catch (TypeError) {
+            return false;
+        } catch (Exception) {
+            return false;
+        }
+    }
+
     Type checkMemberExpression(MemberExpression expr) {
         // Check if the object is a type name (for Type.sizeof, Type.alignof, etc.)
         if (auto ident = cast(IdentifierExpression)expr.object) {

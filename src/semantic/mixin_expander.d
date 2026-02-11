@@ -406,6 +406,18 @@ class MixinExpander {
      * Returns true or false.
      */
     private bool evaluateStaticIfCondition(Expression expr, SourceLocation loc) {
+        // Handle __traits expressions
+        if (auto traits = cast(TraitsExpression)expr) {
+            return evaluateTraitsBool(traits, loc);
+        }
+
+        // Handle unary ! (e.g., static if (!__traits(...)))
+        if (auto unary = cast(UnaryExpression)expr) {
+            if (unary.operator == UnaryExpression.Operator.LogicalNot) {
+                return !evaluateStaticIfCondition(unary.operand, loc);
+            }
+        }
+
         // Handle boolean literals directly
         if (auto literal = cast(LiteralExpression)expr) {
             if (literal.value.type == typeid(bool)) {
@@ -417,7 +429,7 @@ class MixinExpander {
             }
             throw new MixinError("Static if condition must be a boolean expression", loc);
         }
-        
+
         // Handle identifier (reference to manifest constant)
         if (auto ident = cast(IdentifierExpression)expr) {
             // Look up the manifest constant
@@ -478,6 +490,32 @@ class MixinExpander {
         );
     }
     
+    /**
+     * Evaluate a __traits expression to a boolean result.
+     */
+    private bool evaluateTraitsBool(TraitsExpression traits, SourceLocation loc) {
+        // Resolve UserType.declaration from allDeclarations before evaluating.
+        // Can't use ensureResolved(tempSymbolTable) because struct/class declarations
+        // may not be registered in the temp symbol table during mixin expansion.
+        if (traits.typeArguments.length > 0 && traits.typeArguments[0] !is null) {
+            if (auto ut = cast(UserType)traits.typeArguments[0]) {
+                if (ut.declaration is null) {
+                    foreach (decl; allDeclarations) {
+                        if (decl.name == ut.name) {
+                            if (cast(StructDecl)decl || cast(ClassDecl)decl || cast(InterfaceDecl)decl) {
+                                ut.declaration = decl;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        traits.evaluate();
+        return traits.boolResult;
+    }
+
     /**
      * Evaluate an expression to an integer value for static if conditions.
      */

@@ -1575,8 +1575,11 @@ class NativeCompiledFunction : CompiledFunction {
 
             // Return address of temp slice struct
             gen.emitStackAddress(tempOffset);
+        } else if (auto traits = cast(TraitsExpression)expr) {
+            traits.evaluate();
+            gen.emitImm32(stencil_load_imm32, traits.boolResult ? 1 : 0);
         } else {
-            throw new Exception("Expression type not yet supported in native backend: " ~ 
+            throw new Exception("Expression type not yet supported in native backend: " ~
                 typeid(expr).toString());
         }
     }

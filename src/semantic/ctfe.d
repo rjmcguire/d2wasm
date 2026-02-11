@@ -336,7 +336,17 @@ class CTFEEvaluator {
                 return;
             }
         }
-        
+
+        // Check for __traits expression (e.g., enum IS_INT = __traits(isArithmetic, int))
+        if (auto traits = cast(TraitsExpression)manifest.initializer) {
+            traits.evaluate();
+            manifest.ctfeValue = traits.boolResult ? 1 : 0;
+            manifest.ctfeComplete = true;
+            manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Bool);
+            log(3, "CTFE: ", manifest.name, " = ", traits.boolResult ? "true" : "false", " (__traits)");
+            return;
+        }
+
         // Check for unary expression (e.g., -42)
         if (auto unaryExpr = cast(UnaryExpression)manifest.initializer) {
             if (unaryExpr.operator == UnaryExpression.Operator.Minus) {

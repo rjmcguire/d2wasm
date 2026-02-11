@@ -50,22 +50,77 @@ abstract class ASTNode {
 
 // TODO: Add visitor pattern support in a future iteration
 
+/// Visibility levels for declarations
+enum Visibility : ubyte {
+    default_,    // D's default (public at module scope)
+    private_,
+    package_,
+    protected_,
+    public_,
+    export_,
+}
+
+/// Attribute flags for declarations, packed into a uint via bitfields.
+/// Not all flags are meaningful for all declaration kinds.
+struct DeclAttrs {
+    mixin(bitfields!(
+        // Storage classes
+        bool, "isStatic_",    1,
+        bool, "isExtern",     1,
+        bool, "isFinal",      1,
+        bool, "isAbstract",   1,
+        bool, "isOverride",   1,
+        bool, "isDeprecated", 1,
+        // Type qualifiers
+        bool, "isConst",      1,
+        bool, "isImmutable",  1,
+        bool, "isShared",     1,
+        bool, "isGshared",    1,
+        // Function attributes
+        bool, "isNogc",       1,
+        bool, "isNothrow",    1,
+        bool, "isPure",       1,
+        bool, "isSafe",       1,
+        bool, "isTrusted",    1,
+        bool, "isSystem",     1,
+        bool, "isProperty_",  1,
+        bool, "isDisable",    1,
+        uint, "",             14, // padding to fill 32 bits
+    ));
+
+    /// Merge another DeclAttrs into this one (OR all flags)
+    void merge(DeclAttrs other) {
+        (cast(uint*)&this)[0] |= (cast(const uint*)&other)[0];
+    }
+}
+
 /**
  * Abstract base for all declaration nodes
  */
 abstract class Declaration : ASTNode {
     string name;
-    bool isPublic;
-    
+    Visibility visibility = Visibility.default_;
+    DeclAttrs attrs;
+
     /// Dependencies from static if conditions that produced this declaration.
     /// Used for incremental compilation - if these symbols change, this decl
     /// must be recompiled even if its own source hasn't changed.
     string[] staticIfDependencies;
-    
+
     this(SourceLocation loc, string name, bool isPublic = false) {
         super(loc);
         this.name = name;
-        this.isPublic = isPublic;
+        if (isPublic)
+            this.visibility = Visibility.public_;
+    }
+
+    /// Backward-compatible property
+    @property bool isPublic() const {
+        return visibility == Visibility.public_ || visibility == Visibility.default_;
+    }
+
+    @property void isPublic(bool val) {
+        visibility = val ? Visibility.public_ : Visibility.default_;
     }
 }
 
@@ -173,34 +228,38 @@ class FunctionDecl : Declaration {
     Type returnType;
     Parameter[] parameters;
     Statement body_;
-    string[] attributes;  // @safe, @pure, etc.
-    
+
     // Function kind flags (packed into a single byte)
+    // Note: isStatic and isProperty are forwarded to Declaration.attrs
     mixin(bitfields!(
         bool, "isMethod",      1,  // belongs to struct/class, has implicit `this`
-        bool, "isStatic",      1,  // belongs to aggregate but no `this`
-        bool, "isProperty",    1,  // @property, called without parens
         bool, "isCTFE",        1,  // CTFE-only function
         bool, "isIntrinsic",   1,  // compiler emits inline code instead of call
         bool, "isTypeChecked", 1,  // already type-checked (avoid redundant passes)
         bool, "isDestructor",  1,  // ~this() destructor
         bool, "isConstructor", 1,  // this() constructor
+        uint, "",              2,  // padding
     ));
-    
+
+    // Forward isStatic/isProperty to DeclAttrs on Declaration base
+    @property bool isStatic() const { return attrs.isStatic_; }
+    @property void isStatic(bool v) { attrs.isStatic_ = v; }
+    @property bool isProperty() const { return attrs.isProperty_; }
+    @property void isProperty(bool v) { attrs.isProperty_ = v; }
+
     Declaration parent;  // enclosing struct/class, null for free functions
-    
-    this(SourceLocation loc, string name, Type returnType, 
-         Parameter[] parameters, Statement body_, 
+
+    this(SourceLocation loc, string name, Type returnType,
+         Parameter[] parameters, Statement body_,
          string[] attributes = [], bool isPublic = false) {
         super(loc, name, isPublic);
         this.returnType = returnType;
         this.parameters = parameters;
         this.body_ = body_;
-        this.attributes = attributes;
         this.parent = null;
     }
-    
-    
+
+
     override string toString() const {
         return format("FunctionDecl(%s %s)", returnType.toString(), name);
     }
@@ -559,6 +618,9 @@ class ArrayType : Type {
     override bool isPointer() const { return false; }
     override bool isArray() const { return true; }
     override bool isFunction() const { return false; }
+
+    /// True if this is a fixed-size array (has explicit size), false for dynamic/slices
+    @property bool isStaticArray() const { return arraySize !is null; }
 
     /// Arrays (both static and dynamic/slices) are aggregates
     override bool isAggregate() const { return true; }

@@ -496,3 +496,130 @@ class ImportExpression : Expression {
         return format("import(\"%s\")", filename);
     }
 }
+
+/**
+ * __traits expression: __traits(keyword, args...)
+ * Evaluates to a compile-time constant based on type/symbol properties.
+ */
+class TraitsExpression : Expression {
+    string traitName;           // e.g. "isArithmetic", "hasMember", "compiles"
+    Expression[] arguments;     // expression args (null where type arg occupies the slot)
+    Type[] typeArguments;       // type args (null where expr arg occupies the slot)
+
+    // Evaluation results (set during semantic analysis)
+    bool boolResult;
+    string stringResult;
+    bool evaluated = false;
+
+    this(SourceLocation loc, string traitName, Expression[] arguments, Type[] typeArguments) {
+        super(loc);
+        this.traitName = traitName;
+        this.arguments = arguments;
+        this.typeArguments = typeArguments;
+    }
+
+    /**
+     * Self-evaluate the __traits expression in-place.
+     * This is the canonical evaluation method — called from mixin_expander,
+     * type_checker, and emitters. Callers that need UserType resolution
+     * (e.g. for hasMember) should resolve typeArguments before calling this.
+     */
+    void evaluate() {
+        if (evaluated) return;
+
+        Type resolvedType = (typeArguments.length > 0) ? typeArguments[0] : null;
+
+        switch (traitName) {
+            case "isArithmetic":
+                if (auto bt = cast(BasicType)resolvedType)
+                    boolResult = isIntegerKind(bt.kind) || isFloatingKind(bt.kind);
+                break;
+            case "isIntegral":
+                if (auto bt = cast(BasicType)resolvedType)
+                    boolResult = isIntegerKind(bt.kind);
+                break;
+            case "isFloating":
+                if (auto bt = cast(BasicType)resolvedType)
+                    boolResult = isFloatingKind(bt.kind);
+                break;
+            case "isUnsigned":
+                if (auto bt = cast(BasicType)resolvedType)
+                    boolResult = isUnsignedKind(bt.kind);
+                break;
+            case "isSigned":
+                if (auto bt = cast(BasicType)resolvedType)
+                    boolResult = isSignedKind(bt.kind);
+                break;
+            case "isStaticArray":
+                if (auto at = cast(ArrayType)resolvedType)
+                    boolResult = at.isStaticArray;
+                break;
+            case "isArray":
+                boolResult = resolvedType !is null && resolvedType.isArray();
+                break;
+            case "hasMember":
+                boolResult = evaluateHasMember(resolvedType);
+                break;
+            case "identifier":
+                if (arguments.length > 0) {
+                    if (auto ident = cast(IdentifierExpression)arguments[0])
+                        stringResult = ident.name;
+                }
+                break;
+            default:
+                assert(0, "unhandled __trait: " ~ traitName);
+        }
+        evaluated = true;
+    }
+
+    private bool evaluateHasMember(Type resolvedType) {
+        if (resolvedType is null) return false;
+
+        string memberName;
+        if (arguments.length >= 2 && arguments[1] !is null) {
+            if (auto lit = cast(LiteralExpression)arguments[1]) {
+                if (lit.value.type == typeid(string))
+                    memberName = lit.value.get!string;
+            }
+        }
+        if (memberName.length == 0) return false;
+
+        if (auto sd = resolvedType.asStruct()) {
+            foreach (m; sd.members)
+                if (m.name == memberName) return true;
+        } else if (auto cd = resolvedType.asClass()) {
+            foreach (m; cd.members)
+                if (m.name == memberName) return true;
+        }
+        return false;
+    }
+
+    override bool isConstant() const {
+        return true;  // __traits is always a compile-time constant
+    }
+
+    override bool hasLValue() const {
+        return false;
+    }
+
+    override string toString() const {
+        return format("__traits(%s, ...)", traitName);
+    }
+}
+
+// BasicType.Kind classification helpers for __traits evaluation
+private bool isIntegerKind(BasicType.Kind k) {
+    return k >= BasicType.Kind.Int8 && k <= BasicType.Kind.UInt64;
+}
+
+private bool isFloatingKind(BasicType.Kind k) {
+    return k == BasicType.Kind.Float32 || k == BasicType.Kind.Float64;
+}
+
+private bool isUnsignedKind(BasicType.Kind k) {
+    return k >= BasicType.Kind.UInt8 && k <= BasicType.Kind.UInt64;
+}
+
+private bool isSignedKind(BasicType.Kind k) {
+    return k >= BasicType.Kind.Int8 && k <= BasicType.Kind.Int64;
+}

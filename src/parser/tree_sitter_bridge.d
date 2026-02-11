@@ -214,6 +214,83 @@ class TreeSitterBridge {
     }
     
     /**
+     * Extract visibility and DeclAttrs from the attribute children of a declaration node.
+     * Tree-sitter's hidden _attribute rule inlines its children directly into the parent,
+     * but storage_class and member_function_attribute are named wrappers that need recursion.
+     */
+    private void extractAttributes(TSNode node, out Visibility vis, out DeclAttrs dattrs) {
+        vis = Visibility.default_;
+        dattrs = DeclAttrs.init;
+
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string nodeType = TreeSitterParser.getNodeType(child);
+
+            // Visibility keywords
+            if (nodeType == "private")   { vis = Visibility.private_;   continue; }
+            if (nodeType == "public")    { vis = Visibility.public_;    continue; }
+            if (nodeType == "protected") { vis = Visibility.protected_; continue; }
+            if (nodeType == "package")   { vis = Visibility.package_;   continue; }
+            if (nodeType == "export")    { vis = Visibility.export_;    continue; }
+
+            // Storage class keywords
+            if (nodeType == "static")    { dattrs.isStatic_ = true;  continue; }
+            if (nodeType == "extern")    { dattrs.isExtern = true;   continue; }
+            if (nodeType == "final")     { dattrs.isFinal = true;    continue; }
+            if (nodeType == "abstract")  { dattrs.isAbstract = true; continue; }
+            if (nodeType == "override")  { dattrs.isOverride = true; continue; }
+            if (nodeType == "deprecated"){ dattrs.isDeprecated = true; continue; }
+            if (nodeType == "const")     { dattrs.isConst = true;    continue; }
+            if (nodeType == "immutable") { dattrs.isImmutable = true; continue; }
+            if (nodeType == "shared")    { dattrs.isShared = true;   continue; }
+            if (nodeType == "__gshared") { dattrs.isGshared = true;  continue; }
+
+            // Function attribute keywords
+            if (nodeType == "nothrow")   { dattrs.isNothrow = true;  continue; }
+            if (nodeType == "pure")      { dattrs.isPure = true;     continue; }
+
+            // @attributes: @safe, @nogc, @trusted, @system, @property, @disable
+            if (nodeType == "at_attribute") {
+                extractAtAttribute(child, dattrs);
+                continue;
+            }
+
+            // Named wrapper nodes — recurse into them
+            if (nodeType == "storage_class" || nodeType == "member_function_attribute") {
+                Visibility innerVis;
+                DeclAttrs innerAttrs;
+                extractAttributes(child, innerVis, innerAttrs);
+                if (innerVis != Visibility.default_) vis = innerVis;
+                dattrs.merge(innerAttrs);
+                continue;
+            }
+        }
+    }
+
+    /// Extract a specific @attribute (e.g., @safe, @nogc, @property)
+    private void extractAtAttribute(TSNode node, ref DeclAttrs dattrs) {
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string nodeType = TreeSitterParser.getNodeType(child);
+
+            if (nodeType == "identifier") {
+                string attrName = TreeSitterParser.getNodeText(child, sourceText);
+                switch (attrName) {
+                    case "nogc":     dattrs.isNogc = true;      break;
+                    case "safe":     dattrs.isSafe = true;      break;
+                    case "trusted":  dattrs.isTrusted = true;   break;
+                    case "system":   dattrs.isSystem = true;    break;
+                    case "property": dattrs.isProperty_ = true; break;
+                    case "disable":  dattrs.isDisable = true;   break;
+                    default: break; // Unknown @attributes silently ignored
+                }
+            }
+        }
+    }
+
+    /**
      * Convert function declaration node
      * Returns either FunctionDecl or ImportedFunctionDecl depending on linkage
      */
@@ -280,10 +357,14 @@ class TreeSitterBridge {
             body_ = null;
         }
         
-        // TODO: Parse attributes from the tree-sitter node
-        string[] attributes;
-        
-        return new FunctionDecl(loc, name, returnType, parameters, body_, attributes);
+        Visibility vis;
+        DeclAttrs dattrs;
+        extractAttributes(node, vis, dattrs);
+
+        auto funcDecl = new FunctionDecl(loc, name, returnType, parameters, body_);
+        funcDecl.visibility = vis;
+        funcDecl.attrs = dattrs;
+        return funcDecl;
     }
     
     /**
@@ -697,8 +778,14 @@ class TreeSitterBridge {
             throw new ParseError("Class declaration missing name", loc);
         }
         
+        Visibility vis;
+        DeclAttrs dattrs;
+        extractAttributes(node, vis, dattrs);
+
         auto classDecl = new ClassDecl(loc, name, baseClass, interfaces, members);
-        
+        classDecl.visibility = vis;
+        classDecl.attrs = dattrs;
+
         // Mark FunctionDecl members as methods and extract constructor/destructor
         foreach (member; members) {
             if (auto funcDecl = cast(FunctionDecl)member) {
@@ -770,15 +857,21 @@ class TreeSitterBridge {
             throw new ParseError("Struct declaration missing name", loc);
         }
         
+        Visibility vis;
+        DeclAttrs dattrs;
+        extractAttributes(node, vis, dattrs);
+
         auto structDecl = new StructDecl(loc, name, members);
-        
+        structDecl.visibility = vis;
+        structDecl.attrs = dattrs;
+
         // Mark any FunctionDecl members as methods and set their parent
         // Extract destructor if present
         foreach (member; members) {
             if (auto funcDecl = cast(FunctionDecl)member) {
                 funcDecl.isMethod = true;
                 funcDecl.parent = structDecl;
-                
+
                 // Check if this is a destructor
                 if (funcDecl.isDestructor) {
                     structDecl.destructor = funcDecl;
@@ -1060,8 +1153,15 @@ class TreeSitterBridge {
         Type varType = parseType(typeNode);
         string name = TreeSitterParser.getNodeText(nameNode, sourceText);
         Expression initializer = TreeSitterParser.isValid(initNode) ? parseExpression(initNode) : null;
-        
-        return new VariableDecl(loc, name, varType, initializer);
+
+        Visibility vis;
+        DeclAttrs dattrs;
+        extractAttributes(node, vis, dattrs);
+
+        auto varDecl = new VariableDecl(loc, name, varType, initializer);
+        varDecl.visibility = vis;
+        varDecl.attrs = dattrs;
+        return varDecl;
     }
     
     /**
@@ -1119,8 +1219,15 @@ class TreeSitterBridge {
             throw new ParseError("Manifest constant '" ~ name ~ "' missing initializer", loc);
         }
         
+        Visibility vis;
+        DeclAttrs dattrs;
+        extractAttributes(node, vis, dattrs);
+
         log(3, "Parsed manifest constant: ", name, " = ", initializer.toString());
-        return new ManifestConstantDecl(loc, name, initializer);
+        auto mc = new ManifestConstantDecl(loc, name, initializer);
+        mc.visibility = vis;
+        mc.attrs = dattrs;
+        return mc;
     }
     
     EnumDecl parseEnumDeclaration(TSNode node) {
@@ -1991,6 +2098,8 @@ class TreeSitterBridge {
                 return parseCallExpression(node, loc);
             case "import_expression":
                 return parseImportExpression(node, loc);
+            case "traits_expression":
+                return parseTraitsExpression(node, loc);
             case "index_expression":
                 return parseIndexExpression(node, loc);
             case "index":
@@ -2375,7 +2484,116 @@ class TreeSitterBridge {
         
         throw new ParseError("import() requires a string literal argument", loc);
     }
-    
+
+    /**
+     * Parse __traits(keyword, args...) expression.
+     * Grammar: traits_expression -> traits, "(", identifier, [",", template_argument_list], ")"
+     */
+    TraitsExpression parseTraitsExpression(TSNode node, SourceLocation loc) {
+        string traitName;
+        Expression[] args;
+        Type[] typeArgs;
+
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string nodeType = TreeSitterParser.getNodeType(child);
+
+            // Skip punctuation and the __traits keyword
+            if (nodeType == "traits" || nodeType == "(" || nodeType == ")" || nodeType == ",")
+                continue;
+
+            // First identifier is the trait name
+            if (nodeType == "identifier" && traitName.length == 0) {
+                traitName = TreeSitterParser.getNodeText(child, sourceText);
+                continue;
+            }
+
+            // template_argument wraps each argument (could be type or expression)
+            if (nodeType == "template_argument") {
+                parseTraitsArgument(child, args, typeArgs);
+                continue;
+            }
+
+            // template_argument_list wraps all arguments after the trait name
+            if (nodeType == "template_argument_list") {
+                uint argCount = TreeSitterParser.getChildCount(child);
+                for (uint j = 0; j < argCount; j++) {
+                    TSNode argChild = TreeSitterParser.getChild(child, j);
+                    string argType = TreeSitterParser.getNodeType(argChild);
+                    if (argType == "template_argument") {
+                        parseTraitsArgument(argChild, args, typeArgs);
+                    }
+                }
+                continue;
+            }
+
+            // Bare identifier after trait name — could be a type name
+            if (nodeType == "identifier" && traitName.length > 0) {
+                string text = TreeSitterParser.getNodeText(child, sourceText);
+                auto argLoc = makeSourceLocation(child);
+                typeArgs ~= new UserType(argLoc, text);
+                args ~= new IdentifierExpression(argLoc, text);
+                continue;
+            }
+
+            // Bare type node
+            if (nodeType == "type") {
+                auto argLoc = makeSourceLocation(child);
+                typeArgs ~= parseType(child);
+                args ~= null;
+                continue;
+            }
+        }
+
+        if (traitName.length == 0) {
+            throw new ParseError("__traits missing trait name", loc);
+        }
+
+        return new TraitsExpression(loc, traitName, args, typeArgs);
+    }
+
+    /// Parse a single template_argument for __traits — type or expression
+    private void parseTraitsArgument(TSNode node, ref Expression[] args, ref Type[] typeArgs) {
+        uint childCount = TreeSitterParser.getChildCount(node);
+        if (childCount >= 1) {
+            TSNode child = TreeSitterParser.getChild(node, 0);
+            string childType = TreeSitterParser.getNodeType(child);
+
+            if (childType == "type") {
+                typeArgs ~= parseType(child);
+                args ~= null;
+                return;
+            }
+
+            // Bare identifier — could be a type name (e.g. Point in hasMember).
+            // Hedge: create both UserType and IdentifierExpression.
+            if (childType == "identifier") {
+                auto text = TreeSitterParser.getNodeText(child, sourceText);
+                auto argLoc = makeSourceLocation(child);
+                typeArgs ~= new UserType(argLoc, text);
+                args ~= new IdentifierExpression(argLoc, text);
+                return;
+            }
+        }
+        // Fall through: parse as expression
+        auto argLoc = makeSourceLocation(node);
+        try {
+            auto expr = parseExpression(node);
+            typeArgs ~= null;
+            args ~= expr;
+        } catch (ParseError) {
+            // If it fails as expression, try the first child
+            if (childCount >= 1) {
+                auto expr = parseExpression(TreeSitterParser.getChild(node, 0));
+                typeArgs ~= null;
+                args ~= expr;
+            } else {
+                throw new ParseError("Cannot parse __traits argument", argLoc);
+            }
+        }
+    }
+
     /**
      * Parse member expression (placeholder implementation)
      */

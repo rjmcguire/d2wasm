@@ -1,0 +1,7 @@
+{
+  "name": "traits_type",
+  "description": "CTFE parity: __traits type property checks",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 31
+}

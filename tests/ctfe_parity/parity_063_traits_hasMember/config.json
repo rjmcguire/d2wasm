@@ -1,0 +1,7 @@
+{
+  "name": "traits_hasMember",
+  "description": "CTFE parity: __traits(hasMember) struct introspection",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 15
+}

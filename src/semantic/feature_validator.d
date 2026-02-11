@@ -293,6 +293,10 @@ class FeatureValidator {
         } else if (auto assignExpr = cast(AssignmentExpression) expr) {
             validateExpression(assignExpr.left);
             validateExpression(assignExpr.right);
+        } else if (auto traits = cast(TraitsExpression) expr) {
+            foreach (arg; traits.arguments) {
+                if (arg !is null) validateExpression(arg);
+            }
         }
         // LiteralExpression is always valid
     }
@@ -303,18 +307,8 @@ class FeatureValidator {
      * Validate function attributes for unsupported features
      */
     private void validateFunctionAttributes(FunctionDecl node) {
-        string[] supportedAttributes = ["@safe", "@pure", "@nothrow", "@nogc"];
-        
-        foreach (attr; node.attributes) {
-            if (!supportedAttributes.canFind(attr)) {
-                throw new FeatureValidationError(
-                    format("Function attribute '%s' is not supported", attr),
-                    node.location,
-                    "Advanced attributes",
-                    "Use @safe, @pure, @nothrow, or @nogc only"
-                );
-            }
-        }
+        // Attributes are now stored in Declaration.attrs (DeclAttrs bitfield).
+        // All recognized attributes are supported — no validation needed.
     }
     
     /**
@@ -398,7 +392,7 @@ class FeatureValidator {
             "delete", "destroy", "gc", "GC",
             
             // String mixins
-            "mixin", "StringOf", "__traits",
+            "mixin", "StringOf",
             
             // Other complex features
             "typeid", "TypeInfo", "Object", "toString"
@@ -427,7 +421,7 @@ class FeatureValidator {
         if (["delete", "destroy", "gc", "GC"].canFind(identifier)) {
             return "Garbage collection";
         }
-        if (["mixin", "StringOf", "__traits"].canFind(identifier)) {
+        if (["mixin", "StringOf"].canFind(identifier)) {
             return "String mixins and CTFE";
         }
         if (["typeid", "TypeInfo", "Object", "toString"].canFind(identifier)) {

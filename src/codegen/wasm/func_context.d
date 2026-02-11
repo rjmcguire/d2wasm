@@ -1940,6 +1940,10 @@ class FuncContext {
             // Slice expressions as standalone expressions are complex
             // For now, we only support them as initializers (handled in emitSliceVarDecl)
             throw new EmitError("Slice expressions only supported as initializers for now");
+        } else if (auto traits = cast(TraitsExpression)expr) {
+            traits.evaluate();
+            out_ ~= Op.i32_const;
+            leb128s(out_, traits.boolResult ? 1 : 0);
         } else {
             throw new EmitError("Unsupported expression type", expr.toString());
         }
