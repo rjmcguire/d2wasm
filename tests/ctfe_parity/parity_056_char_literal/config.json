@@ -1,0 +1,7 @@
+{
+  "name": "char_literal",
+  "description": "CTFE parity: char literal emission",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 113
+}

@@ -1871,6 +1871,9 @@ class TypeChecker {
         } else if (literal.value.type == typeid(bool)) {
             // Boolean literal
             return new BasicType(literal.location, BasicType.Kind.Bool);
+        } else if (literal.value.type == typeid(char)) {
+            // Char literal
+            return new BasicType(literal.location, BasicType.Kind.Char);
         } else if (literal.value.type == typeid(string)) {
             // String literal - treat as ubyte[] (raw bytes, no string semantics)
             auto ubyteType = new BasicType(literal.location, BasicType.Kind.UInt8);

@@ -3198,6 +3198,9 @@ class FuncContext {
         } else if (expr.value.type == typeid(bool)) {
             out_ ~= Op.i32_const;
             leb128s(out_, expr.value.get!bool() ? 1 : 0);
+        } else if (expr.value.type == typeid(char)) {
+            out_ ~= Op.i32_const;
+            leb128s(out_, cast(int)expr.value.get!char());
         } else if (expr.value.type == typeid(double)) {
             out_ ~= Op.f64_const;
             double val = expr.value.get!double();

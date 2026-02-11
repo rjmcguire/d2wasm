@@ -132,7 +132,7 @@ run_test() {
             return 0
             ;;
             
-        wasm_exec)
+        run|wasm_exec)
             local result
             if ! result=$(wasm3 --func "$func_name" "$wasm_file" $args 2>&1); then
                 echo -e "${RED}FAIL${NC} $test_name"

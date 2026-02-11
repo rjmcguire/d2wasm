@@ -924,6 +924,8 @@ class NativeCompiledFunction : CompiledFunction {
                 gen.emitImm32(stencil_load_imm32, lit.value.get!int);
             } else if (lit.value.type == typeid(bool)) {
                 gen.emitImm32(stencil_load_imm32, lit.value.get!bool ? 1 : 0);
+            } else if (lit.value.type == typeid(char)) {
+                gen.emitImm32(stencil_load_imm32, cast(int)lit.value.get!char);
             } else {
                 throw new Exception("Literal type not supported: " ~ lit.value.type.toString());
             }
