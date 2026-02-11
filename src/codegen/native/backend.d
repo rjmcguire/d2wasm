@@ -125,6 +125,10 @@ class NativeCompiledFunction : CompiledFunction {
     private uint currentFunctionResultPtrOffset;
     private StructDecl currentFunctionReturnStructDecl;
     private uint currentFunctionReturnArrayBytes;  // >0 for static array returns
+
+    // Method tracking (hidden 'this' parameter)
+    private StructDecl currentMethodStruct;  // non-null when compiling a method
+    private uint currentThisOffset;          // stack offset of 'this' pointer
     
     // For return statements to jump to
     private Label epilogueLabel;
@@ -201,13 +205,16 @@ class NativeCompiledFunction : CompiledFunction {
         }
         
         // Store all function decls for call resolution
+        // Methods use mangled names: StructName_methodName
         foreach (func; funcs) {
-            functionDecls[func.name] = func;
+            string name = mangledName(func);
+            functionDecls[name] = func;
         }
-        
+
         // Create labels for all functions before compiling any
         foreach (func; funcs) {
-            functionLabels[func.name] = gen.newLabel();
+            string name = mangledName(func);
+            functionLabels[name] = gen.newLabel();
         }
         
         // Find entry function and store its param count
@@ -232,11 +239,24 @@ class NativeCompiledFunction : CompiledFunction {
 
     }
 
+    /// Get the mangled name for a function (StructName_methodName for methods).
+    private static string mangledName(FunctionDecl func) {
+        if (func.isMethod && func.parent !is null) {
+            if (auto sd = cast(StructDecl)func.parent)
+                return sd.name ~ "_" ~ func.name;
+            if (auto cd = cast(ClassDecl)func.parent)
+                return cd.name ~ "_" ~ func.name;
+        }
+        return func.name;
+    }
+
     private void compileFunction(FunctionDecl func) {
         import std.stdio : writeln;
-        
+
+        string name = mangledName(func);
+
         // Bind function label (for multi-function mode)
-        if (auto labelPtr = func.name in functionLabels) {
+        if (auto labelPtr = name in functionLabels) {
             gen.bindLabel(*labelPtr);
         }
         
@@ -283,6 +303,22 @@ class NativeCompiledFunction : CompiledFunction {
                 "Hidden result pointer offset must be 8-byte aligned for STR x0");
         }
         
+        // For methods, register hidden 'this' parameter
+        currentMethodStruct = null;
+        if (func.isMethod && func.parent !is null) {
+            if (auto sd = cast(StructDecl)func.parent) {
+                currentMethodStruct = sd;
+                // 'this' is a pointer (8 bytes) passed as a register arg
+                currentThisOffset = nextLocalOffset;
+                NativeLocalInfo thisInfo;
+                thisInfo.offset = nextLocalOffset;
+                thisInfo.kind = VarKind.struct_;
+                thisInfo.structDecl = sd;
+                localVars["this"] = thisInfo;
+                nextLocalOffset += 8;  // 64-bit pointer
+            }
+        }
+
         // Reserve space for parameters (x0/x1/x2... depending on hidden ptr)
         foreach (param; func.parameters) {
             NativeLocalInfo nli;
@@ -345,10 +381,22 @@ class NativeCompiledFunction : CompiledFunction {
             gen.emitStoreLocal(currentFunctionResultPtrOffset);  // Save x0 (64-bit ptr)
         }
         
+        // Spill 'this' pointer from register to stack
+        if (currentMethodStruct !is null) {
+            int thisReg = currentFunctionHasHiddenResult ? 1 : 0;
+            // Move this register to x0 for storing (if not already there)
+            switch (thisReg) {
+                case 0: break;  // already in x0
+                case 1: gen.emitMoveX1ToX0(); break;
+                default: break;
+            }
+            gen.emitStoreLocal(currentThisOffset);  // Save 64-bit pointer
+        }
+
         // Spill parameters from registers to stack
         // ARM64 calling convention: first 8 args in x0-x7
         // If hidden result ptr, params are shifted: x1, x2, x3... instead of x0, x1, x2...
-        int regOffset = currentFunctionHasHiddenResult ? 1 : 0;
+        int regOffset = (currentFunctionHasHiddenResult ? 1 : 0) + (currentMethodStruct !is null ? 1 : 0);
         foreach (i, param; func.parameters) {
             int regIdx = cast(int)i + regOffset;
             if (regIdx >= 4) {
@@ -1006,6 +1054,16 @@ class NativeCompiledFunction : CompiledFunction {
                         gen.emitLoadLocal32(info.offset);
                         break;
                 }
+            } else if (currentMethodStruct !is null) {
+                // In a method: check for implicit field access (field without 'this.')
+                auto field = currentMethodStruct.getField(ident.name);
+                if (field) {
+                    // Load this pointer, then load field
+                    gen.emitLoadLocal(currentThisOffset);  // x0 = this ptr (64-bit)
+                    gen.emitLoadFromPointer(cast(uint)field.offset);  // x0 = this.field
+                    return;
+                }
+                throw new Exception("Unknown variable in native backend: " ~ ident.name);
             } else {
                 throw new Exception("Unknown variable in native backend: " ~ ident.name);
             }
@@ -1027,6 +1085,17 @@ class NativeCompiledFunction : CompiledFunction {
             
             auto info = targetIdent.name in localVars;
             if (info is null) {
+                // In a method: check for implicit field assignment
+                if (currentMethodStruct !is null && assign.operator == AssignmentExpression.Operator.Assign) {
+                    auto field = currentMethodStruct.getField(targetIdent.name);
+                    if (field) {
+                        compileExpression(assign.right);  // x0 = value
+                        gen.emitMoveX0ToX9();             // x9 = value
+                        gen.emitLoadLocal(currentThisOffset);  // x0 = this ptr
+                        gen.emitStoreToPointerFromX9(cast(uint)field.offset);  // this.field = x9
+                        return;
+                    }
+                }
                 throw new Exception("Unknown variable in native backend: " ~ targetIdent.name);
             }
 
@@ -1202,7 +1271,12 @@ class NativeCompiledFunction : CompiledFunction {
                     return;
                 }
             }
-            throw new Exception("Function calls not yet supported in native backend: " ~ 
+            // Check for method call: obj.method()
+            if (auto memberCall = cast(MemberExpression)call.function_) {
+                emitMethodCall(memberCall, call.arguments);
+                return;
+            }
+            throw new Exception("Function calls not yet supported in native backend: " ~
                 (cast(IdentifierExpression)call.function_ ? (cast(IdentifierExpression)call.function_).name : "unknown"));
         } else if (auto member = cast(MemberExpression)expr) {
             // Check for slice.length first
@@ -1430,6 +1504,97 @@ class NativeCompiledFunction : CompiledFunction {
             case VarKind.scalar:
                 assert(0, "Cannot index-assign scalar variable: " ~ ident.name);
         }
+    }
+
+    /**
+     * Emit a struct method call: obj.method(args)
+     * Passes 'this' pointer (address of obj) as first argument in x0,
+     * then user arguments in x1, x2, etc.
+     */
+    private void emitMethodCall(MemberExpression memberExpr, Expression[] args) {
+        auto objIdent = cast(IdentifierExpression)memberExpr.object;
+        if (!objIdent)
+            throw new Exception("Method call on non-identifier object not yet supported in native backend");
+
+        // Look up the object to find its struct type
+        auto info = objIdent.name in localVars;
+        if (info is null)
+            throw new Exception("Unknown variable for method call in native backend: " ~ objIdent.name);
+
+        StructDecl structDecl = info.structDecl;
+        if (structDecl is null)
+            throw new Exception("Method call on non-struct variable: " ~ objIdent.name);
+
+        // Find the method in the struct's members
+        FunctionDecl method = null;
+        foreach (member; structDecl.members) {
+            if (auto funcDecl = cast(FunctionDecl)member) {
+                if (funcDecl.name == memberExpr.memberName && funcDecl.isMethod) {
+                    method = funcDecl;
+                    break;
+                }
+            }
+        }
+
+        if (method is null)
+            throw new Exception("Struct '" ~ structDecl.name ~ "' has no method '" ~ memberExpr.memberName ~ "'");
+
+        // Look up the mangled function label
+        string mangledMethodName = structDecl.name ~ "_" ~ method.name;
+        auto labelPtr = mangledMethodName in functionLabels;
+        if (labelPtr is null)
+            throw new Exception("Method not compiled: " ~ mangledMethodName);
+
+        if (args.length > 3)
+            throw new Exception("Native backend: methods support max 3 user arguments (x0 reserved for this)");
+
+        // Check if any argument contains a function call that would clobber registers
+        bool hasNestedCalls = false;
+        foreach (arg; args) {
+            if (containsCall(arg)) {
+                hasNestedCalls = true;
+                break;
+            }
+        }
+
+        if (hasNestedCalls && args.length > 1) {
+            // Save arguments to temp slots, then load into registers
+            uint[] argSlots;
+            foreach (i, arg; args) {
+                compileExpression(arg);
+                uint slot = tempSlot + cast(uint)(i * 4);
+                gen.emitStoreLocal32(slot);
+                argSlots ~= slot;
+            }
+            // Load from temp slots into x1, x2, x3 (reverse order to not clobber)
+            for (long i = cast(long)argSlots.length - 1; i >= 0; i--) {
+                gen.emitLoadLocal32(argSlots[cast(size_t)i]);
+                switch (i) {
+                    case 0: gen.emitMoveX0ToX1(); break;
+                    case 1: gen.emitMoveX0ToX2(); break;
+                    case 2: gen.emitMoveX0ToX3(); break;
+                    default: break;
+                }
+            }
+        } else {
+            // No nested calls - direct register assignment (reverse order)
+            for (long i = cast(long)args.length - 1; i >= 0; i--) {
+                compileExpression(args[i]);
+                switch (i) {
+                    case 0: gen.emitMoveX0ToX1(); break;
+                    case 1: gen.emitMoveX0ToX2(); break;
+                    case 2: gen.emitMoveX0ToX3(); break;
+                    default: break;
+                }
+            }
+        }
+
+        // Load 'this' pointer into x0 (stack address of the struct)
+        gen.emitStackAddress(info.offset);
+
+        // Emit the call
+        gen.emitCall(*labelPtr);
+        // Result is in x0
     }
 
     /**

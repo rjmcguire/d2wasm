@@ -39,10 +39,24 @@ class WASMBackend : Backend {
     override CompiledFunction compileWithDependencies(FunctionDecl[] funcs, string entryFuncName) {
         import std.algorithm : map;
         import std.array : array;
-        
+
         // Convert FunctionDecl[] to Declaration[] for the emitter
         Declaration[] decls = funcs.map!(f => cast(Declaration)f).array;
-        
+
+        // Include parent struct declarations for method dependencies
+        // (emitter needs StructDecl to register methods with mangled names)
+        bool[string] addedStructs;
+        foreach (f; funcs) {
+            if (f.isMethod && f.parent !is null) {
+                if (auto sd = cast(StructDecl)f.parent) {
+                    if (sd.name !in addedStructs) {
+                        decls ~= cast(Declaration)sd;
+                        addedStructs[sd.name] = true;
+                    }
+                }
+            }
+        }
+
         auto emitter = new BinaryEmitter(symbolTable, enableStackTrace);
         auto wasmBytes = emitter.emit(decls);
         
