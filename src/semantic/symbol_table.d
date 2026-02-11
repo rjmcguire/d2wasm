@@ -110,11 +110,13 @@ class Scope {
         if (symbol.kind == SymbolKind.Variable || symbol.kind == SymbolKind.Parameter) {
             if (auto outer = lookupOuter(symbol.name)) {
                 if (outer.kind == SymbolKind.Variable || outer.kind == SymbolKind.Parameter) {
-                    throw new SemanticError(
-                        format("Variable '%s' shadows outer variable declared at %s",
-                               symbol.name, outer.location.toString()),
-                        symbol.location
-                    );
+                    if (!outer.isConstant) {  // Allow shadowing manifest constants (enum x = ...)
+                        throw new SemanticError(
+                            format("Variable '%s' shadows outer variable declared at %s",
+                                   symbol.name, outer.location.toString()),
+                            symbol.location
+                        );
+                    }
                 }
             }
         }
