@@ -1,0 +1,7 @@
+{
+  "name": "string_equal",
+  "description": "CTFE parity: stringEqual from runtime/object.d",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 11
+}

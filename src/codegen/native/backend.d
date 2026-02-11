@@ -455,8 +455,22 @@ class NativeCompiledFunction : CompiledFunction {
                     break;
 
                 case VarKind.slice:
+                    // Register contains pointer to caller's slice struct - copy to our stack
+                    switch (regIdx) {
+                        case 0: gen.emitMoveX0ToX9(); break;
+                        case 1: gen.emitMoveX1ToX9(); break;
+                        case 2: gen.emitMoveX2ToX9(); break;
+                        case 3: gen.emitMoveX3ToX9(); break;
+                        default: break;
+                    }
+                    for (uint off = 0; off < NativeSliceLayout.sizeof; off += 4) {
+                        gen.emitLoadFromX9Offset(off);
+                        gen.emitStoreLocal32(offset + off);
+                    }
+                    break;
+
                 case VarKind.scalar:
-                    // Simple scalar or slice pointer - store the register value
+                    // Simple scalar - store the register value
                     switch (regIdx) {
                         case 0: gen.emitStoreLocal32(offset); break;        // x0
                         case 1: gen.emitStoreLocal32FromX1(offset); break;  // x1
@@ -1072,10 +1086,10 @@ class NativeCompiledFunction : CompiledFunction {
                 final switch (info.kind) {
                     case VarKind.struct_:
                     case VarKind.staticArray:
+                    case VarKind.slice:
                         // Aggregate types: emit address (pointer) instead of loading value
                         gen.emitStackAddress(info.offset);
                         break;
-                    case VarKind.slice:
                     case VarKind.scalar:
                         gen.emitLoadLocal32(info.offset);
                         break;

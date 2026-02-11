@@ -205,7 +205,32 @@ int compileFile(CompilerOptions options) {
         }
         
         log(2, "Parsed ", ast.length, " top-level declarations");
-        
+
+        // 2a. Auto-import runtime/object.d (prepend runtime declarations)
+        {
+            // Try relative to executable, then relative to CWD
+            string exeDir = dirName(thisExePath());
+            string[] searchPaths = [
+                buildPath(exeDir, "..", "runtime", "object.d"),
+                buildPath(exeDir, "runtime", "object.d"),
+                "runtime/object.d",
+            ];
+            foreach (runtimePath; searchPaths) {
+                if (exists(runtimePath)) {
+                    try {
+                        auto rtSource = readText(runtimePath);
+                        auto rtBridge = new TreeSitterBridge(runtimePath, rtSource);
+                        Declaration[] rtDecls = rtBridge.parseSourceFile();
+                        ast = rtDecls ~ ast;
+                        log(2, "Auto-imported ", rtDecls.length, " declarations from ", runtimePath);
+                    } catch (Exception e) {
+                        log(1, "Warning: failed to parse runtime/object.d: ", e.msg);
+                    }
+                    break;
+                }
+            }
+        }
+
         if (options.printAst) {
             writeln("\n=== AST (before mixin expansion) ===");
             printAST(ast);
