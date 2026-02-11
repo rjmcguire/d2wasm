@@ -202,6 +202,18 @@ struct NativeCodeGen {
         // MOV x9, x3 = ORR x9, xzr, x3
         emitRaw32(0xAA0303E9);
     }
+
+    /// Move x9 to x0
+    void emitMoveX9ToX0() {
+        // MOV x0, x9 = ORR x0, xzr, x9
+        emitRaw32(0xAA0903E0);
+    }
+
+    /// Move x9 to x1
+    void emitMoveX9ToX1() {
+        // MOV x1, x9 = ORR x1, xzr, x9
+        emitRaw32(0xAA0903E1);
+    }
     
     /// Compute x0 = SP + offset (for getting address of stack variable)
     void emitStackAddress(uint offset) {

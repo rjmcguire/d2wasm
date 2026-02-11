@@ -1486,6 +1486,62 @@ class NativeCompiledFunction : CompiledFunction {
             // Just compile the inner expression
             // Note: class→interface casts would need special handling when classes are supported
             compileExpression(castExpr.expression);
+        } else if (auto sliceExpr = cast(SliceExpression)expr) {
+            // Slice expression: source[start..end]
+            // Create a temp slice struct on the stack and return its address
+            auto sourceIdent = cast(IdentifierExpression)sliceExpr.array;
+            if (!sourceIdent)
+                throw new Exception("Complex slice source not supported in native backend");
+
+            auto info = sourceIdent.name in localVars;
+            if (info is null || !info.isSlice)
+                throw new Exception("Can only sub-slice a slice variable in native backend");
+
+            uint elemSize = info.elemSize;
+            uint tempOffset = nextLocalOffset;
+            nextLocalOffset += NativeSliceLayout.sizeof;
+
+            // Compute new ptr = source.ptr + start * elemSize
+            // Load source.ptr (64-bit)
+            gen.emitLoadLocal(info.offset);
+            gen.emitMoveX0ToX9();  // x9 = source.ptr
+
+            // Compute start * elemSize
+            compileExpression(sliceExpr.start);
+            gen.emitMoveX0ToX1();  // x1 = start
+            gen.emitImm32(stencil_load_imm32, elemSize);
+            gen.emit(stencil_mul_i32);  // x0 = start * elemSize
+
+            // ptr + start * elemSize (64-bit add: x9 + x0)
+            gen.emitMoveX0ToX1();  // x1 = byte offset
+            gen.emitMoveX9ToX0();  // x0 = source.ptr
+            gen.emit(stencil_add_i32);  // x0 = new ptr
+            gen.emitStoreLocal(tempOffset);  // store 64-bit ptr
+
+            // Compute length = end - start
+            compileExpression(sliceExpr.end);
+            gen.emitMoveX0ToX1();  // x1 = end
+            compileExpression(sliceExpr.start);
+            // x0 = start, x1 = end → need end - start
+            // Swap: we need x0=end, x1=start
+            gen.emitMoveX0ToX9();  // x9 = start
+            gen.emitMoveX1ToX0();  // x0 = end
+            gen.emitMoveX9ToX1();  // x1 = start
+            gen.emit(stencil_sub_i32);  // x0 = end - start
+            gen.emitStoreLocal32(tempOffset + NativeSliceLayout.LENGTH_OFFSET);
+
+            // capacity = length (reload)
+            compileExpression(sliceExpr.end);
+            gen.emitMoveX0ToX1();
+            compileExpression(sliceExpr.start);
+            gen.emitMoveX0ToX9();
+            gen.emitMoveX1ToX0();
+            gen.emitMoveX9ToX1();
+            gen.emit(stencil_sub_i32);
+            gen.emitStoreLocal32(tempOffset + NativeSliceLayout.CAPACITY_OFFSET);
+
+            // Return address of temp slice struct
+            gen.emitStackAddress(tempOffset);
         } else {
             throw new Exception("Expression type not yet supported in native backend: " ~ 
                 typeid(expr).toString());

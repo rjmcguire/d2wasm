@@ -1,0 +1,7 @@
+{
+  "name": "slice_expr_arg",
+  "description": "CTFE parity: slice expression as function argument",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 90
+}

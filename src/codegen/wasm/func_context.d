@@ -3822,6 +3822,113 @@ class FuncContext {
                 }
             }
 
+            // Check for slice expression argument (e.g., data[1..4])
+            if (auto sliceArg = cast(SliceExpression)arg) {
+                auto sourceIdent = cast(IdentifierExpression)sliceArg.array;
+                if (!sourceIdent) {
+                    throw new EmitError("Complex slice source not supported in call argument");
+                }
+
+                // Find source slice info (local or param)
+                int sourceFrameOffset;
+                uint sourceElemSize;
+                bool sourceIsParam = false;
+                uint sourceLocalIndex;
+
+                if (auto srcLocal = sourceIdent.name in locals) {
+                    if (!srcLocal.isSlice)
+                        throw new EmitError("Can only sub-slice a slice variable");
+                    sourceFrameOffset = srcLocal.frameOffset;
+                    sourceElemSize = srcLocal.elementSize;
+                } else if (auto srcParam = sourceIdent.name in params) {
+                    if (!srcParam.isSlice)
+                        throw new EmitError("Can only sub-slice a slice variable");
+                    sourceIsParam = true;
+                    sourceLocalIndex = srcParam.localIndex;
+                    sourceElemSize = srcParam.elementSize;
+                } else {
+                    throw new EmitError("Unknown slice source: " ~ sourceIdent.name);
+                }
+
+                enum sliceSize = WasmSliceLayout.sizeof;
+
+                // Allocate temp: SP = SP - 12
+                out_ ~= Op.global_get;
+                leb128u(out_, emitter.spGlobal);
+                out_ ~= Op.i32_const;
+                leb128s(out_, sliceSize);
+                out_ ~= Op.i32_sub;
+                out_ ~= Op.global_set;
+                leb128u(out_, emitter.spGlobal);
+
+                // Store ptr = source.ptr + start * elemSize at SP+0
+                out_ ~= Op.global_get;
+                leb128u(out_, emitter.spGlobal);
+
+                // Load source.ptr
+                if (sourceIsParam) {
+                    out_ ~= Op.local_get;
+                    leb128u(out_, sourceLocalIndex);
+                } else {
+                    out_ ~= Op.local_get;
+                    leb128u(out_, fpLocal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, sourceFrameOffset);
+                    out_ ~= Op.i32_add;
+                }
+                out_ ~= Op.i32_load;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+
+                // Add start * elemSize
+                emitExpression(out_, sliceArg.start);
+                out_ ~= Op.i32_const;
+                leb128s(out_, sourceElemSize);
+                out_ ~= Op.i32_mul;
+                out_ ~= Op.i32_add;
+
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+
+                // Store length = end - start at SP+4
+                out_ ~= Op.global_get;
+                leb128u(out_, emitter.spGlobal);
+                out_ ~= Op.i32_const;
+                leb128s(out_, WasmSliceLayout.LENGTH_OFFSET);
+                out_ ~= Op.i32_add;
+
+                emitExpression(out_, sliceArg.end);
+                emitExpression(out_, sliceArg.start);
+                out_ ~= Op.i32_sub;
+
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+
+                // Store capacity = length at SP+8
+                out_ ~= Op.global_get;
+                leb128u(out_, emitter.spGlobal);
+                out_ ~= Op.i32_const;
+                leb128s(out_, WasmSliceLayout.CAPACITY_OFFSET);
+                out_ ~= Op.i32_add;
+
+                emitExpression(out_, sliceArg.end);
+                emitExpression(out_, sliceArg.start);
+                out_ ~= Op.i32_sub;
+
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+
+                // Push SP (address of temp slice) as argument
+                out_ ~= Op.global_get;
+                leb128u(out_, emitter.spGlobal);
+
+                totalCopySize += sliceSize;
+                continue;
+            }
+
             // Non-struct argument
             emitExpression(out_, arg);
         }
