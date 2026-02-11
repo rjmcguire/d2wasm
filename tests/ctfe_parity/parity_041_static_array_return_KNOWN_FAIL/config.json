@@ -1,0 +1,7 @@
+{
+  "name": "static_array_return",
+  "description": "CTFE parity: function returning a static array",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 60
+}

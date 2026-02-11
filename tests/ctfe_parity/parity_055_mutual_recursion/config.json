@@ -1,0 +1,7 @@
+{
+  "name": "mutual_recursion",
+  "description": "CTFE parity: mutually recursive isEven/isOdd functions",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 4
+}

@@ -1,0 +1,7 @@
+{
+  "name": "static_array_modify",
+  "description": "CTFE parity: modify elements of a static array",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 46
+}

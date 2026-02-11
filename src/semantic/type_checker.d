@@ -812,7 +812,19 @@ class TypeChecker {
             
             return leftType;  // Result is same type as left operand
         }
-        
+
+        // Concatenation operator (~)
+        if (expr.operator == BinaryExpression.Operator.Concat) {
+            if (auto arrType = cast(ArrayType)leftType) {
+                return arrType;
+            }
+            throw new TypeError(
+                format("Concatenation operator requires array type, got '%s'",
+                       leftType.toString()),
+                expr.location
+            );
+        }
+
         throw new TypeError(
             format("Unsupported binary operator"),
             expr.location

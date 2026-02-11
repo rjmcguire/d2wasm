@@ -1,0 +1,7 @@
+{
+  "name": "struct_param",
+  "description": "CTFE parity: struct passed to multiple functions, dot product",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 25
+}

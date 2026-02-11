@@ -1,0 +1,7 @@
+{
+  "name": "compound_assign_all",
+  "description": "CTFE parity: all compound assignment operators",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 64
+}

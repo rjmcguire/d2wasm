@@ -32,8 +32,22 @@ class FuncContext {
     uint[string] localIndex;       // name -> WASM local index (legacy, for struct/slice lookups)
     uint paramCount;
 
+    /// Discriminant for variable/parameter types in locals/params maps.
+    /// Used with `final switch` at multi-way dispatch points to ensure
+    /// exhaustive handling — adding a new variant produces compile errors
+    /// at every unhandled site.
+    enum VarKind {
+        scalar,      // Should never appear in WASM locals/params maps
+        struct_,
+        class_,
+        interface_,
+        slice,
+        staticArray,
+    }
+
     /// Unified info for all shadow-stack local variables
     struct LocalVarInfo {
+        VarKind kind;
         uint frameOffset;      // Shadow stack offset from FP
         Type type;             // The D type
 
@@ -51,16 +65,17 @@ class FuncContext {
         uint elementCount;
         uint elementSize;
 
-        bool isStruct() const { return structDecl !is null; }
-        bool isClass() const { return classDecl !is null; }
-        bool isInterface() const { return ifaceDecl !is null; }
-        bool isSlice() const { return elementType !is null && elementCount == 0; }
-        bool isStaticArray() const { return elementCount > 0; }
+        bool isStruct() const { return kind == VarKind.struct_; }
+        bool isClass() const { return kind == VarKind.class_; }
+        bool isInterface() const { return kind == VarKind.interface_; }
+        bool isSlice() const { return kind == VarKind.slice; }
+        bool isStaticArray() const { return kind == VarKind.staticArray; }
     }
     LocalVarInfo[string] locals;
 
     /// Unified info for all aggregate parameters
     struct ParamVarInfo {
+        VarKind kind;
         uint localIndex;       // WASM local index
         uint itableLocalIndex; // Only for interface params (0 otherwise)
         Type type;
@@ -68,12 +83,17 @@ class FuncContext {
         StructDecl structDecl;
         ClassDecl classDecl;
         InterfaceDecl ifaceDecl;
-        Type elementType;      // For slice params
+        Type elementType;      // For slice/static-array params
 
-        bool isStruct() const { return structDecl !is null; }
-        bool isClass() const { return classDecl !is null; }
-        bool isInterface() const { return ifaceDecl !is null; }
-        bool isSlice() const { return elementType !is null; }
+        // For static array params
+        uint elementCount;
+        uint elementSize;
+
+        bool isStruct() const { return kind == VarKind.struct_; }
+        bool isClass() const { return kind == VarKind.class_; }
+        bool isInterface() const { return kind == VarKind.interface_; }
+        bool isSlice() const { return kind == VarKind.slice; }
+        bool isStaticArray() const { return kind == VarKind.staticArray; }
     }
     ParamVarInfo[string] params;
 
@@ -125,6 +145,7 @@ class FuncContext {
             
             // Register 'this' as a struct param so this.x works
             ParamVarInfo pvi;
+            pvi.kind = VarKind.struct_;
             pvi.localIndex = 0;
             pvi.structDecl = f.structParent;
             params["this"] = pvi;
@@ -138,6 +159,7 @@ class FuncContext {
 
             // Register 'this' as a class param so this.x works
             ParamVarInfo pvi;
+            pvi.kind = VarKind.class_;
             pvi.localIndex = 0;
             pvi.classDecl = f.classParent;
             params["this"] = pvi;
@@ -198,6 +220,7 @@ class FuncContext {
                 localTypes ~= ValType.i32;
                 
                 ParamVarInfo pvi;
+                pvi.kind = VarKind.interface_;
                 pvi.localIndex = wasmLocalIdx;
                 pvi.itableLocalIndex = wasmLocalIdx + 1;
                 pvi.type = p.type;
@@ -209,24 +232,34 @@ class FuncContext {
                 auto vt = e.dTypeToValType(p.type);
                 localTypes ~= vt;
                 
-                // Track struct/class/slice parameters
+                // Track struct/class/slice/static-array parameters
                 ParamVarInfo pvi;
                 pvi.localIndex = wasmLocalIdx;
                 pvi.type = p.type;
 
                 if (auto structDecl = p.type.asStruct()) {
+                    pvi.kind = VarKind.struct_;
                     pvi.structDecl = structDecl;
                 } else if (auto classDecl = p.type.asClass()) {
+                    pvi.kind = VarKind.class_;
                     pvi.classDecl = classDecl;
-                }
-
-                if (auto arrayType = cast(ArrayType)p.type) {
-                    if (arrayType.arraySize is null) {  // Dynamic array (slice)
+                } else if (auto arrayType = cast(ArrayType)p.type) {
+                    if (arrayType.arraySize !is null) {
+                        // Static array param — passed as i32 pointer
+                        pvi.kind = VarKind.staticArray;
+                        pvi.elementType = arrayType.elementType;
+                        pvi.elementCount = evaluateStaticArraySize(arrayType.arraySize);
+                        size_t elemSize = arrayType.elementType.size();
+                        if (elemSize == 0) elemSize = 4;
+                        pvi.elementSize = cast(uint)elemSize;
+                    } else {
+                        // Dynamic array (slice)
+                        pvi.kind = VarKind.slice;
                         pvi.elementType = arrayType.elementType;
                     }
                 }
 
-                if (pvi.structDecl || pvi.classDecl || pvi.elementType)
+                if (pvi.kind != VarKind.scalar)
                     params[p.name] = pvi;
                 
                 wasmLocalIdx += 1;
@@ -280,6 +313,7 @@ class FuncContext {
                     frameSize = (frameSize + 3) & ~3;
 
                     LocalVarInfo lvi;
+                    lvi.kind = VarKind.struct_;
                     lvi.frameOffset = frameSize;
                     lvi.type = varDecl.type;
                     lvi.structDecl = structDecl;
@@ -304,6 +338,7 @@ class FuncContext {
                     frameSize = (frameSize + cast(uint)classDecl.classAlign - 1) & ~(cast(uint)classDecl.classAlign - 1);
 
                     LocalVarInfo lvi;
+                    lvi.kind = VarKind.class_;
                     lvi.frameOffset = frameSize;
                     lvi.type = varDecl.type;
                     lvi.classDecl = classDecl;
@@ -318,6 +353,7 @@ class FuncContext {
                     frameSize = (frameSize + 3) & ~3;  // Align to 4 bytes
 
                     LocalVarInfo lvi;
+                    lvi.kind = VarKind.interface_;
                     lvi.frameOffset = frameSize;
                     lvi.type = varDecl.type;
                     lvi.ifaceDecl = ifaceDecl;
@@ -341,6 +377,7 @@ class FuncContext {
                     if (elemSize == 0) elemSize = 4;  // Default to 4 for i32
                     
                     LocalVarInfo lvi;
+                    lvi.kind = VarKind.staticArray;
                     lvi.frameOffset = frameSize;
                     lvi.type = varDecl.type;
                     lvi.elementType = arrayType.elementType;
@@ -359,6 +396,7 @@ class FuncContext {
                 emitter.needsArraySupport = true;
                 
                 LocalVarInfo lvi;
+                lvi.kind = VarKind.slice;
                 lvi.frameOffset = frameSize;
                 lvi.type = varDecl.type;
                 lvi.elementType = arrayType.elementType;
@@ -799,12 +837,14 @@ class FuncContext {
         } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
             // Check if this is an aggregate local (on shadow stack)
             if (auto info = varDecl.name in locals) {
-                if (info.isStruct) emitStructVarDecl(out_, varDecl);
-                else if (info.isClass) emitClassVarDecl(out_, varDecl);
-                else if (info.isInterface) emitInterfaceVarDecl(out_, varDecl);
-                else if (info.isStaticArray) emitStaticArrayVarDecl(out_, varDecl);
-                else if (info.isSlice) emitSliceVarDecl(out_, varDecl);
-                else emitVarDecl(out_, varDecl);
+                final switch (info.kind) {
+                    case VarKind.struct_:     emitStructVarDecl(out_, varDecl); break;
+                    case VarKind.class_:      emitClassVarDecl(out_, varDecl); break;
+                    case VarKind.interface_:  emitInterfaceVarDecl(out_, varDecl); break;
+                    case VarKind.staticArray: emitStaticArrayVarDecl(out_, varDecl); break;
+                    case VarKind.slice:       emitSliceVarDecl(out_, varDecl); break;
+                    case VarKind.scalar:      assert(0, "scalar in locals map");
+                }
             } else {
                 emitVarDecl(out_, varDecl);
             }
@@ -851,9 +891,17 @@ class FuncContext {
         if (auto ident = cast(IdentifierExpression)value) {
             // Check if it's a struct or static array local (on shadow stack)
             if (auto info = ident.name in locals) {
-                if (info.isStruct || info.isStaticArray) {
-                    emitMemoryCopy(out_, resultPtrLocalIdx, info.frameOffset, returnValueSize);
-                    return;
+                final switch (info.kind) {
+                    case VarKind.struct_:
+                    case VarKind.staticArray:
+                        emitMemoryCopy(out_, resultPtrLocalIdx, info.frameOffset, returnValueSize);
+                        return;
+                    case VarKind.class_:
+                    case VarKind.interface_:
+                    case VarKind.slice:
+                        break;  // fall through to generic path
+                    case VarKind.scalar:
+                        assert(0, "scalar in locals map");
                 }
             }
         }
@@ -1861,80 +1909,114 @@ class FuncContext {
             throw new EmitError("Complex array indexing not yet supported");
         }
         
-        // Check if it's a static array or slice local
+        // Check if it's a local on the shadow stack
         if (auto info = arrayIdent.name in locals) {
-            if (info.isStaticArray) {
-                // Static array: data is directly on shadow stack at frameOffset
-                // Address = FP + frameOffset + index * elemSize
-                out_ ~= Op.local_get;
-                leb128u(out_, fpLocal);
-                out_ ~= Op.i32_const;
-                leb128s(out_, info.frameOffset);
-                out_ ~= Op.i32_add;
+            final switch (info.kind) {
+                case VarKind.staticArray:
+                    // Static array: data is directly on shadow stack at frameOffset
+                    // Address = FP + frameOffset + index * elemSize
+                    out_ ~= Op.local_get;
+                    leb128u(out_, fpLocal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, info.frameOffset);
+                    out_ ~= Op.i32_add;
 
-                // Add index * elemSize
-                emitExpression(out_, expr.index);
-                out_ ~= Op.i32_const;
-                leb128s(out_, info.elementSize);
-                out_ ~= Op.i32_mul;
-                out_ ~= Op.i32_add;
+                    // Add index * elemSize
+                    emitExpression(out_, expr.index);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, info.elementSize);
+                    out_ ~= Op.i32_mul;
+                    out_ ~= Op.i32_add;
 
-                // Load the element
-                out_ ~= Op.i32_load;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
-                return;
-            }
-            if (info.isSlice) {
-                // Load ptr from slice struct (offset 0)
-                out_ ~= Op.local_get;
-                leb128u(out_, fpLocal);
-                out_ ~= Op.i32_const;
-                leb128s(out_, info.frameOffset);  // ptr is at offset 0
-                out_ ~= Op.i32_add;
-                out_ ~= Op.i32_load;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                    // Load the element
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                    return;
 
-                // Calculate address: ptr + index * elemSize
-                // For now assume i32 elements (4 bytes)
-                emitExpression(out_, expr.index);
-                out_ ~= Op.i32_const;
-                leb128s(out_, 4);  // sizeof(int) = 4
-                out_ ~= Op.i32_mul;
-                out_ ~= Op.i32_add;
+                case VarKind.slice:
+                    // Load ptr from slice struct (offset 0)
+                    out_ ~= Op.local_get;
+                    leb128u(out_, fpLocal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, info.frameOffset);  // ptr is at offset 0
+                    out_ ~= Op.i32_add;
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
 
-                // Load the element
-                out_ ~= Op.i32_load;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
-                return;
+                    // Calculate address: ptr + index * elemSize
+                    emitExpression(out_, expr.index);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, 4);  // sizeof(int) = 4
+                    out_ ~= Op.i32_mul;
+                    out_ ~= Op.i32_add;
+
+                    // Load the element
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                    return;
+
+                case VarKind.struct_:
+                case VarKind.class_:
+                case VarKind.interface_:
+                    assert(0, "Cannot index " ~ arrayIdent.name ~ " (not an array type)");
+                case VarKind.scalar:
+                    assert(0, "scalar in locals map");
             }
         }
 
-        // Check if it's a slice parameter
-        if (auto info = arrayIdent.name in params) if (info.isSlice) {
-            // The parameter contains a pointer to the slice struct
-            // Load ptr from slice struct (offset 0)
-            out_ ~= Op.local_get;
-            leb128u(out_, info.localIndex);
-            out_ ~= Op.i32_load;  // Load ptr field (at offset 0 of slice struct)
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+        // Check if it's an array/slice parameter
+        if (auto info = arrayIdent.name in params) {
+            final switch (info.kind) {
+                case VarKind.staticArray:
+                    // Static array param: i32 pointer to array data
+                    // Address = param_ptr + index * elemSize
+                    out_ ~= Op.local_get;
+                    leb128u(out_, info.localIndex);
 
-            // Calculate address: ptr + index * elemSize
-            // For now assume i32 elements (4 bytes)
-            emitExpression(out_, expr.index);
-            out_ ~= Op.i32_const;
-            leb128s(out_, 4);  // sizeof(int) = 4
-            out_ ~= Op.i32_mul;
-            out_ ~= Op.i32_add;
-            
-            // Load the element
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
-            return;
+                    emitExpression(out_, expr.index);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, info.elementSize);
+                    out_ ~= Op.i32_mul;
+                    out_ ~= Op.i32_add;
+
+                    // Load the element
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                    return;
+
+                case VarKind.slice:
+                    // The parameter contains a pointer to the slice struct
+                    // Load ptr from slice struct (offset 0)
+                    out_ ~= Op.local_get;
+                    leb128u(out_, info.localIndex);
+                    out_ ~= Op.i32_load;  // Load ptr field (at offset 0 of slice struct)
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+
+                    // Calculate address: ptr + index * elemSize
+                    emitExpression(out_, expr.index);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, 4);  // sizeof(int) = 4
+                    out_ ~= Op.i32_mul;
+                    out_ ~= Op.i32_add;
+
+                    // Load the element
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                    return;
+
+                case VarKind.struct_:
+                case VarKind.class_:
+                case VarKind.interface_:
+                    assert(0, "Cannot index " ~ arrayIdent.name ~ " param (not an array type)");
+                case VarKind.scalar:
+                    assert(0, "scalar in params map");
+            }
         }
         
         // Check if it's a manifest constant array (import(), etc.)
@@ -1990,101 +2072,140 @@ class FuncContext {
             throw new EmitError("Complex array index assignment not yet supported");
         }
         
-        // Check if it's a static array or slice local
-        if (auto info = arrayIdent.name in locals) if (info.isStaticArray) {
-            // Static array: direct address on shadow stack
-            // Address = FP + frameOffset + index * elemSize
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset);
-            out_ ~= Op.i32_add;
+        // Check if it's a local on the shadow stack
+        if (auto info = arrayIdent.name in locals) {
+            final switch (info.kind) {
+                case VarKind.staticArray:
+                    // Static array: direct address on shadow stack
+                    // Address = FP + frameOffset + index * elemSize
+                    out_ ~= Op.local_get;
+                    leb128u(out_, fpLocal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, info.frameOffset);
+                    out_ ~= Op.i32_add;
 
-            // Add index * elemSize
-            emitExpression(out_, indexExpr.index);
-            out_ ~= Op.i32_const;
-            leb128s(out_, info.elementSize);
-            out_ ~= Op.i32_mul;
-            out_ ~= Op.i32_add;
-            
-            // Emit value
-            emitExpression(out_, value);
-            
-            // Store the element
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
-            
-            // Assignment is an expression - emit value again for result
-            emitExpression(out_, value);
-            return;
+                    // Add index * elemSize
+                    emitExpression(out_, indexExpr.index);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, info.elementSize);
+                    out_ ~= Op.i32_mul;
+                    out_ ~= Op.i32_add;
+
+                    // Emit value
+                    emitExpression(out_, value);
+
+                    // Store the element
+                    out_ ~= Op.i32_store;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+
+                    // Assignment is an expression - emit value again for result
+                    emitExpression(out_, value);
+                    return;
+
+                case VarKind.slice:
+                    // Load ptr from slice struct (offset 0)
+                    out_ ~= Op.local_get;
+                    leb128u(out_, fpLocal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, info.frameOffset);  // ptr is at offset 0
+                    out_ ~= Op.i32_add;
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+
+                    // Calculate address: ptr + index * elemSize
+                    emitExpression(out_, indexExpr.index);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, 4);  // sizeof(int) = 4
+                    out_ ~= Op.i32_mul;
+                    out_ ~= Op.i32_add;
+
+                    // Emit value
+                    emitExpression(out_, value);
+
+                    // Store the element
+                    out_ ~= Op.i32_store;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+
+                    // Assignment is an expression - emit value again for result
+                    emitExpression(out_, value);
+                    return;
+
+                case VarKind.struct_:
+                case VarKind.class_:
+                case VarKind.interface_:
+                    assert(0, "Cannot index-assign " ~ arrayIdent.name ~ " (not an array type)");
+                case VarKind.scalar:
+                    assert(0, "scalar in locals map");
+            }
         }
-        
-        // Check if it's a slice local (reuse info from static array check above)
-        if (auto info = arrayIdent.name in locals) if (info.isSlice) {
-            // Load ptr from slice struct (offset 0)
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset);  // ptr is at offset 0
-            out_ ~= Op.i32_add;
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
 
-            // Calculate address: ptr + index * elemSize
-            // For now assume i32 elements (4 bytes)
-            emitExpression(out_, indexExpr.index);
-            out_ ~= Op.i32_const;
-            leb128s(out_, 4);  // sizeof(int) = 4
-            out_ ~= Op.i32_mul;
-            out_ ~= Op.i32_add;
+        // Check if it's an array/slice parameter
+        if (auto info = arrayIdent.name in params) {
+            final switch (info.kind) {
+                case VarKind.staticArray:
+                    // Static array param: i32 pointer to array data
+                    // Address = param_ptr + index * elemSize
+                    out_ ~= Op.local_get;
+                    leb128u(out_, info.localIndex);
 
-            // Emit value
-            emitExpression(out_, value);
+                    emitExpression(out_, indexExpr.index);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, info.elementSize);
+                    out_ ~= Op.i32_mul;
+                    out_ ~= Op.i32_add;
 
-            // Store the element
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+                    // Emit value
+                    emitExpression(out_, value);
 
-            // Assignment is an expression - emit value again for result
-            // (This re-evaluates, but works for simple cases)
-            emitExpression(out_, value);
-            return;
+                    // Store the element
+                    out_ ~= Op.i32_store;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+
+                    // Assignment is an expression - emit value again for result
+                    emitExpression(out_, value);
+                    return;
+
+                case VarKind.slice:
+                    // The parameter contains a pointer to the slice struct
+                    // Load ptr from slice struct (offset 0)
+                    out_ ~= Op.local_get;
+                    leb128u(out_, info.localIndex);
+                    out_ ~= Op.i32_load;  // Load ptr field (at offset 0 of slice struct)
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+
+                    // Calculate address: ptr + index * elemSize
+                    emitExpression(out_, indexExpr.index);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, 4);  // sizeof(int) = 4
+                    out_ ~= Op.i32_mul;
+                    out_ ~= Op.i32_add;
+
+                    // Emit value
+                    emitExpression(out_, value);
+
+                    // Store the element
+                    out_ ~= Op.i32_store;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+
+                    // Assignment is an expression - emit value again for result
+                    emitExpression(out_, value);
+                    return;
+
+                case VarKind.struct_:
+                case VarKind.class_:
+                case VarKind.interface_:
+                    assert(0, "Cannot index-assign " ~ arrayIdent.name ~ " param (not an array type)");
+                case VarKind.scalar:
+                    assert(0, "scalar in params map");
+            }
         }
 
-        // Check if it's a slice parameter
-        if (auto info = arrayIdent.name in params) if (info.isSlice) {
-            // The parameter contains a pointer to the slice struct
-            // Load ptr from slice struct (offset 0)
-            out_ ~= Op.local_get;
-            leb128u(out_, info.localIndex);
-            out_ ~= Op.i32_load;  // Load ptr field (at offset 0 of slice struct)
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
-            
-            // Calculate address: ptr + index * elemSize
-            // For now assume i32 elements (4 bytes)
-            emitExpression(out_, indexExpr.index);
-            out_ ~= Op.i32_const;
-            leb128s(out_, 4);  // sizeof(int) = 4
-            out_ ~= Op.i32_mul;
-            out_ ~= Op.i32_add;
-            
-            // Emit value
-            emitExpression(out_, value);
-            
-            // Store the element
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
-            
-            // Assignment is an expression - emit value again for result
-            emitExpression(out_, value);
-            return;
-        }
-        
         throw new EmitError("Unsupported array index assignment on " ~ arrayIdent.name);
     }
     
@@ -3098,16 +3219,23 @@ class FuncContext {
         // For symbol table lookup (constants, globals), do it now
         Symbol symbol = emitter.symbolTable.lookupSymbol(expr.name);
         
-        // Check if it's a struct local - emit address
-        // Aggregate locals (struct, class, static array) — emit address: FP + frameOffset
+        // Check if it's a local on the shadow stack — emit address: FP + frameOffset
+        // All entries in locals are on the shadow stack
         if (auto info = expr.name in locals) {
-            if (info.isStruct || info.isClass || info.isStaticArray) {
-                out_ ~= Op.local_get;
-                leb128u(out_, fpLocal);
-                out_ ~= Op.i32_const;
-                leb128s(out_, info.frameOffset);
-                out_ ~= Op.i32_add;
-                return;
+            final switch (info.kind) {
+                case VarKind.struct_:
+                case VarKind.class_:
+                case VarKind.interface_:
+                case VarKind.staticArray:
+                case VarKind.slice:
+                    out_ ~= Op.local_get;
+                    leb128u(out_, fpLocal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, info.frameOffset);
+                    out_ ~= Op.i32_add;
+                    return;
+                case VarKind.scalar:
+                    assert(0, "scalar in locals map");
             }
         }
 
@@ -3466,6 +3594,106 @@ class FuncContext {
                     continue;
                 }
                 
+                // Check if argument is a static array local that needs copying
+                if (auto localInfo = argIdent.name in locals) if (localInfo.isStaticArray) {
+                    // Static array local - copy to temp, pass temp address
+                    uint arrSize = localInfo.elementCount * localInfo.elementSize;
+
+                    // Allocate temp: SP = SP - arrSize
+                    out_ ~= Op.global_get;
+                    leb128u(out_, emitter.spGlobal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, arrSize);
+                    out_ ~= Op.i32_sub;
+                    out_ ~= Op.global_set;
+                    leb128u(out_, emitter.spGlobal);
+
+                    // Copy from FP+offset to SP, word by word
+                    for (uint off = 0; off < arrSize; off += 4) {
+                        // Dest: SP + off
+                        out_ ~= Op.global_get;
+                        leb128u(out_, emitter.spGlobal);
+                        if (off > 0) {
+                            out_ ~= Op.i32_const;
+                            leb128s(out_, off);
+                            out_ ~= Op.i32_add;
+                        }
+
+                        // Src: FP + frameOffset + off
+                        out_ ~= Op.local_get;
+                        leb128u(out_, fpLocal);
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, localInfo.frameOffset + cast(int)off);
+                        out_ ~= Op.i32_add;
+                        out_ ~= Op.i32_load;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+
+                        // Store
+                        out_ ~= Op.i32_store;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                    }
+
+                    // Push SP (address of copy) as argument
+                    out_ ~= Op.global_get;
+                    leb128u(out_, emitter.spGlobal);
+
+                    totalCopySize += arrSize;
+                    continue;
+                }
+
+                // Check if argument is a static array param that needs copying
+                if (auto paramInfo = argIdent.name in params) if (paramInfo.isStaticArray) {
+                    // Static array param - already a pointer, copy from it
+                    uint arrSize = paramInfo.elementCount * paramInfo.elementSize;
+
+                    // Allocate temp
+                    out_ ~= Op.global_get;
+                    leb128u(out_, emitter.spGlobal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, arrSize);
+                    out_ ~= Op.i32_sub;
+                    out_ ~= Op.global_set;
+                    leb128u(out_, emitter.spGlobal);
+
+                    // Copy from param pointer to SP, word by word
+                    for (uint off = 0; off < arrSize; off += 4) {
+                        // Dest: SP + off
+                        out_ ~= Op.global_get;
+                        leb128u(out_, emitter.spGlobal);
+                        if (off > 0) {
+                            out_ ~= Op.i32_const;
+                            leb128s(out_, off);
+                            out_ ~= Op.i32_add;
+                        }
+
+                        // Src: paramPtr + off
+                        out_ ~= Op.local_get;
+                        leb128u(out_, paramInfo.localIndex);
+                        if (off > 0) {
+                            out_ ~= Op.i32_const;
+                            leb128s(out_, cast(int)off);
+                            out_ ~= Op.i32_add;
+                        }
+                        out_ ~= Op.i32_load;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+
+                        // Store
+                        out_ ~= Op.i32_store;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                    }
+
+                    // Push SP as argument
+                    out_ ~= Op.global_get;
+                    leb128u(out_, emitter.spGlobal);
+
+                    totalCopySize += arrSize;
+                    continue;
+                }
+
                 // Check if argument is a slice local
                 if (auto sliceInfo = argIdent.name in locals) if (sliceInfo.isSlice) {
                     // Slice local - copy 12-byte slice struct to temp, pass temp address

@@ -16,7 +16,6 @@ import semantic.type_checker;
 import codegen.emitter;
 import codegen.wasm.types;
 import codegen.backend;
-import parser.tree_sitter_bridge : TreeSitterBridge;
 import diagnostic.log : log;
 
 import std.stdio;
@@ -779,9 +778,21 @@ class CTFEEvaluator {
         
         log(3, "CTFE: Calling ", funcName, " (returns string: ", returnsString, ")");
         
-        // For string-returning functions, interpret directly
+        // For string-returning functions, compile via backend and extract string from memory
         if (returnsString) {
-            return CTFEResult.fromString(interpretStringFunction(funcDecl));
+            long structPtr = executeViaBackend(funcDecl, []);
+            // Read {ptr, len} from the array struct in execution memory
+            ubyte[] structBytes = cachedContext.readMemory(cast(uint)structPtr, 8);
+            uint dataPtr = (cast(uint)structBytes[0]) |
+                           (cast(uint)structBytes[1] << 8) |
+                           (cast(uint)structBytes[2] << 16) |
+                           (cast(uint)structBytes[3] << 24);
+            uint len = (cast(uint)structBytes[4]) |
+                       (cast(uint)structBytes[5] << 8) |
+                       (cast(uint)structBytes[6] << 16) |
+                       (cast(uint)structBytes[7] << 24);
+            ubyte[] strBytes = cachedContext.readMemory(dataPtr, len);
+            return CTFEResult.fromString(cast(string)strBytes.idup);
         }
         
         // Check if function returns a static array
@@ -1034,196 +1045,6 @@ class CTFEEvaluator {
         return result.intValue;
     }
     
-    /**
-     * Interpret a function that returns a string.
-     * Handles functions with mixins, local variables, and return statements.
-     */
-    string interpretStringFunction(FunctionDecl funcDecl) {
-        log(3, "CTFE: Interpreting string function ", funcDecl.name);
-        
-        if (!funcDecl.body_) {
-            throw new CTFEError("CTFE: Function '" ~ funcDecl.name ~ "' has no body");
-        }
-        
-        // Create a local variable scope for this function
-        string[string] localStrings;
-        long[string] localInts;
-        
-        // Execute statements
-        if (auto compound = cast(CompoundStatement)funcDecl.body_) {
-            auto result = executeStatementsForString(compound.statements, localStrings, localInts);
-            if (result.hasReturn) {
-                return result.value;
-            }
-        }
-        
-        throw new CTFEError("CTFE: Function '" ~ funcDecl.name ~ "' did not return a value");
-    }
-    
-    /**
-     * Result of executing statements during CTFE
-     */
-    private struct StatementResult {
-        bool hasReturn;
-        string value;
-    }
-    
-    /**
-     * Execute a list of statements, handling mixins and returns.
-     */
-    private StatementResult executeStatementsForString(Statement[] statements, 
-                                                       ref string[string] localStrings,
-                                                       ref long[string] localInts) {
-        foreach (stmt; statements) {
-            // Handle mixin statements - expand and execute them
-            if (auto mixinStmt = cast(MixinStatement)stmt) {
-                auto expanded = executeMixinStatement(mixinStmt, localStrings, localInts);
-                if (expanded.hasReturn) {
-                    return expanded;
-                }
-                continue;
-            }
-            
-            // Handle variable declarations (local strings/ints)
-            if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
-                executeVarDecl(varDecl, localStrings, localInts);
-                continue;
-            }
-            
-            // Handle return statement
-            if (auto returnStmt = cast(ReturnStatement)stmt) {
-                if (returnStmt.value) {
-                    string result = evaluateStringExpressionWithLocals(returnStmt.value, localStrings, localInts);
-                    return StatementResult(true, result);
-                }
-            }
-        }
-        
-        return StatementResult(false, "");
-    }
-    
-    /**
-     * Execute a mixin statement during CTFE - expand it and execute the resulting statements.
-     */
-    private StatementResult executeMixinStatement(MixinStatement mixinStmt,
-                                                  ref string[string] localStrings,
-                                                  ref long[string] localInts) {
-        log(3, "CTFE: Expanding mixin inside function: ", mixinStmt.mixinExpr.toString());
-        
-        // Evaluate the mixin expression to get the code string
-        string code = evaluateStringExpressionWithLocals(mixinStmt.mixinExpr, localStrings, localInts);
-        log(3, "CTFE: Mixin expands to: \"", code, "\"");
-        
-        // Parse the code as statements
-        string wrappedCode = "void __mixin_wrapper() { " ~ code ~ " }";
-        auto bridge = new TreeSitterBridge("(ctfe-mixin)", wrappedCode);
-        Declaration[] parsed = bridge.parseSourceFile();
-        
-        if (parsed.length > 0) {
-            if (auto funcDecl = cast(FunctionDecl)parsed[0]) {
-                if (auto compound = cast(CompoundStatement)funcDecl.body_) {
-                    // Execute the expanded statements
-                    return executeStatementsForString(compound.statements, localStrings, localInts);
-                }
-            }
-        }
-        
-        return StatementResult(false, "");
-    }
-    
-    /**
-     * Execute a variable declaration during CTFE.
-     */
-    private void executeVarDecl(VariableDeclarationStatement varDecl,
-                                ref string[string] localStrings,
-                                ref long[string] localInts) {
-        // Check if this is a string variable (dynamic ubyte[])
-        bool isString = isStringType(varDecl.type);
-        
-        if (isString && varDecl.initializer) {
-            string value = evaluateStringExpressionWithLocals(varDecl.initializer, localStrings, localInts);
-            localStrings[varDecl.name] = value;
-            log(3, "CTFE: Local string '", varDecl.name, "' = \"", value, "\"");
-        } else if (varDecl.initializer) {
-            // Assume integer
-            long value = evaluateSimpleExpressionWithLocals(varDecl.initializer, localInts);
-            localInts[varDecl.name] = value;
-            log(3, "CTFE: Local int '", varDecl.name, "' = ", value);
-        }
-    }
-    
-    /**
-     * Evaluate a simple (integer) expression with local variables.
-     */
-    private long evaluateSimpleExpressionWithLocals(Expression expr, long[string] localInts) {
-        if (auto literal = cast(LiteralExpression)expr) {
-            if (literal.value.type == typeid(long)) {
-                return literal.value.get!long();
-            }
-            if (literal.value.type == typeid(bool)) {
-                return literal.value.get!bool() ? 1 : 0;
-            }
-        }
-        
-        if (auto ident = cast(IdentifierExpression)expr) {
-            if (auto val = ident.name in localInts) {
-                return *val;
-            }
-            // Try manifest constants
-            foreach (decl; allDeclarations) {
-                if (auto manifest = cast(ManifestConstantDecl)decl) {
-                    if (manifest.name == ident.name && manifest.ctfeComplete && !manifest.isStringType) {
-                        return manifest.ctfeValue;
-                    }
-                }
-            }
-        }
-        
-        return evaluateSimpleExpression(expr);
-    }
-    
-    /**
-     * Evaluate an expression that produces a string, including local variables.
-     */
-    string evaluateStringExpressionWithLocals(Expression expr, 
-                                              string[string] localStrings,
-                                              long[string] localInts) {
-        // String literal
-        if (auto literal = cast(LiteralExpression)expr) {
-            if (literal.value.type == typeid(string)) {
-                return literal.value.get!string();
-            }
-            throw new CTFEError("CTFE: Expected string literal");
-        }
-        
-        // Identifier - check local variables first, then manifest constants
-        if (auto ident = cast(IdentifierExpression)expr) {
-            // Check local strings
-            if (auto val = ident.name in localStrings) {
-                return *val;
-            }
-            
-            // Check manifest constants
-            foreach (decl; allDeclarations) {
-                if (auto manifest = cast(ManifestConstantDecl)decl) {
-                    if (manifest.name == ident.name && manifest.ctfeComplete && manifest.isStringType) {
-                        return manifest.ctfeStringValue;
-                    }
-                }
-            }
-            throw new CTFEError("CTFE: Undefined string identifier '" ~ ident.name ~ "'");
-        }
-        
-        // String concatenation
-        if (auto binary = cast(BinaryExpression)expr) {
-            if (binary.operator == BinaryExpression.Operator.Concat) {
-                return evaluateStringExpressionWithLocals(binary.left, localStrings, localInts) ~ 
-                       evaluateStringExpressionWithLocals(binary.right, localStrings, localInts);
-            }
-        }
-        
-        throw new CTFEError("CTFE: Cannot evaluate expression as string");
-    }
     
     /**
      * Check if a function uses __ctfe_runtime calls.
@@ -1427,15 +1248,6 @@ class CTFEEvaluator {
     }
     
     /**
-     * Evaluate an expression that produces a string (legacy - no locals).
-     */
-    string evaluateStringExpression(Expression expr) {
-        string[string] emptyStrings;
-        long[string] emptyInts;
-        return evaluateStringExpressionWithLocals(expr, emptyStrings, emptyInts);
-    }
-    
-    /**
      * Check if a function can be interpreted directly (only contains CTFE intrinsics)
      */
     bool canInterpretDirectly(FunctionDecl funcDecl) {
@@ -1612,7 +1424,10 @@ class CTFEEvaluator {
         import semantic.dependency_analyzer : DependencyAnalyzer;
         import std.algorithm : map, filter, canFind;
         import std.array : array, join;
-        
+
+        // Expand any mixin statements in function body before compilation
+        expandFunctionMixins(funcDecl);
+
         // Find all functions this one depends on (transitive closure)
         auto analyzer = new DependencyAnalyzer(symbolTable, allDeclarations);
         auto dependencies = analyzer.findDependencies(funcDecl);
@@ -1670,10 +1485,94 @@ class CTFEEvaluator {
             throw new CTFEError("CTFE execution error: " ~ result.error);
         }
         
-        writeln("CTFE [", backend.name, "]: ", funcDecl.name, "(", args, ") = ", result.intValue);
+        log(3, "CTFE [", backend.name, "]: ", funcDecl.name, "(", args, ") = ", result.intValue);
         return result.intValue;
     }
     
+    /**
+     * Expand mixin statements inside a function body before compilation.
+     * The mixin expander's third pass may not have run yet when CTFE needs
+     * to compile a function (e.g., during top-level mixin expansion).
+     */
+    private void expandFunctionMixins(FunctionDecl funcDecl) {
+        if (!funcDecl.body_) return;
+        auto compound = cast(CompoundStatement)funcDecl.body_;
+        if (!compound) return;
+
+        // Check if any mixin statements need expansion
+        bool hasMixins = false;
+        foreach (stmt; compound.statements) {
+            if (cast(MixinStatement)stmt) {
+                hasMixins = true;
+                break;
+            }
+        }
+        if (!hasMixins) return;
+
+        import parser.tree_sitter_bridge : TreeSitterBridge;
+
+        // Expand mixin statements, replacing them with parsed statements
+        Statement[] expanded;
+        foreach (stmt; compound.statements) {
+            if (auto mixinStmt = cast(MixinStatement)stmt) {
+                // Evaluate the mixin expression to get a string
+                string code = evaluateMixinExpressionForExpansion(mixinStmt.mixinExpr);
+                log(3, "CTFE: Expanding mixin in ", funcDecl.name, ": \"", code, "\"");
+
+                // Parse the string as statements
+                string wrappedCode = "void __mixin_wrapper() { " ~ code ~ " }";
+                auto bridge = new TreeSitterBridge("(ctfe-mixin)", wrappedCode);
+                Declaration[] parsed = bridge.parseSourceFile();
+
+                if (parsed.length > 0) {
+                    if (auto fd = cast(FunctionDecl)parsed[0]) {
+                        if (auto body_ = cast(CompoundStatement)fd.body_) {
+                            expanded ~= body_.statements;
+                            continue;
+                        }
+                    }
+                }
+                throw new CTFEError("CTFE: Failed to parse mixin statement: \"" ~ code ~ "\"");
+            } else {
+                expanded ~= stmt;
+            }
+        }
+
+        funcDecl.body_ = new CompoundStatement(compound.location, expanded);
+    }
+
+    /**
+     * Evaluate a mixin expression to a string for expansion.
+     * Handles string literals, identifiers (manifest constants), and concatenation.
+     */
+    private string evaluateMixinExpressionForExpansion(Expression expr) {
+        if (auto literal = cast(LiteralExpression)expr) {
+            if (literal.value.type == typeid(string)) {
+                return literal.value.get!string();
+            }
+        }
+
+        if (auto ident = cast(IdentifierExpression)expr) {
+            foreach (decl; allDeclarations) {
+                if (auto manifest = cast(ManifestConstantDecl)decl) {
+                    if (manifest.name == ident.name && manifest.ctfeComplete && manifest.isStringType) {
+                        return manifest.ctfeStringValue;
+                    }
+                }
+            }
+            throw new CTFEError("CTFE: Cannot evaluate mixin expression identifier '" ~ ident.name ~ "'");
+        }
+
+        if (auto binary = cast(BinaryExpression)expr) {
+            if (binary.operator == BinaryExpression.Operator.Concat) {
+                return evaluateMixinExpressionForExpansion(binary.left) ~
+                       evaluateMixinExpressionForExpansion(binary.right);
+            }
+        }
+
+        throw new CTFEError("CTFE: Cannot evaluate mixin expression: " ~ expr.toString());
+    }
+
     /**
      * Compile a single function to WASM bytes
      * @deprecated Use executeViaBackend instead

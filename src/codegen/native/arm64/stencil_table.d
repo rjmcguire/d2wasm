@@ -81,6 +81,30 @@ immutable stencil_or_i32 = Stencil(
     []
 );
 
+immutable stencil_logical_and_i32 = Stencil(
+    "logical_and_i32",
+    cast(immutable ubyte[])[
+        0x1f, 0x00, 0x00, 0x71,  // CMP w0, #0
+        0xe0, 0x07, 0x9f, 0x1a,  // CSET w0, NE
+        0x3f, 0x00, 0x00, 0x71,  // CMP w1, #0
+        0xe1, 0x07, 0x9f, 0x1a,  // CSET w1, NE
+        0x00, 0x00, 0x01, 0x0a,  // AND w0, w0, w1
+    ],
+    []
+);
+
+immutable stencil_logical_or_i32 = Stencil(
+    "logical_or_i32",
+    cast(immutable ubyte[])[
+        0x1f, 0x00, 0x00, 0x71,  // CMP w0, #0
+        0xe0, 0x07, 0x9f, 0x1a,  // CSET w0, NE
+        0x3f, 0x00, 0x00, 0x71,  // CMP w1, #0
+        0xe1, 0x07, 0x9f, 0x1a,  // CSET w1, NE
+        0x00, 0x00, 0x01, 0x2a,  // ORR w0, w0, w1
+    ],
+    []
+);
+
 immutable stencil_xor_i32 = Stencil(
     "xor_i32",
     cast(immutable ubyte[])[0x20, 0x00, 0x00, 0xca],  // EOR x0, x0, x1 (64-bit)
@@ -686,6 +710,10 @@ shared static this() {
     stencilTable["shr_i32"] = &stencil_shr_i32;
     stencilTable["not_i32"] = &stencil_not_i32;
     
+    // Logical
+    stencilTable["logical_and_i32"] = &stencil_logical_and_i32;
+    stencilTable["logical_or_i32"] = &stencil_logical_or_i32;
+
     // Comparison (signed)
     stencilTable["eq_i32"] = &stencil_eq_i32;
     stencilTable["ne_i32"] = &stencil_ne_i32;

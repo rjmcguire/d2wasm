@@ -1,0 +1,7 @@
+{
+  "name": "complex_expression",
+  "description": "CTFE parity: complex expressions, precedence, chained conditions",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 188
+}

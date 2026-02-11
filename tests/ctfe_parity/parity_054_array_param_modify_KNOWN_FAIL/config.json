@@ -1,0 +1,7 @@
+{
+  "name": "array_param_modify",
+  "description": "CTFE parity: static array value semantics — callee modifications don't affect caller",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 70
+}

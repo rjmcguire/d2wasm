@@ -1976,6 +1976,8 @@ class TreeSitterBridge {
             case "or_expression":
             case "xor_expression":
             case "shift_expression":
+            case "logical_and_expression":
+            case "logical_or_expression":
                 return parseBinaryExpression(node, loc);
             case "postfix_expression":
                 return parsePostfixExpression(node, loc);

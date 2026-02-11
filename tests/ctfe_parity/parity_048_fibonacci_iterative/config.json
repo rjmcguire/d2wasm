@@ -1,0 +1,7 @@
+{
+  "name": "fibonacci_iterative",
+  "description": "CTFE parity: iterative fibonacci with temp variable swap",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 665
+}

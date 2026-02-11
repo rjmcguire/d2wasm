@@ -64,6 +64,9 @@ interface CompiledFunction {
     /// address is prepended to args, and result bytes are read back.
     ExecutionResult callWithLargeReturn(string funcName, long[] args, uint resultSize);
     
+    /// Read bytes from the execution memory (WASM linear memory or native address space)
+    ubyte[] readMemory(uint offset, uint length);
+
     /// Check if a function exists in this compiled context
     bool hasFunction(string funcName);
     

@@ -1,0 +1,7 @@
+{
+  "name": "max_min_values",
+  "description": "CTFE parity: arithmetic near INT_MAX and INT_MIN boundaries",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 200
+}

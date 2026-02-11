@@ -1,0 +1,7 @@
+{
+  "name": "struct_method",
+  "description": "CTFE parity: struct with getter and mutating methods",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 60
+}

@@ -142,6 +142,10 @@ class WASMCompiledFunction : CompiledFunction {
         }
     }
     
+    override ubyte[] readMemory(uint offset, uint length) {
+        return runtime.readMemory(offset, length);
+    }
+
     override bool hasFunction(string targetFuncName) {
         // WASM runtime exports all functions, so any compiled function should be callable
         // For a proper implementation, we'd check the module exports

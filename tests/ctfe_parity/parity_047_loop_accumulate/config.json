@@ -1,0 +1,7 @@
+{
+  "name": "loop_accumulate",
+  "description": "CTFE parity: sum of squares vs triangular number, both loop types",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 330
+}
