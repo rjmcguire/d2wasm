@@ -943,7 +943,16 @@ class NativeCompiledFunction : CompiledFunction {
                 throw new Exception("Unknown variable in native backend: " ~ ident.name);
             }
         } else if (auto assign = cast(AssignmentExpression)expr) {
-            // For now, only support simple assignment to identifiers
+            // Check for index assignment (arr[i] = value)
+            if (auto indexExpr = cast(IndexExpression)assign.left) {
+                if (assign.operator == AssignmentExpression.Operator.Assign) {
+                    emitIndexAssignment(indexExpr, assign.right);
+                    return;
+                } else {
+                    throw new Exception("Compound index assignment not yet supported in native backend");
+                }
+            }
+
             auto targetIdent = cast(IdentifierExpression)assign.left;
             if (targetIdent is null) {
                 throw new Exception("Assignment to non-identifier not yet supported in native backend");
@@ -1299,6 +1308,63 @@ class NativeCompiledFunction : CompiledFunction {
         }
     }
     
+    /**
+     * Emit index assignment: arr[i] = value
+     */
+    private void emitIndexAssignment(IndexExpression indexExpr, Expression value) {
+        auto ident = cast(IdentifierExpression)indexExpr.array;
+        if (ident is null)
+            throw new Exception("Index assignment only supported for local variables in native backend");
+
+        auto info = ident.name in localVars;
+        if (info is null)
+            throw new Exception("Unknown variable in native backend: " ~ ident.name);
+
+        final switch (info.kind) {
+            case VarKind.staticArray:
+                // For constant index, store directly to stack
+                if (auto indexLit = cast(LiteralExpression)indexExpr.index) {
+                    if (indexLit.value.type == typeid(long)) {
+                        uint idx = cast(uint)indexLit.value.get!long();
+                        compileExpression(value);  // x0 = value
+                        gen.emitStoreLocal32(info.offset + idx * 4);
+                        return;
+                    }
+                }
+                // Dynamic index: compute value, save to x9, compute address, store
+                compileExpression(value);  // x0 = value
+                gen.emitMoveX0ToX9();      // x9 = value (preserved across address calc)
+                compileExpression(indexExpr.index);  // x0 = index
+                gen.emitMoveX0ToX1();      // x1 = index
+                gen.emitImm32(stencil_load_imm32, 4);
+                gen.emit(stencil_mul_i32);  // x0 = index * 4
+                gen.emitMoveX0ToX1();      // x1 = byte offset
+                gen.emitStackAddress(info.offset);  // x0 = base address
+                gen.emit(stencil_add_i32);  // x0 = target address
+                gen.emitStoreToPointerFromX9(0);    // STR w9, [x0, #0]
+                return;
+
+            case VarKind.slice:
+                // Slice index assignment: load ptr, compute offset, store
+                compileExpression(value);  // x0 = value
+                gen.emitMoveX0ToX9();      // x9 = value
+                compileExpression(indexExpr.index);  // x0 = index
+                gen.emitMoveX0ToX1();      // x1 = index
+                gen.emitImm32(stencil_load_imm32, 4);
+                gen.emit(stencil_mul_i32);  // x0 = index * 4
+                gen.emitMoveX0ToX1();      // x1 = byte offset
+                gen.emitLoadLocal(info.offset);  // x0 = slice ptr (64-bit)
+                gen.emit(stencil_add_i32);  // x0 = target address
+                gen.emitStoreToPointerFromX9(0);    // STR w9, [x0, #0]
+                return;
+
+            case VarKind.struct_:
+                assert(0, "Cannot index-assign struct variable: " ~ ident.name);
+            case VarKind.scalar:
+                assert(0, "Cannot index-assign scalar variable: " ~ ident.name);
+        }
+    }
+
     /**
      * Emit call stack push - store call frame data and call __ctfe_push_call
      */
