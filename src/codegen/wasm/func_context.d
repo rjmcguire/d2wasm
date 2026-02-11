@@ -256,6 +256,9 @@ class FuncContext {
                         // Dynamic array (slice)
                         pvi.kind = VarKind.slice;
                         pvi.elementType = arrayType.elementType;
+                        size_t sliceElemSize = arrayType.elementType.size();
+                        if (sliceElemSize == 0) sliceElemSize = 4;
+                        pvi.elementSize = cast(uint)sliceElemSize;
                     }
                 }
 
@@ -400,6 +403,11 @@ class FuncContext {
                 lvi.frameOffset = frameSize;
                 lvi.type = varDecl.type;
                 lvi.elementType = arrayType.elementType;
+                {
+                    size_t sliceElemSize = arrayType.elementType.size();
+                    if (sliceElemSize == 0) sliceElemSize = 4;
+                    lvi.elementSize = cast(uint)sliceElemSize;
+                }
 
                 // Slice struct is WasmSliceLayout.sizeof bytes (ptr: i32, length: i32, capacity: i32)
                 frameSize += WasmSliceLayout.sizeof;
@@ -1568,11 +1576,9 @@ class FuncContext {
                 
                 // Value: the element expression
                 emitExpression(out_, arrayLit.elements[i]);
-                
+
                 // Store
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitStoreForSize(out_, cast(uint)elemSize);
             }
             
             // Now initialize the slice struct:
@@ -1770,10 +1776,10 @@ class FuncContext {
             out_ ~= cast(ubyte)0x02;
             leb128u(out_, 0);
             
-            // Add start * 4
+            // Add start * elemSize
             emitExpression(out_, sliceExpr.start);
             out_ ~= Op.i32_const;
-            leb128s(out_, 4);  // sizeof(int)
+            leb128s(out_, sourceInfo.elementSize);
             out_ ~= Op.i32_mul;
             out_ ~= Op.i32_add;
             
@@ -1943,9 +1949,7 @@ class FuncContext {
                     out_ ~= Op.i32_add;
 
                     // Load the element
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitLoadForSize(out_, info.elementSize);
                     return;
 
                 case VarKind.slice:
@@ -1962,14 +1966,12 @@ class FuncContext {
                     // Calculate address: ptr + index * elemSize
                     emitExpression(out_, expr.index);
                     out_ ~= Op.i32_const;
-                    leb128s(out_, 4);  // sizeof(int) = 4
+                    leb128s(out_, info.elementSize);
                     out_ ~= Op.i32_mul;
                     out_ ~= Op.i32_add;
 
                     // Load the element
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitLoadForSize(out_, info.elementSize);
                     return;
 
                 case VarKind.struct_:
@@ -1997,9 +1999,7 @@ class FuncContext {
                     out_ ~= Op.i32_add;
 
                     // Load the element
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitLoadForSize(out_, info.elementSize);
                     return;
 
                 case VarKind.slice:
@@ -2014,14 +2014,12 @@ class FuncContext {
                     // Calculate address: ptr + index * elemSize
                     emitExpression(out_, expr.index);
                     out_ ~= Op.i32_const;
-                    leb128s(out_, 4);  // sizeof(int) = 4
+                    leb128s(out_, info.elementSize);
                     out_ ~= Op.i32_mul;
                     out_ ~= Op.i32_add;
 
                     // Load the element
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitLoadForSize(out_, info.elementSize);
                     return;
 
                 case VarKind.struct_:
@@ -2109,9 +2107,7 @@ class FuncContext {
                     emitExpression(out_, value);
 
                     // Store the element
-                    out_ ~= Op.i32_store;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitStoreForSize(out_, info.elementSize);
 
                     // Assignment is an expression - emit value again for result
                     emitExpression(out_, value);
@@ -2131,7 +2127,7 @@ class FuncContext {
                     // Calculate address: ptr + index * elemSize
                     emitExpression(out_, indexExpr.index);
                     out_ ~= Op.i32_const;
-                    leb128s(out_, 4);  // sizeof(int) = 4
+                    leb128s(out_, info.elementSize);
                     out_ ~= Op.i32_mul;
                     out_ ~= Op.i32_add;
 
@@ -2139,9 +2135,7 @@ class FuncContext {
                     emitExpression(out_, value);
 
                     // Store the element
-                    out_ ~= Op.i32_store;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitStoreForSize(out_, info.elementSize);
 
                     // Assignment is an expression - emit value again for result
                     emitExpression(out_, value);
@@ -2175,9 +2169,7 @@ class FuncContext {
                     emitExpression(out_, value);
 
                     // Store the element
-                    out_ ~= Op.i32_store;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitStoreForSize(out_, info.elementSize);
 
                     // Assignment is an expression - emit value again for result
                     emitExpression(out_, value);
@@ -2195,7 +2187,7 @@ class FuncContext {
                     // Calculate address: ptr + index * elemSize
                     emitExpression(out_, indexExpr.index);
                     out_ ~= Op.i32_const;
-                    leb128s(out_, 4);  // sizeof(int) = 4
+                    leb128s(out_, info.elementSize);
                     out_ ~= Op.i32_mul;
                     out_ ~= Op.i32_add;
 
@@ -2203,9 +2195,7 @@ class FuncContext {
                     emitExpression(out_, value);
 
                     // Store the element
-                    out_ ~= Op.i32_store;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitStoreForSize(out_, info.elementSize);
 
                     // Assignment is an expression - emit value again for result
                     emitExpression(out_, value);
@@ -2599,12 +2589,12 @@ class FuncContext {
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);
         out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        leb128s(out_, sliceInfo.elementSize);
         out_ ~= Op.i32_mul;
         uint allocIdx = emitter.getFuncIndex("__alloc");
         out_ ~= Op.call;
         leb128u(out_, allocIdx);
-        
+
         // Store newBuffer at SP-12
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
@@ -2671,10 +2661,10 @@ class FuncContext {
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);
         out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        leb128s(out_, sliceInfo.elementSize);
         out_ ~= Op.i32_mul;
         out_ ~= Op.i32_add;
-        
+
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
@@ -2692,16 +2682,12 @@ class FuncContext {
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);
         out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        leb128s(out_, sliceInfo.elementSize);
         out_ ~= Op.i32_mul;
         out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitLoadForSize(out_, sliceInfo.elementSize);
+
+        emitStoreForSize(out_, sliceInfo.elementSize);
         
         // i++
         out_ ~= Op.global_get;
@@ -2785,10 +2771,10 @@ class FuncContext {
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);
         out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        leb128s(out_, sliceInfo.elementSize);
         out_ ~= Op.i32_mul;
         out_ ~= Op.i32_add;
-        
+
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
@@ -2797,10 +2783,8 @@ class FuncContext {
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);
-        
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+
+        emitStoreForSize(out_, sliceInfo.elementSize);
         
         // Increment length
         out_ ~= Op.local_get;
@@ -3179,6 +3163,32 @@ class FuncContext {
         return null;
     }
     
+    /// Emit a load instruction appropriate for the given element size.
+    void emitLoadForSize(ref Appender!(ubyte[]) out_, uint elemSize) {
+        if (elemSize == 1) {
+            out_ ~= Op.i32_load8_u;
+            out_ ~= cast(ubyte)0x00;
+            leb128u(out_, 0);
+        } else {
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+        }
+    }
+
+    /// Emit a store instruction appropriate for the given element size.
+    void emitStoreForSize(ref Appender!(ubyte[]) out_, uint elemSize) {
+        if (elemSize == 1) {
+            out_ ~= Op.i32_store8;
+            out_ ~= cast(ubyte)0x00;
+            leb128u(out_, 0);
+        } else {
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+        }
+    }
+
     void emitLiteral(ref Appender!(ubyte[]) out_, LiteralExpression expr) {
         if (expr.value.type == typeid(long)) {
             long value = expr.value.get!long();

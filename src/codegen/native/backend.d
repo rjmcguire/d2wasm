@@ -109,10 +109,18 @@ class NativeCompiledFunction : CompiledFunction {
         StructDecl structDecl;    // Non-null when kind == struct_
         uint staticArraySize;     // Element count when kind == staticArray
         uint staticArrayElemSize; // Element byte size when kind == staticArray
+        uint sliceElemSize;       // Element byte size when kind == slice
 
         bool isStruct() const { return kind == VarKind.struct_; }
         bool isSlice() const { return kind == VarKind.slice; }
         bool isStaticArray() const { return kind == VarKind.staticArray; }
+
+        /// Get element size for any array-like kind
+        uint elemSize() const {
+            if (kind == VarKind.staticArray) return staticArrayElemSize;
+            if (kind == VarKind.slice) return sliceElemSize;
+            return 4;
+        }
     }
     private NativeLocalInfo[string] localVars;
     private uint nextLocalOffset;
@@ -352,6 +360,8 @@ class NativeCompiledFunction : CompiledFunction {
                 } else {
                     // Dynamic array (slice) param
                     nli.kind = VarKind.slice;
+                    nli.sliceElemSize = cast(uint)arrayType.elementType.size();
+                    if (nli.sliceElemSize == 0) nli.sliceElemSize = 4;
                     paramSize = NativeSliceLayout.sizeof;
                 }
             }
@@ -637,6 +647,12 @@ class NativeCompiledFunction : CompiledFunction {
                 nli.structDecl = structType;
             } else if (isSlice) {
                 nli.kind = VarKind.slice;
+                if (auto at = cast(ArrayType)varDecl.type) {
+                    nli.sliceElemSize = cast(uint)at.elementType.size();
+                    if (nli.sliceElemSize == 0) nli.sliceElemSize = 4;
+                } else {
+                    nli.sliceElemSize = 4;
+                }
             } else if (staticArrayLength > 0) {
                 nli.kind = VarKind.staticArray;
                 nli.staticArraySize = staticArrayLength;
@@ -731,14 +747,20 @@ class NativeCompiledFunction : CompiledFunction {
                         }
                     }
                 } else if (nli.isSlice) {
-                    // Slice initialization from array literal or import()
+                    // Slice initialization from array literal, string literal, or import()
                     if (auto arrLit = cast(ArrayLiteralExpression)varDecl.initializer) {
                         compileSliceInit(nextLocalOffset, arrLit);
                     } else if (auto importExpr = cast(ImportExpression)varDecl.initializer) {
                         // Milestone 86: import() in native backend
                         compileImportInit(nextLocalOffset, importExpr);
+                    } else if (auto litExpr = cast(LiteralExpression)varDecl.initializer) {
+                        if (litExpr.value.type == typeid(string)) {
+                            compileStringLiteralInit(nextLocalOffset, litExpr.value.get!string());
+                        } else {
+                            throw new Exception("Unsupported literal type for slice init");
+                        }
                     } else {
-                        throw new Exception("Slice can only be initialized from array literal or import()");
+                        throw new Exception("Slice can only be initialized from array literal, string literal, or import()");
                     }
                 } else if (nli.isStaticArray) {
                     // Static array initialization from array literal
@@ -1418,20 +1440,23 @@ class NativeCompiledFunction : CompiledFunction {
                                             indexExpr.location.line, indexExpr.location.column);
                             // x0 still = index
 
-                            // Compute index * 4 (element size)
+                            // Compute index * elemSize
                             gen.emitMoveX0ToX1();  // x1 = index
-                            gen.emitImm32(stencil_load_imm32, 4);  // x0 = 4
-                            gen.emit(stencil_mul_i32);  // x0 = index * 4
-                            gen.emitMoveX0ToX1();  // x1 = index * 4
+                            gen.emitImm32(stencil_load_imm32, info.elemSize);
+                            gen.emit(stencil_mul_i32);  // x0 = index * elemSize
+                            gen.emitMoveX0ToX1();  // x1 = byte offset
 
                             // Load 64-bit ptr from slice struct (offset 0)
                             gen.emitLoadLocal(info.offset);  // x0 = ptr (64-bit!)
 
-                            // Compute address: ptr + index * 4
-                            gen.emit(stencil_add_i32);  // x0 = ptr + index * 4
+                            // Compute address: ptr + byte offset
+                            gen.emit(stencil_add_i32);
 
-                            // Load value from computed address
-                            gen.emitLoadFromPointer(0);
+                            // Load value from computed address (byte or word)
+                            if (info.elemSize == 1)
+                                gen.emitLoadByteFromPointer(0);
+                            else
+                                gen.emitLoadFromPointer(0);
                             return;
 
                         case VarKind.struct_:
@@ -1967,7 +1992,30 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitImm32(stencil_load_imm32, cast(int)len);
         gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.CAPACITY_OFFSET);  // store capacity
     }
-    
+
+    /// Initialize a slice from a string literal by storing bytes in the data section.
+    private void compileStringLiteralInit(uint sliceOffset, string strVal) {
+        ubyte[] strData = cast(ubyte[])strVal.dup;
+        uint len = cast(uint)strData.length;
+
+        ubyte* dataPtr = dataSection.addData(strData);
+        if (dataPtr is null) {
+            throw new Exception("String literal: data section full");
+        }
+
+        // ptr = dataPtr (64-bit host pointer)
+        gen.emitLoadImm64(cast(ulong)dataPtr);
+        gen.emitStoreLocal(sliceOffset);
+
+        // length (32-bit at offset 8)
+        gen.emitImm32(stencil_load_imm32, cast(int)len);
+        gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);
+
+        // capacity (32-bit at offset 12)
+        gen.emitImm32(stencil_load_imm32, cast(int)len);
+        gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.CAPACITY_OFFSET);
+    }
+
     /**
      * Compile slice append: arr ~= element
      * 
