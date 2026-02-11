@@ -140,6 +140,13 @@ class NativeCompiledFunction : CompiledFunction {
     
     // For return statements to jump to
     private Label epilogueLabel;
+
+    // Loop stack for break/continue
+    private struct NativeLoopContext {
+        Label breakLabel;
+        Label continueLabel;
+    }
+    private NativeLoopContext[] nativeLoopStack;
     
     // For multi-function support: map function names to their labels
     private Label[string] functionLabels;
@@ -862,57 +869,75 @@ class NativeCompiledFunction : CompiledFunction {
             // Compile: while (cond) { body }
             auto loopStart = gen.newLabel();
             auto loopEnd = gen.newLabel();
-            
-            // Loop start
+
+            nativeLoopStack ~= NativeLoopContext(loopEnd, loopStart);
+
+            // Loop start (continue target)
             gen.bindLabel(loopStart);
-            
+
             // Compile condition (result in x0)
             compileExpression(whileStmt.condition);
-            
+
             // Exit loop if condition is zero
             gen.emitBranchIfZero(loopEnd);
-            
+
             // Compile body
             compileStatement(whileStmt.body_);
-            
+
             // Jump back to start
             gen.emitBranch(loopStart);
-            
-            // Loop end
+
+            // Loop end (break target)
             gen.bindLabel(loopEnd);
+
+            nativeLoopStack = nativeLoopStack[0 .. $ - 1];
         } else if (auto forStmt = cast(ForStatement)stmt) {
             // Compile: for (init; cond; update) { body }
             auto loopStart = gen.newLabel();
             auto loopEnd = gen.newLabel();
-            
+            auto updateLabel = gen.newLabel();
+
             // Compile init (if present)
             if (forStmt.init) {
                 compileStatement(forStmt.init);
             }
-            
+
+            nativeLoopStack ~= NativeLoopContext(loopEnd, updateLabel);
+
             // Loop start
             gen.bindLabel(loopStart);
-            
+
             // Compile condition (if present, result in x0)
             if (forStmt.condition) {
                 compileExpression(forStmt.condition);
                 // Exit loop if condition is zero
                 gen.emitBranchIfZero(loopEnd);
             }
-            
+
             // Compile body
             compileStatement(forStmt.body_);
-            
-            // Compile update (if present)
+
+            // Update (continue target)
+            gen.bindLabel(updateLabel);
             if (forStmt.update) {
                 compileExpression(forStmt.update);
             }
-            
+
             // Jump back to start
             gen.emitBranch(loopStart);
-            
-            // Loop end
+
+            // Loop end (break target)
             gen.bindLabel(loopEnd);
+
+            nativeLoopStack = nativeLoopStack[0 .. $ - 1];
+        } else if (cast(BreakStatement)stmt) {
+            if (nativeLoopStack.length == 0)
+                throw new Exception("break statement outside of loop");
+            gen.emitBranch(nativeLoopStack[$ - 1].breakLabel);
+        } else if (cast(ContinueStatement)stmt) {
+            if (nativeLoopStack.length == 0)
+                throw new Exception("continue statement outside of loop");
+            gen.emitBranch(nativeLoopStack[$ - 1].continueLabel);
         }
     }
     

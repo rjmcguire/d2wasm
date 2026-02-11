@@ -192,3 +192,31 @@ class MixinStatement : Statement {
         return format("MixinStatement(%s)", mixinExpr.toString());
     }
 }
+
+/**
+ * Break statement: break;
+ * Exits the innermost enclosing loop.
+ */
+class BreakStatement : Statement {
+    this(SourceLocation loc) {
+        super(loc);
+    }
+
+    override string toString() const {
+        return "BreakStatement";
+    }
+}
+
+/**
+ * Continue statement: continue;
+ * Skips to the next iteration of the innermost enclosing loop.
+ */
+class ContinueStatement : Statement {
+    this(SourceLocation loc) {
+        super(loc);
+    }
+
+    override string toString() const {
+        return "ContinueStatement";
+    }
+}

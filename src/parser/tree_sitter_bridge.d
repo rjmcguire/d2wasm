@@ -1630,6 +1630,10 @@ class TreeSitterBridge {
                 return parseVariableDeclarationStatement(node, loc);
             case "mixin_declaration":
                 return parseMixinStatement(node, loc);
+            case "break_statement":
+                return new BreakStatement(loc);
+            case "continue_statement":
+                return new ContinueStatement(loc);
             case "comment":
                 // Skip comments - return null (handled by caller)
                 return null;

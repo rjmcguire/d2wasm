@@ -103,7 +103,14 @@ class FuncContext {
     
     // Block depth for br instructions
     uint blockDepth = 0;
-    
+
+    // Loop stack for break/continue
+    struct LoopContext {
+        uint breakBlockDepth;     // blockDepth of the outer block (break target)
+        uint continueBlockDepth;  // blockDepth of the loop/inner block (continue target)
+    }
+    LoopContext[] loopStack;
+
     // RAII tracking: struct locals that need destructor calls
     struct RAIIVarInfo {
         string name;           // Variable name
@@ -862,6 +869,18 @@ class FuncContext {
             } else {
                 emitVarDecl(out_, varDecl);
             }
+        } else if (cast(BreakStatement)stmt) {
+            if (loopStack.length == 0)
+                throw new EmitError("break statement outside of loop");
+            auto ctx = loopStack[$ - 1];
+            out_ ~= Op.br;
+            leb128u(out_, blockDepth - ctx.breakBlockDepth);
+        } else if (cast(ContinueStatement)stmt) {
+            if (loopStack.length == 0)
+                throw new EmitError("continue statement outside of loop");
+            auto ctx = loopStack[$ - 1];
+            out_ ~= Op.br;
+            leb128u(out_, blockDepth - ctx.continueBlockDepth);
         } else {
             throw new EmitError("Unsupported statement type", stmt.toString());
         }
@@ -1072,28 +1091,34 @@ class FuncContext {
         out_ ~= Op.block;
         out_ ~= cast(ubyte)BlockType.void_;
         blockDepth++;
-        
-        // loop
+        uint breakDepth = blockDepth;
+
+        // loop (for continue)
         out_ ~= Op.loop;
         out_ ~= cast(ubyte)BlockType.void_;
         blockDepth++;
-        
+        uint continueDepth = blockDepth;
+
+        loopStack ~= LoopContext(breakDepth, continueDepth);
+
         // Condition
         emitExpression(out_, stmt.condition);
         out_ ~= Op.i32_eqz;  // Invert: break if false
         out_ ~= Op.br_if;
         leb128u(out_, 1);  // Break to outer block
-        
+
         // Body
         emitStatement(out_, stmt.body_);
-        
+
         // Continue: branch back to loop
         out_ ~= Op.br;
         leb128u(out_, 0);  // Back to loop
-        
+
+        loopStack = loopStack[0 .. $ - 1];
+
         blockDepth--;
         out_ ~= Op.end;  // End loop
-        
+
         blockDepth--;
         out_ ~= Op.end;  // End block
     }
@@ -1103,17 +1128,18 @@ class FuncContext {
         if (stmt.init) {
             emitStatement(out_, stmt.init);
         }
-        
+
         // block (for break)
         out_ ~= Op.block;
         out_ ~= cast(ubyte)BlockType.void_;
         blockDepth++;
-        
+        uint breakDepth = blockDepth;
+
         // loop
         out_ ~= Op.loop;
         out_ ~= cast(ubyte)BlockType.void_;
         blockDepth++;
-        
+
         // Condition (if present)
         if (stmt.condition) {
             emitExpression(out_, stmt.condition);
@@ -1121,10 +1147,23 @@ class FuncContext {
             out_ ~= Op.br_if;
             leb128u(out_, 1);  // Break to outer block
         }
-        
+
+        // Inner block (continue target — exiting falls through to update)
+        out_ ~= Op.block;
+        out_ ~= cast(ubyte)BlockType.void_;
+        blockDepth++;
+        uint continueDepth = blockDepth;
+
+        loopStack ~= LoopContext(breakDepth, continueDepth);
+
         // Body
         emitStatement(out_, stmt.body_);
-        
+
+        loopStack = loopStack[0 .. $ - 1];
+
+        blockDepth--;
+        out_ ~= Op.end;  // End inner block (continue lands here)
+
         // Update
         if (stmt.update) {
             emitExpression(out_, stmt.update);
@@ -1132,14 +1171,14 @@ class FuncContext {
                 out_ ~= Op.drop;
             }
         }
-        
-        // Continue
+
+        // Loop back
         out_ ~= Op.br;
         leb128u(out_, 0);
-        
+
         blockDepth--;
         out_ ~= Op.end;  // End loop
-        
+
         blockDepth--;
         out_ ~= Op.end;  // End block
     }

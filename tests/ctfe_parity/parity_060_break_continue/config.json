@@ -1,0 +1,7 @@
+{
+  "name": "break_continue",
+  "description": "CTFE parity: break and continue in while loop",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 18
+}
