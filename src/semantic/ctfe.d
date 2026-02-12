@@ -1157,26 +1157,37 @@ class CTFEEvaluator {
             }
             return false;
         }
-        
         if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
             if (varDecl.initializer && expressionUsesCTFERuntime(varDecl.initializer)) {
                 return true;
             }
             return false;
         }
-        
         if (auto exprStmt = cast(ExpressionStatement)stmt) {
             return expressionUsesCTFERuntime(exprStmt.expression);
         }
-        
         if (auto returnStmt = cast(ReturnStatement)stmt) {
-            if (returnStmt.value) {
-                return expressionUsesCTFERuntime(returnStmt.value);
-            }
+            if (returnStmt.value) return expressionUsesCTFERuntime(returnStmt.value);
             return false;
         }
-        
-        return false;
+        if (auto ifStmt = cast(IfStatement)stmt) {
+            if (statementUsesCTFERuntime(ifStmt.thenStatement)) return true;
+            if (ifStmt.elseStatement && statementUsesCTFERuntime(ifStmt.elseStatement)) return true;
+            return false;
+        }
+        if (auto whileStmt = cast(WhileStatement)stmt) {
+            return statementUsesCTFERuntime(whileStmt.body_);
+        }
+        if (auto forStmt = cast(ForStatement)stmt) {
+            if (forStmt.init && statementUsesCTFERuntime(forStmt.init)) return true;
+            if (forStmt.body_ && statementUsesCTFERuntime(forStmt.body_)) return true;
+            return false;
+        }
+        if (cast(BreakStatement)stmt || cast(ContinueStatement)stmt
+            || cast(MixinStatement)stmt || cast(StructDeclarationStatement)stmt) {
+            return false;
+        }
+        assert(0, "statementUsesCTFERuntime: unhandled statement type: " ~ typeid(stmt).name);
     }
     
     private bool expressionUsesCTFERuntime(Expression expr) {
@@ -1358,21 +1369,18 @@ class CTFEEvaluator {
             }
             return true;
         }
-        
         if (auto exprStmt = cast(ExpressionStatement)stmt) {
             if (auto call = cast(CallExpression)exprStmt.expression) {
                 if (auto ident = cast(IdentifierExpression)call.function_) {
-                    // __writeln is an intrinsic we can interpret
                     if (ident.name == "__writeln") return true;
                 }
             }
+            return false;
         }
-        
         if (auto returnStmt = cast(ReturnStatement)stmt) {
-            // Empty return is fine for void functions
             return returnStmt.value is null;
         }
-        
+        // Any other statement type means this isn't a pure-intrinsic function
         return false;
     }
     
@@ -1393,6 +1401,8 @@ class CTFEEvaluator {
             interpretExpression(exprStmt.expression);
         } else if (auto returnStmt = cast(ReturnStatement)stmt) {
             // Void return - do nothing
+        } else {
+            assert(0, "interpretStatement: unhandled statement type: " ~ typeid(stmt).name);
         }
     }
     

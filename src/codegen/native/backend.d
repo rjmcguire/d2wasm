@@ -565,8 +565,14 @@ class NativeCompiledFunction : CompiledFunction {
         } else if (auto forStmt = cast(ForStatement)stmt) {
             bytes += countLocalBytesInStatement(forStmt.init);
             bytes += countLocalBytesInStatement(forStmt.body_);
+        } else if (cast(ReturnStatement)stmt || cast(ExpressionStatement)stmt
+                   || cast(BreakStatement)stmt || cast(ContinueStatement)stmt
+                   || cast(MixinStatement)stmt || cast(StructDeclarationStatement)stmt) {
+            // No local allocations
+        } else {
+            assert(0, "countLocalBytesInStatement: unhandled statement type: " ~ typeid(stmt).name);
         }
-        
+
         return bytes;
     }
     
@@ -942,9 +948,17 @@ class NativeCompiledFunction : CompiledFunction {
             gen.emitBranch(nativeLoopStack[$ - 1].continueLabel);
         } else if (cast(StructDeclarationStatement)stmt) {
             // Inner struct declaration — no runtime code
+        } else if (auto mixinStmt = cast(MixinStatement)stmt) {
+            if (mixinStmt.isExpanded) {
+                foreach (s; mixinStmt.expandedStatements) {
+                    compileStatement(s);
+                }
+            }
+        } else {
+            assert(0, "compileStatement: unhandled statement type: " ~ typeid(stmt).name);
         }
     }
-    
+
     /// Check if an expression contains a function call (which would clobber registers)
     private bool containsFunctionCall(Expression expr) {
         if (expr is null) return false;

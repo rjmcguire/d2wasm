@@ -128,8 +128,18 @@ class MixinExpander {
             }
             forStmt.body_ = expandMixinsInStatement(forStmt.body_);
             return forStmt;
+        } else if (auto structStmt = cast(StructDeclarationStatement)stmt) {
+            // Recurse into inner struct method bodies for mixin expansion
+            foreach (member; structStmt.structDecl.members) {
+                if (auto funcDecl = cast(FunctionDecl)member) {
+                    if (funcDecl.body_) {
+                        funcDecl.body_ = expandMixinsInStatement(funcDecl.body_);
+                    }
+                }
+            }
+            return stmt;
         }
-        // Other statements (return, expression, var decl) don't contain mixins
+        // Other statements (return, expression, var decl, break, continue) don't contain mixins
         return stmt;
     }
     

@@ -989,6 +989,16 @@ class BinaryEmitter {
                     scanForSliceTypes(funcDecl);
                 }
             }
+        } else if (cast(BreakStatement)stmt || cast(ContinueStatement)stmt) {
+            // No expressions to scan
+        } else if (auto mixinStmt = cast(MixinStatement)stmt) {
+            if (mixinStmt.isExpanded) {
+                foreach (s; mixinStmt.expandedStatements) {
+                    scanStatementForSliceTypes(s);
+                }
+            }
+        } else {
+            assert(0, "scanStatementForSliceTypes: unhandled statement type: " ~ typeid(stmt).name);
         }
     }
 
@@ -1094,8 +1104,30 @@ class BinaryEmitter {
         }
         if (auto returnStmt = cast(ReturnStatement)stmt) {
             if (returnStmt.value) return expressionUsesVariadicCTFE(returnStmt.value);
+            return false;
         }
-        return false;
+        if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
+            if (varDecl.initializer) return expressionUsesVariadicCTFE(varDecl.initializer);
+            return false;
+        }
+        if (auto ifStmt = cast(IfStatement)stmt) {
+            if (statementUsesVariadicCTFE(ifStmt.thenStatement)) return true;
+            if (ifStmt.elseStatement && statementUsesVariadicCTFE(ifStmt.elseStatement)) return true;
+            return false;
+        }
+        if (auto whileStmt = cast(WhileStatement)stmt) {
+            return statementUsesVariadicCTFE(whileStmt.body_);
+        }
+        if (auto forStmt = cast(ForStatement)stmt) {
+            if (forStmt.init && statementUsesVariadicCTFE(forStmt.init)) return true;
+            if (forStmt.body_ && statementUsesVariadicCTFE(forStmt.body_)) return true;
+            return false;
+        }
+        if (cast(BreakStatement)stmt || cast(ContinueStatement)stmt
+            || cast(MixinStatement)stmt || cast(StructDeclarationStatement)stmt) {
+            return false;
+        }
+        assert(0, "statementUsesVariadicCTFE: unhandled statement type: " ~ typeid(stmt).name);
     }
     
     private bool expressionUsesVariadicCTFE(Expression expr) {
@@ -1124,26 +1156,37 @@ class BinaryEmitter {
             }
             return false;
         }
-        
         if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
             if (varDecl.initializer && expressionUsesCTFERuntime(varDecl.initializer)) {
                 return true;
             }
             return false;
         }
-        
         if (auto exprStmt = cast(ExpressionStatement)stmt) {
             return expressionUsesCTFERuntime(exprStmt.expression);
         }
-        
         if (auto returnStmt = cast(ReturnStatement)stmt) {
-            if (returnStmt.value) {
-                return expressionUsesCTFERuntime(returnStmt.value);
-            }
+            if (returnStmt.value) return expressionUsesCTFERuntime(returnStmt.value);
             return false;
         }
-        
-        return false;
+        if (auto ifStmt = cast(IfStatement)stmt) {
+            if (usesCTFERuntime(ifStmt.thenStatement)) return true;
+            if (ifStmt.elseStatement && usesCTFERuntime(ifStmt.elseStatement)) return true;
+            return false;
+        }
+        if (auto whileStmt = cast(WhileStatement)stmt) {
+            return usesCTFERuntime(whileStmt.body_);
+        }
+        if (auto forStmt = cast(ForStatement)stmt) {
+            if (forStmt.init && usesCTFERuntime(forStmt.init)) return true;
+            if (forStmt.body_ && usesCTFERuntime(forStmt.body_)) return true;
+            return false;
+        }
+        if (cast(BreakStatement)stmt || cast(ContinueStatement)stmt
+            || cast(MixinStatement)stmt || cast(StructDeclarationStatement)stmt) {
+            return false;
+        }
+        assert(0, "usesCTFERuntime: unhandled statement type: " ~ typeid(stmt).name);
     }
     
     /**
@@ -1182,24 +1225,20 @@ class BinaryEmitter {
             }
             return true;
         }
-        
         if (auto exprStmt = cast(ExpressionStatement)stmt) {
             if (auto call = cast(CallExpression)exprStmt.expression) {
                 if (auto ident = cast(IdentifierExpression)call.function_) {
-                    // Check if calling a CTFE-only function
                     auto symbol = symbolTable.lookupSymbol(ident.name);
                     if (symbol && symbol.isCTFEOnly) return true;
                 }
             }
             return false;  // Other expressions need WASM
         }
-        
         if (auto returnStmt = cast(ReturnStatement)stmt) {
-            // Empty return (void) is OK for CTFE-only functions
             return returnStmt.value is null;
         }
-        
-        return false;  // Other statement types need WASM
+        // Any other statement type means this isn't a pure-intrinsic function
+        return false;
     }
     
     /**

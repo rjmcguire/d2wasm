@@ -460,6 +460,12 @@ class FuncContext {
                     collectLocals(s);
                 }
             }
+        } else if (cast(ReturnStatement)stmt || cast(ExpressionStatement)stmt
+                   || cast(BreakStatement)stmt || cast(ContinueStatement)stmt
+                   || cast(StructDeclarationStatement)stmt) {
+            // No local declarations to collect
+        } else {
+            assert(0, "collectLocals: unhandled statement type: " ~ typeid(stmt).name);
         }
     }
     
@@ -1085,7 +1091,14 @@ class FuncContext {
                    alwaysReturns(ifStmt.thenStatement) &&
                    alwaysReturns(ifStmt.elseStatement);
         }
-        return false;
+        // Statements that don't return
+        if (cast(ExpressionStatement)stmt || cast(VariableDeclarationStatement)stmt
+            || cast(WhileStatement)stmt || cast(ForStatement)stmt
+            || cast(BreakStatement)stmt || cast(ContinueStatement)stmt
+            || cast(MixinStatement)stmt || cast(StructDeclarationStatement)stmt) {
+            return false;
+        }
+        assert(0, "alwaysReturns: unhandled statement type: " ~ typeid(stmt).name);
     }
     
     void emitWhile(ref Appender!(ubyte[]) out_, WhileStatement stmt) {
