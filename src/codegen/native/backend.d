@@ -1202,7 +1202,11 @@ class NativeCompiledFunction : CompiledFunction {
                 }
             }
             
-            if (assign.operator == AssignmentExpression.Operator.Assign) {
+            if (assign.loweredCall) {
+                // Lowered shift compound assignment: emit call, store result
+                compileExpression(assign.loweredCall);
+                gen.emitStoreLocal32(info.offset);
+            } else if (assign.operator == AssignmentExpression.Operator.Assign) {
                 // Simple assignment: x = expr
                 compileExpression(assign.right);
                 gen.emitStoreLocal32(info.offset);

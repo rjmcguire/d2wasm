@@ -1726,7 +1726,23 @@ class TypeChecker {
     Type checkAssignmentExpression(AssignmentExpression expr) {
         Type leftType = checkExpression(expr.left);
         Type rightType = checkExpression(expr.right);
-        
+
+        // Compound shift assignments — lower to checked call but keep operator
+        if (expr.operator == AssignmentExpression.Operator.ShiftLeftAssign ||
+            expr.operator == AssignmentExpression.Operator.ShiftRightAssign) {
+            string funcName;
+            if (expr.operator == AssignmentExpression.Operator.ShiftLeftAssign)
+                funcName = "opShiftLeft";
+            else
+                funcName = "opShiftRight";
+            auto callExpr = new CallExpression(expr.location,
+                new IdentifierExpression(expr.location, funcName),
+                [expr.left, expr.right]);
+            checkCallExpression(callExpr);
+            expr.loweredCall = callExpr;
+            return leftType;
+        }
+
         // Special case: ~= on arrays appends an element
         if (expr.operator == AssignmentExpression.Operator.ConcatAssign) {
             if (auto arrayType = cast(ArrayType)leftType) {

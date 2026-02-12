@@ -319,6 +319,21 @@ class CTFEEvaluator {
             return;
         }
 
+        // Cycle detection: if we're already evaluating this manifest, it's circular
+        if (manifest.ctfeInProgress) {
+            throw new CTFEError(
+                "circular dependency evaluating `enum " ~ manifest.name ~ "`",
+                manifest.location);
+        }
+
+        manifest.ctfeInProgress = true;
+        scope(exit) manifest.ctfeInProgress = false;
+
+        // Save and restore symbol table scope state so CTFE evaluation
+        // doesn't corrupt the caller's scope (re-entrancy protection)
+        auto savedScope = symbolTable.saveAndResetScope();
+        scope(exit) symbolTable.restoreScope(savedScope);
+
         try {
             evaluateManifestConstantImpl(manifest);
         } catch (CTFEError e) {
@@ -924,9 +939,13 @@ class CTFEEvaluator {
             funcDecl = instantiator.instantiate(funcDecl, deducedTypes);
             callExpr.resolvedInstantiation = funcDecl;
 
-            // Type-check the instantiation
-            auto typeChecker = new TypeChecker(symbolTable);
-            typeChecker.checkFunctionDeclaration(funcDecl);
+            // Type-check the instantiation (save/restore scope for re-entrancy safety)
+            {
+                auto saved = symbolTable.saveAndResetScope();
+                scope(exit) symbolTable.restoreScope(saved);
+                auto typeChecker = new TypeChecker(symbolTable);
+                typeChecker.checkFunctionDeclaration(funcDecl);
+            }
         }
 
         // Check if function returns a string (dynamic ubyte[])
@@ -1098,13 +1117,17 @@ class CTFEEvaluator {
             statFunctionsCompiled += cast(uint)newFuncs.length;
             log(3, "CTFE: Compiling ", newFuncs.length, " new functions for ", funcDecl.name);
 
-            // Type-check new functions
-            auto typeChecker = new TypeChecker(symbolTable);
-            foreach (dep; newFuncs) {
-                try {
-                    typeChecker.checkFunctionDeclaration(dep);
-                } catch (TypeError e) {
-                    throw new CTFEError("CTFE type check error in " ~ dep.name ~ ": " ~ e.msg, dep.location);
+            // Type-check new functions (save/restore scope for re-entrancy safety)
+            {
+                auto saved = symbolTable.saveAndResetScope();
+                scope(exit) symbolTable.restoreScope(saved);
+                auto typeChecker = new TypeChecker(symbolTable);
+                foreach (dep; newFuncs) {
+                    try {
+                        typeChecker.checkFunctionDeclaration(dep);
+                    } catch (TypeError e) {
+                        throw new CTFEError("CTFE type check error in " ~ dep.name ~ ": " ~ e.msg, dep.location);
+                    }
                 }
             }
 
@@ -1187,12 +1210,17 @@ class CTFEEvaluator {
             statFunctionsCompiled += cast(uint)newFuncs.length;
             log(3, "CTFE: Compiling ", newFuncs.length, " new functions for ", funcDecl.name);
 
-            auto typeChecker = new TypeChecker(symbolTable);
-            foreach (dep; newFuncs) {
-                try {
-                    typeChecker.checkFunctionDeclaration(dep);
-                } catch (TypeError e) {
-                    throw new CTFEError("CTFE type check error in " ~ dep.name ~ ": " ~ e.msg, dep.location);
+            // Type-check new functions (save/restore scope for re-entrancy safety)
+            {
+                auto saved = symbolTable.saveAndResetScope();
+                scope(exit) symbolTable.restoreScope(saved);
+                auto typeChecker = new TypeChecker(symbolTable);
+                foreach (dep; newFuncs) {
+                    try {
+                        typeChecker.checkFunctionDeclaration(dep);
+                    } catch (TypeError e) {
+                        throw new CTFEError("CTFE type check error in " ~ dep.name ~ ": " ~ e.msg, dep.location);
+                    }
                 }
             }
 
@@ -1688,13 +1716,17 @@ class CTFEEvaluator {
             log(3, "CTFE: Adding ", newFuncs.length, " new function(s): [",
                 newFuncs.map!(f => f.name).array.join(", "), "]");
 
-            // Type-check only new functions
-            auto typeChecker = new TypeChecker(symbolTable);
-            foreach (dep; newFuncs) {
-                try {
-                    typeChecker.checkFunctionDeclaration(dep);
-                } catch (TypeError e) {
-                    throw new CTFEError("CTFE type check error in " ~ dep.name ~ ": " ~ e.msg, dep.location);
+            // Type-check only new functions (save/restore scope for re-entrancy safety)
+            {
+                auto saved = symbolTable.saveAndResetScope();
+                scope(exit) symbolTable.restoreScope(saved);
+                auto typeChecker = new TypeChecker(symbolTable);
+                foreach (dep; newFuncs) {
+                    try {
+                        typeChecker.checkFunctionDeclaration(dep);
+                    } catch (TypeError e) {
+                        throw new CTFEError("CTFE type check error in " ~ dep.name ~ ": " ~ e.msg, dep.location);
+                    }
                 }
             }
 
@@ -1828,12 +1860,17 @@ class CTFEEvaluator {
         // Ensure the function is type-checked before compilation
         // This is necessary because CTFE may run before the main type-checking pass
         // (e.g., when evaluating manifest constants during mixin expansion)
-        auto typeChecker = new TypeChecker(symbolTable);
-        try {
-            typeChecker.checkFunctionDeclaration(funcDecl);
-        } catch (TypeError e) {
-            log(3, "CTFE type check error: ", e.msg);
-            return null;
+        // Save/restore scope for re-entrancy safety
+        {
+            auto saved = symbolTable.saveAndResetScope();
+            scope(exit) symbolTable.restoreScope(saved);
+            auto typeChecker = new TypeChecker(symbolTable);
+            try {
+                typeChecker.checkFunctionDeclaration(funcDecl);
+            } catch (TypeError e) {
+                log(3, "CTFE type check error: ", e.msg);
+                return null;
+            }
         }
 
         // Create a minimal compilation with just this function

@@ -4362,7 +4362,9 @@ class FuncContext {
             if (info.addrMode == AddrMode.wasmLocal) {
                 // Scalar local/param — local_set/local_tee
                 auto wasmIdx = info.wasmLocalIdx;
-                if (expr.operator != AssignmentExpression.Operator.Assign) {
+                if (expr.loweredCall) {
+                    emitCall(out_, expr.loweredCall);
+                } else if (expr.operator != AssignmentExpression.Operator.Assign) {
                     out_ ~= Op.local_get;
                     leb128u(out_, wasmIdx);
                     emitExpression(out_, expr.right);
@@ -4383,7 +4385,9 @@ class FuncContext {
         if (symbol) {
             if (auto varDecl = cast(VariableDecl)symbol.declaration) {
                 if (varDecl.wasmGlobalIndex != uint.max) {
-                    if (expr.operator != AssignmentExpression.Operator.Assign) {
+                    if (expr.loweredCall) {
+                        emitCall(out_, expr.loweredCall);
+                    } else if (expr.operator != AssignmentExpression.Operator.Assign) {
                         out_ ~= Op.global_get;
                         leb128u(out_, varDecl.wasmGlobalIndex);
                         emitExpression(out_, expr.right);

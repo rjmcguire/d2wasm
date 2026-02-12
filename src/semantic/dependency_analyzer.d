@@ -210,6 +210,8 @@ class DependencyAnalyzer {
         } else if (auto assign = cast(AssignmentExpression)expr) {
             calls ~= findCallsInExpression(assign.left);
             calls ~= findCallsInExpression(assign.right);
+            if (assign.loweredCall)
+                calls ~= findCallsInExpression(assign.loweredCall);
         } else if (auto slice = cast(SliceExpression)expr) {
             calls ~= findCallsInExpression(slice.array);
             calls ~= findCallsInExpression(slice.start);
@@ -279,6 +281,8 @@ class DependencyAnalyzer {
         } else if (auto assign = cast(AssignmentExpression)expr) {
             result ~= findTemplateCallsInExpression(assign.left);
             result ~= findTemplateCallsInExpression(assign.right);
+            if (assign.loweredCall)
+                result ~= findTemplateCallsInExpression(assign.loweredCall);
         }
         return result;
     }

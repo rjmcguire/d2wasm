@@ -540,6 +540,7 @@ class ManifestConstantDecl : Declaration {
     ubyte[] ctfeArrayBytes;  // Raw bytes for array data (for codegen)
     uint ctfeElementSize;    // Size of each element in bytes
     bool ctfeComplete;       // Whether CTFE has been performed
+    bool ctfeInProgress;     // True while CTFE evaluation is running (cycle detection)
     bool isStringType;       // True if this is a string constant
     bool isArrayType;        // True if this is an array constant
     

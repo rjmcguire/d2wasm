@@ -466,7 +466,8 @@ class AssignmentExpression : Expression {
     Expression left;
     Operator operator;
     Expression right;
-    
+    CallExpression loweredCall;  // Set by type checker for shift compound assignments
+
     this(SourceLocation loc, Expression left, Operator operator, Expression right) {
         super(loc);
         this.left = left;
