@@ -759,13 +759,41 @@ class TypeChecker {
         }
         
         // Bitwise operators (and, or, xor, shift)
-        if (expr.operator == BinaryExpression.Operator.BitwiseAnd ||
-            expr.operator == BinaryExpression.Operator.BitwiseOr ||
-            expr.operator == BinaryExpression.Operator.BitwiseXor ||
-            expr.operator == BinaryExpression.Operator.ShiftLeft ||
+        // Shift operators — lower to checked operator function calls
+        if (expr.operator == BinaryExpression.Operator.ShiftLeft ||
             expr.operator == BinaryExpression.Operator.ShiftRight ||
             expr.operator == BinaryExpression.Operator.UnsignedShiftRight) {
-            
+
+            if (!isIntegerType(cast(BasicType)leftType.resolve()) || !isIntegerType(cast(BasicType)rightType.resolve())) {
+                throw new TypeError(
+                    format("Shift operator requires integer types, got '%s' and '%s'",
+                           leftType.toString(), rightType.toString()),
+                    expr.location
+                );
+            }
+
+            // Lower to checked operator function call
+            string funcName;
+            if (expr.operator == BinaryExpression.Operator.ShiftLeft)
+                funcName = "opShiftLeft";
+            else if (expr.operator == BinaryExpression.Operator.ShiftRight)
+                funcName = "opShiftRight";
+            else
+                funcName = "opUnsignedShiftRight";
+
+            auto callExpr = new CallExpression(expr.location,
+                new IdentifierExpression(expr.location, funcName),
+                [expr.left, expr.right]);
+            Type resultType = checkCallExpression(callExpr);
+            expr.loweredCall = callExpr;
+            return resultType;
+        }
+
+        // Bitwise operators (non-shift)
+        if (expr.operator == BinaryExpression.Operator.BitwiseAnd ||
+            expr.operator == BinaryExpression.Operator.BitwiseOr ||
+            expr.operator == BinaryExpression.Operator.BitwiseXor) {
+
             if (!isIntegerType(cast(BasicType)leftType.resolve()) || !isIntegerType(cast(BasicType)rightType.resolve())) {
                 throw new TypeError(
                     format("Bitwise operator requires integer types, got '%s' and '%s'",
@@ -773,7 +801,7 @@ class TypeChecker {
                     expr.location
                 );
             }
-            
+
             return leftType;  // Result is same type as left operand
         }
 

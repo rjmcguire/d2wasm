@@ -3163,11 +3163,17 @@ class FuncContext {
             emitArrayConcat(out_, expr);
             return;
         }
-        
+
+        // Lowered shift operators — emit the call instead of raw opcode
+        if (expr.loweredCall) {
+            emitCall(out_, expr.loweredCall);
+            return;
+        }
+
         // Emit operands
         emitExpression(out_, expr.left);
         emitExpression(out_, expr.right);
-        
+
         // Emit operator (assuming i32 for now)
         Op op;
         final switch (expr.operator) {
@@ -3193,9 +3199,12 @@ class FuncContext {
             case BinaryExpression.Operator.BitwiseAnd: op = Op.i32_and; break;
             case BinaryExpression.Operator.BitwiseOr: op = Op.i32_or; break;
             case BinaryExpression.Operator.BitwiseXor: op = Op.i32_xor; break;
-            case BinaryExpression.Operator.ShiftLeft: op = Op.i32_shl; break;
-            case BinaryExpression.Operator.ShiftRight: op = Op.i32_shr_s; break;
-            case BinaryExpression.Operator.UnsignedShiftRight: op = Op.i32_shr_u; break;
+            case BinaryExpression.Operator.ShiftLeft:
+                assert(0, "ShiftLeft should be lowered to opShiftLeft call");
+            case BinaryExpression.Operator.ShiftRight:
+                assert(0, "ShiftRight should be lowered to opShiftRight call");
+            case BinaryExpression.Operator.UnsignedShiftRight:
+                assert(0, "UnsignedShiftRight should be lowered to opUnsignedShiftRight call");
             case BinaryExpression.Operator.Concat:
                 assert(false, "Concat should be handled above");
         }
@@ -4406,8 +4415,10 @@ class FuncContext {
             case AssignmentExpression.Operator.AndAssign: out_ ~= Op.i32_and; break;
             case AssignmentExpression.Operator.OrAssign: out_ ~= Op.i32_or; break;
             case AssignmentExpression.Operator.XorAssign: out_ ~= Op.i32_xor; break;
-            case AssignmentExpression.Operator.ShiftLeftAssign: out_ ~= Op.i32_shl; break;
-            case AssignmentExpression.Operator.ShiftRightAssign: out_ ~= Op.i32_shr_s; break;
+            case AssignmentExpression.Operator.ShiftLeftAssign:
+                assert(0, "<<= should be lowered to opShiftLeft call");
+            case AssignmentExpression.Operator.ShiftRightAssign:
+                assert(0, ">>= should be lowered to opShiftRight call");
             case AssignmentExpression.Operator.ConcatAssign:
                 throw new EmitError("~= should use slice path");
         }

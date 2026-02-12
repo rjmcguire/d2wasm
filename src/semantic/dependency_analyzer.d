@@ -191,6 +191,9 @@ class DependencyAnalyzer {
         } else if (auto binary = cast(BinaryExpression)expr) {
             calls ~= findCallsInExpression(binary.left);
             calls ~= findCallsInExpression(binary.right);
+            // Follow lowered shift operator calls
+            if (binary.loweredCall)
+                calls ~= findCallsInExpression(binary.loweredCall);
         } else if (auto unary = cast(UnaryExpression)expr) {
             calls ~= findCallsInExpression(unary.operand);
         } else if (auto index = cast(IndexExpression)expr) {
@@ -265,6 +268,8 @@ class DependencyAnalyzer {
         } else if (auto binary = cast(BinaryExpression)expr) {
             result ~= findTemplateCallsInExpression(binary.left);
             result ~= findTemplateCallsInExpression(binary.right);
+            if (binary.loweredCall)
+                result ~= findTemplateCallsInExpression(binary.loweredCall);
         } else if (auto unary = cast(UnaryExpression)expr) {
             result ~= findTemplateCallsInExpression(unary.operand);
         } else if (auto call = cast(CallExpression)expr) {

@@ -423,6 +423,27 @@ class CTFEEvaluator {
                 }
                 return;
             }
+            // Shift operators — lower to checked operator function call
+            if (binaryExpr.operator == BinaryExpression.Operator.ShiftLeft ||
+                binaryExpr.operator == BinaryExpression.Operator.ShiftRight ||
+                binaryExpr.operator == BinaryExpression.Operator.UnsignedShiftRight) {
+                string funcName;
+                if (binaryExpr.operator == BinaryExpression.Operator.ShiftLeft)
+                    funcName = "opShiftLeft";
+                else if (binaryExpr.operator == BinaryExpression.Operator.ShiftRight)
+                    funcName = "opShiftRight";
+                else
+                    funcName = "opUnsignedShiftRight";
+                auto callExpr = new CallExpression(binaryExpr.location,
+                    new IdentifierExpression(binaryExpr.location, funcName),
+                    [binaryExpr.left, binaryExpr.right]);
+                auto result = evaluateCallExpressionString(callExpr);
+                manifest.ctfeValue = result.intValue;
+                manifest.ctfeComplete = true;
+                manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Int32);
+                log(3, "CTFE: ", manifest.name, " = ", manifest.ctfeValue, " (checked shift)");
+                return;
+            }
             // Arithmetic/comparison — evaluate via backend
             long value = evaluateExpressionViaBackend(binaryExpr);
             manifest.ctfeValue = value;

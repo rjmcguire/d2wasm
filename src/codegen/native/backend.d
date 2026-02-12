@@ -1018,6 +1018,11 @@ class NativeCompiledFunction : CompiledFunction {
                 throw new Exception("Literal type not supported: " ~ lit.value.type.toString());
             }
         } else if (auto binOp = cast(BinaryExpression)expr) {
+            // Lowered shift operators — emit the call instead of raw opcode
+            if (binOp.loweredCall) {
+                compileExpression(binOp.loweredCall);
+                return;
+            }
             // Check if left operand might clobber x1 (function call, nested binary expr, or index expr)
             // IndexExpression uses x1 internally for address calculation
             bool leftMightClobber = containsFunctionCall(binOp.left) || 
@@ -1098,15 +1103,11 @@ class NativeCompiledFunction : CompiledFunction {
                     gen.emit(stencil_xor_i32);
                     break;
                 case BinaryExpression.Operator.ShiftLeft:
-                    gen.emit(stencil_shl_i32);
-                    break;
+                    assert(0, "ShiftLeft should be lowered to opShiftLeft call");
                 case BinaryExpression.Operator.ShiftRight:
-                    gen.emit(stencil_shr_i32);
-                    break;
+                    assert(0, "ShiftRight should be lowered to opShiftRight call");
                 case BinaryExpression.Operator.UnsignedShiftRight:
-                    // TODO: implement unsigned shift (for now use signed)
-                    gen.emit(stencil_shr_i32);
-                    break;
+                    assert(0, "UnsignedShiftRight should be lowered to opUnsignedShiftRight call");
                 case BinaryExpression.Operator.LogicalAnd:
                     gen.emit(stencil_logical_and_i32);
                     break;
@@ -1244,11 +1245,9 @@ class NativeCompiledFunction : CompiledFunction {
                         gen.emit(stencil_xor_i32);
                         break;
                     case AssignmentExpression.Operator.ShiftLeftAssign:
-                        gen.emit(stencil_shl_i32);
-                        break;
+                        assert(0, "<<= should be lowered to opShiftLeft call");
                     case AssignmentExpression.Operator.ShiftRightAssign:
-                        gen.emit(stencil_shr_i32);
-                        break;
+                        assert(0, ">>= should be lowered to opShiftRight call");
                     case AssignmentExpression.Operator.ConcatAssign:
                         // Handled specially above for slices
                         throw new Exception("~= on non-slice not supported");

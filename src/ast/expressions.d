@@ -19,25 +19,26 @@ class BinaryExpression : Expression {
     enum Operator {
         // Arithmetic
         Add, Subtract, Multiply, Divide, Modulo,
-        
+
         // Comparison
         Equal, NotEqual, Less, LessEqual, Greater, GreaterEqual,
-        
+
         // Logical
         LogicalAnd, LogicalOr,
-        
+
         // Bitwise
         BitwiseAnd, BitwiseOr, BitwiseXor,
         ShiftLeft, ShiftRight, UnsignedShiftRight,
-        
+
         // Array/String
         Concat  // ~ operator
     }
-    
+
     Expression left;
     Operator operator;
     Expression right;
-    
+    CallExpression loweredCall;  // Set by type checker for shift lowering
+
     this(SourceLocation loc, Expression left, Operator operator, Expression right) {
         super(loc);
         this.left = left;

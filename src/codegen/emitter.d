@@ -2614,6 +2614,11 @@ private class EvalContext {
             emitArrayConcat(out_, expr);
             return;
         }
+        // Lowered shift operators — emit the call instead of raw opcode
+        if (expr.loweredCall) {
+            emitCallExpr(out_, expr.loweredCall);
+            return;
+        }
         // LogicalAnd/LogicalOr need boolean normalization (eqz+eqz converts to 0/1)
         if (expr.operator == BinaryExpression.Operator.LogicalAnd) {
             emitExpression(out_, expr.left);
@@ -2655,13 +2660,16 @@ private class EvalContext {
             case BinaryExpression.Operator.BitwiseAnd: out_ ~= Op.i32_and; break;
             case BinaryExpression.Operator.BitwiseOr: out_ ~= Op.i32_or; break;
             case BinaryExpression.Operator.BitwiseXor: out_ ~= Op.i32_xor; break;
-            case BinaryExpression.Operator.ShiftLeft: out_ ~= Op.i32_shl; break;
-            case BinaryExpression.Operator.ShiftRight: out_ ~= Op.i32_shr_s; break;
-            case BinaryExpression.Operator.UnsignedShiftRight: out_ ~= Op.i32_shr_u; break;
+            case BinaryExpression.Operator.ShiftLeft:
+                assert(0, "ShiftLeft should be lowered to opShiftLeft call");
+            case BinaryExpression.Operator.ShiftRight:
+                assert(0, "ShiftRight should be lowered to opShiftRight call");
+            case BinaryExpression.Operator.UnsignedShiftRight:
+                assert(0, "UnsignedShiftRight should be lowered to opUnsignedShiftRight call");
             case BinaryExpression.Operator.Concat: assert(0); // handled above
         }
     }
-    
+
     void emitArrayConcat(ref Appender!(ubyte[]) out_, BinaryExpression expr) {
         // Emit left operand (string pointer)
         emitExpression(out_, expr.left);

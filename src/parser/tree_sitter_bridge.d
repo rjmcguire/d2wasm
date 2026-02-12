@@ -1156,15 +1156,17 @@ class TreeSitterBridge {
             // Parse name and initializer from declarator
             if (TreeSitterParser.isValid(declaratorNode)) {
                 uint declChildCount = TreeSitterParser.getChildCount(declaratorNode);
+                bool sawEquals = false;
                 for (uint i = 0; i < declChildCount; i++) {
                     TSNode child = TreeSitterParser.getChild(declaratorNode, i);
                     string childType = TreeSitterParser.getNodeType(child);
-                    
-                    if (childType == "identifier" && !TreeSitterParser.isValid(nameNode)) {
+
+                    if (childType == "=") {
+                        sawEquals = true;
+                    } else if (!sawEquals && childType == "identifier" && !TreeSitterParser.isValid(nameNode)) {
                         nameNode = child;
-                    } else if (childType != "=" && childType != "identifier" && 
-                               TreeSitterParser.isValid(nameNode) && !TreeSitterParser.isValid(initNode)) {
-                        // This should be the initializer expression
+                    } else if (sawEquals && !TreeSitterParser.isValid(initNode)) {
+                        // Everything after = is the initializer expression
                         initNode = child;
                     }
                 }
