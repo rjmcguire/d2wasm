@@ -478,6 +478,9 @@ class VariableDecl : Declaration {
     // CTFE-evaluated struct data (for global immutable structs)
     bool ctfeComplete;
     uint ctfeStructAddress;  // Address in data section where struct is stored
+
+    // WASM global index for scalar globals (int, bool, etc.)
+    uint wasmGlobalIndex = uint.max;  // uint.max = not a scalar global
     
     this(SourceLocation loc, string name, Type type, 
          Expression initializer = null, bool isPublic = false) {

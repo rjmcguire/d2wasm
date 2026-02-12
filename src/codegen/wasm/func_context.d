@@ -3374,9 +3374,20 @@ class FuncContext {
             }
         }
         
+        // Check if it's a scalar global variable
+        if (symbol) {
+            if (auto varDecl = cast(VariableDecl)symbol.declaration) {
+                if (varDecl.wasmGlobalIndex != uint.max) {
+                    out_ ~= Op.global_get;
+                    leb128u(out_, varDecl.wasmGlobalIndex);
+                    return;
+                }
+            }
+        }
+
         throw new EmitError("Unknown identifier: " ~ expr.name);
     }
-    
+
     void emitBinary(ref Appender!(ubyte[]) out_, BinaryExpression expr) {
         // Handle string concatenation specially
         if (expr.operator == BinaryExpression.Operator.Concat) {
@@ -4866,6 +4877,43 @@ class FuncContext {
             out_ ~= Op.local_tee;
             leb128u(out_, wasmIdx);
         } else {
+            // Check for scalar global variable
+            auto globalSymbol = emitter.symbolTable.lookupSymbol(ident.name);
+            if (globalSymbol) {
+                if (auto varDecl = cast(VariableDecl)globalSymbol.declaration) {
+                    if (varDecl.wasmGlobalIndex != uint.max) {
+                        if (expr.operator != AssignmentExpression.Operator.Assign) {
+                            // Compound assignment: load current, apply op, store
+                            out_ ~= Op.global_get;
+                            leb128u(out_, varDecl.wasmGlobalIndex);
+                            emitExpression(out_, expr.right);
+                            final switch (expr.operator) {
+                                case AssignmentExpression.Operator.Assign: assert(0);
+                                case AssignmentExpression.Operator.AddAssign: out_ ~= Op.i32_add; break;
+                                case AssignmentExpression.Operator.SubtractAssign: out_ ~= Op.i32_sub; break;
+                                case AssignmentExpression.Operator.MultiplyAssign: out_ ~= Op.i32_mul; break;
+                                case AssignmentExpression.Operator.DivideAssign: out_ ~= Op.i32_div_s; break;
+                                case AssignmentExpression.Operator.ModuloAssign: out_ ~= Op.i32_rem_s; break;
+                                case AssignmentExpression.Operator.AndAssign: out_ ~= Op.i32_and; break;
+                                case AssignmentExpression.Operator.OrAssign: out_ ~= Op.i32_or; break;
+                                case AssignmentExpression.Operator.XorAssign: out_ ~= Op.i32_xor; break;
+                                case AssignmentExpression.Operator.ShiftLeftAssign: out_ ~= Op.i32_shl; break;
+                                case AssignmentExpression.Operator.ShiftRightAssign: out_ ~= Op.i32_shr_s; break;
+                                case AssignmentExpression.Operator.ConcatAssign:
+                                    throw new EmitError("~= not supported on global scalars");
+                            }
+                        } else {
+                            emitExpression(out_, expr.right);
+                        }
+                        out_ ~= Op.global_set;
+                        leb128u(out_, varDecl.wasmGlobalIndex);
+                        // Assignment as expression: push value back onto stack
+                        out_ ~= Op.global_get;
+                        leb128u(out_, varDecl.wasmGlobalIndex);
+                        return;
+                    }
+                }
+            }
             throw new EmitError("Unknown identifier in assignment: " ~ ident.name);
         }
     }

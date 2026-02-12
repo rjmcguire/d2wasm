@@ -806,7 +806,22 @@ class BinaryEmitter {
                     }
                 }
             }
+            return;
         }
+
+        // Scalar global variable (int, bool, etc.) — allocate a WASM global
+        long initValue = 0;
+        if (decl.initializer) {
+            initValue = evaluateConstantIntExpr(decl.initializer);
+        }
+
+        decl.wasmGlobalIndex = cast(uint)globals.length;
+        GlobalInfo g;
+        g.type = dTypeToValType(decl.type);
+        g.mutable = true;
+        g.initValue = initValue;
+        g.name = decl.name;
+        globals ~= g;
     }
     
     private void collectImportedFunction(ImportedFunctionDecl decl) {
