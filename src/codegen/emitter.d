@@ -625,18 +625,19 @@ class BinaryEmitter {
             typeIndex[sig] = tIdx;
         }
         
-        // Generate mangled name
-        string mangledName = structDecl.name ~ "_" ~ method.name;
-        
+        // Generate D ABI mangled name
+        import codegen.mangle : computeMangledName;
+        method.mangledName = computeMangledName(symbolTable.modulePath, method);
+
         // Create function info
         FuncInfo info;
-        info.name = mangledName;  // Use mangled name for index lookups
+        info.name = method.mangledName;
         info.decl = method;
         info.typeIndex = tIdx;
         info.isImport = false;
         info.structParent = structDecl;  // Track parent struct for codegen
-        
-        funcIndex[mangledName] = cast(uint)functions.length;
+
+        funcIndex[method.mangledName] = cast(uint)functions.length;
         functions ~= info;
     }
     
@@ -736,17 +737,18 @@ class BinaryEmitter {
             typeIndex[sig] = tIdx;
         }
         
-        // Generate mangled name: ClassName_methodName
-        string mangledName = classDecl.name ~ "_" ~ method.name;
-        
+        // Generate D ABI mangled name
+        import codegen.mangle : computeMangledName;
+        method.mangledName = computeMangledName(symbolTable.modulePath, method);
+
         FuncInfo info;
-        info.name = mangledName;
+        info.name = method.mangledName;
         info.decl = method;
         info.typeIndex = tIdx;
         info.isImport = false;
         info.classParent = classDecl;
-        
-        funcIndex[mangledName] = cast(uint)functions.length;
+
+        funcIndex[method.mangledName] = cast(uint)functions.length;
         functions ~= info;
     }
     
@@ -901,14 +903,18 @@ class BinaryEmitter {
             typeIndex[sig] = tIdx;
         }
         
+        // Set mangled name — free functions keep their original name for exports
+        if (!decl.mangledName)
+            decl.mangledName = decl.name;
+
         // Add function
         FuncInfo info;
-        info.name = decl.name;
+        info.name = decl.mangledName;
         info.typeIndex = tIdx;
         info.decl = decl;
         info.exported = true;  // Export all for now
-        
-        funcIndex[decl.name] = cast(uint)functions.length;
+
+        funcIndex[decl.mangledName] = cast(uint)functions.length;
         functions ~= info;
     }
     
@@ -1579,11 +1585,8 @@ class BinaryEmitter {
             
             // Add virtual methods in declaration order
             foreach (method; classDecl.virtualMethods) {
-                // Use the method's actual parent class for the mangled name
-                // (inherited methods still use their defining class name)
-                ClassDecl definingClass = cast(ClassDecl)method.parent;
-                string mangledName = definingClass.name ~ "_" ~ method.name;
-                if (auto idx = mangledName in funcIndex) {
+                // Use the method's mangledName (set during collectClassMethod)
+                if (auto idx = method.mangledName in funcIndex) {
                     // funcIndex already includes import offset after stabilization
                     tableFunctions ~= cast(uint)imports.length + *idx;
                 }
@@ -1620,9 +1623,7 @@ class BinaryEmitter {
                     // Find the implementing method in the class
                     auto implMethod = findImplementingMethod(classDecl, ifaceMethod.name);
                     if (implMethod) {
-                        ClassDecl definingClass = cast(ClassDecl)implMethod.parent;
-                        string mangledName = definingClass.name ~ "_" ~ implMethod.name;
-                        if (auto idx = mangledName in funcIndex) {
+                        if (auto idx = implMethod.mangledName in funcIndex) {
                             tableFunctions ~= cast(uint)imports.length + *idx;
                         }
                     }

@@ -95,15 +95,11 @@ private bool isStringType(Type t) {
     return false;
 }
 
-/// Compute a unique key for a function (mangled name for methods).
-/// Same logic as DependencyAnalyzer.funcKey — duplicated here to avoid coupling.
+/// Compute a unique key for a function using D ABI mangling.
 private string ctfeFuncKey(FunctionDecl func) {
-    if (func.isMethod && func.parent !is null) {
-        if (auto sd = cast(StructDecl)func.parent)
-            return sd.name ~ "_" ~ func.name;
-        if (auto cd = cast(ClassDecl)func.parent)
-            return cd.name ~ "_" ~ func.name;
-    }
+    import codegen.mangle : computeMangledName;
+    if (func.isMethod && func.parent !is null)
+        return computeMangledName([], func);
     return func.name;
 }
 

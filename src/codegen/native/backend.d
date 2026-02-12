@@ -222,13 +222,13 @@ class NativeCompiledFunction : CompiledFunction {
         // Store all function decls for call resolution
         // Methods use mangled names: StructName_methodName
         foreach (func; funcs) {
-            string name = mangledName(func);
+            string name = getMangledName(func);
             functionDecls[name] = func;
         }
 
         // Create labels for all functions before compiling any
         foreach (func; funcs) {
-            string name = mangledName(func);
+            string name = getMangledName(func);
             functionLabels[name] = gen.newLabel();
         }
         
@@ -258,13 +258,15 @@ class NativeCompiledFunction : CompiledFunction {
 
     }
 
-    /// Get the mangled name for a function (StructName_methodName for methods).
-    private static string mangledName(FunctionDecl func) {
+    /// Get the mangled name for a function.
+    /// Uses FunctionDecl.mangledName if set (by WASM emitter), otherwise computes it.
+    private static string getMangledName(FunctionDecl func) {
+        if (func.mangledName)
+            return func.mangledName;
+        // Fallback for native-only compilation (no WASM emitter ran)
         if (func.isMethod && func.parent !is null) {
-            if (auto sd = cast(StructDecl)func.parent)
-                return sd.name ~ "_" ~ func.name;
-            if (auto cd = cast(ClassDecl)func.parent)
-                return cd.name ~ "_" ~ func.name;
+            import codegen.mangle : computeMangledName;
+            return computeMangledName([], func);
         }
         return func.name;
     }
@@ -272,7 +274,7 @@ class NativeCompiledFunction : CompiledFunction {
     private void compileFunction(FunctionDecl func) {
         import std.stdio : writeln;
 
-        string name = mangledName(func);
+        string name = getMangledName(func);
 
         // Bind function label (for multi-function mode)
         if (auto labelPtr = name in functionLabels) {
@@ -1698,7 +1700,7 @@ class NativeCompiledFunction : CompiledFunction {
             throw new Exception("Struct '" ~ structDecl.name ~ "' has no method '" ~ memberExpr.memberName ~ "'");
 
         // Look up the mangled function label
-        string mangledMethodName = structDecl.name ~ "_" ~ method.name;
+        string mangledMethodName = getMangledName(method);
         auto labelPtr = mangledMethodName in functionLabels;
         if (labelPtr is null)
             throw new Exception("Method not compiled: " ~ mangledMethodName);

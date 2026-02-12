@@ -4219,8 +4219,7 @@ class FuncContext {
         // For classes: call_indirect through vtable (virtual dispatch)
         if (structDecl) {
             // Struct method: direct call
-            string mangledName = typeName ~ "_" ~ method.name;
-            uint funcIdx = emitter.getFuncIndex(mangledName);
+            uint funcIdx = emitter.getFuncIndex(method.mangledName);
             out_ ~= Op.call;
             leb128u(out_, funcIdx);
         } else if (classDecl) {
@@ -4236,8 +4235,7 @@ class FuncContext {
             
             if (methodSlot < 0) {
                 // Not a virtual method (constructor/destructor) - use direct call
-                string mangledName = typeName ~ "_" ~ method.name;
-                uint funcIdx = emitter.getFuncIndex(mangledName);
+                uint funcIdx = emitter.getFuncIndex(method.mangledName);
                 out_ ~= Op.call;
                 leb128u(out_, funcIdx);
             } else {
@@ -4279,8 +4277,7 @@ class FuncContext {
                 }
                 
                 // call_indirect with type signature
-                string mangledName = typeName ~ "_" ~ method.name;
-                uint funcIdx = emitter.getFuncIndex(mangledName);
+                uint funcIdx = emitter.getFuncIndex(method.mangledName);
                 uint typeIdx = emitter.functions[funcIdx - cast(uint)emitter.imports.length].typeIndex;
                 
                 out_ ~= Op.call_indirect;

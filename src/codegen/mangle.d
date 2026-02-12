@@ -230,6 +230,46 @@ string mangleBasicType(BasicType.Kind kind) {
 }
 
 /**
+ * Compute the D ABI mangled name for a FunctionDecl.
+ * Handles free functions, methods, destructors, and constructors.
+ * Uses the module path and parent struct/class info from the decl itself.
+ */
+string computeMangledName(const(string[]) modulePath, FunctionDecl decl) {
+    string result = "_D";
+
+    // Module path components
+    foreach (component; modulePath)
+        result ~= lname(component);
+
+    // Parent aggregate (struct/class) for methods
+    if (decl.isMethod && decl.parent !is null) {
+        if (auto sd = cast(StructDecl)decl.parent)
+            result ~= lname(sd.name);
+        else if (auto cd = cast(ClassDecl)decl.parent)
+            result ~= lname(cd.name);
+    }
+
+    // Symbol name — destructors use __dtor, constructors use __ctor
+    string symName = decl.isDestructor ? "__dtor"
+                   : decl.isConstructor ? "__ctor"
+                   : decl.name;
+    result ~= lname(symName);
+
+    // Method marker
+    if (decl.isMethod)
+        result ~= "M";
+
+    // Function type: F <params> Z <return>
+    result ~= "F";
+    foreach (p; decl.parameters)
+        result ~= mangleTypeNode(p.type);
+    result ~= "Z";
+    result ~= mangleTypeNode(decl.returnType);
+
+    return result;
+}
+
+/**
  * Demangle a D mangled name back to human-readable form.
  * Used for error messages.
  * 

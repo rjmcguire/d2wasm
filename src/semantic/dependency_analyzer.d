@@ -57,14 +57,11 @@ class DependencyAnalyzer {
         return structDeps;
     }
 
-    /// Compute a unique key for a function (mangled name for methods).
+    /// Compute a unique key for a function (D ABI mangled name for methods).
     private static string funcKey(FunctionDecl func) {
-        if (func.isMethod && func.parent !is null) {
-            if (auto sd = cast(StructDecl)func.parent)
-                return sd.name ~ "_" ~ func.name;
-            if (auto cd = cast(ClassDecl)func.parent)
-                return cd.name ~ "_" ~ func.name;
-        }
+        import codegen.mangle : computeMangledName;
+        if (func.isMethod && func.parent !is null)
+            return computeMangledName([], func);
         return func.name;
     }
 

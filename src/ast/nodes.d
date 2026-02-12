@@ -260,6 +260,7 @@ class FunctionDecl : Declaration {
     @property void isProperty(bool v) { attrs.isProperty_ = v; }
 
     Declaration parent;  // enclosing struct/class, null for free functions
+    string mangledName;  // D ABI mangled name, set during emitter collection
 
     TemplateParamType[] templateParams;  // empty for non-template functions
     @property bool isTemplate() const { return templateParams.length > 0; }
