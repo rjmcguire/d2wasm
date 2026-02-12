@@ -19,12 +19,14 @@ NC='\033[0m' # No Color
 # Options
 VERBOSE=0
 AGENT_MODE=0
+FILTER=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         -v|--verbose) VERBOSE=1; shift ;;
         --agent-mode) AGENT_MODE=1; shift ;;
-        *) echo "Unknown option: $1"; exit 1 ;;
+        -*) echo "Unknown option: $1"; exit 1 ;;
+        *) FILTER="$1"; shift ;;
     esac
 done
 
@@ -101,14 +103,46 @@ run_test() {
     
     if [ $compile_status -ne 0 ]; then
         if [ "$test_type" = "compile_error" ]; then
-            # Expected to fail compilation
+            # Expected to fail compilation — check error message content
             if [ -f "$expected_file" ]; then
-                local expected=$(cat "$expected_file")
-                if echo "$compile_output" | grep -qF "$expected"; then
+                local all_matched=true
+                local failed_line=""
+                while IFS= read -r line || [ -n "$line" ]; do
+                    # Strip leading/trailing whitespace
+                    line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+                    [ -z "$line" ] && continue
+                    if ! echo "$compile_output" | grep -qF -- "$line"; then
+                        all_matched=false
+                        failed_line="$line"
+                        break
+                    fi
+                done < "$expected_file"
+                if [ "$all_matched" = true ]; then
                     echo -e "${GREEN}PASS${NC} $test_name (compile error as expected)"
                     return 0
+                else
+                    echo -e "${RED}FAIL${NC} $test_name"
+                    echo "  Missing expected line: $failed_line"
+                    echo "  Actual output:"
+                    echo "$compile_output" | sed 's/^/    /'
+                    return 1
                 fi
             fi
+            # Check expected_error from config.json
+            local expected_error=$(jq -r '.expected_error // empty' "$config_file")
+            if [ -n "$expected_error" ]; then
+                if echo "$compile_output" | grep -qF "$expected_error"; then
+                    echo -e "${GREEN}PASS${NC} $test_name (compile error as expected)"
+                    return 0
+                else
+                    echo -e "${RED}FAIL${NC} $test_name"
+                    echo "  Expected error text: $expected_error"
+                    echo "  Actual output:"
+                    echo "$compile_output" | sed 's/^/    /'
+                    return 1
+                fi
+            fi
+            # No expected text specified — just check that it failed
             echo -e "${GREEN}PASS${NC} $test_name (compile error)"
             return 0
         fi
@@ -119,6 +153,12 @@ run_test() {
         return 1
     fi
     
+    # compile_error tests should have failed above                                                 
+    if [ "$test_type" = "compile_error" ]; then                                                    
+      echo -e "${RED}FAIL${NC} $test_name"                                                       
+      echo "  Expected compilation to fail, but it succeeded"                                    
+      return 1                                                                                   
+    fi
     # Validate binary with wasm2wat
     if ! wasm2wat "$wasm_file" >/dev/null 2>&1; then
         echo -e "${RED}FAIL${NC} $test_name"
@@ -333,6 +373,10 @@ failed=0
 skipped=0
 
 for test_dir in $(ls -d "$TESTS_DIR"/milestone_* "$TESTS_DIR"/quality_* 2>/dev/null | sort); do
+    # Filter by name if specified
+    if [ -n "$FILTER" ] && [[ "$(basename "$test_dir")" != *"$FILTER"* ]]; then
+        continue
+    fi
     if run_test "$test_dir"; then
         ((passed++)) || true
     else

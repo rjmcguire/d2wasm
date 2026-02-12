@@ -1,0 +1,5 @@
+error: CTFE compile error: Unknown identifier: r
+return r;
+^
+note: while evaluating `enum RESULT`
+enum RESULT = test();

@@ -1,0 +1,6 @@
+{
+  "name": "ctfe_error_context",
+  "description": "CTFE compile errors show 'while evaluating' note with source context",
+  "type": "compile_error",
+  "capability": "Error message quality - CTFE evaluation context"
+}
