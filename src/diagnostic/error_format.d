@@ -123,18 +123,93 @@ string formatError(string errorType, string message, SourceLocation loc, string 
 }
 
 /**
+ * Format a note (secondary diagnostic) with source context
+ */
+string formatNote(string message, SourceLocation loc) {
+    auto result = appender!string;
+
+    result ~= Colors.cyan();
+    result ~= "note";
+    result ~= Colors.reset();
+    result ~= ": ";
+    result ~= message;
+    result ~= "\n";
+
+    result ~= Colors.blue();
+    result ~= "  --> ";
+    result ~= Colors.reset();
+    result ~= loc.filename;
+    result ~= ":";
+    result ~= to!string(loc.line);
+    result ~= ":";
+    result ~= to!string(loc.column);
+    result ~= "\n";
+
+    try {
+        if (loc.filename.length > 0 && exists(loc.filename)) {
+            string source = readText(loc.filename);
+            auto lines = source.splitLines();
+
+            if (loc.line > 0 && loc.line <= lines.length) {
+                string lineNum = to!string(loc.line);
+                string padding = repeat(" ", lineNum.length).join();
+                string sourceLine = lines[loc.line - 1];
+
+                result ~= Colors.blue();
+                result ~= padding;
+                result ~= " |\n";
+
+                result ~= lineNum;
+                result ~= " | ";
+                result ~= Colors.reset();
+                result ~= sourceLine;
+                result ~= "\n";
+
+                result ~= Colors.blue();
+                result ~= padding;
+                result ~= " | ";
+                result ~= Colors.cyan();
+
+                uint caretPos = loc.column > 0 ? loc.column - 1 : 0;
+                string beforeCaret = "";
+                foreach (i, ch; sourceLine) {
+                    if (i >= caretPos) break;
+                    beforeCaret ~= (ch == '\t') ? '\t' : ' ';
+                }
+                result ~= beforeCaret;
+                result ~= "^";
+
+                if (loc.endOffset > loc.startOffset) {
+                    uint extent = loc.endOffset - loc.startOffset;
+                    if (extent > 1 && extent < 50) {
+                        result ~= repeat("~", extent - 1).join();
+                    }
+                }
+
+                result ~= Colors.reset();
+                result ~= "\n";
+            }
+        }
+    } catch (Exception e) {
+        // Couldn't read source, skip context
+    }
+
+    return result.data;
+}
+
+/**
  * Print a formatted error to stderr
  */
 void printError(E)(E exception) if (is(typeof(exception.location) : SourceLocation)) {
     // Extract just the message without location (it's already in exception.msg usually)
     string msg = exception.msg;
-    
+
     // Strip "Type error: X at file:line:col" pattern to get just X
     auto atIdx = msg.lastIndexOf(" at ");
     if (atIdx > 0) {
         msg = msg[0..atIdx];
     }
-    
+
     // Strip redundant prefix like "Type error: "
     foreach (prefix; ["Type error: ", "Parse error: ", "Semantic error: "]) {
         if (msg.startsWith(prefix)) {
@@ -142,8 +217,15 @@ void printError(E)(E exception) if (is(typeof(exception.location) : SourceLocati
             break;
         }
     }
-    
+
     stderr.write(formatError(typeid(exception).name, msg, exception.location));
+
+    // Print any attached notes (e.g., CTFE evaluation chain)
+    static if (is(typeof(exception.notes))) {
+        foreach (note; exception.notes) {
+            stderr.write(formatNote(note.message, note.location));
+        }
+    }
 }
 
 /**

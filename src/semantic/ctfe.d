@@ -32,9 +32,21 @@ import core.time : MonoTime, Duration;
 class CTFEError : Exception {
     SourceLocation location;
 
+    struct Note {
+        string message;
+        SourceLocation location;
+    }
+    Note[] notes;
+
     this(string msg, SourceLocation location, string file = __FILE__, size_t line = __LINE__) {
         this.location = location;
         super(msg, file, line);
+    }
+
+    /// Add a note with source location context (e.g., "while evaluating ...")
+    CTFEError addNote(string message, SourceLocation loc) {
+        notes ~= Note(message, loc);
+        return this;
     }
 }
 
@@ -291,9 +303,21 @@ class CTFEEvaluator {
         if (manifest.ctfeComplete) {
             return;
         }
-        
+
+        try {
+            evaluateManifestConstantImpl(manifest);
+        } catch (CTFEError e) {
+            // Add context note showing which manifest constant triggered the evaluation
+            if (e.location != manifest.location) {
+                throw e.addNote("while evaluating `enum " ~ manifest.name ~ "`", manifest.location);
+            }
+            throw e;
+        }
+    }
+
+    private void evaluateManifestConstantImpl(ManifestConstantDecl manifest) {
         log(3, "CTFE: Evaluating ", manifest.name);
-        
+
         // Check if it's a simple literal (no CTFE needed)
         if (auto literal = cast(LiteralExpression)manifest.initializer) {
             if (literal.value.type == typeid(long)) {
