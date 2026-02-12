@@ -1,0 +1,7 @@
+{
+  "name": "ifti",
+  "description": "Implicit Function Template Instantiation (IFTI)",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 8
+}

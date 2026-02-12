@@ -3371,8 +3371,10 @@ class FuncContext {
         }
         
         // Get callee's parameter types for interface conversion detection
+        // Use IFTI resolved name if available
+        string calleeLookup = expr.resolvedInstantiation ? expr.resolvedInstantiation.name : ident.name;
         FunctionDecl calleeDecl = null;
-        if (auto funcInfo = ident.name in emitter.funcIndex) {
+        if (auto funcInfo = calleeLookup in emitter.funcIndex) {
             if (*funcInfo < emitter.functions.length) {
                 calleeDecl = emitter.functions[*funcInfo].decl;
             }
@@ -3657,8 +3659,9 @@ class FuncContext {
             emitExpression(out_, arg);
         }
         
-        // Call
-        uint funcIdx = emitter.getFuncIndex(ident.name);
+        // Call — use IFTI resolved name if available
+        string callName = expr.resolvedInstantiation ? expr.resolvedInstantiation.name : ident.name;
+        uint funcIdx = emitter.getFuncIndex(callName);
         out_ ~= Op.call;
         leb128u(out_, funcIdx);
         

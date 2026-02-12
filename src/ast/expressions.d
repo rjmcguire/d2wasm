@@ -148,6 +148,7 @@ class CallExpression : Expression {
     Expression function_;
     Expression[] arguments;
     bool isUFCS = false;  // Set by type checker for UFCS calls (obj.func() -> func(obj))
+    FunctionDecl resolvedInstantiation;  // Set by IFTI during type checking
     
     this(SourceLocation loc, Expression function_, Expression[] arguments) {
         super(loc);

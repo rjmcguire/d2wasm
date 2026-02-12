@@ -110,6 +110,21 @@ private bool isStringType(Type t) {
     return false;
 }
 
+/// Deduce the type of an expression for IFTI in CTFE context.
+/// Only handles literal types; more complex expressions default to Int32.
+private Type deduceTypeFromExpression(Expression expr) {
+    if (auto literal = cast(LiteralExpression)expr) {
+        if (literal.value.type == typeid(long) || literal.value.type == typeid(int))
+            return new BasicType(expr.location, BasicType.Kind.Int32);
+        if (literal.value.type == typeid(bool))
+            return new BasicType(expr.location, BasicType.Kind.Bool);
+        if (literal.value.type == typeid(char))
+            return new BasicType(expr.location, BasicType.Kind.Char);
+    }
+    // Default to int for manifest constant references and other expressions
+    return new BasicType(expr.location, BasicType.Kind.Int32);
+}
+
 /// Compute a unique key for a function using D ABI mangling.
 private string ctfeFuncKey(FunctionDecl func) {
     import codegen.mangle : computeMangledName;
@@ -250,7 +265,7 @@ class CTFEEvaluator {
                 if (arguments.length != 1) {
                     throw new CTFEError("CTFE: __ctfe_runtime.alloc requires 1 argument", loc);
                 }
-                int size = cast(int)evaluateSimpleExpression(arguments[0]);
+                int size = cast(int)extractLiteralValue(arguments[0]);
                 int ptr = arena.alloc(size);
                 log(3, "CTFE: __ctfe_runtime.alloc(", size, ") = ", ptr);
                 return CTFEResult.fromInt(ptr);
@@ -375,7 +390,7 @@ class CTFEEvaluator {
         if (auto unaryExpr = cast(UnaryExpression)manifest.initializer) {
             if (unaryExpr.operator == UnaryExpression.Operator.Minus) {
                 // Evaluate the operand
-                long operand = evaluateSimpleExpression(unaryExpr.operand);
+                long operand = extractLiteralValue(unaryExpr.operand);
                 long value = -operand;
                 // Allow both signed i32 and unsigned u32 range
                 if (value > uint.max || value < int.min) {
@@ -393,7 +408,7 @@ class CTFEEvaluator {
             }
         }
         
-        // Check for binary expression (e.g., array/string concatenation)
+        // Check for binary expression (e.g., array/string concatenation, arithmetic)
         if (auto binaryExpr = cast(BinaryExpression)manifest.initializer) {
             if (binaryExpr.operator == BinaryExpression.Operator.Concat) {
                 // Determine if this is string or array concat
@@ -408,6 +423,13 @@ class CTFEEvaluator {
                 }
                 return;
             }
+            // Arithmetic/comparison — evaluate via backend
+            long value = evaluateExpressionViaBackend(binaryExpr);
+            manifest.ctfeValue = value;
+            manifest.ctfeComplete = true;
+            manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Int32);
+            log(3, "CTFE: ", manifest.name, " = ", manifest.ctfeValue, " (binary expression)");
+            return;
         }
         
         // Check for function call that might return a string or array
@@ -548,6 +570,8 @@ class CTFEEvaluator {
                     }
                 }
             }
+        } else if (auto unary = cast(UnaryExpression)expr) {
+            ensureDependenciesEvaluated(unary.operand);
         } else if (auto binary = cast(BinaryExpression)expr) {
             ensureDependenciesEvaluated(binary.left);
             ensureDependenciesEvaluated(binary.right);
@@ -569,7 +593,7 @@ class CTFEEvaluator {
         // Evaluate all elements
         long[] values;
         foreach (elem; arrayLit.elements) {
-            values ~= evaluateSimpleExpression(elem);
+            values ~= extractLiteralValue(elem);
         }
         
         // Determine element size (assume i32 for now - 4 bytes)
@@ -735,7 +759,7 @@ class CTFEEvaluator {
         if (auto arrayLit = cast(ArrayLiteralExpression)expr) {
             auto bytes = appender!(ubyte[]);
             foreach (elem; arrayLit.elements) {
-                long val = evaluateSimpleExpression(elem);
+                long val = extractLiteralValue(elem);
                 int v = cast(int)val;
                 bytes ~= cast(ubyte)(v & 0xFF);
                 bytes ~= cast(ubyte)((v >> 8) & 0xFF);
@@ -776,7 +800,7 @@ class CTFEEvaluator {
         if (auto arrayLit = cast(ArrayLiteralExpression)expr) {
             long[] values;
             foreach (elem; arrayLit.elements) {
-                values ~= evaluateSimpleExpression(elem);
+                values ~= extractLiteralValue(elem);
             }
             return values;
         }
@@ -822,22 +846,61 @@ class CTFEEvaluator {
             return CTFEResult.fromInt(evaluateCtfeWriteln(callExpr));
         }
         string funcName = identExpr.name;
-        
-        // Find the function declaration
-        FunctionDecl funcDecl = null;
-        foreach (decl; allDeclarations) {
-            if (auto fd = cast(FunctionDecl)decl) {
-                if (fd.name == funcName) {
-                    funcDecl = fd;
-                    break;
+
+        // IFTI: if the call has a resolved instantiation, use it directly
+        FunctionDecl funcDecl = callExpr.resolvedInstantiation;
+
+        // Otherwise, find the function declaration by name
+        if (!funcDecl) {
+            foreach (decl; allDeclarations) {
+                if (auto fd = cast(FunctionDecl)decl) {
+                    if (fd.name == funcName) {
+                        funcDecl = fd;
+                        break;
+                    }
                 }
             }
         }
-        
+
         if (!funcDecl) {
             throw new CTFEError("CTFE: Function '" ~ funcName ~ "' not found", callExpr.location);
         }
-        
+
+        // IFTI: if the found function is a template, deduce type args from call args
+        if (funcDecl.isTemplate) {
+            import semantic.template_instantiation : TemplateInstantiator;
+
+            // Deduce types from arguments (simple: assume int literals → Int32)
+            Type[] deducedTypes = new Type[funcDecl.templateParams.length];
+            foreach (i, param; funcDecl.parameters) {
+                if (i >= callExpr.arguments.length) break;
+                if (auto tpt = cast(TemplateParamType)param.type) {
+                    foreach (j, tp; funcDecl.templateParams) {
+                        if (tp.paramName == tpt.paramName && deducedTypes[j] is null) {
+                            deducedTypes[j] = deduceTypeFromExpression(callExpr.arguments[i]);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Verify all deduced
+            foreach (i, dt; deducedTypes) {
+                if (dt is null) {
+                    throw new CTFEError("CTFE: Cannot deduce template parameter '" ~
+                        funcDecl.templateParams[i].paramName ~ "'", callExpr.location);
+                }
+            }
+
+            auto instantiator = new TemplateInstantiator();
+            funcDecl = instantiator.instantiate(funcDecl, deducedTypes);
+            callExpr.resolvedInstantiation = funcDecl;
+
+            // Type-check the instantiation
+            auto typeChecker = new TypeChecker(symbolTable);
+            typeChecker.checkFunctionDeclaration(funcDecl);
+        }
+
         // Check if function returns a string (dynamic ubyte[])
         bool returnsString = isStringType(funcDecl.returnType);
         
@@ -889,7 +952,7 @@ class CTFEEvaluator {
         // Evaluate arguments (must be literals or simple expressions)
         long[] args;
         foreach (arg; callExpr.arguments) {
-            args ~= evaluateSimpleExpression(arg);
+            args ~= extractLiteralValue(arg);
         }
         
         log(3, "CTFE: Calling ", funcName, " with args ", args);
@@ -928,7 +991,7 @@ class CTFEEvaluator {
         // Evaluate arguments
         long[] args;
         foreach (arg; tmplInst.callArguments) {
-            args ~= evaluateSimpleExpression(arg);
+            args ~= extractLiteralValue(arg);
         }
 
         log(3, "CTFE: Calling template ", inst.name, " with args ", args);
@@ -973,7 +1036,7 @@ class CTFEEvaluator {
         // Evaluate arguments
         long[] args;
         foreach (arg; argExprs) {
-            args ~= evaluateSimpleExpression(arg);
+            args ~= extractLiteralValue(arg);
         }
         
         log(3, "CTFE: Calling ", funcDecl.name, " with args ", args, " returning ", elemCount, " elements");
@@ -1078,7 +1141,7 @@ class CTFEEvaluator {
         // Evaluate arguments
         long[] args;
         foreach (arg; argExprs) {
-            args ~= evaluateSimpleExpression(arg);
+            args ~= extractLiteralValue(arg);
         }
         
         uint structSize = cast(uint)structDecl.structSize;
@@ -1468,7 +1531,7 @@ class CTFEEvaluator {
             } else {
                 // Try to evaluate as simple expression (numbers)
                 try {
-                    long val = evaluateSimpleExpression(arg);
+                    long val = extractLiteralValue(arg);
                     write(val);
                 } catch (Exception e) {
                     write("<expr>");
@@ -1502,9 +1565,11 @@ class CTFEEvaluator {
     }
     
     /**
-     * Evaluate a simple expression (literal, binary op on literals)
+     * Extract a literal value directly from an AST node.
+     * Only handles bare literals — not interpretation.
+     * For non-literal expressions, falls back to evaluateExpressionViaBackend.
      */
-    long evaluateSimpleExpression(Expression expr) {
+    long extractLiteralValue(Expression expr) {
         if (auto literal = cast(LiteralExpression)expr) {
             if (literal.value.type == typeid(long)) {
                 return literal.value.get!long();
@@ -1512,39 +1577,54 @@ class CTFEEvaluator {
             if (literal.value.type == typeid(bool)) {
                 return literal.value.get!bool() ? 1 : 0;
             }
-            throw new CTFEError("CTFE: Unsupported literal type", expr.location);
-        }
-        
-        if (auto binary = cast(BinaryExpression)expr) {
-            long left = evaluateSimpleExpression(binary.left);
-            long right = evaluateSimpleExpression(binary.right);
-            
-            final switch (binary.operator) {
-                case BinaryExpression.Operator.Add: return left + right;
-                case BinaryExpression.Operator.Subtract: return left - right;
-                case BinaryExpression.Operator.Multiply: return left * right;
-                case BinaryExpression.Operator.Divide: return left / right;
-                case BinaryExpression.Operator.Modulo: return left % right;
-                case BinaryExpression.Operator.Equal: return left == right ? 1 : 0;
-                case BinaryExpression.Operator.NotEqual: return left != right ? 1 : 0;
-                case BinaryExpression.Operator.Less: return left < right ? 1 : 0;
-                case BinaryExpression.Operator.LessEqual: return left <= right ? 1 : 0;
-                case BinaryExpression.Operator.Greater: return left > right ? 1 : 0;
-                case BinaryExpression.Operator.GreaterEqual: return left >= right ? 1 : 0;
-                case BinaryExpression.Operator.LogicalAnd: return (left != 0 && right != 0) ? 1 : 0;
-                case BinaryExpression.Operator.LogicalOr: return (left != 0 || right != 0) ? 1 : 0;
-                case BinaryExpression.Operator.BitwiseAnd: return left & right;
-                case BinaryExpression.Operator.BitwiseOr: return left | right;
-                case BinaryExpression.Operator.BitwiseXor: return left ^ right;
-                case BinaryExpression.Operator.ShiftLeft: return left << right;
-                case BinaryExpression.Operator.ShiftRight: return left >> right;
-                case BinaryExpression.Operator.UnsignedShiftRight: return left >>> right;
-                case BinaryExpression.Operator.Concat:
-                    throw new CTFEError("CTFE: String concat not supported in numeric context", expr.location);
+            if (literal.value.type == typeid(char)) {
+                return cast(long)literal.value.get!char();
             }
         }
+        // For identifier references to manifest constants
+        if (auto ident = cast(IdentifierExpression)expr) {
+            foreach (decl; allDeclarations) {
+                if (auto manifest = cast(ManifestConstantDecl)decl) {
+                    if (manifest.name == ident.name) {
+                        if (!manifest.ctfeComplete)
+                            evaluateManifestConstant(manifest);
+                        if (manifest.ctfeComplete && !manifest.isStringType && !manifest.isArrayType)
+                            return manifest.ctfeValue;
+                    }
+                }
+            }
+        }
+        // Non-literal: evaluate through the backend
+        return evaluateExpressionViaBackend(expr);
+    }
 
-        throw new CTFEError("CTFE: Cannot evaluate expression at compile time", expr.location);
+    /**
+     * Evaluate an integer expression by compiling it to WASM and executing.
+     * Routes through the real backend for proper error handling.
+     */
+    long evaluateExpressionViaBackend(Expression expr) {
+        import semantic.ctfe_runtime : CTFERuntime, CTFERuntimeError;
+
+        ensureDependenciesEvaluated(expr);
+
+        auto emitter = new BinaryEmitter(symbolTable, enableStackTrace);
+        ubyte[] wasmBytes = emitter.emitIntExpressionModule(expr);
+        if (wasmBytes is null) {
+            auto errLoc = emitter.errorLocation();
+            throw new CTFEError("CTFE compile error: " ~ emitter.error(),
+                errLoc.filename ? errLoc : expr.location);
+        }
+
+        auto runtime = new CTFERuntime();
+        scope(exit) destroy(runtime);
+
+        try {
+            runtime.loadModule(wasmBytes);
+            auto result = runtime.callI32("__eval");
+            return result.asInt();
+        } catch (CTFERuntimeError e) {
+            throw new CTFEError("CTFE execution error: " ~ e.msg, expr.location);
+        }
     }
     
     /**

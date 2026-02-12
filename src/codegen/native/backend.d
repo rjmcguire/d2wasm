@@ -1278,8 +1278,11 @@ class NativeCompiledFunction : CompiledFunction {
                     return;
                 }
                 
+                // IFTI: use resolved instantiation name if available
+                string callName = call.resolvedInstantiation ? call.resolvedInstantiation.name : funcIdent.name;
+
                 // Check if this is a call to a known function
-                if (auto labelPtr = funcIdent.name in functionLabels) {
+                if (auto labelPtr = callName in functionLabels) {
                     if (call.arguments.length > 4) {
                         throw new Exception("Native backend: more than 4 arguments not yet supported");
                     }

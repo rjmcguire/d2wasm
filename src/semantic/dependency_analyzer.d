@@ -102,6 +102,13 @@ class DependencyAnalyzer {
                 collectDependencies(tmplCall.resolvedInstantiation, result);
             }
         }
+
+        // Follow IFTI resolved instantiations on regular CallExpressions
+        foreach (call; calls) {
+            if (call.resolvedInstantiation !is null) {
+                collectDependencies(call.resolvedInstantiation, result);
+            }
+        }
     }
 
     /**

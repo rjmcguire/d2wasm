@@ -445,13 +445,59 @@ class BinaryEmitter {
             
         } catch (EmitError e) {
             lastError = e.msg;
+            lastErrorLocation = e.sourceLocation;
             return null;
         } catch (Exception e) {
             lastError = "Internal error: " ~ e.msg;
             return null;
         }
     }
-    
+
+    /**
+     * Emit a minimal module that evaluates an integer expression.
+     * Used by CTFE to evaluate arithmetic/comparison expressions via the backend.
+     *
+     * The module exports:
+     * - __eval(): i32  - evaluates expression, returns the integer result
+     */
+    ubyte[] emitIntExpressionModule(Expression expr) {
+        try {
+            // Reset state for a fresh module
+            output.clear();
+            types.length = 0;
+            typeIndex.clear();
+            functions.length = 0;
+            funcIndex.clear();
+            globals.length = 0;
+            dataEntries.length = 0;
+            arrayLiterals.clear();
+            manifestArrayAddrs.clear();
+            nextDataOffset = MEMORY_RESERVED;
+            needsArraySupport = false;
+            hasBuiltins = false;
+
+            // Add the __eval function
+            addEvalFunction(expr);
+
+            // Emit the module (minimal — no memory, no data)
+            emitHeader();
+            emitTypeSection();
+            emitFunctionSection();
+            emitExportSection();
+            emitCodeSection();
+
+            return output.data.dup;
+
+        } catch (EmitError e) {
+            lastError = e.msg;
+            lastErrorLocation = e.sourceLocation;
+            return null;
+        } catch (Exception e) {
+            lastError = "Internal error: " ~ e.msg;
+            return null;
+        }
+    }
+
     /**
      * Recursively collect array literals from an expression.
      */
@@ -1947,7 +1993,7 @@ class BinaryEmitter {
             globalExports ~= GlobalExport("__heap_ptr", heapPtrGlobal);
         }
         
-        if (auto content = buildExportSection(funcExports, true, globalExports))
+        if (auto content = buildExportSection(funcExports, needsMemory || needsArraySupport, globalExports))
             emitSection(Section.export_, content);
     }
     
@@ -2392,12 +2438,36 @@ private class EvalContext {
             emitLiteral(out_, literal);
         } else if (auto ident = cast(IdentifierExpression)expr) {
             emitIdentifier(out_, ident);
+        } else if (auto unary = cast(UnaryExpression)expr) {
+            emitUnary(out_, unary);
         } else if (auto binary = cast(BinaryExpression)expr) {
             emitBinary(out_, binary);
         } else if (auto call = cast(CallExpression)expr) {
             emitCallExpr(out_, call);
         } else {
-            throw new EmitError("Unsupported expression in __eval: " ~ expr.toString());
+            throw new EmitError("Unsupported expression in __eval: " ~ expr.toString(), expr.location);
+        }
+    }
+
+    void emitUnary(ref Appender!(ubyte[]) out_, UnaryExpression expr) {
+        if (expr.operator == UnaryExpression.Operator.Minus) {
+            // -x => 0 - x
+            out_ ~= Op.i32_const;
+            leb128s(out_, 0);
+            emitExpression(out_, expr.operand);
+            out_ ~= Op.i32_sub;
+        } else if (expr.operator == UnaryExpression.Operator.BitwiseNot) {
+            // ~x => x ^ -1
+            emitExpression(out_, expr.operand);
+            out_ ~= Op.i32_const;
+            leb128s(out_, -1);
+            out_ ~= Op.i32_xor;
+        } else if (expr.operator == UnaryExpression.Operator.LogicalNot) {
+            // !x => x == 0
+            emitExpression(out_, expr.operand);
+            out_ ~= Op.i32_eqz;
+        } else {
+            throw new EmitError("Unsupported unary operator in __eval", expr.location);
         }
     }
     
@@ -2519,14 +2589,59 @@ private class EvalContext {
                 return;
             }
         }
-        throw new EmitError("Unknown identifier in __eval: " ~ expr.name);
+        throw new EmitError("Unknown identifier in __eval: " ~ expr.name, expr.location);
     }
     
     void emitBinary(ref Appender!(ubyte[]) out_, BinaryExpression expr) {
         if (expr.operator == BinaryExpression.Operator.Concat) {
             emitArrayConcat(out_, expr);
-        } else {
-            throw new EmitError("Unsupported binary operator in __eval");
+            return;
+        }
+        // LogicalAnd/LogicalOr need boolean normalization (eqz+eqz converts to 0/1)
+        if (expr.operator == BinaryExpression.Operator.LogicalAnd) {
+            emitExpression(out_, expr.left);
+            out_ ~= Op.i32_eqz;
+            out_ ~= Op.i32_eqz;
+            emitExpression(out_, expr.right);
+            out_ ~= Op.i32_eqz;
+            out_ ~= Op.i32_eqz;
+            out_ ~= Op.i32_and;
+            return;
+        }
+        if (expr.operator == BinaryExpression.Operator.LogicalOr) {
+            emitExpression(out_, expr.left);
+            out_ ~= Op.i32_eqz;
+            out_ ~= Op.i32_eqz;
+            emitExpression(out_, expr.right);
+            out_ ~= Op.i32_eqz;
+            out_ ~= Op.i32_eqz;
+            out_ ~= Op.i32_or;
+            return;
+        }
+        // Arithmetic/comparison — emit both operands then the operator
+        emitExpression(out_, expr.left);
+        emitExpression(out_, expr.right);
+        final switch (expr.operator) {
+            case BinaryExpression.Operator.Add: out_ ~= Op.i32_add; break;
+            case BinaryExpression.Operator.Subtract: out_ ~= Op.i32_sub; break;
+            case BinaryExpression.Operator.Multiply: out_ ~= Op.i32_mul; break;
+            case BinaryExpression.Operator.Divide: out_ ~= Op.i32_div_s; break;
+            case BinaryExpression.Operator.Modulo: out_ ~= Op.i32_rem_s; break;
+            case BinaryExpression.Operator.Equal: out_ ~= Op.i32_eq; break;
+            case BinaryExpression.Operator.NotEqual: out_ ~= Op.i32_ne; break;
+            case BinaryExpression.Operator.Less: out_ ~= Op.i32_lt_s; break;
+            case BinaryExpression.Operator.LessEqual: out_ ~= Op.i32_le_s; break;
+            case BinaryExpression.Operator.Greater: out_ ~= Op.i32_gt_s; break;
+            case BinaryExpression.Operator.GreaterEqual: out_ ~= Op.i32_ge_s; break;
+            case BinaryExpression.Operator.LogicalAnd: assert(0); // handled above
+            case BinaryExpression.Operator.LogicalOr: assert(0); // handled above
+            case BinaryExpression.Operator.BitwiseAnd: out_ ~= Op.i32_and; break;
+            case BinaryExpression.Operator.BitwiseOr: out_ ~= Op.i32_or; break;
+            case BinaryExpression.Operator.BitwiseXor: out_ ~= Op.i32_xor; break;
+            case BinaryExpression.Operator.ShiftLeft: out_ ~= Op.i32_shl; break;
+            case BinaryExpression.Operator.ShiftRight: out_ ~= Op.i32_shr_s; break;
+            case BinaryExpression.Operator.UnsignedShiftRight: out_ ~= Op.i32_shr_u; break;
+            case BinaryExpression.Operator.Concat: assert(0); // handled above
         }
     }
     

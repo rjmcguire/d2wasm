@@ -1,0 +1,7 @@
+{
+  "name": "ifti_ctfe",
+  "description": "IFTI with CTFE manifest constant evaluation",
+  "type": "wasm_exec",
+  "entry": "result",
+  "expected_result": 8
+}

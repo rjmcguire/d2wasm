@@ -1,1 +1,1 @@
-division by zero
+integer divide by zero

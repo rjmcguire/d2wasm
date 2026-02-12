@@ -905,7 +905,18 @@ class TypeChecker {
                 }
             }
         }
-        
+
+        // IFTI: if callee is a template function, deduce type args from call args
+        if (auto identExpr = cast(IdentifierExpression)expr.function_) {
+            auto sym = symbolTable.lookupSymbol(identExpr.name);
+            if (sym && sym.kind == SymbolKind.Function) {
+                auto funcDecl = cast(FunctionDecl)sym.declaration;
+                if (funcDecl && funcDecl.isTemplate) {
+                    return checkImplicitTemplateCall(expr, funcDecl);
+                }
+            }
+        }
+
         // Handle struct method calls (obj.method()) or UFCS (obj.func() -> func(obj))
         if (auto memberExpr = cast(MemberExpression)expr.function_) {
             Type objectType = checkExpression(memberExpr.object);
@@ -1225,6 +1236,82 @@ class TypeChecker {
                     format("Argument %d: expected type '%s', got '%s'",
                            i + 1, paramType.toString(), argType.toString()),
                     expr.callArguments[i].location
+                );
+            }
+        }
+
+        return inst.returnType;
+    }
+
+    /**
+     * IFTI: Implicit Function Template Instantiation.
+     * Deduce template type args from call arguments, instantiate, and type-check.
+     */
+    Type checkImplicitTemplateCall(CallExpression expr, FunctionDecl templateFunc) {
+        // Type-check each argument to get argTypes
+        Type[] argTypes;
+        foreach (arg; expr.arguments) {
+            argTypes ~= checkExpression(arg);
+        }
+
+        // Deduce template type arguments from call arguments
+        Type[] deducedTypes = new Type[templateFunc.templateParams.length];
+        foreach (i, param; templateFunc.parameters) {
+            if (i >= argTypes.length) break;
+            if (auto tpt = cast(TemplateParamType)param.type) {
+                // Find which template param this is
+                foreach (j, tp; templateFunc.templateParams) {
+                    if (tp.paramName == tpt.paramName) {
+                        if (deducedTypes[j] is null) {
+                            deducedTypes[j] = argTypes[i];
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Verify all template params were deduced
+        foreach (i, dt; deducedTypes) {
+            if (dt is null) {
+                throw new TypeError(
+                    format("Cannot deduce template parameter '%s' from call arguments",
+                           templateFunc.templateParams[i].paramName),
+                    expr.location
+                );
+            }
+        }
+
+        // Instantiate
+        auto inst = templateInstantiator.instantiate(templateFunc, deducedTypes);
+
+        // Type-check the instantiation at module scope
+        if (!inst.isTypeChecked) {
+            auto saved = symbolTable.saveAndResetScope();
+            scope(exit) symbolTable.restoreScope(saved);
+            checkFunctionDeclaration(inst);
+        }
+
+        expr.resolvedInstantiation = inst;
+
+        // Check call argument count
+        if (expr.arguments.length != inst.parameters.length) {
+            throw new TypeError(
+                format("'%s' expects %d arguments, got %d",
+                       inst.name, inst.parameters.length, expr.arguments.length),
+                expr.location
+            );
+        }
+
+        // Check call argument types against instantiation
+        for (size_t i = 0; i < expr.arguments.length; i++) {
+            Type paramType = inst.parameters[i].type;
+            auto compat = checkTypeCompatibility(argTypes[i], paramType);
+            if (!compat.isCompatible) {
+                throw new TypeError(
+                    format("Argument %d: expected type '%s', got '%s'",
+                           i + 1, paramType.toString(), argTypes[i].toString()),
+                    expr.arguments[i].location
                 );
             }
         }
