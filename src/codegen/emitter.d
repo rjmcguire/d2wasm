@@ -41,10 +41,16 @@ public import codegen.wasm.sections : FuncSig, ImportInfo;
 
 class EmitError : Exception {
     string context;
-    
+    SourceLocation sourceLocation;
+
     this(string msg, string context = null, string file = __FILE__, size_t line = __LINE__) {
         this.context = context;
         super(context ? format("%s (in %s)", msg, context) : msg, file, line);
+    }
+
+    this(string msg, SourceLocation loc, string file = __FILE__, size_t line = __LINE__) {
+        this.sourceLocation = loc;
+        super(msg, file, line);
     }
 }
 
@@ -122,6 +128,7 @@ class BinaryEmitter {
         // State
         EmitPhase phase = EmitPhase.init;
         string lastError;
+        SourceLocation lastErrorLocation;
         
         // Memory tracking
         bool needsMemory = false;
@@ -360,6 +367,7 @@ class BinaryEmitter {
         } catch (EmitError e) {
             phase = EmitPhase.error;
             lastError = e.msg;
+            lastErrorLocation = e.sourceLocation;
             return null;
         } catch (Exception e) {
             phase = EmitPhase.error;
@@ -373,6 +381,13 @@ class BinaryEmitter {
      */
     string error() const {
         return lastError;
+    }
+
+    /**
+     * Get the source location of the last error, if available
+     */
+    SourceLocation errorLocation() const {
+        return lastErrorLocation;
     }
     
     //==========================================================================

@@ -30,7 +30,10 @@ import core.time : MonoTime, Duration;
  * CTFE evaluation error
  */
 class CTFEError : Exception {
-    this(string msg, string file = __FILE__, size_t line = __LINE__) {
+    SourceLocation location;
+
+    this(string msg, SourceLocation location, string file = __FILE__, size_t line = __LINE__) {
+        this.location = location;
         super(msg, file, line);
     }
 }
@@ -217,23 +220,23 @@ class CTFEEvaluator {
         // Check if this is a __ctfe_runtime call
         if (auto objIdent = cast(IdentifierExpression)memberExpr.object) {
             if (objIdent.name == "__ctfe_runtime") {
-                return evaluateCTFERuntimeCall(memberExpr.memberName, arguments);
+                return evaluateCTFERuntimeCall(memberExpr.memberName, arguments, memberExpr.location);
             }
         }
-        
-        throw new CTFEError("CTFE: Member calls not supported except for magic modules");
+
+        throw new CTFEError("CTFE: Member calls not supported except for magic modules", memberExpr.location);
     }
-    
+
     /**
      * Evaluate a __ctfe_runtime function call
      */
-    private CTFEResult evaluateCTFERuntimeCall(string funcName, Expression[] arguments) {
+    private CTFEResult evaluateCTFERuntimeCall(string funcName, Expression[] arguments, SourceLocation loc) {
         log(3, "CTFE: __ctfe_runtime.", funcName, " called");
         
         switch (funcName) {
             case "alloc":
                 if (arguments.length != 1) {
-                    throw new CTFEError("CTFE: __ctfe_runtime.alloc requires 1 argument");
+                    throw new CTFEError("CTFE: __ctfe_runtime.alloc requires 1 argument", loc);
                 }
                 int size = cast(int)evaluateSimpleExpression(arguments[0]);
                 int ptr = arena.alloc(size);
@@ -242,7 +245,7 @@ class CTFEEvaluator {
                 
             case "push":
                 if (arguments.length != 0) {
-                    throw new CTFEError("CTFE: __ctfe_runtime.push takes no arguments");
+                    throw new CTFEError("CTFE: __ctfe_runtime.push takes no arguments", loc);
                 }
                 arena.push();
                 log(3, "CTFE: __ctfe_runtime.push()");
@@ -250,7 +253,7 @@ class CTFEEvaluator {
                 
             case "pop":
                 if (arguments.length != 0) {
-                    throw new CTFEError("CTFE: __ctfe_runtime.pop takes no arguments");
+                    throw new CTFEError("CTFE: __ctfe_runtime.pop takes no arguments", loc);
                 }
                 arena.pop();
                 log(3, "CTFE: __ctfe_runtime.pop()");
@@ -258,14 +261,14 @@ class CTFEEvaluator {
                 
             case "remaining":
                 if (arguments.length != 0) {
-                    throw new CTFEError("CTFE: __ctfe_runtime.remaining takes no arguments");
+                    throw new CTFEError("CTFE: __ctfe_runtime.remaining takes no arguments", loc);
                 }
                 int rem = arena.remaining();
                 log(3, "CTFE: __ctfe_runtime.remaining() = ", rem);
                 return CTFEResult.fromInt(rem);
                 
             default:
-                throw new CTFEError("CTFE: Unknown __ctfe_runtime function: " ~ funcName);
+                throw new CTFEError("CTFE: Unknown __ctfe_runtime function: " ~ funcName, loc);
         }
     }
     
@@ -299,7 +302,8 @@ class CTFEEvaluator {
                 if (value > uint.max || value < int.min) {
                     throw new CTFEError(
                         format("Integer literal %d exceeds 32-bit range [%d, %d] for '%s'",
-                               value, int.min, uint.max, manifest.name)
+                               value, int.min, uint.max, manifest.name),
+                        manifest.location
                     );
                 }
                 manifest.ctfeValue = value;
@@ -353,7 +357,8 @@ class CTFEEvaluator {
                 if (value > uint.max || value < int.min) {
                     throw new CTFEError(
                         format("Integer value %d exceeds 32-bit range [%d, %d] for '%s'",
-                               value, int.min, uint.max, manifest.name)
+                               value, int.min, uint.max, manifest.name),
+                        manifest.location
                     );
                 }
                 manifest.ctfeValue = value;
@@ -442,8 +447,8 @@ class CTFEEvaluator {
         // Shouldn't reach here - call expressions are handled above
         // This is legacy code for non-call expressions that need WASM evaluation
         
-        throw new CTFEError("Cannot evaluate manifest constant '" ~ manifest.name ~ 
-                           "': unsupported initializer type");
+        throw new CTFEError("Cannot evaluate manifest constant '" ~ manifest.name ~
+                           "': unsupported initializer type", manifest.location);
     }
     
     /**
@@ -470,7 +475,7 @@ class CTFEEvaluator {
         ubyte[] wasmBytes = emitter.emitArrayExpressionModule(expr);
         
         if (wasmBytes is null) {
-            throw new CTFEError("CTFE: Failed to compile array expression: " ~ emitter.error());
+            throw new CTFEError("CTFE: Failed to compile array expression: " ~ emitter.error(), expr.location);
         }
         
         // Debug: show the generated WASM size
@@ -503,10 +508,10 @@ class CTFEEvaluator {
             return resultStr;
             
         } catch (CTFERuntimeError e) {
-            throw new CTFEError("CTFE: wasm3 execution failed: " ~ e.msg);
+            throw new CTFEError("CTFE: wasm3 execution failed: " ~ e.msg, expr.location);
         }
     }
-    
+
     /**
      * Ensure all manifest constants referenced in an expression are evaluated.
      */
@@ -589,7 +594,8 @@ class CTFEEvaluator {
         if (!exists(fullPath)) {
             throw new CTFEError(
                 format("import(\"%s\"): file not found (tried '%s' and '%s')",
-                       filename, buildPath(sourceDir, filename), filename)
+                       filename, buildPath(sourceDir, filename), filename),
+                importExpr.location
             );
         }
         
@@ -601,7 +607,8 @@ class CTFEEvaluator {
             fileData = cast(ubyte[])read(fullPath);
         } catch (Exception e) {
             throw new CTFEError(
-                format("import(\"%s\"): failed to read file: %s", filename, e.msg)
+                format("import(\"%s\"): failed to read file: %s", filename, e.msg),
+                importExpr.location
             );
         }
         
@@ -734,7 +741,7 @@ class CTFEEvaluator {
             }
         }
         
-        throw new CTFEError("Cannot get array bytes from expression");
+        throw new CTFEError("Cannot get array bytes from expression", expr.location);
     }
     
     /**
@@ -783,7 +790,7 @@ class CTFEEvaluator {
         // Get the function name
         auto identExpr = cast(IdentifierExpression)callExpr.function_;
         if (!identExpr) {
-            throw new CTFEError("CTFE: Indirect function calls not supported");
+            throw new CTFEError("CTFE: Indirect function calls not supported", callExpr.location);
         }
         
         // Handle CTFE intrinsics
@@ -804,17 +811,7 @@ class CTFEEvaluator {
         }
         
         if (!funcDecl) {
-            throw new CTFEError("CTFE: Function '" ~ funcName ~ "' not found");
-        }
-        
-        // Debug: print body statements
-        import std.stdio : stderr;
-        if (funcDecl.body_) {
-            if (auto compound = cast(CompoundStatement)funcDecl.body_) {
-                foreach (i, s; compound.statements) {
-                    stderr.writeln("  [", i, "] ", typeid(s), " = ", s.toString());
-                }
-            }
+            throw new CTFEError("CTFE: Function '" ~ funcName ~ "' not found", callExpr.location);
         }
         
         // Check if function returns a string (dynamic ubyte[])
@@ -897,7 +894,7 @@ class CTFEEvaluator {
             }
         }
         if (!templateFunc)
-            throw new CTFEError("CTFE: Template function '" ~ tmplInst.templateName ~ "' not found");
+            throw new CTFEError("CTFE: Template function '" ~ tmplInst.templateName ~ "' not found", tmplInst.location);
 
         // Instantiate the template
         auto instantiator = new TemplateInstantiator();
@@ -929,7 +926,7 @@ class CTFEEvaluator {
     CTFEResult evaluateStaticArrayReturningFunction(FunctionDecl funcDecl, Expression[] argExprs) {
         auto arrType = cast(ArrayType)funcDecl.returnType;
         if (!arrType || arrType.arraySize is null) {
-            throw new CTFEError("Expected static array return type");
+            throw new CTFEError("Expected static array return type", funcDecl.location);
         }
         
         // Evaluate array size
@@ -943,7 +940,7 @@ class CTFEEvaluator {
         }
         
         if (elemCount == 0) {
-            throw new CTFEError("Cannot evaluate static array size");
+            throw new CTFEError("Cannot evaluate static array size", funcDecl.location);
         }
         
         uint elemSize = 4;  // Assume int elements for now
@@ -992,7 +989,7 @@ class CTFEEvaluator {
                 try {
                     typeChecker.checkFunctionDeclaration(dep);
                 } catch (TypeError e) {
-                    throw new CTFEError("CTFE type check error in " ~ dep.name ~ ": " ~ e.msg);
+                    throw new CTFEError("CTFE type check error in " ~ dep.name ~ ": " ~ e.msg, dep.location);
                 }
             }
 
@@ -1006,7 +1003,9 @@ class CTFEEvaluator {
             cachedContext = backend.compileWithDependencies(allFuncs, funcDecl.name);
             statCompileTime += MonoTime.currTime - t1;
             if (cachedContext is null) {
-                throw new CTFEError("CTFE compile error: " ~ backend.error());
+                auto errLoc = backend.errorLocation();
+                throw new CTFEError("CTFE compile error: " ~ backend.error(),
+                    errLoc.filename ? errLoc : funcDecl.location);
             }
 
             contextFunctions = allFuncs;
@@ -1024,9 +1023,9 @@ class CTFEEvaluator {
         statExecTime += MonoTime.currTime - t2;
 
         if (!result.success) {
-            throw new CTFEError("CTFE execution error: " ~ result.error);
+            throw new CTFEError("CTFE execution error: " ~ result.error, funcDecl.location);
         }
-        
+
         log(3, "CTFE: ", funcDecl.name, " returned ", result.arrayBytes.length, " bytes");
         
         // Convert bytes to array of longs
@@ -1078,7 +1077,7 @@ class CTFEEvaluator {
                 try {
                     typeChecker.checkFunctionDeclaration(dep);
                 } catch (TypeError e) {
-                    throw new CTFEError("CTFE type check error in " ~ dep.name ~ ": " ~ e.msg);
+                    throw new CTFEError("CTFE type check error in " ~ dep.name ~ ": " ~ e.msg, dep.location);
                 }
             }
 
@@ -1092,7 +1091,9 @@ class CTFEEvaluator {
             cachedContext = backend.compileWithDependencies(allFuncs, funcDecl.name);
             statCompileTime += MonoTime.currTime - t1;
             if (cachedContext is null) {
-                throw new CTFEError("CTFE compile error: " ~ backend.error());
+                auto errLoc = backend.errorLocation();
+                throw new CTFEError("CTFE compile error: " ~ backend.error(),
+                    errLoc.filename ? errLoc : funcDecl.location);
             }
 
             contextFunctions = allFuncs;
@@ -1109,7 +1110,7 @@ class CTFEEvaluator {
         statExecTime += MonoTime.currTime - t2;
 
         if (!result.success) {
-            throw new CTFEError("CTFE execution error: " ~ result.error);
+            throw new CTFEError("CTFE execution error: " ~ result.error, funcDecl.location);
         }
         
         log(3, "CTFE: ", funcDecl.name, " returned ", result.arrayBytes.length, " bytes");
@@ -1136,7 +1137,7 @@ class CTFEEvaluator {
     long evaluateCallExpression(CallExpression callExpr) {
         auto result = evaluateCallExpressionString(callExpr);
         if (result.isString) {
-            throw new CTFEError("CTFE: Expected integer result but got string");
+            throw new CTFEError("CTFE: Expected integer result but got string", callExpr.location);
         }
         return result.intValue;
     }
@@ -1223,7 +1224,7 @@ class CTFEEvaluator {
         log(3, "CTFE: Interpreting int function ", funcDecl.name);
         
         if (!funcDecl.body_) {
-            throw new CTFEError("CTFE: Function '" ~ funcDecl.name ~ "' has no body");
+            throw new CTFEError("CTFE: Function '" ~ funcDecl.name ~ "' has no body", funcDecl.location);
         }
         
         // Create local variable scope
@@ -1237,7 +1238,7 @@ class CTFEEvaluator {
             }
         }
         
-        throw new CTFEError("CTFE: Function '" ~ funcDecl.name ~ "' did not return a value");
+        throw new CTFEError("CTFE: Function '" ~ funcDecl.name ~ "' did not return a value", funcDecl.location);
     }
     
     /**
@@ -1309,14 +1310,14 @@ class CTFEEvaluator {
                     }
                 }
             }
-            throw new CTFEError("CTFE: Undefined identifier '" ~ ident.name ~ "'");
+            throw new CTFEError("CTFE: Undefined identifier '" ~ ident.name ~ "'", expr.location);
         }
         
         // Call expression (including __ctfe_runtime calls)
         if (auto call = cast(CallExpression)expr) {
             auto result = evaluateCallExpressionString(call);
             if (result.isString) {
-                throw new CTFEError("CTFE: Expected integer but got string");
+                throw new CTFEError("CTFE: Expected integer but got string", expr.location);
             }
             return result.intValue;
         }
@@ -1346,12 +1347,12 @@ class CTFEEvaluator {
                 case BinaryExpression.Operator.ShiftLeft: return left << right;
                 case BinaryExpression.Operator.ShiftRight: return left >> right;
                 case BinaryExpression.Operator.UnsignedShiftRight: return left >>> right;
-                case BinaryExpression.Operator.Concat: 
-                    throw new CTFEError("CTFE: String concat not supported in numeric context");
+                case BinaryExpression.Operator.Concat:
+                    throw new CTFEError("CTFE: String concat not supported in numeric context", expr.location);
             }
         }
-        
-        throw new CTFEError("CTFE: Cannot evaluate expression at compile time: " ~ expr.toString());
+
+        throw new CTFEError("CTFE: Cannot evaluate expression at compile time: " ~ expr.toString(), expr.location);
     }
     
     /**
@@ -1487,7 +1488,7 @@ class CTFEEvaluator {
             if (literal.value.type == typeid(bool)) {
                 return literal.value.get!bool() ? 1 : 0;
             }
-            throw new CTFEError("CTFE: Unsupported literal type");
+            throw new CTFEError("CTFE: Unsupported literal type", expr.location);
         }
         
         if (auto binary = cast(BinaryExpression)expr) {
@@ -1514,12 +1515,12 @@ class CTFEEvaluator {
                 case BinaryExpression.Operator.ShiftLeft: return left << right;
                 case BinaryExpression.Operator.ShiftRight: return left >> right;
                 case BinaryExpression.Operator.UnsignedShiftRight: return left >>> right;
-                case BinaryExpression.Operator.Concat: 
-                    throw new CTFEError("CTFE: String concat not supported in numeric context");
+                case BinaryExpression.Operator.Concat:
+                    throw new CTFEError("CTFE: String concat not supported in numeric context", expr.location);
             }
         }
-        
-        throw new CTFEError("CTFE: Cannot evaluate expression at compile time");
+
+        throw new CTFEError("CTFE: Cannot evaluate expression at compile time", expr.location);
     }
     
     /**
@@ -1561,7 +1562,7 @@ class CTFEEvaluator {
                 try {
                     typeChecker.checkFunctionDeclaration(dep);
                 } catch (TypeError e) {
-                    throw new CTFEError("CTFE type check error in " ~ dep.name ~ ": " ~ e.msg);
+                    throw new CTFEError("CTFE type check error in " ~ dep.name ~ ": " ~ e.msg, dep.location);
                 }
             }
 
@@ -1576,7 +1577,9 @@ class CTFEEvaluator {
             cachedContext = backend.compileWithDependencies(allFuncs, funcDecl.name);
             statCompileTime += MonoTime.currTime - t1;
             if (cachedContext is null) {
-                throw new CTFEError("CTFE compile error: " ~ backend.error());
+                auto errLoc = backend.errorLocation();
+                throw new CTFEError("CTFE compile error: " ~ backend.error(),
+                    errLoc.filename ? errLoc : funcDecl.location);
             }
 
             // Only mark as compiled after successful compilation
@@ -1594,7 +1597,7 @@ class CTFEEvaluator {
         auto result = cachedContext.callByName(funcDecl.name, args);
         statExecTime += MonoTime.currTime - t2;
         if (!result.success) {
-            throw new CTFEError("CTFE execution error: " ~ result.error);
+            throw new CTFEError("CTFE execution error: " ~ result.error, funcDecl.location);
         }
 
         log(3, "CTFE [", backend.name, "]: ", funcDecl.name, "(", args, ") = ", result.intValue);
@@ -1644,7 +1647,7 @@ class CTFEEvaluator {
                         }
                     }
                 }
-                throw new CTFEError("CTFE: Failed to parse mixin statement: \"" ~ code ~ "\"");
+                throw new CTFEError("CTFE: Failed to parse mixin statement: \"" ~ code ~ "\"", mixinStmt.location);
             } else {
                 expanded ~= stmt;
             }
@@ -1672,7 +1675,7 @@ class CTFEEvaluator {
                     }
                 }
             }
-            throw new CTFEError("CTFE: Cannot evaluate mixin expression identifier '" ~ ident.name ~ "'");
+            throw new CTFEError("CTFE: Cannot evaluate mixin expression identifier '" ~ ident.name ~ "'", expr.location);
         }
 
         if (auto binary = cast(BinaryExpression)expr) {
@@ -1682,7 +1685,7 @@ class CTFEEvaluator {
             }
         }
 
-        throw new CTFEError("CTFE: Cannot evaluate mixin expression: " ~ expr.toString());
+        throw new CTFEError("CTFE: Cannot evaluate mixin expression: " ~ expr.toString(), expr.location);
     }
 
     /**
@@ -1697,16 +1700,16 @@ class CTFEEvaluator {
         try {
             typeChecker.checkFunctionDeclaration(funcDecl);
         } catch (TypeError e) {
-            writeln("CTFE type check error: ", e.msg);
+            log(3, "CTFE type check error: ", e.msg);
             return null;
         }
-        
+
         // Create a minimal compilation with just this function
         auto emitter = new BinaryEmitter(symbolTable, enableStackTrace);
         auto result = emitter.emit([funcDecl]);
-        
+
         if (result is null) {
-            writeln("CTFE compile error: ", emitter.error());
+            log(3, "CTFE compile error: ", emitter.error());
         }
         
         return result;
@@ -1737,7 +1740,7 @@ class CTFEEvaluator {
             return result.asInt();
             
         } catch (CTFERuntimeError e) {
-            throw new CTFEError("CTFE: wasm3 execution failed: " ~ e.msg);
+            throw new CTFEError("CTFE: wasm3 execution failed: " ~ e.msg, SourceLocation.init);
         }
     }
 }

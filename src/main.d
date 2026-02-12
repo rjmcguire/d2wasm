@@ -29,6 +29,7 @@ import semantic.type_checker;
 import codegen.emitter;
 import codegen.backend;
 import diagnostic.error_format : printError;
+import semantic.ctfe : CTFEError;
 
 struct CompilerOptions {
     string inputFile;
@@ -435,6 +436,9 @@ int compileFile(CompilerOptions options) {
         printError(e);
         return 1;
     } catch (TypeError e) {
+        printError(e);
+        return 1;
+    } catch (CTFEError e) {
         printError(e);
         return 1;
     } catch (Exception e) {

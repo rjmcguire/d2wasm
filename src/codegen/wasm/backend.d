@@ -17,6 +17,7 @@ import semantic.symbol_table;
 class WASMBackend : Backend {
     private SymbolTable symbolTable;
     private string lastError;
+    private SourceLocation lastErrorLoc;
     private bool enableStackTrace;
     
     this(SymbolTable st, bool enableStackTrace = true) {
@@ -30,6 +31,7 @@ class WASMBackend : Backend {
         
         if (wasmBytes is null) {
             lastError = emitter.error();
+            lastErrorLoc = emitter.errorLocation();
             return null;
         }
         
@@ -62,6 +64,7 @@ class WASMBackend : Backend {
         
         if (wasmBytes is null) {
             lastError = emitter.error();
+            lastErrorLoc = emitter.errorLocation();
             return null;
         }
         
@@ -73,11 +76,13 @@ class WASMBackend : Backend {
         auto result = emitter.emit(decls);
         if (result is null) {
             lastError = emitter.error();
+            lastErrorLoc = emitter.errorLocation();
         }
         return result;
     }
     
     override string error() { return lastError; }
+    override SourceLocation errorLocation() { return lastErrorLoc; }
     override string name() { return "wasm"; }
 }
 

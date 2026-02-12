@@ -78,6 +78,7 @@ class NativeBackend : Backend {
     }
     
     override string error() { return lastError; }
+    override SourceLocation errorLocation() { return SourceLocation.init; }
     override string name() { return "native"; }
 }
 

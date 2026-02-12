@@ -11,7 +11,7 @@ int test() {
 //    A b;
 A b;
   }
-  return x;
+  return r;
 }
 enum RESULT = test();
 

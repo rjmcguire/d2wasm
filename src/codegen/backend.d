@@ -11,7 +11,7 @@
  */
 module codegen.backend;
 
-import ast.nodes;
+import ast.nodes : Declaration, FunctionDecl, StructDecl, SourceLocation;
 import ast.expressions;
 import semantic.symbol_table;
 
@@ -113,7 +113,12 @@ interface Backend {
      * Get the last error message, if any.
      */
     string error();
-    
+
+    /**
+     * Get the source location of the last error, if available.
+     */
+    SourceLocation errorLocation();
+
     /**
      * Backend name for debugging/logging.
      */

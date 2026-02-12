@@ -3154,7 +3154,7 @@ class FuncContext {
             }
         }
 
-        throw new EmitError("Unknown identifier: " ~ expr.name);
+        throw new EmitError("Unknown identifier: " ~ expr.name, expr.location);
     }
 
     void emitBinary(ref Appender!(ubyte[]) out_, BinaryExpression expr) {
@@ -4358,7 +4358,7 @@ class FuncContext {
                 }
             }
         }
-        throw new EmitError("Unknown identifier in assignment: " ~ ident.name);
+        throw new EmitError("Unknown identifier in assignment: " ~ ident.name, ident.location);
     }
 
     /// Emit the compound operation for compound assignment operators.
