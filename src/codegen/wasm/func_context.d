@@ -97,6 +97,80 @@ class FuncContext {
     }
     ParamVarInfo[string] params;
 
+    // --- Unified variable resolution (replacing the 4 parallel maps above) ---
+
+    enum THIS_LOCAL_ID = uint.max - 1;  // Sentinel for 'this' parameter
+
+    /// Address mode: how to emit code that loads/stores this variable
+    enum AddrMode : ubyte {
+        wasmLocal,       // scalar: local_get/set wasmLocalIdx
+        shadowStack,     // aggregate local: FP + frameOffset
+        paramPointer,    // aggregate param: local_get wasmLocalIdx (pointer)
+    }
+
+    /// Unified info for all local variables and parameters
+    struct VarInfo {
+        VarKind kind;
+        AddrMode addrMode;
+
+        uint wasmLocalIdx = uint.max;   // for wasmLocal and paramPointer
+        uint frameOffset;               // for shadowStack
+        uint itableLocalIdx = uint.max; // for interface params (second WASM local)
+
+        Type type;
+        StructDecl structDecl;
+        ClassDecl classDecl;
+        InterfaceDecl ifaceDecl;
+        Type elementType;               // slice/static-array element type
+        uint dataOffset, dataSize;      // slice inline data
+        uint elementCount, elementSize; // static array
+
+        bool isStruct() const { return kind == VarKind.struct_; }
+        bool isClass() const { return kind == VarKind.class_; }
+        bool isInterface() const { return kind == VarKind.interface_; }
+        bool isSlice() const { return kind == VarKind.slice; }
+        bool isStaticArray() const { return kind == VarKind.staticArray; }
+        bool isScalar() const { return kind == VarKind.scalar; }
+    }
+
+    VarInfo[uint] varsByLocalId;    // uniqueLocalId → VarInfo (primary lookup)
+    VarInfo[string] varsByName;     // name → VarInfo (fallback for "this", legacy)
+
+    /// Resolve a variable by localId (preferred) or name (fallback).
+    /// Returns null if not found (e.g. globals, constants).
+    VarInfo* resolveVar(uint localId, string name) {
+        if (localId != uint.max) {
+            if (auto p = localId in varsByLocalId)
+                return p;
+        }
+        if (auto p = name in varsByName)
+            return p;
+        return null;
+    }
+
+    /// Emit the base address of a variable onto the WASM stack.
+    /// For wasmLocal/paramPointer: emits local_get.
+    /// For shadowStack: emits FP + frameOffset.
+    void emitVarAddress(ref Appender!(ubyte[]) out_, const VarInfo* info) {
+        final switch (info.addrMode) {
+            case AddrMode.wasmLocal:
+            case AddrMode.paramPointer:
+                out_ ~= Op.local_get;
+                leb128u(out_, info.wasmLocalIdx);
+                break;
+            case AddrMode.shadowStack:
+                // FP + frameOffset
+                out_ ~= Op.local_get;
+                leb128u(out_, fpLocal);
+                out_ ~= Op.i32_const;
+                leb128u(out_, info.frameOffset);
+                out_ ~= Op.i32_add;
+                break;
+        }
+    }
+
+    // --- End unified variable resolution ---
+
     uint frameSize = 0;        // Total size of struct/slice locals on shadow stack
     uint savedSpLocal;         // Local index to store saved SP (for epilogue restore)
     uint fpLocal;              // Local index for frame pointer (stable, never changes)
@@ -156,6 +230,15 @@ class FuncContext {
             pvi.localIndex = 0;
             pvi.structDecl = f.structParent;
             params["this"] = pvi;
+
+            // Dual write to unified map
+            VarInfo vi;
+            vi.kind = VarKind.struct_;
+            vi.addrMode = AddrMode.paramPointer;
+            vi.wasmLocalIdx = 0;
+            vi.structDecl = f.structParent;
+            varsByLocalId[THIS_LOCAL_ID] = vi;
+            varsByName["this"] = vi;
         }
 
         // Same for class methods
@@ -170,6 +253,15 @@ class FuncContext {
             pvi.localIndex = 0;
             pvi.classDecl = f.classParent;
             params["this"] = pvi;
+
+            // Dual write to unified map
+            VarInfo vi;
+            vi.kind = VarKind.class_;
+            vi.addrMode = AddrMode.paramPointer;
+            vi.wasmLocalIdx = 0;
+            vi.classDecl = f.classParent;
+            varsByLocalId[THIS_LOCAL_ID] = vi;
+            varsByName["this"] = vi;
         }
         
         // Resolve return type if needed
@@ -225,7 +317,7 @@ class FuncContext {
                 // Interface: fat pointer = 2 i32 locals (obj_ptr, itable_ptr)
                 localTypes ~= ValType.i32;
                 localTypes ~= ValType.i32;
-                
+
                 ParamVarInfo pvi;
                 pvi.kind = VarKind.interface_;
                 pvi.localIndex = wasmLocalIdx;
@@ -234,22 +326,45 @@ class FuncContext {
                 pvi.ifaceDecl = ifaceDecl;
                 params[p.name] = pvi;
 
+                // Dual write to unified map
+                VarInfo vi;
+                vi.kind = VarKind.interface_;
+                vi.addrMode = AddrMode.paramPointer;
+                vi.wasmLocalIdx = wasmLocalIdx;
+                vi.itableLocalIdx = wasmLocalIdx + 1;
+                vi.type = p.type;
+                vi.ifaceDecl = ifaceDecl;
+                if (p.uniqueLocalId != uint.max)
+                    varsByLocalId[p.uniqueLocalId] = vi;
+                varsByName[p.name] = vi;
+
                 wasmLocalIdx += 2;
             } else {
                 auto vt = e.dTypeToValType(p.type);
                 localTypes ~= vt;
-                
+
                 // Track struct/class/slice/static-array parameters
                 ParamVarInfo pvi;
                 pvi.localIndex = wasmLocalIdx;
                 pvi.type = p.type;
 
+                // Build unified VarInfo in parallel
+                VarInfo vi;
+                vi.wasmLocalIdx = wasmLocalIdx;
+                vi.type = p.type;
+
                 if (auto structDecl = p.type.asStruct()) {
                     pvi.kind = VarKind.struct_;
                     pvi.structDecl = structDecl;
+                    vi.kind = VarKind.struct_;
+                    vi.addrMode = AddrMode.paramPointer;
+                    vi.structDecl = structDecl;
                 } else if (auto classDecl = p.type.asClass()) {
                     pvi.kind = VarKind.class_;
                     pvi.classDecl = classDecl;
+                    vi.kind = VarKind.class_;
+                    vi.addrMode = AddrMode.paramPointer;
+                    vi.classDecl = classDecl;
                 } else if (auto arrayType = cast(ArrayType)p.type) {
                     if (arrayType.arraySize !is null) {
                         // Static array param — passed as i32 pointer
@@ -259,6 +374,11 @@ class FuncContext {
                         size_t elemSize = arrayType.elementType.size();
                         if (elemSize == 0) elemSize = 4;
                         pvi.elementSize = cast(uint)elemSize;
+                        vi.kind = VarKind.staticArray;
+                        vi.addrMode = AddrMode.paramPointer;
+                        vi.elementType = arrayType.elementType;
+                        vi.elementCount = pvi.elementCount;
+                        vi.elementSize = pvi.elementSize;
                     } else {
                         // Dynamic array (slice)
                         pvi.kind = VarKind.slice;
@@ -266,12 +386,25 @@ class FuncContext {
                         size_t sliceElemSize = arrayType.elementType.size();
                         if (sliceElemSize == 0) sliceElemSize = 4;
                         pvi.elementSize = cast(uint)sliceElemSize;
+                        vi.kind = VarKind.slice;
+                        vi.addrMode = AddrMode.paramPointer;
+                        vi.elementType = arrayType.elementType;
+                        vi.elementSize = pvi.elementSize;
                     }
+                } else {
+                    // Scalar parameter
+                    vi.kind = VarKind.scalar;
+                    vi.addrMode = AddrMode.wasmLocal;
                 }
 
                 if (pvi.kind != VarKind.scalar)
                     params[p.name] = pvi;
-                
+
+                // Always write to unified maps (including scalars)
+                if (p.uniqueLocalId != uint.max)
+                    varsByLocalId[p.uniqueLocalId] = vi;
+                varsByName[p.name] = vi;
+
                 wasmLocalIdx += 1;
             }
         }
@@ -329,6 +462,17 @@ class FuncContext {
                     lvi.structDecl = structDecl;
                     locals[varDecl.name] = lvi;
 
+                    // Dual write to unified map
+                    VarInfo vi;
+                    vi.kind = VarKind.struct_;
+                    vi.addrMode = AddrMode.shadowStack;
+                    vi.frameOffset = frameSize;
+                    vi.type = varDecl.type;
+                    vi.structDecl = structDecl;
+                    if (varDecl.uniqueLocalId != uint.max)
+                        varsByLocalId[varDecl.uniqueLocalId] = vi;
+                    varsByName[varDecl.name] = vi;
+
                     // Track for RAII if struct has destructor
                     if (structDecl.hasDestructor()) {
                         RAIIVarInfo raiiInfo;
@@ -354,6 +498,17 @@ class FuncContext {
                     lvi.classDecl = classDecl;
                     locals[varDecl.name] = lvi;
 
+                    // Dual write to unified map
+                    VarInfo vi;
+                    vi.kind = VarKind.class_;
+                    vi.addrMode = AddrMode.shadowStack;
+                    vi.frameOffset = frameSize;
+                    vi.type = varDecl.type;
+                    vi.classDecl = classDecl;
+                    if (varDecl.uniqueLocalId != uint.max)
+                        varsByLocalId[varDecl.uniqueLocalId] = vi;
+                    varsByName[varDecl.name] = vi;
+
                     frameSize += cast(uint)classDecl.classSize;
                     return;
                 }
@@ -368,6 +523,17 @@ class FuncContext {
                     lvi.type = varDecl.type;
                     lvi.ifaceDecl = ifaceDecl;
                     locals[varDecl.name] = lvi;
+
+                    // Dual write to unified map
+                    VarInfo vi;
+                    vi.kind = VarKind.interface_;
+                    vi.addrMode = AddrMode.shadowStack;
+                    vi.frameOffset = frameSize;
+                    vi.type = varDecl.type;
+                    vi.ifaceDecl = ifaceDecl;
+                    if (varDecl.uniqueLocalId != uint.max)
+                        varsByLocalId[varDecl.uniqueLocalId] = vi;
+                    varsByName[varDecl.name] = vi;
 
                     frameSize += 8;  // Fat pointer: obj_ptr + itable_ptr
                     return;
@@ -394,6 +560,19 @@ class FuncContext {
                     lvi.elementCount = elemCount;
                     lvi.elementSize = cast(uint)elemSize;
                     locals[varDecl.name] = lvi;
+
+                    // Dual write to unified map
+                    VarInfo vi;
+                    vi.kind = VarKind.staticArray;
+                    vi.addrMode = AddrMode.shadowStack;
+                    vi.frameOffset = frameSize;
+                    vi.type = varDecl.type;
+                    vi.elementType = arrayType.elementType;
+                    vi.elementCount = elemCount;
+                    vi.elementSize = cast(uint)elemSize;
+                    if (varDecl.uniqueLocalId != uint.max)
+                        varsByLocalId[varDecl.uniqueLocalId] = vi;
+                    varsByName[varDecl.name] = vi;
 
                     frameSize += elemCount * cast(uint)elemSize;
                     return;
@@ -433,9 +612,24 @@ class FuncContext {
                 }
 
                 locals[varDecl.name] = lvi;
+
+                // Dual write to unified map
+                VarInfo vi;
+                vi.kind = VarKind.slice;
+                vi.addrMode = AddrMode.shadowStack;
+                vi.frameOffset = lvi.frameOffset;
+                vi.type = varDecl.type;
+                vi.elementType = lvi.elementType;
+                vi.elementSize = lvi.elementSize;
+                vi.dataOffset = lvi.dataOffset;
+                vi.dataSize = lvi.dataSize;
+                if (varDecl.uniqueLocalId != uint.max)
+                    varsByLocalId[varDecl.uniqueLocalId] = vi;
+                varsByName[varDecl.name] = vi;
+
                 return;
             }
-            
+
             // Regular local - add to WASM locals
             auto vt = emitter.dTypeToValType(varDecl.type);
             uint wasmIdx = cast(uint)localTypes.length;
@@ -444,6 +638,16 @@ class FuncContext {
                 localIdToWasmIdx[varDecl.uniqueLocalId] = wasmIdx;
             }
             localTypes ~= vt;
+
+            // Dual write to unified map
+            VarInfo vi;
+            vi.kind = VarKind.scalar;
+            vi.addrMode = AddrMode.wasmLocal;
+            vi.wasmLocalIdx = wasmIdx;
+            vi.type = varDecl.type;
+            if (varDecl.uniqueLocalId != uint.max)
+                varsByLocalId[varDecl.uniqueLocalId] = vi;
+            varsByName[varDecl.name] = vi;
         } else if (auto ifStmt = cast(IfStatement)stmt) {
             collectLocals(ifStmt.thenStatement);
             if (ifStmt.elseStatement) {
@@ -1199,24 +1403,20 @@ class FuncContext {
     }
     
     void emitVarDecl(ref Appender!(ubyte[]) out_, VariableDeclarationStatement stmt) {
-        // Use uniqueLocalId if available, fall back to name lookup
-        uint idx;
-        if (stmt.uniqueLocalId != uint.max && stmt.uniqueLocalId in localIdToWasmIdx) {
-            idx = localIdToWasmIdx[stmt.uniqueLocalId];
-        } else {
-            idx = localIndex[stmt.name];
+        auto info = resolveVar(stmt.uniqueLocalId, stmt.name);
+        if (!info || info.addrMode != AddrMode.wasmLocal) {
+            throw new EmitError("emitVarDecl: expected scalar local: " ~ stmt.name);
         }
-        
+
         if (stmt.initializer) {
             emitExpression(out_, stmt.initializer);
         } else {
-            // Default init to 0
             out_ ~= Op.i32_const;
             leb128s(out_, 0);
         }
-        
+
         out_ ~= Op.local_set;
-        leb128u(out_, idx);
+        leb128u(out_, info.wasmLocalIdx);
     }
     
     /**
@@ -3287,54 +3487,39 @@ class FuncContext {
     }
     
     void emitIdentifier(ref Appender!(ubyte[]) out_, IdentifierExpression expr) {
-        // First check if type checker resolved this to a local variable
-        if (expr.resolvedLocalId != uint.max) {
-            if (auto wasmIdx = expr.resolvedLocalId in localIdToWasmIdx) {
-                out_ ~= Op.local_get;
-                leb128u(out_, *wasmIdx);
-                return;
-            }
-        }
-        
-        // Fallback to legacy name-based lookup
-        if (auto idx = expr.name in localIndex) {
-            out_ ~= Op.local_get;
-            leb128u(out_, *idx);
-            return;
-        }
-        
-        // For symbol table lookup (constants, globals), do it now
-        Symbol symbol = emitter.symbolTable.lookupSymbol(expr.name);
-        
-        // Check if it's a local on the shadow stack — emit address: FP + frameOffset
-        // All entries in locals are on the shadow stack
-        if (auto info = expr.name in locals) {
-            final switch (info.kind) {
-                case VarKind.struct_:
-                case VarKind.class_:
-                case VarKind.interface_:
-                case VarKind.staticArray:
-                case VarKind.slice:
+        // Unified variable resolution: check varsByLocalId/varsByName first
+        if (auto info = resolveVar(expr.resolvedLocalId, expr.name)) {
+            final switch (info.addrMode) {
+                case AddrMode.wasmLocal:
+                    out_ ~= Op.local_get;
+                    leb128u(out_, info.wasmLocalIdx);
+                    return;
+                case AddrMode.shadowStack:
                     out_ ~= Op.local_get;
                     leb128u(out_, fpLocal);
                     out_ ~= Op.i32_const;
                     leb128s(out_, info.frameOffset);
                     out_ ~= Op.i32_add;
                     return;
-                case VarKind.scalar:
-                    assert(0, "scalar in locals map");
+                case AddrMode.paramPointer:
+                    out_ ~= Op.local_get;
+                    leb128u(out_, info.wasmLocalIdx);
+                    return;
             }
         }
 
+        // Not a local/param — check symbol table for implicit field access, constants, globals
+        Symbol symbol = emitter.symbolTable.lookupSymbol(expr.name);
+
         // In a method, check if it's an implicit field access (field without 'this.')
-        if (auto thisInfo = "this" in params) {
+        if (auto thisInfo = resolveVar(THIS_LOCAL_ID, "this")) {
             AggregateDecl parent = func.structParent ? cast(AggregateDecl)func.structParent
                                                      : cast(AggregateDecl)func.classParent;
             if (parent) {
                 auto field = parent.getField(expr.name);
                 if (field) {
                     out_ ~= Op.local_get;
-                    leb128u(out_, thisInfo.localIndex);
+                    leb128u(out_, thisInfo.wasmLocalIdx);
                     if (field.offset > 0) {
                         out_ ~= Op.i32_const;
                         leb128s(out_, cast(int)field.offset);
@@ -3347,33 +3532,26 @@ class FuncContext {
                 }
             }
         }
-        
+
         // Check if it's a manifest constant (CTFE-evaluated lazily)
-        // Reuse symbol lookup from above (or do fresh lookup if symbol is null)
-        if (symbol is null) {
-            symbol = emitter.symbolTable.lookupSymbol(expr.name);
-        }
         if (symbol && symbol.isConstant) {
             if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
                 // Trigger lazy evaluation if needed, then emit
                 if (manifest.isStringType) {
-                    // Ensure it's evaluated (for string, ctfeStringValue is set during eval)
                     if (!manifest.ctfeComplete) {
                         emitter.symbolTable.resolveManifestValue(manifest);
                     }
-                    // String constant: register and emit struct pointer
                     uint structAddr = emitter.registerArrayLiteral(manifest.ctfeStringValue);
                     out_ ~= Op.i32_const;
                     leb128s(out_, structAddr);
                 } else {
-                    // Numeric constant: emit value via lazy resolver
                     out_ ~= Op.i32_const;
                     leb128s(out_, emitter.symbolTable.resolveManifestValue(manifest));
                 }
                 return;
             }
         }
-        
+
         // Check if it's a scalar global variable
         if (symbol) {
             if (auto varDecl = cast(VariableDecl)symbol.declaration) {
@@ -3491,31 +3669,74 @@ class FuncContext {
         if (!ident) {
             throw new EmitError("Increment/decrement requires identifier");
         }
-        
-        auto idx = localIndex[ident.name];
-        
-        if (expr.isPostfix) {
-            // Return old value, then modify
-            out_ ~= Op.local_get;
-            leb128u(out_, idx);
-            
-            out_ ~= Op.local_get;
-            leb128u(out_, idx);
-            out_ ~= Op.i32_const;
-            leb128s(out_, 1);
-            out_ ~= (inc ? Op.i32_add : Op.i32_sub);
-            out_ ~= Op.local_set;
-            leb128u(out_, idx);
-        } else {
-            // Modify, then return new value
-            out_ ~= Op.local_get;
-            leb128u(out_, idx);
-            out_ ~= Op.i32_const;
-            leb128s(out_, 1);
-            out_ ~= (inc ? Op.i32_add : Op.i32_sub);
-            out_ ~= Op.local_tee;
-            leb128u(out_, idx);
+
+        // Check unified map first (locals and params)
+        if (auto info = resolveVar(ident.resolvedLocalId, ident.name)) {
+            if (info.addrMode != AddrMode.wasmLocal)
+                throw new EmitError("Increment/decrement requires scalar variable");
+            auto idx = info.wasmLocalIdx;
+
+            if (expr.isPostfix) {
+                out_ ~= Op.local_get;
+                leb128u(out_, idx);
+                out_ ~= Op.local_get;
+                leb128u(out_, idx);
+                out_ ~= Op.i32_const;
+                leb128s(out_, 1);
+                out_ ~= (inc ? Op.i32_add : Op.i32_sub);
+                out_ ~= Op.local_set;
+                leb128u(out_, idx);
+            } else {
+                out_ ~= Op.local_get;
+                leb128u(out_, idx);
+                out_ ~= Op.i32_const;
+                leb128s(out_, 1);
+                out_ ~= (inc ? Op.i32_add : Op.i32_sub);
+                out_ ~= Op.local_tee;
+                leb128u(out_, idx);
+            }
+            return;
         }
+
+        // Check for global variable
+        Symbol symbol = emitter.symbolTable.lookupSymbol(ident.name);
+        if (symbol) {
+            if (auto varDecl = cast(VariableDecl)symbol.declaration) {
+                if (varDecl.wasmGlobalIndex != uint.max) {
+                    auto gIdx = varDecl.wasmGlobalIndex;
+                    if (expr.isPostfix) {
+                        // Return old value, then modify
+                        out_ ~= Op.global_get;
+                        leb128u(out_, gIdx);
+                        out_ ~= Op.global_get;
+                        leb128u(out_, gIdx);
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, 1);
+                        out_ ~= (inc ? Op.i32_add : Op.i32_sub);
+                        out_ ~= Op.global_set;
+                        leb128u(out_, gIdx);
+                    } else {
+                        // Modify, then return new value
+                        out_ ~= Op.global_get;
+                        leb128u(out_, gIdx);
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, 1);
+                        out_ ~= (inc ? Op.i32_add : Op.i32_sub);
+                        // global doesn't have tee, so dup before set
+                        // store new value in global, leave copy on stack
+                        // We need: [newVal] on stack + global = newVal
+                        // Emit: compute newVal, global_set, global_get
+                        out_ ~= Op.global_set;
+                        leb128u(out_, gIdx);
+                        out_ ~= Op.global_get;
+                        leb128u(out_, gIdx);
+                    }
+                    return;
+                }
+            }
+        }
+
+        throw new EmitError("Increment/decrement: unknown variable: " ~ ident.name);
     }
     
     void emitCall(ref Appender!(ubyte[]) out_, CallExpression expr) {
@@ -4745,24 +4966,24 @@ class FuncContext {
             }
             throw new EmitError("Concat-assign (~=) only supported on slice locals");
         }
-        
+
         // Check for struct field assignment (p.x = value)
         if (auto member = cast(MemberExpression)expr.left) {
             emitMemberAssignment(out_, member, expr.right);
             return;
         }
-        
+
         // Check for index assignment (arr[i] = value)
         if (auto indexExpr = cast(IndexExpression)expr.left) {
             emitIndexAssignment(out_, indexExpr, expr.right);
             return;
         }
-        
+
         auto ident = cast(IdentifierExpression)expr.left;
         if (!ident) {
             throw new EmitError("Complex assignment targets not yet supported");
         }
-        
+
         // Check for implicit field assignment in a method (fieldName = value)
         if (func.structParent !is null || func.classParent !is null) {
             AggregateDecl parent = func.structParent ? cast(AggregateDecl)func.structParent
@@ -4770,151 +4991,86 @@ class FuncContext {
             auto field = parent.getField(ident.name);
             if (field) {
                 // Implicit this.fieldName = value
-                if (auto thisInfo = "this" in params) {
-                    // Calculate address: this + fieldOffset
+                if (auto thisInfo = resolveVar(THIS_LOCAL_ID, "this")) {
                     out_ ~= Op.local_get;
-                    leb128u(out_, thisInfo.localIndex);
+                    leb128u(out_, thisInfo.wasmLocalIdx);
                     if (field.offset > 0) {
                         out_ ~= Op.i32_const;
                         leb128s(out_, cast(int)field.offset);
                         out_ ~= Op.i32_add;
                     }
-                    
-                    // Emit value
                     emitExpression(out_, expr.right);
-                    
-                    // For consistent semantics, assignment should leave value on stack
-                    // Store to temp, emit again for stack value
-                    // We need to: [addr, value] -> store, then push value back
-                    // Use a temp local to hold the value
-                    
-                    // Actually, simplest approach: emit value twice (before address)
-                    // But we already emitted address. Let's just store and push 0
-                    // as a placeholder - the expressionHasValue will need to handle this
-                    
-                    // Store (consumes addr and value)
                     out_ ~= Op.i32_store;
                     out_ ~= cast(ubyte)0x02;
                     leb128u(out_, 0);
-                    
-                    // For now, emit value again so assignment has a value
-                    // This re-evaluates the expression (not ideal but works for simple cases)
                     emitExpression(out_, expr.right);
                     return;
                 }
             }
         }
-        
-        // Regular local variable assignment
-        // Look up symbol to get uniqueLocalId
-        auto symbol = emitter.symbolTable.lookupSymbol(ident.name);
-        uint wasmIdx = uint.max;
-        if (symbol && symbol.uniqueLocalId != uint.max) {
-            if (auto idx = symbol.uniqueLocalId in localIdToWasmIdx) {
-                wasmIdx = *idx;
-            }
-        }
-        // Fallback to legacy name-based lookup
-        if (wasmIdx == uint.max) {
-            if (auto idxPtr = ident.name in localIndex) {
-                wasmIdx = *idxPtr;
-            }
-        }
-        
-        if (wasmIdx != uint.max) {
-            // Handle compound assignment operators (+=, -=, etc.)
-            if (expr.operator != AssignmentExpression.Operator.Assign) {
-                // Load current value
-                out_ ~= Op.local_get;
-                leb128u(out_, wasmIdx);
-                
-                // Emit RHS value
-                emitExpression(out_, expr.right);
-                
-                // Apply operation based on operator
-                final switch (expr.operator) {
-                    case AssignmentExpression.Operator.Assign:
-                        assert(false); // Handled in else branch
-                    case AssignmentExpression.Operator.AddAssign:
-                        out_ ~= Op.i32_add;
-                        break;
-                    case AssignmentExpression.Operator.SubtractAssign:
-                        out_ ~= Op.i32_sub;
-                        break;
-                    case AssignmentExpression.Operator.MultiplyAssign:
-                        out_ ~= Op.i32_mul;
-                        break;
-                    case AssignmentExpression.Operator.DivideAssign:
-                        out_ ~= Op.i32_div_s;
-                        break;
-                    case AssignmentExpression.Operator.ModuloAssign:
-                        out_ ~= Op.i32_rem_s;
-                        break;
-                    case AssignmentExpression.Operator.AndAssign:
-                        out_ ~= Op.i32_and;
-                        break;
-                    case AssignmentExpression.Operator.OrAssign:
-                        out_ ~= Op.i32_or;
-                        break;
-                    case AssignmentExpression.Operator.XorAssign:
-                        out_ ~= Op.i32_xor;
-                        break;
-                    case AssignmentExpression.Operator.ShiftLeftAssign:
-                        out_ ~= Op.i32_shl;
-                        break;
-                    case AssignmentExpression.Operator.ShiftRightAssign:
-                        out_ ~= Op.i32_shr_s;
-                        break;
-                    case AssignmentExpression.Operator.ConcatAssign:
-                        throw new EmitError("~= on local should use slice path");
+
+        // Unified variable resolution for locals and params
+        if (auto info = resolveVar(ident.resolvedLocalId, ident.name)) {
+            if (info.addrMode == AddrMode.wasmLocal) {
+                // Scalar local/param — local_set/local_tee
+                auto wasmIdx = info.wasmLocalIdx;
+                if (expr.operator != AssignmentExpression.Operator.Assign) {
+                    out_ ~= Op.local_get;
+                    leb128u(out_, wasmIdx);
+                    emitExpression(out_, expr.right);
+                    emitCompoundOp(out_, expr.operator);
+                } else {
+                    emitExpression(out_, expr.right);
                 }
-            } else {
-                // Simple assignment: emit value
-                emitExpression(out_, expr.right);
+                out_ ~= Op.local_tee;
+                leb128u(out_, wasmIdx);
+                return;
             }
-            
-            // Store and leave value on stack (assignment is an expression)
-            out_ ~= Op.local_tee;
-            leb128u(out_, wasmIdx);
-        } else {
-            // Check for scalar global variable
-            auto globalSymbol = emitter.symbolTable.lookupSymbol(ident.name);
-            if (globalSymbol) {
-                if (auto varDecl = cast(VariableDecl)globalSymbol.declaration) {
-                    if (varDecl.wasmGlobalIndex != uint.max) {
-                        if (expr.operator != AssignmentExpression.Operator.Assign) {
-                            // Compound assignment: load current, apply op, store
-                            out_ ~= Op.global_get;
-                            leb128u(out_, varDecl.wasmGlobalIndex);
-                            emitExpression(out_, expr.right);
-                            final switch (expr.operator) {
-                                case AssignmentExpression.Operator.Assign: assert(0);
-                                case AssignmentExpression.Operator.AddAssign: out_ ~= Op.i32_add; break;
-                                case AssignmentExpression.Operator.SubtractAssign: out_ ~= Op.i32_sub; break;
-                                case AssignmentExpression.Operator.MultiplyAssign: out_ ~= Op.i32_mul; break;
-                                case AssignmentExpression.Operator.DivideAssign: out_ ~= Op.i32_div_s; break;
-                                case AssignmentExpression.Operator.ModuloAssign: out_ ~= Op.i32_rem_s; break;
-                                case AssignmentExpression.Operator.AndAssign: out_ ~= Op.i32_and; break;
-                                case AssignmentExpression.Operator.OrAssign: out_ ~= Op.i32_or; break;
-                                case AssignmentExpression.Operator.XorAssign: out_ ~= Op.i32_xor; break;
-                                case AssignmentExpression.Operator.ShiftLeftAssign: out_ ~= Op.i32_shl; break;
-                                case AssignmentExpression.Operator.ShiftRightAssign: out_ ~= Op.i32_shr_s; break;
-                                case AssignmentExpression.Operator.ConcatAssign:
-                                    throw new EmitError("~= not supported on global scalars");
-                            }
-                        } else {
-                            emitExpression(out_, expr.right);
-                        }
-                        out_ ~= Op.global_set;
-                        leb128u(out_, varDecl.wasmGlobalIndex);
-                        // Assignment as expression: push value back onto stack
+            // Shadow stack / param pointer assignments handled via other paths
+            // (struct/class/slice assignments go through member/index assignment)
+        }
+
+        // Check for scalar global variable
+        Symbol symbol = emitter.symbolTable.lookupSymbol(ident.name);
+        if (symbol) {
+            if (auto varDecl = cast(VariableDecl)symbol.declaration) {
+                if (varDecl.wasmGlobalIndex != uint.max) {
+                    if (expr.operator != AssignmentExpression.Operator.Assign) {
                         out_ ~= Op.global_get;
                         leb128u(out_, varDecl.wasmGlobalIndex);
-                        return;
+                        emitExpression(out_, expr.right);
+                        emitCompoundOp(out_, expr.operator);
+                    } else {
+                        emitExpression(out_, expr.right);
                     }
+                    out_ ~= Op.global_set;
+                    leb128u(out_, varDecl.wasmGlobalIndex);
+                    out_ ~= Op.global_get;
+                    leb128u(out_, varDecl.wasmGlobalIndex);
+                    return;
                 }
             }
-            throw new EmitError("Unknown identifier in assignment: " ~ ident.name);
+        }
+        throw new EmitError("Unknown identifier in assignment: " ~ ident.name);
+    }
+
+    /// Emit the compound operation for compound assignment operators.
+    private void emitCompoundOp(ref Appender!(ubyte[]) out_, AssignmentExpression.Operator op) {
+        final switch (op) {
+            case AssignmentExpression.Operator.Assign:
+                assert(0, "emitCompoundOp called with Assign");
+            case AssignmentExpression.Operator.AddAssign: out_ ~= Op.i32_add; break;
+            case AssignmentExpression.Operator.SubtractAssign: out_ ~= Op.i32_sub; break;
+            case AssignmentExpression.Operator.MultiplyAssign: out_ ~= Op.i32_mul; break;
+            case AssignmentExpression.Operator.DivideAssign: out_ ~= Op.i32_div_s; break;
+            case AssignmentExpression.Operator.ModuloAssign: out_ ~= Op.i32_rem_s; break;
+            case AssignmentExpression.Operator.AndAssign: out_ ~= Op.i32_and; break;
+            case AssignmentExpression.Operator.OrAssign: out_ ~= Op.i32_or; break;
+            case AssignmentExpression.Operator.XorAssign: out_ ~= Op.i32_xor; break;
+            case AssignmentExpression.Operator.ShiftLeftAssign: out_ ~= Op.i32_shl; break;
+            case AssignmentExpression.Operator.ShiftRightAssign: out_ ~= Op.i32_shr_s; break;
+            case AssignmentExpression.Operator.ConcatAssign:
+                throw new EmitError("~= should use slice path");
         }
     }
     
