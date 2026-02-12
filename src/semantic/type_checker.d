@@ -633,9 +633,15 @@ class TypeChecker {
                                      null, varDeclStmt.location, false);
             symbol.uniqueLocalId = varDeclStmt.uniqueLocalId;
             symbolTable.addSymbol(symbol);
+        } else if (auto structStmt = cast(StructDeclarationStatement)stmt) {
+            // Inner struct declaration — compute layout and register type symbol
+            auto collector = new SymbolCollector(symbolTable);
+            collector.collectStructSymbol(structStmt.structDecl);
+            // Type check struct members (methods, etc.)
+            checkStructDeclaration(structStmt.structDecl);
         }
     }
-    
+
     /**
      * Type check an expression and return its type
      */

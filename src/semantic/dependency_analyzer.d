@@ -152,6 +152,15 @@ class DependencyAnalyzer {
                     calls ~= findCallsInStatement(s);
                 }
             }
+        } else if (auto structStmt = cast(StructDeclarationStatement)stmt) {
+            // Scan inner struct method bodies for calls
+            foreach (member; structStmt.structDecl.members) {
+                if (auto funcDecl = cast(FunctionDecl)member) {
+                    if (funcDecl.body_) {
+                        calls ~= findCallsInStatement(funcDecl.body_);
+                    }
+                }
+            }
         }
         // Note: AssignmentStatement doesn't exist - assignments are expressions
 

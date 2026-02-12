@@ -706,7 +706,7 @@ class SymbolCollector {
         symbolTable.addSymbol(symbol);
     }
     
-    private void collectStructSymbol(StructDecl decl) {
+    package void collectStructSymbol(StructDecl decl) {
         // Compute struct layout
         computeStructLayout(decl);
         

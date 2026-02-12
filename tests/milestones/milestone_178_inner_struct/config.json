@@ -1,0 +1,8 @@
+{
+  "name": "inner_struct",
+  "description": "Struct declared inside a function body with methods",
+  "type": "wasm_exec",
+  "expected_result": 0,
+  "entry": "test",
+  "capability": "inner struct declarations"
+}

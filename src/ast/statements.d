@@ -194,6 +194,23 @@ class MixinStatement : Statement {
 }
 
 /**
+ * Struct declaration as a statement (inner struct inside a function body).
+ * Wraps a StructDecl so it can appear in statement position.
+ */
+class StructDeclarationStatement : Statement {
+    StructDecl structDecl;
+
+    this(SourceLocation loc, StructDecl structDecl) {
+        super(loc);
+        this.structDecl = structDecl;
+    }
+
+    override string toString() const {
+        return format("StructDeclarationStatement(%s)", structDecl.name);
+    }
+}
+
+/**
  * Break statement: break;
  * Exits the innermost enclosing loop.
  */

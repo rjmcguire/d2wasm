@@ -940,6 +940,8 @@ class NativeCompiledFunction : CompiledFunction {
             if (nativeLoopStack.length == 0)
                 throw new Exception("continue statement outside of loop");
             gen.emitBranch(nativeLoopStack[$ - 1].continueLabel);
+        } else if (cast(StructDeclarationStatement)stmt) {
+            // Inner struct declaration — no runtime code
         }
     }
     

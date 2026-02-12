@@ -1766,6 +1766,8 @@ class TreeSitterBridge {
                 return new BreakStatement(loc);
             case "continue_statement":
                 return new ContinueStatement(loc);
+            case "struct_declaration":
+                return new StructDeclarationStatement(loc, parseStructDeclaration(node));
             case "comment":
                 // Skip comments - return null (handled by caller)
                 return null;

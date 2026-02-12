@@ -881,6 +881,8 @@ class FuncContext {
             auto ctx = loopStack[$ - 1];
             out_ ~= Op.br;
             leb128u(out_, blockDepth - ctx.continueBlockDepth);
+        } else if (cast(StructDeclarationStatement)stmt) {
+            // Inner struct declaration — no runtime code; methods already collected by emitter
         } else {
             throw new EmitError("Unsupported statement type", stmt.toString());
         }

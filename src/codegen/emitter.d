@@ -867,6 +867,9 @@ class BinaryEmitter {
         
         // Scan for slice types to enable array support (__alloc, etc.)
         scanForSliceTypes(decl);
+
+        // Collect methods from inner struct declarations in the function body
+        collectInnerStructs(decl.body_);
         
         // Build signature
         FuncSig sig;
@@ -979,9 +982,38 @@ class BinaryEmitter {
             scanExpressionForCTFECalls(exprStmt.expression);
         } else if (auto returnStmt = cast(ReturnStatement)stmt) {
             if (returnStmt.value) scanExpressionForCTFECalls(returnStmt.value);
+        } else if (auto structStmt = cast(StructDeclarationStatement)stmt) {
+            // Scan inner struct methods for slice types too
+            foreach (member; structStmt.structDecl.members) {
+                if (auto funcDecl = cast(FunctionDecl)member) {
+                    scanForSliceTypes(funcDecl);
+                }
+            }
         }
     }
-    
+
+    /**
+     * Collect methods from inner struct declarations found in function bodies.
+     */
+    private void collectInnerStructs(Statement stmt) {
+        if (stmt is null) return;
+        if (auto compound = cast(CompoundStatement)stmt) {
+            foreach (s; compound.statements) {
+                collectInnerStructs(s);
+            }
+        } else if (auto structStmt = cast(StructDeclarationStatement)stmt) {
+            collectStructMethods(structStmt.structDecl);
+        } else if (auto ifStmt = cast(IfStatement)stmt) {
+            collectInnerStructs(ifStmt.thenStatement);
+            if (ifStmt.elseStatement) collectInnerStructs(ifStmt.elseStatement);
+        } else if (auto whileStmt = cast(WhileStatement)stmt) {
+            collectInnerStructs(whileStmt.body_);
+        } else if (auto forStmt = cast(ForStatement)stmt) {
+            if (forStmt.init) collectInnerStructs(forStmt.init);
+            if (forStmt.body_) collectInnerStructs(forStmt.body_);
+        }
+    }
+
     /**
      * Scan an expression for calls to CTFE-only functions.
      * For __writeln, we pre-expand to the typed __ctfe_write_* imports.
