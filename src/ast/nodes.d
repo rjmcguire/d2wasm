@@ -194,6 +194,10 @@ abstract class Type : ASTNode {
 
     /// Aggregate alignment, or 1.
     size_t aggregateAlignment() const { return 1; }
+
+    /// Resolve through TemplateParamType wrappers to the underlying concrete type.
+    /// Returns `this` for all types except TemplateParamType, which returns boundType.
+    Type resolve() { return this; }
 }
 
 /**
@@ -248,6 +252,9 @@ class FunctionDecl : Declaration {
     @property void isProperty(bool v) { attrs.isProperty_ = v; }
 
     Declaration parent;  // enclosing struct/class, null for free functions
+
+    TemplateParamType[] templateParams;  // empty for non-template functions
+    @property bool isTemplate() const { return templateParams.length > 0; }
 
     this(SourceLocation loc, string name, Type returnType,
          Parameter[] parameters, Statement body_,
@@ -795,6 +802,41 @@ class UserType : Type {
     override string toString() const {
         return name;
     }
+}
+
+/**
+ * Template parameter type: a mutable type node that delegates to its bound type.
+ *
+ * All references to T in a template body share one TemplateParamType instance.
+ * When bound (boundType != null), all Type methods delegate transparently.
+ */
+class TemplateParamType : Type {
+    string paramName;
+    Type boundType;
+
+    this(SourceLocation loc, string paramName) {
+        super(loc);
+        this.paramName = paramName;
+    }
+
+    override bool isBasicType() const { return boundType ? boundType.isBasicType() : false; }
+    override bool isPointer() const   { return boundType ? boundType.isPointer() : false; }
+    override bool isArray() const     { return boundType ? boundType.isArray() : false; }
+    override bool isFunction() const  { return boundType ? boundType.isFunction() : false; }
+    override size_t size() const      { return boundType ? boundType.size() : 0; }
+    override size_t alignment() const { return boundType ? boundType.alignment() : 0; }
+    override bool isAggregate() const { return boundType ? boundType.isAggregate() : false; }
+    override bool isLargeReturn() const { return boundType ? boundType.isLargeReturn() : false; }
+
+    override StructDecl asStruct()       { return boundType ? boundType.asStruct() : null; }
+    override ClassDecl asClass()         { return boundType ? boundType.asClass() : null; }
+    override InterfaceDecl asInterface() { return boundType ? boundType.asInterface() : null; }
+
+    override string toString() const {
+        return boundType ? boundType.toString() : paramName;
+    }
+
+    override Type resolve() { return boundType ? boundType.resolve() : this; }
 }
 
 /**

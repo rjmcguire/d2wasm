@@ -97,6 +97,14 @@ class DependencyAnalyzer {
                 collectDependencies(calledFunc, result);
             }
         }
+
+        // Also find template instantiation calls in the body
+        auto tmplCalls = findTemplateCallsInStatement(func.body_);
+        foreach (tmplCall; tmplCalls) {
+            if (tmplCall.resolvedInstantiation !is null) {
+                collectDependencies(tmplCall.resolvedInstantiation, result);
+            }
+        }
     }
 
     /**
@@ -194,6 +202,67 @@ class DependencyAnalyzer {
         // IdentifierExpression, LiteralExpression, ImportExpression - no calls inside
 
         return calls;
+    }
+
+    /// Find all TemplateInstantiationExpressions in a statement (recursive).
+    private TemplateInstantiationExpression[] findTemplateCallsInStatement(Statement stmt) {
+        TemplateInstantiationExpression[] result;
+        if (stmt is null) return result;
+
+        if (auto compound = cast(CompoundStatement)stmt) {
+            foreach (s; compound.statements)
+                result ~= findTemplateCallsInStatement(s);
+        } else if (auto exprStmt = cast(ExpressionStatement)stmt) {
+            result ~= findTemplateCallsInExpression(exprStmt.expression);
+        } else if (auto returnStmt = cast(ReturnStatement)stmt) {
+            if (returnStmt.value)
+                result ~= findTemplateCallsInExpression(returnStmt.value);
+        } else if (auto ifStmt = cast(IfStatement)stmt) {
+            result ~= findTemplateCallsInExpression(ifStmt.condition);
+            result ~= findTemplateCallsInStatement(ifStmt.thenStatement);
+            if (ifStmt.elseStatement)
+                result ~= findTemplateCallsInStatement(ifStmt.elseStatement);
+        } else if (auto whileStmt = cast(WhileStatement)stmt) {
+            result ~= findTemplateCallsInExpression(whileStmt.condition);
+            result ~= findTemplateCallsInStatement(whileStmt.body_);
+        } else if (auto forStmt = cast(ForStatement)stmt) {
+            if (forStmt.init)
+                result ~= findTemplateCallsInStatement(forStmt.init);
+            if (forStmt.condition)
+                result ~= findTemplateCallsInExpression(forStmt.condition);
+            if (forStmt.update)
+                result ~= findTemplateCallsInExpression(forStmt.update);
+            result ~= findTemplateCallsInStatement(forStmt.body_);
+        } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
+            if (varDecl.initializer)
+                result ~= findTemplateCallsInExpression(varDecl.initializer);
+        }
+        return result;
+    }
+
+    /// Find all TemplateInstantiationExpressions in an expression (recursive).
+    private TemplateInstantiationExpression[] findTemplateCallsInExpression(Expression expr) {
+        TemplateInstantiationExpression[] result;
+        if (expr is null) return result;
+
+        if (auto tmpl = cast(TemplateInstantiationExpression)expr) {
+            result ~= tmpl;
+            foreach (arg; tmpl.callArguments)
+                result ~= findTemplateCallsInExpression(arg);
+        } else if (auto binary = cast(BinaryExpression)expr) {
+            result ~= findTemplateCallsInExpression(binary.left);
+            result ~= findTemplateCallsInExpression(binary.right);
+        } else if (auto unary = cast(UnaryExpression)expr) {
+            result ~= findTemplateCallsInExpression(unary.operand);
+        } else if (auto call = cast(CallExpression)expr) {
+            result ~= findTemplateCallsInExpression(call.function_);
+            foreach (arg; call.arguments)
+                result ~= findTemplateCallsInExpression(arg);
+        } else if (auto assign = cast(AssignmentExpression)expr) {
+            result ~= findTemplateCallsInExpression(assign.left);
+            result ~= findTemplateCallsInExpression(assign.right);
+        }
+        return result;
     }
 
     /**

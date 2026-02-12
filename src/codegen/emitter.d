@@ -838,6 +838,11 @@ class BinaryEmitter {
     }
     
     private void collectFunction(FunctionDecl decl) {
+        // Skip template declarations — only instantiated functions are emitted
+        if (decl.isTemplate) {
+            return;
+        }
+
         // Skip methods — they are collected via collectStructMethods/collectClassMethods
         // when their parent StructDecl/ClassDecl is processed (which sets structParent/classParent)
         if (decl.isMethod && decl.parent !is null) {
@@ -911,6 +916,7 @@ class BinaryEmitter {
      * Check if a type can be emitted to WASM (basic types only for now)
      */
     package bool isVoidType(Type t) {
+        t = t.resolve();
         auto basic = cast(BasicType)t;
         return basic && basic.kind == BasicType.Kind.Void;
     }
@@ -921,6 +927,7 @@ class BinaryEmitter {
      */
     bool isLargeReturnType(Type t) {
         if (t is null) return false;
+        t = t.resolve();
 
         // Ensure UserType is resolved before checking
         if (auto userType = cast(UserType)t) {
@@ -1176,6 +1183,9 @@ class BinaryEmitter {
     }
     
     package ValType dTypeToValType(Type t) {
+        // Unwrap TemplateParamType to the concrete bound type
+        t = t.resolve();
+
         // Struct types are passed as i32 pointers
         if (auto userType = cast(UserType)t) {
             return ValType.i32;  // Pointer to struct

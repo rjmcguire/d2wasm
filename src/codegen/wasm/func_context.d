@@ -1944,6 +1944,8 @@ class FuncContext {
             traits.evaluate();
             out_ ~= Op.i32_const;
             leb128s(out_, traits.boolResult ? 1 : 0);
+        } else if (auto tmplInst = cast(TemplateInstantiationExpression)expr) {
+            emitTemplateCall(out_, tmplInst);
         } else {
             throw new EmitError("Unsupported expression type", expr.toString());
         }
@@ -4001,6 +4003,26 @@ class FuncContext {
     }
     
     /**
+     * Emit a template instantiation call: max!int(3, 5)
+     * The resolved instantiation has a mangled name that the emitter collected.
+     */
+    void emitTemplateCall(ref Appender!(ubyte[]) out_, TemplateInstantiationExpression expr) {
+        auto inst = expr.resolvedInstantiation;
+        if (!inst)
+            throw new EmitError("Template instantiation not resolved: " ~ expr.templateName);
+
+        // Emit call arguments
+        foreach (arg; expr.callArguments) {
+            emitExpression(out_, arg);
+        }
+
+        // Call the mangled function
+        uint funcIdx = emitter.getFuncIndex(inst.name);
+        out_ ~= Op.call;
+        leb128u(out_, funcIdx);
+    }
+
+    /**
      * Emit __writeln(args...) by lowering to typed CTFE write calls.
      * Each argument is printed according to its type, followed by a newline.
      * Uses __ctfe_write_* (building blocks without prefix) not __ctfe_print_*.
@@ -5382,6 +5404,7 @@ class FuncContext {
     }
     
     private bool isVoidType(Type t) {
+        t = t.resolve();
         if (auto basic = cast(BasicType)t) {
             return basic.kind == BasicType.Kind.Void;
         }

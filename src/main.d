@@ -306,7 +306,12 @@ int compileFile(CompilerOptions options) {
         
         auto typeChecker = new TypeChecker(symbolTable);
         typeChecker.checkDeclarations(ast);
-        
+
+        // Append template instantiations to AST so the emitter collects them
+        foreach (inst; typeChecker.templateInstantiator.allInstantiations()) {
+            ast ~= inst;
+        }
+
         log(1, "Type checking passed");
         
         // 6b. Evaluate remaining manifest constants (for side-effect-only CTFE like enum _ = ctfeMain())

@@ -1,0 +1,7 @@
+{
+  "name": "basic_template",
+  "description": "Basic function template with explicit instantiation",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 8
+}

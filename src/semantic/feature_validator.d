@@ -213,15 +213,8 @@ class FeatureValidator {
                 validateType(param);
             }
         } else if (auto userType = cast(UserType) type) {
-            // Check for template instantiation syntax
-            if (userType.name.canFind("!") || userType.name.canFind("<")) {
-                throw new FeatureValidationError(
-                    "Template instantiation is not supported",
-                    userType.location,
-                    "Templates and generics",
-                    "Use function overloading instead of templates"
-                );
-            }
+            // UserType is fine — template instantiation syntax is handled
+            // by TemplateInstantiationExpression, not encoded in the name.
         }
     }
     
@@ -297,6 +290,10 @@ class FeatureValidator {
             foreach (arg; traits.arguments) {
                 if (arg !is null) validateExpression(arg);
             }
+        } else if (auto tmplInst = cast(TemplateInstantiationExpression) expr) {
+            foreach (arg; tmplInst.callArguments) {
+                validateExpression(arg);
+            }
         }
         // LiteralExpression is always valid
     }
@@ -315,15 +312,7 @@ class FeatureValidator {
      * Validate function signature for templates
      */
     private void validateFunctionSignature(FunctionDecl node) {
-        // Check for template syntax in function name
-        if (node.name.canFind("!") || node.name.canFind("<")) {
-            throw new FeatureValidationError(
-                "Template functions are not supported",
-                node.location,
-                "Function templates",
-                "Use function overloading with different parameter types instead"
-            );
-        }
+        // Function templates (T max(T)(T a, T b)) are now supported
     }
     
     /**

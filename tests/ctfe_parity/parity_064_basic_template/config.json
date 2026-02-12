@@ -1,0 +1,7 @@
+{
+  "name": "basic_template",
+  "description": "CTFE parity: basic function template instantiation",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 8
+}

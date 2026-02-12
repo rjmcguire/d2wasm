@@ -296,48 +296,66 @@ class TreeSitterBridge {
      */
     Declaration parseFunctionDeclaration(TSNode node) {
         SourceLocation loc = makeSourceLocation(node);
-        
+
         // Parse function declaration by examining children in order:
         // - linkage_attribute (optional, for extern(WASM, "module"))
         // - type (return type)
-        // - identifier (function name) 
+        // - identifier (function name)
+        // - template_parameters (optional, for function templates)
         // - parameters
         // - function_body
-        
-        TSNode linkageNode, returnTypeNode, nameNode, parametersNode, bodyNode;
-        
+
+        TSNode linkageNode, returnTypeNode, nameNode, templateParamsNode, parametersNode, bodyNode;
+
         uint childCount = TreeSitterParser.getChildCount(node);
         for (uint i = 0; i < childCount; i++) {
             TSNode child = TreeSitterParser.getChild(node, i);
             string nodeType = TreeSitterParser.getNodeType(child);
-            
+
             if (nodeType == "linkage_attribute") {
                 linkageNode = child;
             } else if (nodeType == "type" && !TreeSitterParser.isValid(returnTypeNode)) {
                 returnTypeNode = child;
             } else if (nodeType == "identifier" && !TreeSitterParser.isValid(nameNode)) {
                 nameNode = child;
+            } else if (nodeType == "template_parameters") {
+                templateParamsNode = child;
             } else if (nodeType == "parameters") {
                 parametersNode = child;
             } else if (nodeType == "function_body") {
                 bodyNode = child;
             }
         }
-        
+
         if (!TreeSitterParser.isValid(nameNode)) {
             throw new ParseError("Function declaration missing name", loc);
         }
-        
+
         string name = TreeSitterParser.getNodeText(nameNode, sourceText);
-        Type returnType = TreeSitterParser.isValid(returnTypeNode) ? 
-            parseType(returnTypeNode) : 
+
+        // Parse template parameters if present: T max(T)(T a, T b)
+        TemplateParamType[] templateParams;
+        if (TreeSitterParser.isValid(templateParamsNode)) {
+            templateParams = parseTemplateParams(templateParamsNode, loc);
+        }
+
+        Type returnType = TreeSitterParser.isValid(returnTypeNode) ?
+            parseType(returnTypeNode) :
             new BasicType(loc, BasicType.Kind.Void);
-        
+
         Parameter[] parameters;
         if (TreeSitterParser.isValid(parametersNode)) {
             parameters = parseParameterList(parametersNode);
         }
-        
+
+        // Replace UserType refs that match template param names
+        if (templateParams.length > 0) {
+            returnType = replaceTemplateTypeRefs(returnType, templateParams);
+            foreach (ref param; parameters) {
+                param.type = replaceTemplateTypeRefs(param.type, templateParams);
+            }
+        }
+
         // Check for WASM import linkage
         if (TreeSitterParser.isValid(linkageNode)) {
             string moduleName = parseWasmLinkage(linkageNode);
@@ -347,7 +365,7 @@ class TreeSitterBridge {
                 return new ImportedFunctionDecl(loc, name, returnType, parameters, moduleName);
             }
         }
-        
+
         // Regular function - parse body
         Statement body_;
         if (TreeSitterParser.isValid(bodyNode)) {
@@ -356,7 +374,12 @@ class TreeSitterBridge {
             // Abstract function or declaration
             body_ = null;
         }
-        
+
+        // Replace template type refs in function body
+        if (templateParams.length > 0 && body_ !is null) {
+            replaceTemplateTypeRefsInStatement(body_, templateParams);
+        }
+
         Visibility vis;
         DeclAttrs dattrs;
         extractAttributes(node, vis, dattrs);
@@ -364,6 +387,7 @@ class TreeSitterBridge {
         auto funcDecl = new FunctionDecl(loc, name, returnType, parameters, body_);
         funcDecl.visibility = vis;
         funcDecl.attrs = dattrs;
+        funcDecl.templateParams = templateParams;
         return funcDecl;
     }
     
@@ -2335,31 +2359,53 @@ class TreeSitterBridge {
     /**
      * Parse call expression (placeholder implementation)
      */
-    CallExpression parseCallExpression(TSNode node, SourceLocation loc) {
+    Expression parseCallExpression(TSNode node, SourceLocation loc) {
         TSNode functionNode = TreeSitterParser.getChildByFieldName(node, "function");
         TSNode argumentsNode = TreeSitterParser.getChildByFieldName(node, "arguments");
-        
+
         if (!TreeSitterParser.isValid(functionNode)) {
             functionNode = TreeSitterParser.getChild(node, 0);
         }
-        
+
         if (!TreeSitterParser.isValid(functionNode)) {
             throw new ParseError("Call expression missing function", loc);
         }
-        
-        Expression function_;
+
         string funcNodeType = TreeSitterParser.getNodeType(functionNode);
-        
+
+        // Template instantiation call: max!int(3, 5)
+        if (funcNodeType == "template_instance") {
+            return parseTemplateInstantiationCall(node, functionNode, loc);
+        }
+
+        Expression function_;
+
         // Handle "type" node which tree-sitter uses for qualified identifiers like "module.func"
+        // It also wraps template_instance: type → template_instance → identifier + template_arguments
         if (funcNodeType == "type") {
+            // Check if the type wraps a template_instance
+            uint typeChildCount = TreeSitterParser.getChildCount(functionNode);
+            for (uint ti = 0; ti < typeChildCount; ti++) {
+                TSNode typeChild = TreeSitterParser.getChild(functionNode, ti);
+                if (TreeSitterParser.getNodeType(typeChild) == "template_instance") {
+                    return parseTemplateInstantiationCall(node, typeChild, loc);
+                }
+            }
             string qualifiedName = TreeSitterParser.getNodeText(functionNode, sourceText);
             function_ = parseQualifiedIdentifier(qualifiedName, loc);
         } else {
             function_ = parseExpression(functionNode);
         }
-        
-        Expression[] arguments;
-        
+
+        Expression[] arguments = parseCallArguments(node);
+
+        return new CallExpression(loc, function_, arguments);
+    }
+
+    /// Parse call arguments from a call_expression node
+    private Expression[] parseCallArguments(TSNode node) {
+        TSNode argumentsNode = TreeSitterParser.getChildByFieldName(node, "arguments");
+
         if (!TreeSitterParser.isValid(argumentsNode)) {
             // Look for arguments in other nodes like named_arguments
             uint childCount = TreeSitterParser.getChildCount(node);
@@ -2372,13 +2418,14 @@ class TreeSitterBridge {
                 }
             }
         }
-        
+
+        Expression[] arguments;
         if (TreeSitterParser.isValid(argumentsNode)) {
             uint childCount = TreeSitterParser.getChildCount(argumentsNode);
             for (uint i = 0; i < childCount; i++) {
                 TSNode child = TreeSitterParser.getChild(argumentsNode, i);
                 string nodeType = TreeSitterParser.getNodeType(child);
-                
+
                 if (nodeType != "(" && nodeType != ")" && nodeType != ",") {
                     try {
                         if (nodeType == "named_argument") {
@@ -2401,8 +2448,30 @@ class TreeSitterBridge {
                 }
             }
         }
-        
-        return new CallExpression(loc, function_, arguments);
+        return arguments;
+    }
+
+    /// Parse a template instantiation call: max!int(3, 5)
+    private Expression parseTemplateInstantiationCall(TSNode callNode, TSNode templateInstanceNode, SourceLocation loc) {
+        // template_instance has children: identifier, template_arguments
+        string templateName;
+        Type[] templateArgs;
+
+        uint tiChildCount = TreeSitterParser.getChildCount(templateInstanceNode);
+        for (uint i = 0; i < tiChildCount; i++) {
+            TSNode child = TreeSitterParser.getChild(templateInstanceNode, i);
+            string childType = TreeSitterParser.getNodeType(child);
+
+            if (childType == "identifier") {
+                templateName = TreeSitterParser.getNodeText(child, sourceText);
+            } else if (childType == "template_arguments") {
+                templateArgs = parseTemplateArgTypes(child);
+            }
+        }
+
+        Expression[] callArgs = parseCallArguments(callNode);
+
+        return new TemplateInstantiationExpression(loc, templateName, templateArgs, callArgs);
     }
     
     /**
@@ -2774,10 +2843,10 @@ class TreeSitterBridge {
      */
     SourceLocation makeSourceLocation(TSNode node) {
         import parser.tree_sitter_c : ts_node_start_byte, ts_node_end_byte;
-        
+
         auto startPoint = TreeSitterParser.getStartPoint(node);
         auto endPoint = TreeSitterParser.getEndPoint(node);
-        
+
         return SourceLocation(
             filename,
             startPoint.row + 1,  // tree-sitter uses 0-based rows
@@ -2785,5 +2854,203 @@ class TreeSitterBridge {
             ts_node_start_byte(node),
             ts_node_end_byte(node)
         );
+    }
+
+    // ===== Template support helpers =====
+
+    /// Parse template_parameters node: (T) or (T, U)
+    private TemplateParamType[] parseTemplateParams(TSNode node, SourceLocation loc) {
+        TemplateParamType[] result;
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            if (childType == "template_parameter") {
+                // template_parameter -> identifier (for type params)
+                uint tpChildCount = TreeSitterParser.getChildCount(child);
+                for (uint j = 0; j < tpChildCount; j++) {
+                    TSNode tpChild = TreeSitterParser.getChild(child, j);
+                    if (TreeSitterParser.getNodeType(tpChild) == "identifier") {
+                        string paramName = TreeSitterParser.getNodeText(tpChild, sourceText);
+                        result ~= new TemplateParamType(loc, paramName);
+                        break;
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
+    /// Parse template_arguments node into types: !int or !(int, float)
+    private Type[] parseTemplateArgTypes(TSNode node) {
+        Type[] result;
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+
+            if (childType == "!" || childType == "(" || childType == ")" || childType == ",")
+                continue;
+
+            // type node wrapping a builtin_type or user type
+            if (childType == "type" || childType == "primitive_type") {
+                result ~= parseType(child);
+                continue;
+            }
+
+            // Single arg: _template_single_arg (identifier, builtin_type, literal)
+            if (childType == "identifier" || childType == "int" || childType == "uint" ||
+                childType == "long" || childType == "ulong" || childType == "float" ||
+                childType == "double" || childType == "byte" || childType == "ubyte" ||
+                childType == "short" || childType == "ushort" || childType == "bool" ||
+                childType == "char" || childType == "void") {
+                auto argLoc = makeSourceLocation(child);
+                string text = TreeSitterParser.getNodeText(child, sourceText);
+                result ~= parseBasicTypeByText(text, argLoc);
+                continue;
+            }
+
+            // template_argument wraps a type or expression
+            if (childType == "template_argument") {
+                uint taChildCount = TreeSitterParser.getChildCount(child);
+                for (uint j = 0; j < taChildCount; j++) {
+                    TSNode taChild = TreeSitterParser.getChild(child, j);
+                    string taChildType = TreeSitterParser.getNodeType(taChild);
+                    if (taChildType == "type") {
+                        result ~= parseType(taChild);
+                        break;
+                    } else if (taChildType == "identifier") {
+                        auto argLoc = makeSourceLocation(taChild);
+                        string text = TreeSitterParser.getNodeText(taChild, sourceText);
+                        result ~= new UserType(argLoc, text);
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            // template_argument_list wraps multiple template_arguments
+            if (childType == "template_argument_list") {
+                uint talChildCount = TreeSitterParser.getChildCount(child);
+                for (uint j = 0; j < talChildCount; j++) {
+                    TSNode talChild = TreeSitterParser.getChild(child, j);
+                    string talChildType = TreeSitterParser.getNodeType(talChild);
+                    if (talChildType == "template_argument") {
+                        uint taChildCount = TreeSitterParser.getChildCount(talChild);
+                        for (uint k = 0; k < taChildCount; k++) {
+                            TSNode taChild = TreeSitterParser.getChild(talChild, k);
+                            string taChildType = TreeSitterParser.getNodeType(taChild);
+                            if (taChildType == "type") {
+                                result ~= parseType(taChild);
+                                break;
+                            } else if (taChildType == "identifier") {
+                                auto argLoc = makeSourceLocation(taChild);
+                                string text = TreeSitterParser.getNodeText(taChild, sourceText);
+                                result ~= new UserType(argLoc, text);
+                                break;
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+        return result;
+    }
+
+    /// Replace UserType references matching template param names with the shared TemplateParamType.
+    private Type replaceTemplateTypeRefs(Type type, TemplateParamType[] templateParams) {
+        if (type is null) return null;
+
+        if (auto ut = cast(UserType)type) {
+            foreach (tp; templateParams) {
+                if (ut.name == tp.paramName)
+                    return tp;
+            }
+            return type;
+        }
+        if (auto at = cast(ArrayType)type) {
+            auto newElem = replaceTemplateTypeRefs(at.elementType, templateParams);
+            if (newElem !is at.elementType)
+                at.elementType = newElem;
+            return type;
+        }
+        if (auto pt = cast(PointerType)type) {
+            auto newPointee = replaceTemplateTypeRefs(pt.pointeeType, templateParams);
+            if (newPointee !is pt.pointeeType)
+                pt.pointeeType = newPointee;
+            return type;
+        }
+        return type;
+    }
+
+    /// Walk a statement tree and replace UserType refs matching template params.
+    private void replaceTemplateTypeRefsInStatement(Statement stmt, TemplateParamType[] tp) {
+        if (stmt is null) return;
+
+        if (auto cs = cast(CompoundStatement)stmt) {
+            foreach (s; cs.statements)
+                replaceTemplateTypeRefsInStatement(s, tp);
+        } else if (auto ifs = cast(IfStatement)stmt) {
+            replaceTemplateTypeRefsInExpression(ifs.condition, tp);
+            replaceTemplateTypeRefsInStatement(ifs.thenStatement, tp);
+            replaceTemplateTypeRefsInStatement(ifs.elseStatement, tp);
+        } else if (auto ws = cast(WhileStatement)stmt) {
+            replaceTemplateTypeRefsInExpression(ws.condition, tp);
+            replaceTemplateTypeRefsInStatement(ws.body_, tp);
+        } else if (auto fs = cast(ForStatement)stmt) {
+            replaceTemplateTypeRefsInStatement(fs.init, tp);
+            replaceTemplateTypeRefsInExpression(fs.condition, tp);
+            replaceTemplateTypeRefsInExpression(fs.update, tp);
+            replaceTemplateTypeRefsInStatement(fs.body_, tp);
+        } else if (auto rs = cast(ReturnStatement)stmt) {
+            replaceTemplateTypeRefsInExpression(rs.value, tp);
+        } else if (auto es = cast(ExpressionStatement)stmt) {
+            replaceTemplateTypeRefsInExpression(es.expression, tp);
+        } else if (auto vds = cast(VariableDeclarationStatement)stmt) {
+            vds.type = replaceTemplateTypeRefs(vds.type, tp);
+            replaceTemplateTypeRefsInExpression(vds.initializer, tp);
+        }
+        // BreakStatement, ContinueStatement, MixinStatement: no types to replace
+    }
+
+    /// Walk an expression tree and replace UserType refs matching template params.
+    private void replaceTemplateTypeRefsInExpression(Expression expr, TemplateParamType[] tp) {
+        if (expr is null) return;
+
+        if (auto bin = cast(BinaryExpression)expr) {
+            replaceTemplateTypeRefsInExpression(bin.left, tp);
+            replaceTemplateTypeRefsInExpression(bin.right, tp);
+        } else if (auto un = cast(UnaryExpression)expr) {
+            replaceTemplateTypeRefsInExpression(un.operand, tp);
+        } else if (auto call = cast(CallExpression)expr) {
+            replaceTemplateTypeRefsInExpression(call.function_, tp);
+            foreach (arg; call.arguments)
+                replaceTemplateTypeRefsInExpression(arg, tp);
+        } else if (auto ti = cast(TemplateInstantiationExpression)expr) {
+            foreach (ref targ; ti.templateArguments)
+                targ = replaceTemplateTypeRefs(targ, tp);
+            foreach (arg; ti.callArguments)
+                replaceTemplateTypeRefsInExpression(arg, tp);
+        } else if (auto idx = cast(IndexExpression)expr) {
+            replaceTemplateTypeRefsInExpression(idx.array, tp);
+            replaceTemplateTypeRefsInExpression(idx.index, tp);
+        } else if (auto sl = cast(SliceExpression)expr) {
+            replaceTemplateTypeRefsInExpression(sl.array, tp);
+            replaceTemplateTypeRefsInExpression(sl.start, tp);
+            replaceTemplateTypeRefsInExpression(sl.end, tp);
+        } else if (auto mem = cast(MemberExpression)expr) {
+            replaceTemplateTypeRefsInExpression(mem.object, tp);
+        } else if (auto assign = cast(AssignmentExpression)expr) {
+            replaceTemplateTypeRefsInExpression(assign.left, tp);
+            replaceTemplateTypeRefsInExpression(assign.right, tp);
+        } else if (auto cast_ = cast(CastExpression)expr) {
+            cast_.targetType = replaceTemplateTypeRefs(cast_.targetType, tp);
+            replaceTemplateTypeRefsInExpression(cast_.expression, tp);
+        } else if (auto arrLit = cast(ArrayLiteralExpression)expr) {
+            foreach (elem; arrLit.elements)
+                replaceTemplateTypeRefsInExpression(elem, tp);
+        }
+        // IdentifierExpression, LiteralExpression, ImportExpression, TraitsExpression: no type refs to replace
     }
 }

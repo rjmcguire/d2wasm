@@ -175,6 +175,37 @@ class CallExpression : Expression {
 }
 
 /**
+ * Template instantiation call: templateName!typeArgs(callArgs)
+ * E.g. max!int(3, 5)
+ */
+class TemplateInstantiationExpression : Expression {
+    string templateName;
+    Type[] templateArguments;
+    Expression[] callArguments;
+
+    // Set during semantic analysis
+    FunctionDecl resolvedInstantiation;
+
+    this(SourceLocation loc, string templateName, Type[] templateArguments, Expression[] callArguments) {
+        super(loc);
+        this.templateName = templateName;
+        this.templateArguments = templateArguments;
+        this.callArguments = callArguments;
+    }
+
+    override bool isConstant() const { return false; }
+    override bool hasLValue() const { return false; }
+
+    override string toString() const {
+        import std.algorithm : map;
+        import std.array : join, array;
+        string typeStr = templateArguments.map!(t => t.toString()).array.join(", ");
+        string argStr = callArguments.map!(a => a.toString()).array.join(", ");
+        return format("%s!(%s)(%s)", templateName, typeStr, argStr);
+    }
+}
+
+/**
  * Array indexing: array[index]
  */
 class IndexExpression : Expression {

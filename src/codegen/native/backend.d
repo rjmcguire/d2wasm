@@ -1578,6 +1578,29 @@ class NativeCompiledFunction : CompiledFunction {
         } else if (auto traits = cast(TraitsExpression)expr) {
             traits.evaluate();
             gen.emitImm32(stencil_load_imm32, traits.boolResult ? 1 : 0);
+        } else if (auto tmplInst = cast(TemplateInstantiationExpression)expr) {
+            // Template instantiation call — emit like a regular call using the mangled name
+            auto inst = tmplInst.resolvedInstantiation;
+            if (!inst)
+                throw new Exception("Template instantiation not resolved: " ~ tmplInst.templateName);
+
+            auto labelPtr = inst.name in functionLabels;
+            if (!labelPtr)
+                throw new Exception("Template instantiation label not found: " ~ inst.name);
+
+            // Compile arguments into registers
+            for (long i = cast(long)tmplInst.callArguments.length - 1; i >= 0; i--) {
+                compileExpression(tmplInst.callArguments[i]);
+                switch (i) {
+                    case 0: break;
+                    case 1: gen.emitMoveX0ToX1(); break;
+                    case 2: gen.emitMoveX0ToX2(); break;
+                    case 3: gen.emitMoveX0ToX3(); break;
+                    default: assert(0, "argument register > 3");
+                }
+            }
+
+            gen.emitCall(*labelPtr);
         } else {
             throw new Exception("Expression type not yet supported in native backend: " ~
                 typeid(expr).toString());

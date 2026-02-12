@@ -425,6 +425,12 @@ class CTFEEvaluator {
             }
         }
         
+        // Check for template instantiation call (e.g., enum RESULT = max!int(3, 8))
+        if (auto tmplInst = cast(TemplateInstantiationExpression)manifest.initializer) {
+            evaluateTemplateInstantiationCall(manifest, tmplInst);
+            return;
+        }
+
         // Check for array literal
         if (auto arrayLit = cast(ArrayLiteralExpression)manifest.initializer) {
             evaluateArrayLiteral(manifest, arrayLit);
@@ -877,6 +883,46 @@ class CTFEEvaluator {
         return CTFEResult.fromInt(result);
     }
     
+    /**
+     * Evaluate a template instantiation call as a manifest constant.
+     * e.g. enum RESULT = max!int(3, 8)
+     */
+    void evaluateTemplateInstantiationCall(ManifestConstantDecl manifest, TemplateInstantiationExpression tmplInst) {
+        import semantic.template_instantiation : TemplateInstantiator;
+
+        // Find the template function
+        FunctionDecl templateFunc = null;
+        foreach (decl; allDeclarations) {
+            if (auto fd = cast(FunctionDecl)decl) {
+                if (fd.name == tmplInst.templateName && fd.isTemplate) {
+                    templateFunc = fd;
+                    break;
+                }
+            }
+        }
+        if (!templateFunc)
+            throw new CTFEError("CTFE: Template function '" ~ tmplInst.templateName ~ "' not found");
+
+        // Instantiate the template
+        auto instantiator = new TemplateInstantiator();
+        auto inst = instantiator.instantiate(templateFunc, tmplInst.templateArguments);
+        tmplInst.resolvedInstantiation = inst;
+
+        // Evaluate arguments
+        long[] args;
+        foreach (arg; tmplInst.callArguments) {
+            args ~= evaluateSimpleExpression(arg);
+        }
+
+        log(3, "CTFE: Calling template ", inst.name, " with args ", args);
+
+        long result = executeViaBackend(inst, args);
+        manifest.ctfeValue = result;
+        manifest.ctfeComplete = true;
+        manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Int32);
+        log(3, "CTFE: ", manifest.name, " = ", result, " (template call)");
+    }
+
     /**
      * Evaluate a function that returns a static array at compile time.
      * Handles the hidden __result parameter by:

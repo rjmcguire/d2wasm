@@ -15,6 +15,7 @@ import std.array;
 import std.algorithm;
 import std.conv;
 import std.stdio;
+import semantic.template_instantiation;
 import diagnostic.log : log;
 
 /**
@@ -58,16 +59,20 @@ class TypeChecker {
     private Type currentFunctionReturnType;
     private StructDecl currentStructDecl;  // Non-null when inside a struct method
     private ClassDecl currentClassDecl;    // Non-null when inside a class method
-    
+
     // Unique local ID counter - reset per function
     private uint nextLocalId;
-    
+
     // Stack of scope variable lists for RAII unwind tracking
     // Each entry is a list of local IDs declared in that scope
     private uint[][] scopeVarStack;
-    
+
+    // Template instantiation driver — shared across all type-checking in this compilation
+    TemplateInstantiator templateInstantiator;
+
     this(SymbolTable symbolTable) {
         this.symbolTable = symbolTable;
+        this.templateInstantiator = new TemplateInstantiator();
     }
     
     /**
@@ -724,6 +729,8 @@ class TypeChecker {
             return checkImportExpression(import_);
         } else if (auto traits = cast(TraitsExpression)expr) {
             return checkTraitsExpression(traits);
+        } else if (auto tmplInst = cast(TemplateInstantiationExpression)expr) {
+            return checkTemplateInstantiation(tmplInst);
         }
 
         throw new TypeError("Unknown expression type", expr.location);
@@ -804,7 +811,7 @@ class TypeChecker {
             expr.operator == BinaryExpression.Operator.ShiftRight ||
             expr.operator == BinaryExpression.Operator.UnsignedShiftRight) {
             
-            if (!isIntegerType(cast(BasicType)leftType) || !isIntegerType(cast(BasicType)rightType)) {
+            if (!isIntegerType(cast(BasicType)leftType.resolve()) || !isIntegerType(cast(BasicType)rightType.resolve())) {
                 throw new TypeError(
                     format("Bitwise operator requires integer types, got '%s' and '%s'",
                            leftType.toString(), rightType.toString()),
@@ -1206,6 +1213,72 @@ class TypeChecker {
         return functionType.returnType;
     }
     
+    /**
+     * Type check template instantiation call: max!int(3, 5)
+     */
+    Type checkTemplateInstantiation(TemplateInstantiationExpression expr) {
+        // Look up the template function by name
+        auto sym = symbolTable.lookupSymbol(expr.templateName);
+        if (!sym || sym.kind != SymbolKind.Function) {
+            throw new TypeError(
+                format("'%s' is not a template function", expr.templateName),
+                expr.location
+            );
+        }
+        auto templateFunc = cast(FunctionDecl)sym.declaration;
+        if (!templateFunc || !templateFunc.isTemplate) {
+            throw new TypeError(
+                format("'%s' is not a template function", expr.templateName),
+                expr.location
+            );
+        }
+
+        // Validate template argument count
+        if (expr.templateArguments.length != templateFunc.templateParams.length) {
+            throw new TypeError(
+                format("Template '%s' expects %d type arguments, got %d",
+                       expr.templateName, templateFunc.templateParams.length,
+                       expr.templateArguments.length),
+                expr.location
+            );
+        }
+
+        // Instantiate
+        auto inst = templateInstantiator.instantiate(templateFunc, expr.templateArguments);
+
+        // Type-check the instantiation body if not already done
+        if (!inst.isTypeChecked)
+            checkFunctionDeclaration(inst);
+
+        expr.resolvedInstantiation = inst;
+
+        // Check call argument count
+        if (expr.callArguments.length != inst.parameters.length) {
+            throw new TypeError(
+                format("'%s' expects %d arguments, got %d",
+                       inst.name, inst.parameters.length, expr.callArguments.length),
+                expr.location
+            );
+        }
+
+        // Check call argument types
+        for (size_t i = 0; i < expr.callArguments.length; i++) {
+            Type argType = checkExpression(expr.callArguments[i]);
+            Type paramType = inst.parameters[i].type;
+
+            auto compat = checkTypeCompatibility(argType, paramType);
+            if (!compat.isCompatible) {
+                throw new TypeError(
+                    format("Argument %d: expected type '%s', got '%s'",
+                           i + 1, paramType.toString(), argType.toString()),
+                    expr.callArguments[i].location
+                );
+            }
+        }
+
+        return inst.returnType;
+    }
+
     /**
      * Get a method from a struct by name, returns null if not found
      */
@@ -1650,6 +1723,8 @@ class TypeChecker {
      * Check if two types are compatible
      */
     TypeCompatibility checkTypeCompatibility(Type from, Type to) {
+        from = from.resolve();
+        to = to.resolve();
         // Exact type match
         if (typesEqual(from, to)) {
             return TypeCompatibility.compatible();
@@ -1775,6 +1850,8 @@ class TypeChecker {
      * Promote two arithmetic types to common type
      */
     Type promoteArithmeticTypes(Type left, Type right, SourceLocation location) {
+        left = left.resolve();
+        right = right.resolve();
         auto leftBasic = cast(BasicType)left;
         auto rightBasic = cast(BasicType)right;
         
@@ -1808,12 +1885,16 @@ class TypeChecker {
     bool typesEqual(Type a, Type b) {
         if (a is b) return true;
         if (!a || !b) return false;
+        a = a.resolve();
+        b = b.resolve();
+        if (a is b) return true;
         // Simplified equality check - in a full implementation this would be more sophisticated
         return a.toString() == b.toString();
     }
     
     bool isArithmeticType(Type type) {
         if (!type) return false;
+        type = type.resolve();
         auto basic = cast(BasicType)type;
         return basic && (isIntegerType(basic) || isFloatingType(basic));
     }
@@ -1824,6 +1905,7 @@ class TypeChecker {
     
     bool isIntegralType(Type type) {
         if (!type) return false;
+        type = type.resolve();
         auto basic = cast(BasicType)type;
         return basic && isIntegerType(basic);
     }
@@ -1862,6 +1944,7 @@ class TypeChecker {
     
     bool isBooleanConvertible(Type type) {
         // D requires strict bool - no implicit conversion from int/float
+        type = type.resolve();
         auto basic = cast(BasicType)type;
         if (basic) {
             return basic.kind == BasicType.Kind.Bool;
@@ -1871,6 +1954,7 @@ class TypeChecker {
     
     bool isVoidType(Type type) {
         if (!type) return false;
+        type = type.resolve();
         auto basic = cast(BasicType)type;
         return basic && basic.kind == BasicType.Kind.Void;
     }
