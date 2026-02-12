@@ -388,6 +388,7 @@ class TreeSitterBridge {
         funcDecl.visibility = vis;
         funcDecl.attrs = dattrs;
         funcDecl.templateParams = templateParams;
+        funcDecl.sourceText = sourceText;  // store reference for template re-parsing
         return funcDecl;
     }
     

@@ -39,9 +39,17 @@ struct SourceLocation {
 abstract class ASTNode {
     SourceLocation location;
     ASTNode parent;
-    
+    string sourceText;  // reference to original source (D slice, not a copy)
+
     this(SourceLocation loc) {
         location = loc;
+    }
+
+    /// Get this node's original source text.
+    string getSourceText() const {
+        if (sourceText && location.startOffset < sourceText.length && location.endOffset <= sourceText.length)
+            return sourceText[location.startOffset .. location.endOffset];
+        return null;
     }
     
     // TODO: Add visitor pattern support later

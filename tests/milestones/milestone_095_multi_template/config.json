@@ -1,0 +1,7 @@
+{
+  "name": "multi_template",
+  "description": "Multiple instantiations of the same template with different types",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 50
+}

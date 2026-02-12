@@ -1246,9 +1246,20 @@ class TypeChecker {
         // Instantiate
         auto inst = templateInstantiator.instantiate(templateFunc, expr.templateArguments);
 
-        // Type-check the instantiation body if not already done
-        if (!inst.isTypeChecked)
+        // Type-check the instantiation at module scope (not nested inside caller's scope).
+        // Must also save/restore nextLocalId and scopeVarStack, since checkFunctionDeclaration
+        // resets them — otherwise the caller's local variable IDs get corrupted.
+        if (!inst.isTypeChecked) {
+            auto saved = symbolTable.saveAndResetScope();
+            auto savedNextLocalId = nextLocalId;
+            auto savedScopeVarStack = scopeVarStack;
+            scope(exit) {
+                symbolTable.restoreScope(saved);
+                nextLocalId = savedNextLocalId;
+                scopeVarStack = savedScopeVarStack;
+            }
             checkFunctionDeclaration(inst);
+        }
 
         expr.resolvedInstantiation = inst;
 

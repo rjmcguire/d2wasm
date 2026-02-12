@@ -303,6 +303,26 @@ class SymbolTable {
         return null;
     }
     
+    /// Saved scope state for temporary scope switching (e.g., template instantiation).
+    struct ScopeState {
+        Scope currentScope;
+        Scope[] scopeStack;
+    }
+
+    /// Save current scope state and reset to global scope.
+    ScopeState saveAndResetScope() {
+        auto saved = ScopeState(currentScope, scopeStack.dup);
+        currentScope = globalScope;
+        scopeStack = null;
+        return saved;
+    }
+
+    /// Restore a previously saved scope state.
+    void restoreScope(ScopeState saved) {
+        currentScope = saved.currentScope;
+        scopeStack = saved.scopeStack;
+    }
+
     /**
      * Enter a new scope
      */
