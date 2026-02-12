@@ -60,65 +60,12 @@ class TypeChecker {
     private StructDecl currentStructDecl;  // Non-null when inside a struct method
     private ClassDecl currentClassDecl;    // Non-null when inside a class method
 
-    // Unique local ID counter - reset per function
-    private uint nextLocalId;
-
-    // Stack of scope variable lists for RAII unwind tracking
-    // Each entry is a list of local IDs declared in that scope
-    private uint[][] scopeVarStack;
-
     // Template instantiation driver — shared across all type-checking in this compilation
     TemplateInstantiator templateInstantiator;
 
     this(SymbolTable symbolTable) {
         this.symbolTable = symbolTable;
         this.templateInstantiator = new TemplateInstantiator();
-    }
-    
-    /**
-     * Allocate the next unique local ID (for variables/parameters)
-     */
-    private uint allocateLocalId() {
-        return nextLocalId++;
-    }
-    
-    /**
-     * Push a new scope onto the variable tracking stack
-     */
-    private void pushScopeVars() {
-        uint[] empty;
-        scopeVarStack ~= empty;
-    }
-    
-    /**
-     * Pop the current scope from the variable tracking stack
-     */
-    private uint[] popScopeVars() {
-        if (scopeVarStack.length == 0) return [];
-        auto vars = scopeVarStack[$-1];
-        scopeVarStack = scopeVarStack[0..$-1];
-        return vars;
-    }
-    
-    /**
-     * Add a variable to the current scope's tracking list
-     */
-    private void trackScopeVar(uint localId) {
-        if (scopeVarStack.length > 0) {
-            scopeVarStack[$-1] ~= localId;
-        }
-    }
-    
-    /**
-     * Get the current unwind chain (all scope vars from innermost to outermost)
-     */
-    private uint[][] getUnwindChain() {
-        // Return a copy of the stack (innermost is at index 0)
-        uint[][] chain;
-        foreach_reverse (scope_; scopeVarStack) {
-            chain ~= scope_.dup;
-        }
-        return chain;
     }
     
     /**
@@ -166,11 +113,8 @@ class TypeChecker {
         symbolTable.enterScope("function:" ~ decl.name);
         scope(exit) symbolTable.exitScope();
         
-        // Reset unique local ID counter and scope tracking for this function
-        nextLocalId = 0;
-        scopeVarStack = [];
-        pushScopeVars();  // Function scope
-        scope(exit) popScopeVars();
+        // Reset unique local ID counter for this function
+        symbolTable.nextLocalId = 0;
         
         // Set current return type for return statement checking
         Type oldReturnType = currentFunctionReturnType;
@@ -195,7 +139,7 @@ class TypeChecker {
             log(3, "  Parameter: ", param.name);
             
             // Assign unique local ID
-            param.uniqueLocalId = allocateLocalId();
+            param.uniqueLocalId = symbolTable.allocateLocalId();
             
             // Check if parameter type is null (from parsing issues)
             if (!param.type) {
@@ -571,9 +515,8 @@ class TypeChecker {
         
         if (auto compound = cast(CompoundStatement)stmt) {
             symbolTable.enterScope("block");
-            pushScopeVars();
             scope(exit) {
-                compound.destructOnExit = popScopeVars();
+                compound.destructOnExit = symbolTable.popScopeVars();
                 symbolTable.exitScope();
             }
             
@@ -627,7 +570,7 @@ class TypeChecker {
             checkStatement(forStmt.body_);
         } else if (auto returnStmt = cast(ReturnStatement)stmt) {
             // Capture unwind chain for RAII destruction
-            returnStmt.unwindChain = getUnwindChain();
+            returnStmt.unwindChain = symbolTable.getUnwindChain();
             
             if (returnStmt.value) {
                 Type returnType = checkExpression(returnStmt.value);
@@ -656,10 +599,10 @@ class TypeChecker {
             checkExpression(exprStmt.expression);
         } else if (auto varDeclStmt = cast(VariableDeclarationStatement)stmt) {
             // Assign unique local ID
-            varDeclStmt.uniqueLocalId = allocateLocalId();
-            
+            varDeclStmt.uniqueLocalId = symbolTable.allocateLocalId();
+
             // Track for RAII unwind
-            trackScopeVar(varDeclStmt.uniqueLocalId);
+            symbolTable.trackScopeVar(varDeclStmt.uniqueLocalId);
             
             // Link UserType to its declaration
             if (auto userType = cast(UserType)varDeclStmt.type) {
@@ -1247,17 +1190,10 @@ class TypeChecker {
         auto inst = templateInstantiator.instantiate(templateFunc, expr.templateArguments);
 
         // Type-check the instantiation at module scope (not nested inside caller's scope).
-        // Must also save/restore nextLocalId and scopeVarStack, since checkFunctionDeclaration
-        // resets them — otherwise the caller's local variable IDs get corrupted.
+        // saveAndResetScope handles all scope state: symbol scopes, nextLocalId, declaredVars.
         if (!inst.isTypeChecked) {
             auto saved = symbolTable.saveAndResetScope();
-            auto savedNextLocalId = nextLocalId;
-            auto savedScopeVarStack = scopeVarStack;
-            scope(exit) {
-                symbolTable.restoreScope(saved);
-                nextLocalId = savedNextLocalId;
-                scopeVarStack = savedScopeVarStack;
-            }
+            scope(exit) symbolTable.restoreScope(saved);
             checkFunctionDeclaration(inst);
         }
 

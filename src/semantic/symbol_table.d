@@ -86,7 +86,8 @@ class Scope {
     Scope parent;
     Symbol[string] symbols;
     string name;  // For debugging
-    
+    uint[] declaredVars;  // Local IDs declared in this scope (for RAII unwind)
+
     this(Scope parent = null, string name = "anonymous") {
         this.parent = parent;
         this.name = name;
@@ -303,17 +304,59 @@ class SymbolTable {
         return null;
     }
     
+    // --- Per-function scope state (local ID allocation) ---
+
+    /// Unique local ID counter — reset per function.
+    uint nextLocalId;
+
+    /// Allocate the next unique local ID (for variables/parameters).
+    uint allocateLocalId() {
+        return nextLocalId++;
+    }
+
+    // --- Per-scope variable tracking (RAII unwind) ---
+    // Variable lists live on Scope.declaredVars — no parallel stack needed.
+
+    /// Return the current scope's declared variable IDs (for destructOnExit).
+    uint[] popScopeVars() {
+        return currentScope.declaredVars;
+    }
+
+    /// Add a variable to the current scope's tracking list.
+    void trackScopeVar(uint localId) {
+        currentScope.declaredVars ~= localId;
+    }
+
+    /// Get the unwind chain from current scope up to the function scope (inclusive).
+    /// Returns innermost scope first.
+    uint[][] getUnwindChain() {
+        import std.string : startsWith;
+        uint[][] chain;
+        Scope s = currentScope;
+        while (s !is null) {
+            chain ~= s.declaredVars.dup;
+            if (s.name.startsWith("function:"))
+                break;
+            s = s.parent;
+        }
+        return chain;
+    }
+
+    // --- Scope state save/restore (for template instantiation) ---
+
     /// Saved scope state for temporary scope switching (e.g., template instantiation).
     struct ScopeState {
         Scope currentScope;
         Scope[] scopeStack;
+        uint nextLocalId;
     }
 
     /// Save current scope state and reset to global scope.
     ScopeState saveAndResetScope() {
-        auto saved = ScopeState(currentScope, scopeStack.dup);
+        auto saved = ScopeState(currentScope, scopeStack.dup, nextLocalId);
         currentScope = globalScope;
         scopeStack = null;
+        nextLocalId = 0;
         return saved;
     }
 
@@ -321,6 +364,7 @@ class SymbolTable {
     void restoreScope(ScopeState saved) {
         currentScope = saved.currentScope;
         scopeStack = saved.scopeStack;
+        nextLocalId = saved.nextLocalId;
     }
 
     /**
