@@ -510,6 +510,12 @@ class SymbolTable {
         writeNewlineSymbol.isCTFEOnly = true;
         globalScope.addSymbol(writeNewlineSymbol);
         
+        // Compiler intrinsics — raw opcodes, no function call overhead
+        addIntrinsicFunction("__intrinsic_shl", loc, i32Type, [i32Type, i32Type]);
+        addIntrinsicFunction("__intrinsic_shr_s", loc, i32Type, [i32Type, i32Type]);
+        addIntrinsicFunction("__intrinsic_shr_u", loc, i32Type, [i32Type, i32Type]);
+        addIntrinsicFunction("__intrinsic_unreachable", loc, voidType, []);
+
         // Register built-in methods for array/slice types
         registerArrayBuiltinMethods(loc);
     }
@@ -568,6 +574,16 @@ class SymbolTable {
         globalScope.addSymbol(symbol);
     }
     
+    /**
+     * Helper to add a compiler intrinsic function with explicit signature.
+     */
+    private void addIntrinsicFunction(string name, SourceLocation loc, Type returnType, Type[] paramTypes) {
+        auto funcType = new FunctionType(loc, returnType, paramTypes);
+        auto symbol = new Symbol(name, SymbolKind.Function, funcType, null, loc, true);
+        symbol.isCTFEOnly = true;
+        globalScope.addSymbol(symbol);
+    }
+
     /**
      * Debug: Print symbol table contents
      */

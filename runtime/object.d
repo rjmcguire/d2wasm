@@ -47,3 +47,22 @@ bool isDigit(char c) {
 bool isWhitespace(char c) {
     return cast(int)c == 32 || cast(int)c == 9 || cast(int)c == 10 || cast(int)c == 13;
 }
+
+// Checked shift operators — trap on out-of-range shift amounts
+T opShiftLeft(T)(T value, int amount) {
+    if (amount < 0 || amount >= 32)
+        __intrinsic_unreachable();
+    return __intrinsic_shl(value, amount);
+}
+
+T opShiftRight(T)(T value, int amount) {
+    if (amount < 0 || amount >= 32)
+        __intrinsic_unreachable();
+    return __intrinsic_shr_s(value, amount);
+}
+
+T opUnsignedShiftRight(T)(T value, int amount) {
+    if (amount < 0 || amount >= 32)
+        __intrinsic_unreachable();
+    return __intrinsic_shr_u(value, amount);
+}

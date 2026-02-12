@@ -2477,6 +2477,23 @@ private class EvalContext {
             throw new EmitError("Unsupported call expression in __eval");
         }
         
+        // Compiler intrinsics — raw opcodes
+        if (ident.name.length > 12 && ident.name[0..12] == "__intrinsic_") {
+            foreach (arg; expr.arguments)
+                emitExpression(out_, arg);
+            if (ident.name == "__intrinsic_shl")
+                out_ ~= Op.i32_shl;
+            else if (ident.name == "__intrinsic_shr_s")
+                out_ ~= Op.i32_shr_s;
+            else if (ident.name == "__intrinsic_shr_u")
+                out_ ~= Op.i32_shr_u;
+            else if (ident.name == "__intrinsic_unreachable")
+                out_ ~= Op.unreachable;
+            else
+                throw new EmitError("Unknown intrinsic in __eval: " ~ ident.name, expr.location);
+            return;
+        }
+
         if (ident.name == "__text") {
             // __text(expr) - convert integer expression to string at compile time
             if (expr.arguments.length != 1) {

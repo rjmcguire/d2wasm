@@ -1,0 +1,7 @@
+{
+  "name": "intrinsics",
+  "description": "Compiler intrinsics emit raw opcodes",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 20
+}

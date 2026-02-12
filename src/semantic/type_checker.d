@@ -102,7 +102,13 @@ class TypeChecker {
         if (decl.isTypeChecked) {
             return;
         }
-        
+
+        // Skip uninstantiated template functions — they are type-checked
+        // when instantiated with concrete types
+        if (decl.isTemplate) {
+            return;
+        }
+
         log(3, "Type checking function: ", decl.name);
         
         // Note: CTFE-only functions (e.g. those returning ubyte[] for mixin)

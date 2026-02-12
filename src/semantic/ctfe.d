@@ -845,6 +845,13 @@ class CTFEEvaluator {
         if (identExpr.name == "__writeln") {
             return CTFEResult.fromInt(evaluateCtfeWriteln(callExpr));
         }
+
+        // Compiler intrinsics — evaluate via backend (emitIntExpressionModule handles them)
+        if (identExpr.name.length > 12 && identExpr.name[0..12] == "__intrinsic_") {
+            long result = evaluateExpressionViaBackend(callExpr);
+            return CTFEResult.fromInt(result);
+        }
+
         string funcName = identExpr.name;
 
         // IFTI: if the call has a resolved instantiation, use it directly

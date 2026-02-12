@@ -1,0 +1,6 @@
+{
+  "name": "checked_shift_trap",
+  "description": "Checked shift traps on shift amount >= 32",
+  "type": "compile_error",
+  "expected_error": "unreachable executed"
+}

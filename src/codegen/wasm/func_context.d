@@ -3369,6 +3369,12 @@ class FuncContext {
             emitWritelnCall(out_, expr.arguments);
             return;
         }
+
+        // Compiler intrinsics — emit raw opcodes, no function call
+        if (ident.name.length > 12 && ident.name[0..12] == "__intrinsic_") {
+            emitIntrinsicCall(out_, ident.name, expr.arguments);
+            return;
+        }
         
         // Get callee's parameter types for interface conversion detection
         // Use IFTI resolved name if available
@@ -3702,6 +3708,29 @@ class FuncContext {
         uint funcIdx = emitter.getFuncIndex(inst.name);
         out_ ~= Op.call;
         leb128u(out_, funcIdx);
+    }
+
+    /**
+     * Emit a compiler intrinsic — raw opcode, no function call overhead.
+     */
+    void emitIntrinsicCall(ref Appender!(ubyte[]) out_, string name, Expression[] arguments) {
+        // Emit arguments
+        foreach (arg; arguments) {
+            emitExpression(out_, arg);
+        }
+
+        // Dispatch to raw opcode
+        if (name == "__intrinsic_shl") {
+            out_ ~= Op.i32_shl;
+        } else if (name == "__intrinsic_shr_s") {
+            out_ ~= Op.i32_shr_s;
+        } else if (name == "__intrinsic_shr_u") {
+            out_ ~= Op.i32_shr_u;
+        } else if (name == "__intrinsic_unreachable") {
+            out_ ~= Op.unreachable;
+        } else {
+            throw new EmitError("Unknown intrinsic: " ~ name);
+        }
     }
 
     /**

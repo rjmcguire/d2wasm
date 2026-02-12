@@ -1,0 +1,7 @@
+{
+  "name": "checked_shift",
+  "description": "Checked shift operator functions with valid amounts",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 20
+}

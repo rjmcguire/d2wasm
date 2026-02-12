@@ -1277,7 +1277,13 @@ class NativeCompiledFunction : CompiledFunction {
                     compileWriteln(call.arguments);
                     return;
                 }
-                
+
+                // Compiler intrinsics — emit raw opcodes, no function call
+                if (funcIdent.name.length > 12 && funcIdent.name[0..12] == "__intrinsic_") {
+                    compileIntrinsicCall(funcIdent.name, call.arguments);
+                    return;
+                }
+
                 // IFTI: use resolved instantiation name if available
                 string callName = call.resolvedInstantiation ? call.resolvedInstantiation.name : funcIdent.name;
 
@@ -2363,6 +2369,36 @@ class NativeCompiledFunction : CompiledFunction {
      * Compile __writeln(args...) by lowering to typed host function calls.
      * Milestone 89: Native __writeln support.
      */
+    /**
+     * Emit a compiler intrinsic — raw opcodes, no function call.
+     */
+    private void compileIntrinsicCall(string name, Expression[] args) {
+        if (name == "__intrinsic_shl") {
+            assert(args.length == 2, "__intrinsic_shl requires 2 arguments");
+            compileExpression(args[1]);
+            gen.emitMoveX0ToX1();
+            compileExpression(args[0]);
+            gen.emit(stencil_shl_i32);
+        } else if (name == "__intrinsic_shr_s") {
+            assert(args.length == 2, "__intrinsic_shr_s requires 2 arguments");
+            compileExpression(args[1]);
+            gen.emitMoveX0ToX1();
+            compileExpression(args[0]);
+            gen.emit(stencil_shr_i32);
+        } else if (name == "__intrinsic_shr_u") {
+            assert(args.length == 2, "__intrinsic_shr_u requires 2 arguments");
+            compileExpression(args[1]);
+            gen.emitMoveX0ToX1();
+            compileExpression(args[0]);
+            gen.emit(stencil_shr_i32);  // TODO: unsigned shift variant
+        } else if (name == "__intrinsic_unreachable") {
+            // BRK #1 — triggers SIGTRAP
+            gen.emitRaw32(0xD4200020);
+        } else {
+            throw new Exception("Unknown intrinsic: " ~ name);
+        }
+    }
+
     private void compileWriteln(Expression[] args) {
         import std.variant : Variant;
         

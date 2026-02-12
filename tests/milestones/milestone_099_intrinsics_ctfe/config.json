@@ -1,0 +1,7 @@
+{
+  "name": "intrinsics_ctfe",
+  "description": "Compiler intrinsics via CTFE",
+  "type": "wasm_exec",
+  "entry": "result",
+  "expected_result": 20
+}
