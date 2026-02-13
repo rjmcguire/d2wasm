@@ -24,8 +24,7 @@ enum SymbolKind {
     Type,
     Parameter,
     Field,
-    Template,
-    Alias
+    Template
 }
 
 /**
@@ -87,12 +86,23 @@ class Symbol {
 class Scope {
     Scope parent;
     Symbol[string] symbols;
+    Type[string] aliases;  // type alias registry (alias Name = Type)
     string name;  // For debugging
     uint[] declaredVars;  // Local IDs declared in this scope (for RAII unwind)
 
     this(Scope parent = null, string name = "anonymous") {
         this.parent = parent;
         this.name = name;
+    }
+
+    void addAlias(string aliasName, Type targetType) {
+        aliases[aliasName] = targetType;
+    }
+
+    Type lookupAlias(string aliasName) {
+        if (auto ptr = aliasName in aliases) return *ptr;
+        if (parent) return parent.lookupAlias(aliasName);
+        return null;
     }
     
     /**
@@ -397,13 +407,52 @@ class SymbolTable {
     }
     
     /**
+     * Register a type alias in the current scope.
+     */
+    void registerAlias(string aliasName, Type targetType) {
+        currentScope.addAlias(aliasName, targetType);
+    }
+
+    /**
+     * Look up a type alias in the scope chain.
+     */
+    Type lookupAlias(string aliasName) {
+        return currentScope.lookupAlias(aliasName);
+    }
+
+    /**
      * Look up symbol starting from current scope.
      * For manifest constants, triggers lazy CTFE evaluation to ensure
      * the type is correct (e.g., string vs int).
+     * For type aliases, transparently resolves to the underlying symbol.
      */
     Symbol lookupSymbol(string name) {
         auto symbol = currentScope.lookup(name);
-        
+
+        // Follow alias registry for unknown names
+        if (!symbol) {
+            auto aliasType = currentScope.lookupAlias(name);
+            if (aliasType !is null) {
+                if (auto ut = cast(UserType)aliasType) {
+                    if (ut.declaration !is null) {
+                        // Fully resolved by a previous type-checker pass —
+                        // create and cache a Type symbol for transparent access
+                        auto aliasSym = new Symbol(
+                            name, SymbolKind.Type, aliasType,
+                            ut.declaration, ut.declaration.location,
+                            inGlobalScope(), modulePath
+                        );
+                        currentScope.symbols[name] = aliasSym;
+                        symbol = aliasSym;
+                    } else {
+                        // Not yet resolved — follow by name
+                        return lookupSymbol(ut.name);
+                    }
+                }
+                // For primitive type aliases (BasicType target), no symbol to return
+            }
+        }
+
         // For manifest constants, ensure CTFE has run so type is correct
         if (symbol && symbol.isConstant) {
             if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
@@ -417,7 +466,7 @@ class SymbolTable {
                 }
             }
         }
-        
+
         return symbol;
     }
     
@@ -926,16 +975,7 @@ class SymbolCollector {
     }
 
     private void collectAliasSymbol(AliasDecl decl) {
-        auto symbol = new Symbol(
-            decl.name,
-            SymbolKind.Alias,
-            decl.targetType,
-            decl,
-            decl.location,
-            symbolTable.inGlobalScope(),
-            symbolTable.modulePath
-        );
-        symbolTable.addSymbol(symbol);
+        symbolTable.registerAlias(decl.name, decl.targetType);
     }
 
     private Type[] getFunctionParameterTypes(FunctionDecl decl) {

@@ -149,6 +149,7 @@ class CTFEEvaluator {
     private uint statCacheHits;           // times we reused cached context
     private uint statCacheMisses;         // times we needed to compile new functions
     private uint statCallCount;           // total CTFE calls
+    private uint ctfeWrapperCounter;      // unique names for synthetic wrapper functions
     private Duration statCompileTime;     // total time spent compiling
     private Duration statExecTime;        // total time spent executing
     private Duration statAnalysisTime;    // total time in dependency analysis
@@ -1013,17 +1014,39 @@ class CTFEEvaluator {
             return interpretIntFunction(funcDecl);
         }
         
+        // Check if any parameter is a struct type — needs full compilation via wrapper
+        bool hasStructParam = false;
+        foreach (param; funcDecl.parameters) {
+            auto pt = resolveAliasType(param.type);
+            if (pt.asStruct() !is null) {
+                hasStructParam = true;
+                break;
+            }
+        }
+
+        if (hasStructParam) {
+            // Struct args can't be decomposed into scalar values.
+            // Wrap the call in a synthetic function and compile through the full backend.
+            log(3, "CTFE: Function has struct params, using wrapper for full compilation");
+            auto retStmt = new ReturnStatement(callExpr.location, callExpr);
+            auto body_ = new CompoundStatement(callExpr.location, [cast(Statement)retStmt]);
+            auto wrapperName = "__ctfe_eval_" ~ to!string(ctfeWrapperCounter++);
+            auto wrapper = new FunctionDecl(callExpr.location, wrapperName,
+                new BasicType(callExpr.location, BasicType.Kind.Int32), [], body_);
+            return CTFEResult.fromInt(executeViaBackend(wrapper, []));
+        }
+
         // Evaluate arguments (must be literals or simple expressions)
         long[] args;
         foreach (arg; callExpr.arguments) {
             args ~= extractLiteralValue(arg);
         }
-        
+
         log(3, "CTFE: Calling ", funcName, " with args ", args);
-        
+
         // Execute via the configured backend (WASM or Native)
         long result = executeViaBackend(funcDecl, args);
-        
+
         return CTFEResult.fromInt(result);
     }
     
@@ -1517,6 +1540,17 @@ class CTFEEvaluator {
         throw new CTFEError("CTFE: Cannot evaluate expression at compile time: " ~ expr.toString(), expr.location);
     }
     
+    /// Resolve transparent type aliases via the symbol table's alias registry.
+    private Type resolveAliasType(Type type) {
+        if (auto ut = cast(UserType)type) {
+            auto target = symbolTable.lookupAlias(ut.name);
+            if (target) {
+                return resolveAliasType(target);
+            }
+        }
+        return type;
+    }
+
     /**
      * Check if a function can be interpreted directly (only contains CTFE intrinsics)
      */

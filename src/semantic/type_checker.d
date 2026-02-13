@@ -128,10 +128,13 @@ class TypeChecker {
         // Reset unique local ID counter for this function
         symbolTable.nextLocalId = 0;
         
-        // Resolve transparent type aliases in return type and parameters
+        // Resolve transparent type aliases in return type and parameters,
+        // then resolve any resulting UserTypes (template instantiation or declaration linking)
         decl.returnType = resolveAliasType(decl.returnType);
+        resolveUserType(decl.returnType);
         foreach (ref param; decl.parameters) {
             param.type = resolveAliasType(param.type);
+            resolveUserType(param.type);
         }
 
         // Set current return type for return statement checking
@@ -271,8 +274,9 @@ class TypeChecker {
      * Type check variable declaration
      */
     void checkVariableDeclaration(VariableDecl decl) {
-        // Resolve transparent type aliases
+        // Resolve transparent type aliases, then link UserType declarations
         decl.type = resolveAliasType(decl.type);
+        resolveUserType(decl.type);
 
         // Type check initializer if present
         if (decl.initializer) {
@@ -1828,12 +1832,26 @@ class TypeChecker {
     /// return the alias's target type (following chains). Otherwise return the type unchanged.
     private Type resolveAliasType(Type type) {
         if (auto ut = cast(UserType)type) {
-            auto sym = symbolTable.lookupSymbol(ut.name);
-            if (sym && sym.kind == SymbolKind.Alias) {
-                return resolveAliasType(sym.type);  // follow chains
+            auto target = symbolTable.lookupAlias(ut.name);
+            if (target) {
+                return resolveAliasType(target);  // follow chains
             }
         }
         return type;
+    }
+
+    /// Ensure a UserType has its declaration linked (template instantiation or plain lookup).
+    private void resolveUserType(Type type) {
+        if (auto ut = cast(UserType)type) {
+            if (ut.templateArgs.length > 0) {
+                resolveTemplateUserType(ut);
+            } else if (!ut.declaration) {
+                auto sym = symbolTable.lookupSymbol(ut.name);
+                if (sym && sym.kind == SymbolKind.Type) {
+                    ut.declaration = sym.declaration;
+                }
+            }
+        }
     }
 
     /// Try alias-this forwarding for member field access.

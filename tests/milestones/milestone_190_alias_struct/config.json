@@ -1,6 +1,6 @@
 {
   "name": "alias_struct",
-  "description": "Struct type alias (alias P = Point)",
+  "description": "Struct type alias and alias chains (alias Q = P = Point)",
   "type": "wasm_exec",
   "entry": "main",
   "expected_result": 42

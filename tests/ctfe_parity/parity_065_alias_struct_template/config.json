@@ -1,0 +1,7 @@
+{
+  "name": "alias_struct_template",
+  "description": "CTFE parity: alias of struct template instantiation",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 42
+}
