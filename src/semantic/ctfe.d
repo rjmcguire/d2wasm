@@ -308,7 +308,8 @@ class CTFEEvaluator {
      * Wraps the constraint in a synthetic function, compiles, and executes.
      * Throws TypeError if constraint evaluates to false, or on CTFE error.
      */
-    void evaluateTemplateConstraint(Expression constraintExpr, SourceLocation loc) {
+    void evaluateTemplateConstraint(Expression constraintExpr, SourceLocation loc,
+                                    string templateName, string[] typeBindings) {
         import ast.statements : ReturnStatement, CompoundStatement;
 
         auto retStmt = new ReturnStatement(loc, constraintExpr);
@@ -322,13 +323,20 @@ class CTFEEvaluator {
             result = executeViaBackend(wrapper, []);
         } catch (CTFEError e) {
             throw new TypeError(
-                format("While evaluating template constraint: %s", e.msg), loc);
+                format("While evaluating template constraint for '%s': %s",
+                       templateName, e.msg), loc);
         } catch (Exception e) {
             throw new TypeError(
-                format("While evaluating template constraint: %s", e.msg), loc);
+                format("While evaluating template constraint for '%s': %s",
+                       templateName, e.msg), loc);
         }
         if (result == 0) {
-            throw new TypeError("Template constraint not satisfied", loc);
+            string msg = format("Template constraint not satisfied for '%s'\n  with:\n",
+                                templateName);
+            foreach (b; typeBindings)
+                msg ~= format("    %s\n", b);
+            msg ~= format("  constraint: %s = false", constraintExpr.toString());
+            throw new TypeError(msg, loc);
         }
     }
 

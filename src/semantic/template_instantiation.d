@@ -23,7 +23,7 @@ class TemplateInstantiator {
 
     /// Delegate for evaluating template constraints via CTFE.
     /// Throws on failure (TypeError if constraint not satisfied, or CTFE error).
-    void delegate(Expression, SourceLocation) constraintEvaluator;
+    void delegate(Expression, SourceLocation, string, string[]) constraintEvaluator;
 
     /// Instantiate a template for given type arguments.
     /// Returns the eponymous member Declaration (FunctionDecl, StructDecl, etc.).
@@ -82,7 +82,11 @@ class TemplateInstantiator {
         if (freshTmpl.constraint !is null) {
             substituteInExpression(freshTmpl.constraint, typeMap);
             if (constraintEvaluator !is null) {
-                constraintEvaluator(freshTmpl.constraint, tmpl.location);
+                string[] bindings;
+                foreach (i, tp; tmpl.templateParams)
+                    bindings ~= tp.paramName ~ " = " ~ typeArgs[i].toString();
+                constraintEvaluator(freshTmpl.constraint, tmpl.location,
+                                    tmpl.name, bindings);
             }
         }
 
@@ -137,12 +141,19 @@ private void substituteInDeclaration(Declaration decl, Type[string] typeMap) {
     }
 }
 
-/// Replace TemplateParamType nodes with concrete types.
+/// Replace TemplateParamType and UserType nodes matching template params with concrete types.
 private Type substituteType(Type type, Type[string] typeMap) {
     if (type is null) return null;
 
     if (auto tpt = cast(TemplateParamType)type) {
         if (auto concrete = tpt.paramName in typeMap)
+            return *concrete;
+        return type;
+    }
+    // After re-parsing, template param names in non-signature positions (e.g. __traits args)
+    // appear as UserType, not TemplateParamType — substitute those too.
+    if (auto ut = cast(UserType)type) {
+        if (auto concrete = ut.name in typeMap)
             return *concrete;
         return type;
     }

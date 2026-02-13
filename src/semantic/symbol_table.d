@@ -219,7 +219,7 @@ class SymbolTable {
 
     // Template constraint evaluation - callback set by CTFEEvaluator
     // Throws TypeError if constraint not satisfied, or on evaluation error.
-    void delegate(Expression, SourceLocation) constraintEvaluator;
+    void delegate(Expression, SourceLocation, string, string[]) constraintEvaluator;
     
     this() {
         globalScope = new Scope(null, "global");
