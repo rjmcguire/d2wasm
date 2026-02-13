@@ -1,0 +1,7 @@
+{
+  "name": "is_expression",
+  "description": "is(...) compile-time type introspection expressions",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 42
+}

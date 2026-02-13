@@ -533,6 +533,39 @@ class ImportExpression : Expression {
 }
 
 /**
+ * is(...) expression: compile-time type introspection.
+ * Forms: is(T), is(T == int), is(T == struct), is(T : int)
+ */
+class IsExpression : Expression {
+    Type checkedType;       // The type being tested
+    string operator;        // "==" or ":" or null (bare is(T))
+    Type specType;          // Specific type for == or : (e.g., int)
+    string specKeyword;     // Category keyword: "struct", "class", "interface", "enum", null
+    bool boolResult;
+    bool evaluated;
+
+    this(SourceLocation loc, Type checkedType, string operator = null,
+         Type specType = null, string specKeyword = null) {
+        super(loc);
+        this.checkedType = checkedType;
+        this.operator = operator;
+        this.specType = specType;
+        this.specKeyword = specKeyword;
+    }
+
+    override bool isConstant() const { return true; }
+    override bool hasLValue() const { return false; }
+
+    override string toString() const {
+        if (operator is null)
+            return format("is(%s)", checkedType);
+        if (specKeyword !is null)
+            return format("is(%s %s %s)", checkedType, operator, specKeyword);
+        return format("is(%s %s %s)", checkedType, operator, specType);
+    }
+}
+
+/**
  * __traits expression: __traits(keyword, args...)
  * Evaluates to a compile-time constant based on type/symbol properties.
  */

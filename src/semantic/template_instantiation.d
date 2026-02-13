@@ -240,5 +240,9 @@ private void substituteInExpression(Expression expr, Type[string] typeMap) {
     } else if (auto traits = cast(TraitsExpression)expr) {
         foreach (ref t; traits.typeArguments)
             t = substituteType(t, typeMap);
+    } else if (auto isExpr = cast(IsExpression)expr) {
+        isExpr.checkedType = substituteType(isExpr.checkedType, typeMap);
+        if (isExpr.specType !is null)
+            isExpr.specType = substituteType(isExpr.specType, typeMap);
     }
 }

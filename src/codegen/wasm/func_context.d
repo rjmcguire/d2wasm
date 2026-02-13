@@ -1972,6 +1972,9 @@ class FuncContext {
             traits.evaluate();
             out_ ~= Op.i32_const;
             leb128s(out_, traits.boolResult ? 1 : 0);
+        } else if (auto isExpr = cast(IsExpression)expr) {
+            out_ ~= Op.i32_const;
+            leb128s(out_, isExpr.boolResult ? 1 : 0);
         } else if (auto tmplInst = cast(TemplateInstantiationExpression)expr) {
             emitTemplateCall(out_, tmplInst);
         } else {

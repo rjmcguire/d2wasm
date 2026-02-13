@@ -1619,6 +1619,8 @@ class NativeCompiledFunction : CompiledFunction {
         } else if (auto traits = cast(TraitsExpression)expr) {
             traits.evaluate();
             gen.emitImm32(stencil_load_imm32, traits.boolResult ? 1 : 0);
+        } else if (auto isExpr = cast(IsExpression)expr) {
+            gen.emitImm32(stencil_load_imm32, isExpr.boolResult ? 1 : 0);
         } else if (auto tmplInst = cast(TemplateInstantiationExpression)expr) {
             // Struct template construction: Pair!(int, int)(10, 20)
             if (tmplInst.resolvedStructInstantiation) {

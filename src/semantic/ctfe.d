@@ -440,6 +440,18 @@ class CTFEEvaluator {
             return;
         }
 
+        // Check for is(...) expression (e.g., enum IS_STRUCT = is(Point == struct))
+        if (auto isExpr = cast(IsExpression)manifest.initializer) {
+            // is() needs type resolution — create a type checker to resolve
+            auto tc = new TypeChecker(symbolTable);
+            tc.checkIsExpression(isExpr);
+            manifest.ctfeValue = isExpr.boolResult ? 1 : 0;
+            manifest.ctfeComplete = true;
+            manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Bool);
+            log(3, "CTFE: ", manifest.name, " = ", isExpr.boolResult ? "true" : "false", " (is expression)");
+            return;
+        }
+
         // Check for unary expression (e.g., -42)
         if (auto unaryExpr = cast(UnaryExpression)manifest.initializer) {
             if (unaryExpr.operator == UnaryExpression.Operator.Minus) {

@@ -421,6 +421,11 @@ class MixinExpander {
             return evaluateTraitsBool(traits, loc);
         }
 
+        // Handle is(...) expressions
+        if (auto isExpr = cast(IsExpression)expr) {
+            return evaluateIsBool(isExpr, loc);
+        }
+
         // Handle unary ! (e.g., static if (!__traits(...)))
         if (auto unary = cast(UnaryExpression)expr) {
             if (unary.operator == UnaryExpression.Operator.LogicalNot) {
@@ -524,6 +529,44 @@ class MixinExpander {
 
         traits.evaluate();
         return traits.boolResult;
+    }
+
+    /**
+     * Evaluate an is(...) expression to a boolean result.
+     */
+    private bool evaluateIsBool(IsExpression isExpr, SourceLocation loc) {
+        // Resolve UserType.declaration from allDeclarations before evaluating.
+        if (auto ut = cast(UserType)isExpr.checkedType) {
+            if (ut.declaration is null) {
+                foreach (decl; allDeclarations) {
+                    if (decl.name == ut.name) {
+                        if (cast(StructDecl)decl || cast(ClassDecl)decl || cast(InterfaceDecl)decl) {
+                            ut.declaration = decl;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if (isExpr.specType !is null) {
+            if (auto ut = cast(UserType)isExpr.specType) {
+                if (ut.declaration is null) {
+                    foreach (decl; allDeclarations) {
+                        if (decl.name == ut.name) {
+                            if (cast(StructDecl)decl || cast(ClassDecl)decl || cast(InterfaceDecl)decl) {
+                                ut.declaration = decl;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        import semantic.type_checker : TypeChecker;
+        auto tc = new TypeChecker(tempSymbolTable);
+        tc.checkIsExpression(isExpr);
+        return isExpr.boolResult;
     }
 
     /**

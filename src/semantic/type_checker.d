@@ -727,6 +727,8 @@ class TypeChecker {
             return checkImportExpression(import_);
         } else if (auto traits = cast(TraitsExpression)expr) {
             return checkTraitsExpression(traits);
+        } else if (auto isExpr = cast(IsExpression)expr) {
+            return checkIsExpression(isExpr);
         } else if (auto tmplInst = cast(TemplateInstantiationExpression)expr) {
             return checkTemplateInstantiation(tmplInst);
         }
@@ -1755,6 +1757,46 @@ class TypeChecker {
             return false;
         } catch (Exception) {
             return false;
+        }
+    }
+
+    Type checkIsExpression(IsExpression expr) {
+        // Resolve UserType via symbol table
+        if (auto ut = cast(UserType)expr.checkedType) {
+            try { ut.ensureResolved(symbolTable); } catch (Exception) {}
+        }
+        if (expr.specType !is null) {
+            if (auto ut = cast(UserType)expr.specType) {
+                try { ut.ensureResolved(symbolTable); } catch (Exception) {}
+            }
+        }
+
+        if (expr.operator is null) {
+            // is(T) — type validity: true if type resolved successfully
+            expr.boolResult = expr.checkedType !is null;
+        } else if (expr.specKeyword !is null) {
+            // is(T == struct), is(T == class), etc.
+            expr.boolResult = checkTypeCategory(expr.checkedType, expr.specKeyword);
+        } else if (expr.operator == "==") {
+            // is(T == int) — exact type match
+            expr.boolResult = typesEqual(expr.checkedType, expr.specType);
+        } else if (expr.operator == ":") {
+            // is(T : int) — implicit conversion
+            expr.boolResult = checkTypeCompatibility(expr.checkedType, expr.specType).isCompatible;
+        }
+
+        expr.evaluated = true;
+        return new BasicType(expr.location, BasicType.Kind.Bool);
+    }
+
+    private bool checkTypeCategory(Type type, string category) {
+        if (type is null) return false;
+        switch (category) {
+            case "struct":    return type.asStruct() !is null;
+            case "class":     return type.asClass() !is null;
+            case "interface": return type.asInterface() !is null;
+            case "enum":      return false; // future: type.asEnum()
+            default:          return false;
         }
     }
 

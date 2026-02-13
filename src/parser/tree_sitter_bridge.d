@@ -2303,6 +2303,8 @@ class TreeSitterBridge {
                 return parseImportExpression(node, loc);
             case "traits_expression":
                 return parseTraitsExpression(node, loc);
+            case "is_expression":
+                return parseIsExpression(node, loc);
             case "index_expression":
                 return parseIndexExpression(node, loc);
             case "index":
@@ -2840,6 +2842,78 @@ class TreeSitterBridge {
                 throw new ParseError("Cannot parse __traits argument", argLoc);
             }
         }
+    }
+
+    /**
+     * Parse is(...) expression.
+     * Grammar: is_expression -> is, "(", type, [identifier], [("==" | ":"), type_specialization], ")"
+     * type_specialization is either a type node or a keyword (struct, class, interface, enum, etc.)
+     */
+    IsExpression parseIsExpression(TSNode node, SourceLocation loc) {
+        import ast.expressions : IsExpression;
+
+        Type checkedType;
+        string operator;
+        Type specType;
+        string specKeyword;
+
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string nodeType = TreeSitterParser.getNodeType(child);
+
+            // Skip punctuation and the 'is' keyword
+            if (nodeType == "is" || nodeType == "(" || nodeType == ")" || nodeType == ",")
+                continue;
+
+            // Skip optional identifier binding (future: named bindings)
+            if (nodeType == "identifier")
+                continue;
+
+            // The first type child is the checked type
+            if (nodeType == "type" && checkedType is null) {
+                checkedType = parseType(child);
+                continue;
+            }
+
+            // Operator: == or :
+            if (nodeType == "==" || nodeType == ":") {
+                operator = nodeType;
+                continue;
+            }
+
+            // type_specialization: either a keyword or a type
+            if (nodeType == "type_specialization") {
+                uint specChildCount = TreeSitterParser.getChildCount(child);
+                if (specChildCount > 0) {
+                    TSNode specChild = TreeSitterParser.getChild(child, 0);
+                    string specNodeType = TreeSitterParser.getNodeType(specChild);
+                    // Keywords: struct, class, interface, enum, etc.
+                    if (specNodeType == "struct" || specNodeType == "class" ||
+                        specNodeType == "interface" || specNodeType == "enum" ||
+                        specNodeType == "function" || specNodeType == "delegate") {
+                        specKeyword = specNodeType;
+                    } else {
+                        // It's a type (e.g., int, MyStruct)
+                        specType = parseType(specChild);
+                    }
+                }
+                continue;
+            }
+
+            // Category keywords appearing directly (some grammars inline them)
+            if (nodeType == "struct" || nodeType == "class" ||
+                nodeType == "interface" || nodeType == "enum") {
+                specKeyword = nodeType;
+                continue;
+            }
+        }
+
+        if (checkedType is null) {
+            throw new ParseError("is expression missing type", loc);
+        }
+
+        return new IsExpression(loc, checkedType, operator, specType, specKeyword);
     }
 
     /**
