@@ -101,6 +101,13 @@ class DependencyAnalyzer {
             if (tmplCall.resolvedInstantiation !is null) {
                 collectDependencies(tmplCall.resolvedInstantiation, result);
             }
+            if (tmplCall.resolvedStructInstantiation !is null) {
+                auto sd = tmplCall.resolvedStructInstantiation;
+                if (sd.name !in neededStructs) {
+                    neededStructs[sd.name] = true;
+                    structDeps ~= sd;
+                }
+            }
         }
 
         // Follow IFTI resolved instantiations on regular CallExpressions

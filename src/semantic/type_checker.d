@@ -81,7 +81,10 @@ class TypeChecker {
      * Type check a single declaration
      */
     void checkDeclaration(Declaration decl) {
-        if (auto funcDecl = cast(FunctionDecl)decl) {
+        if (auto tmplDecl = cast(TemplateDecl)decl) {
+            // Skip — templates are type-checked when instantiated
+            return;
+        } else if (auto funcDecl = cast(FunctionDecl)decl) {
             checkFunctionDeclaration(funcDecl);
         } else if (auto classDecl = cast(ClassDecl)decl) {
             checkClassDeclaration(classDecl);
@@ -612,7 +615,10 @@ class TypeChecker {
             
             // Link UserType to its declaration
             if (auto userType = cast(UserType)varDeclStmt.type) {
-                if (!userType.declaration) {
+                if (userType.templateArgs.length > 0) {
+                    // Template type: Pair!(int, int) — instantiate the template
+                    resolveTemplateUserType(userType);
+                } else if (!userType.declaration) {
                     auto typeSymbol = symbolTable.lookupSymbol(userType.name);
                     if (typeSymbol && typeSymbol.kind == SymbolKind.Type) {
                         userType.declaration = typeSymbol.declaration;
@@ -940,13 +946,14 @@ class TypeChecker {
             }
         }
 
-        // IFTI: if callee is a template function, deduce type args from call args
+        // IFTI: if callee is a template, deduce type args from call args
         if (auto identExpr = cast(IdentifierExpression)expr.function_) {
             auto sym = symbolTable.lookupSymbol(identExpr.name);
-            if (sym && sym.kind == SymbolKind.Function) {
-                auto funcDecl = cast(FunctionDecl)sym.declaration;
-                if (funcDecl && funcDecl.isTemplate) {
-                    return checkImplicitTemplateCall(expr, funcDecl);
+            if (sym && sym.kind == SymbolKind.Template) {
+                auto tmplDecl = cast(TemplateDecl)sym.declaration;
+                if (tmplDecl) {
+                    if (auto funcMember = cast(FunctionDecl)tmplDecl.eponymousMember())
+                        return checkImplicitTemplateCall(expr, tmplDecl, funcMember);
                 }
             }
         }
@@ -1211,77 +1218,155 @@ class TypeChecker {
      * Type check template instantiation call: max!int(3, 5)
      */
     Type checkTemplateInstantiation(TemplateInstantiationExpression expr) {
-        // Look up the template function by name
+        // Look up the template by name
         auto sym = symbolTable.lookupSymbol(expr.templateName);
-        if (!sym || sym.kind != SymbolKind.Function) {
+        if (!sym || sym.kind != SymbolKind.Template) {
             throw new TypeError(
-                format("'%s' is not a template function", expr.templateName),
+                format("'%s' is not a template", expr.templateName),
                 expr.location
             );
         }
-        auto templateFunc = cast(FunctionDecl)sym.declaration;
-        if (!templateFunc || !templateFunc.isTemplate) {
+        auto tmplDecl = cast(TemplateDecl)sym.declaration;
+        if (!tmplDecl) {
             throw new TypeError(
-                format("'%s' is not a template function", expr.templateName),
+                format("'%s' is not a template", expr.templateName),
                 expr.location
             );
         }
 
         // Validate template argument count
-        if (expr.templateArguments.length != templateFunc.templateParams.length) {
+        if (expr.templateArguments.length != tmplDecl.templateParams.length) {
             throw new TypeError(
                 format("Template '%s' expects %d type arguments, got %d",
-                       expr.templateName, templateFunc.templateParams.length,
+                       expr.templateName, tmplDecl.templateParams.length,
                        expr.templateArguments.length),
                 expr.location
             );
         }
 
         // Instantiate
-        auto inst = templateInstantiator.instantiate(templateFunc, expr.templateArguments);
+        auto inst = templateInstantiator.instantiate(tmplDecl, expr.templateArguments);
 
-        // Type-check the instantiation at module scope (not nested inside caller's scope).
-        // saveAndResetScope handles all scope state: symbol scopes, nextLocalId, declaredVars.
-        if (!inst.isTypeChecked) {
-            auto saved = symbolTable.saveAndResetScope();
-            scope(exit) symbolTable.restoreScope(saved);
-            checkFunctionDeclaration(inst);
+        // Dispatch based on what the template contains
+        if (auto funcInst = cast(FunctionDecl)inst) {
+            // Function template instantiation — type-check and validate call args
+            if (!funcInst.isTypeChecked) {
+                auto saved = symbolTable.saveAndResetScope();
+                scope(exit) symbolTable.restoreScope(saved);
+                checkFunctionDeclaration(funcInst);
+            }
+
+            expr.resolvedInstantiation = funcInst;
+
+            // Check call argument count
+            if (expr.callArguments.length != funcInst.parameters.length) {
+                throw new TypeError(
+                    format("'%s' expects %d arguments, got %d",
+                           funcInst.name, funcInst.parameters.length, expr.callArguments.length),
+                    expr.location
+                );
+            }
+
+            // Check call argument types
+            for (size_t i = 0; i < expr.callArguments.length; i++) {
+                Type argType = checkExpression(expr.callArguments[i]);
+                Type paramType = funcInst.parameters[i].type;
+
+                auto compat = checkTypeCompatibility(argType, paramType);
+                if (!compat.isCompatible) {
+                    throw new TypeError(
+                        format("Argument %d: expected type '%s', got '%s'",
+                               i + 1, paramType.toString(), argType.toString()),
+                        expr.callArguments[i].location
+                    );
+                }
+            }
+
+            return funcInst.returnType;
         }
 
-        expr.resolvedInstantiation = inst;
+        if (auto structInst = cast(StructDecl)inst) {
+            // Struct template instantiation — register, layout, type-check, then check construction
+            auto collector = new SymbolCollector(symbolTable);
+            collector.collectStructSymbol(structInst);
 
-        // Check call argument count
-        if (expr.callArguments.length != inst.parameters.length) {
+            if (!structInst.isTypeChecked) {
+                auto saved = symbolTable.saveAndResetScope();
+                scope(exit) symbolTable.restoreScope(saved);
+                checkStructDeclaration(structInst);
+            }
+
+            expr.resolvedStructInstantiation = structInst;
+
+            // Create a UserType for the instantiated struct and check construction
+            auto userType = new UserType(expr.location, structInst.name);
+            userType.declaration = structInst;
+
+            return checkStructConstruction(structInst, userType, expr.callArguments, expr.location);
+        }
+
+        throw new TypeError(
+            format("'%s' template instantiation is not callable", expr.templateName),
+            expr.location
+        );
+    }
+
+    /**
+     * Resolve a UserType with templateArgs (e.g. Pair!(int, int) in type position).
+     * Instantiates the template, registers the struct, and sets userType.declaration.
+     */
+    void resolveTemplateUserType(UserType userType) {
+        auto sym = symbolTable.lookupSymbol(userType.name);
+        if (!sym || sym.kind != SymbolKind.Template) {
             throw new TypeError(
-                format("'%s' expects %d arguments, got %d",
-                       inst.name, inst.parameters.length, expr.callArguments.length),
-                expr.location
+                format("'%s' is not a template", userType.name),
+                userType.location
+            );
+        }
+        auto tmplDecl = cast(TemplateDecl)sym.declaration;
+        if (!tmplDecl) {
+            throw new TypeError(
+                format("'%s' is not a template", userType.name),
+                userType.location
             );
         }
 
-        // Check call argument types
-        for (size_t i = 0; i < expr.callArguments.length; i++) {
-            Type argType = checkExpression(expr.callArguments[i]);
-            Type paramType = inst.parameters[i].type;
-
-            auto compat = checkTypeCompatibility(argType, paramType);
-            if (!compat.isCompatible) {
-                throw new TypeError(
-                    format("Argument %d: expected type '%s', got '%s'",
-                           i + 1, paramType.toString(), argType.toString()),
-                    expr.callArguments[i].location
-                );
-            }
+        if (userType.templateArgs.length != tmplDecl.templateParams.length) {
+            throw new TypeError(
+                format("Template '%s' expects %d type arguments, got %d",
+                       userType.name, tmplDecl.templateParams.length,
+                       userType.templateArgs.length),
+                userType.location
+            );
         }
 
-        return inst.returnType;
+        auto inst = templateInstantiator.instantiate(tmplDecl, userType.templateArgs);
+
+        if (auto structInst = cast(StructDecl)inst) {
+            auto collector = new SymbolCollector(symbolTable);
+            collector.collectStructSymbol(structInst);
+
+            if (!structInst.isTypeChecked) {
+                auto saved = symbolTable.saveAndResetScope();
+                scope(exit) symbolTable.restoreScope(saved);
+                checkStructDeclaration(structInst);
+            }
+
+            userType.declaration = structInst;
+            userType.name = structInst.name;
+        } else {
+            throw new TypeError(
+                format("Template '%s' does not produce a type", userType.name),
+                userType.location
+            );
+        }
     }
 
     /**
      * IFTI: Implicit Function Template Instantiation.
      * Deduce template type args from call arguments, instantiate, and type-check.
      */
-    Type checkImplicitTemplateCall(CallExpression expr, FunctionDecl templateFunc) {
+    Type checkImplicitTemplateCall(CallExpression expr, TemplateDecl tmplDecl, FunctionDecl templateFunc) {
         // Type-check each argument to get argTypes
         Type[] argTypes;
         foreach (arg; expr.arguments) {
@@ -1289,12 +1374,12 @@ class TypeChecker {
         }
 
         // Deduce template type arguments from call arguments
-        Type[] deducedTypes = new Type[templateFunc.templateParams.length];
+        Type[] deducedTypes = new Type[tmplDecl.templateParams.length];
         foreach (i, param; templateFunc.parameters) {
             if (i >= argTypes.length) break;
             if (auto tpt = cast(TemplateParamType)param.type) {
                 // Find which template param this is
-                foreach (j, tp; templateFunc.templateParams) {
+                foreach (j, tp; tmplDecl.templateParams) {
                     if (tp.paramName == tpt.paramName) {
                         if (deducedTypes[j] is null) {
                             deducedTypes[j] = argTypes[i];
@@ -1310,14 +1395,16 @@ class TypeChecker {
             if (dt is null) {
                 throw new TypeError(
                     format("Cannot deduce template parameter '%s' from call arguments",
-                           templateFunc.templateParams[i].paramName),
+                           tmplDecl.templateParams[i].paramName),
                     expr.location
                 );
             }
         }
 
         // Instantiate
-        auto inst = templateInstantiator.instantiate(templateFunc, deducedTypes);
+        auto inst = cast(FunctionDecl)templateInstantiator.instantiate(tmplDecl, deducedTypes);
+        if (!inst)
+            throw new TypeError("IFTI: template did not produce a function", expr.location);
 
         // Type-check the instantiation at module scope
         if (!inst.isTypeChecked) {

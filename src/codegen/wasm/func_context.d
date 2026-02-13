@@ -3704,6 +3704,12 @@ class FuncContext {
      * The resolved instantiation has a mangled name that the emitter collected.
      */
     void emitTemplateCall(ref Appender!(ubyte[]) out_, TemplateInstantiationExpression expr) {
+        // Struct template construction: Pair!(int, int)(10, 20)
+        if (expr.resolvedStructInstantiation) {
+            emitStructConstructionToTemp(out_, expr.resolvedStructInstantiation, expr.callArguments);
+            return;
+        }
+
         auto inst = expr.resolvedInstantiation;
         if (!inst)
             throw new EmitError("Template instantiation not resolved: " ~ expr.templateName);

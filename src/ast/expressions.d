@@ -187,6 +187,7 @@ class TemplateInstantiationExpression : Expression {
 
     // Set during semantic analysis
     FunctionDecl resolvedInstantiation;
+    StructDecl resolvedStructInstantiation;  // Non-null for struct template construction
 
     this(SourceLocation loc, string templateName, Type[] templateArguments, Expression[] callArguments) {
         super(loc);

@@ -1,10 +1,14 @@
 /**
  * Template Instantiation Driver
  *
- * Handles instantiation of function templates by re-parsing the template's
- * source text for each unique type argument combination. This produces
- * completely fresh, independent AST nodes for each instantiation — no
- * shared mutable state between different instantiations.
+ * Handles instantiation of templates (functions, structs, etc.) by re-parsing
+ * the template's source text for each unique type argument combination. This
+ * produces completely fresh, independent AST nodes for each instantiation —
+ * no shared mutable state between different instantiations.
+ *
+ * Both `T max(T)(T a, T b) { ... }` and `struct Pair(T, U) { ... }` are
+ * eponymous template shorthands — the parser wraps them in TemplateDecl,
+ * and this module instantiates them uniformly.
  */
 module semantic.template_instantiation;
 
@@ -15,68 +19,68 @@ import std.array : join;
 import std.format : format;
 
 class TemplateInstantiator {
-    private FunctionDecl[string] cache;
+    private Declaration[string] cache;
 
-    /// Instantiate a template function for given type arguments.
-    /// Returns the (possibly cached) instantiated FunctionDecl.
-    FunctionDecl instantiate(FunctionDecl templateFunc, Type[] typeArgs) {
-        string key = mangleInstantiation(templateFunc.name, typeArgs);
+    /// Instantiate a template for given type arguments.
+    /// Returns the eponymous member Declaration (FunctionDecl, StructDecl, etc.).
+    Declaration instantiate(TemplateDecl tmpl, Type[] typeArgs) {
+        string key = mangleInstantiation(tmpl.name, typeArgs);
         if (auto cached = key in cache)
             return *cached;
 
-        auto inst = reparseAndSubstitute(templateFunc, typeArgs, key);
+        auto inst = reparseAndSubstitute(tmpl, typeArgs, key);
         cache[key] = inst;
         return inst;
     }
 
     /// Get all cached instantiations (for emitter collection).
-    FunctionDecl[] allInstantiations() {
+    Declaration[] allInstantiations() {
         return cache.values;
     }
 
     /// Re-parse the template source text and substitute concrete types.
-    private FunctionDecl reparseAndSubstitute(FunctionDecl templateFunc, Type[] typeArgs, string mangledName) {
+    private Declaration reparseAndSubstitute(TemplateDecl tmpl, Type[] typeArgs, string mangledName) {
         import parser.tree_sitter_bridge : TreeSitterBridge;
 
-        // Extract source text from the template function
-        string src = templateFunc.getSourceText();
+        // Extract source text from the template
+        string src = tmpl.getSourceText();
         if (src is null)
-            throw new Exception(format("Template function '%s' has no stored source text", templateFunc.name));
+            throw new Exception(format("Template '%s' has no stored source text", tmpl.name));
 
         // Re-parse to get fresh, independent AST
         auto bridge = new TreeSitterBridge("<template:" ~ mangledName ~ ">", src);
         Declaration[] parsed = bridge.parseSourceFile();
 
-        // Find the function declaration in the parsed result
-        FunctionDecl freshFunc = null;
+        // Find the TemplateDecl in the re-parsed result (re-parsing a template produces a TemplateDecl)
+        TemplateDecl freshTmpl = null;
         foreach (decl; parsed) {
-            if (auto fd = cast(FunctionDecl)decl) {
-                if (fd.name == templateFunc.name) {
-                    freshFunc = fd;
+            if (auto td = cast(TemplateDecl)decl) {
+                if (td.name == tmpl.name) {
+                    freshTmpl = td;
                     break;
                 }
             }
         }
-        if (freshFunc is null)
-            throw new Exception(format("Re-parse of template '%s' failed to produce a FunctionDecl", templateFunc.name));
+        if (freshTmpl is null)
+            throw new Exception(format("Re-parse of template '%s' failed to produce a TemplateDecl", tmpl.name));
 
         // Build name → concrete type map from template params
         Type[string] typeMap;
-        foreach (i, tp; templateFunc.templateParams)
+        foreach (i, tp; tmpl.templateParams)
             typeMap[tp.paramName] = typeArgs[i];
 
-        // Substitute TemplateParamType nodes with concrete types in the fresh AST
-        freshFunc.returnType = substituteType(freshFunc.returnType, typeMap);
-        foreach (ref p; freshFunc.parameters)
-            p.type = substituteType(p.type, typeMap);
-        if (freshFunc.body_)
-            substituteInStatement(freshFunc.body_, typeMap);
+        // Substitute types in all members
+        foreach (member; freshTmpl.members) {
+            substituteInDeclaration(member, typeMap);
+        }
 
-        // Set mangled name and clear template status
-        freshFunc.name = mangledName;
-        freshFunc.templateParams = null;
+        // Find and rename the eponymous member
+        auto eponymous = freshTmpl.eponymousMember();
+        if (eponymous is null)
+            throw new Exception(format("Template '%s' has no eponymous member", tmpl.name));
 
-        return freshFunc;
+        eponymous.name = mangledName;
+        return eponymous;
     }
 
     static string mangleInstantiation(string templateName, Type[] typeArgs) {
@@ -103,6 +107,23 @@ class TemplateInstantiator {
 }
 
 // ===== Type substitution helpers =====
+
+/// Substitute types in a declaration (dispatches by declaration kind).
+private void substituteInDeclaration(Declaration decl, Type[string] typeMap) {
+    if (auto fd = cast(FunctionDecl)decl) {
+        fd.returnType = substituteType(fd.returnType, typeMap);
+        foreach (ref p; fd.parameters)
+            p.type = substituteType(p.type, typeMap);
+        if (fd.body_)
+            substituteInStatement(fd.body_, typeMap);
+    } else if (auto sd = cast(StructDecl)decl) {
+        foreach (member; sd.members) {
+            substituteInDeclaration(member, typeMap);
+        }
+    } else if (auto vd = cast(VariableDecl)decl) {
+        vd.type = substituteType(vd.type, typeMap);
+    }
+}
 
 /// Replace TemplateParamType nodes with concrete types.
 private Type substituteType(Type type, Type[string] typeMap) {

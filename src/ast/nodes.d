@@ -442,6 +442,32 @@ class StructDecl : AggregateDecl {
 }
 
 /**
+ * Template declaration: wraps templated functions, structs, etc.
+ * Both `T max(T)(T a, T b) { ... }` and `struct Pair(T, U) { ... }` desugar to this.
+ */
+class TemplateDecl : Declaration {
+    TemplateParamType[] templateParams;
+    Declaration[] members;
+
+    this(SourceLocation loc, string name, TemplateParamType[] templateParams, Declaration[] members) {
+        super(loc, name, false);
+        this.templateParams = templateParams;
+        this.members = members;
+    }
+
+    /// Eponymous member — has the same name as the template
+    Declaration eponymousMember() {
+        foreach (m; members)
+            if (m.name == this.name) return m;
+        return null;
+    }
+
+    override string toString() const {
+        return format("TemplateDecl(%s, %d params, %d members)", name, templateParams.length, members.length);
+    }
+}
+
+/**
  * Interface declaration: interface Name : ParentInterfaces { methods }
  */
 class InterfaceDecl : Declaration {
@@ -726,6 +752,7 @@ class FunctionType : Type {
 class UserType : Type {
     string name;
     Declaration declaration;  // Set during semantic analysis
+    Type[] templateArgs;  // Non-null for Pair!(int, string) in type position
 
     this(SourceLocation loc, string name) {
         super(loc);

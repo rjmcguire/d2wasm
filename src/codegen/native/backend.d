@@ -1610,6 +1610,12 @@ class NativeCompiledFunction : CompiledFunction {
             traits.evaluate();
             gen.emitImm32(stencil_load_imm32, traits.boolResult ? 1 : 0);
         } else if (auto tmplInst = cast(TemplateInstantiationExpression)expr) {
+            // Struct template construction: Pair!(int, int)(10, 20)
+            if (tmplInst.resolvedStructInstantiation) {
+                compileStructConstruction(tmplInst.resolvedStructInstantiation, tmplInst.callArguments);
+                return;
+            }
+
             // Template instantiation call — emit like a regular call using the mangled name
             auto inst = tmplInst.resolvedInstantiation;
             if (!inst)

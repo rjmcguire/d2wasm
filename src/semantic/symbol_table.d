@@ -23,7 +23,8 @@ enum SymbolKind {
     Function,
     Type,
     Parameter,
-    Field
+    Field,
+    Template
 }
 
 /**
@@ -628,7 +629,9 @@ class SymbolCollector {
      * Collect symbol from single declaration
      */
     void collectSymbol(Declaration decl) {
-        if (auto funcDecl = cast(FunctionDecl)decl) {
+        if (auto tmplDecl = cast(TemplateDecl)decl) {
+            collectTemplateSymbol(tmplDecl);
+        } else if (auto funcDecl = cast(FunctionDecl)decl) {
             collectFunctionSymbol(funcDecl);
         } else if (auto importedFunc = cast(ImportedFunctionDecl)decl) {
             collectImportedFunctionSymbol(importedFunc);
@@ -647,6 +650,19 @@ class SymbolCollector {
         }
     }
     
+    private void collectTemplateSymbol(TemplateDecl decl) {
+        auto symbol = new Symbol(
+            decl.name,
+            SymbolKind.Template,
+            null,  // no specific type for uninstantiated templates
+            decl,
+            decl.location,
+            symbolTable.inGlobalScope(),
+            symbolTable.modulePath
+        );
+        symbolTable.addSymbol(symbol);
+    }
+
     private void collectFunctionSymbol(FunctionDecl decl) {
         auto symbol = new Symbol(
             decl.name,

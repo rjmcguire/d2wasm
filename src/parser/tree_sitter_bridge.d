@@ -387,8 +387,16 @@ class TreeSitterBridge {
         auto funcDecl = new FunctionDecl(loc, name, returnType, parameters, body_);
         funcDecl.visibility = vis;
         funcDecl.attrs = dattrs;
-        funcDecl.templateParams = templateParams;
-        funcDecl.sourceText = sourceText;  // store reference for template re-parsing
+
+        // If this is a template function, wrap in TemplateDecl
+        if (templateParams.length > 0) {
+            auto tmplDecl = new TemplateDecl(loc, name, templateParams, [funcDecl]);
+            tmplDecl.sourceText = sourceText;
+            tmplDecl.visibility = vis;
+            tmplDecl.attrs = dattrs;
+            return tmplDecl;
+        }
+
         return funcDecl;
     }
     
@@ -860,28 +868,55 @@ class TreeSitterBridge {
     /**
      * Parse struct declaration
      */
-    StructDecl parseStructDeclaration(TSNode node) {
+    Declaration parseStructDeclaration(TSNode node) {
         SourceLocation loc = makeSourceLocation(node);
-        
+
         string name;
         Declaration[] members;
-        
+        TSNode templateParamsNode;
+
         uint childCount = TreeSitterParser.getChildCount(node);
         for (uint i = 0; i < childCount; i++) {
             TSNode child = TreeSitterParser.getChild(node, i);
             string childType = TreeSitterParser.getNodeType(child);
-            
+
             if (childType == "identifier") {
                 name = TreeSitterParser.getNodeText(child, sourceText);
+            } else if (childType == "template_parameters") {
+                templateParamsNode = child;
             } else if (childType == "aggregate_body") {
                 members = parseAggregateBody(child);
             }
         }
-        
+
         if (name.length == 0) {
             throw new ParseError("Struct declaration missing name", loc);
         }
-        
+
+        // Parse template parameters if present
+        TemplateParamType[] templateParams;
+        if (TreeSitterParser.isValid(templateParamsNode)) {
+            templateParams = parseTemplateParams(templateParamsNode, loc);
+        }
+
+        // Replace UserType refs matching template param names in member types
+        if (templateParams.length > 0) {
+            foreach (member; members) {
+                if (auto varDecl = cast(VariableDecl)member) {
+                    varDecl.type = replaceTemplateTypeRefs(varDecl.type, templateParams);
+                }
+                if (auto funcDecl = cast(FunctionDecl)member) {
+                    funcDecl.returnType = replaceTemplateTypeRefs(funcDecl.returnType, templateParams);
+                    foreach (ref p; funcDecl.parameters) {
+                        p.type = replaceTemplateTypeRefs(p.type, templateParams);
+                    }
+                    if (funcDecl.body_) {
+                        replaceTemplateTypeRefsInStatement(funcDecl.body_, templateParams);
+                    }
+                }
+            }
+        }
+
         Visibility vis;
         DeclAttrs dattrs;
         extractAttributes(node, vis, dattrs);
@@ -903,7 +938,16 @@ class TreeSitterBridge {
                 }
             }
         }
-        
+
+        // If this is a template struct, wrap in TemplateDecl
+        if (templateParams.length > 0) {
+            auto tmplDecl = new TemplateDecl(loc, name, templateParams, [structDecl]);
+            tmplDecl.sourceText = sourceText;
+            tmplDecl.visibility = vis;
+            tmplDecl.attrs = dattrs;
+            return tmplDecl;
+        }
+
         return structDecl;
     }
     
@@ -1642,12 +1686,39 @@ class TreeSitterBridge {
                 return parsePointerType(node, loc);
             case "identifier":
                 return new UserType(loc, TreeSitterParser.getNodeText(node, sourceText));
+            case "template_instance":
+                return parseTemplateInstanceType(node, loc);
             default:
                 // Try to parse the text directly as a basic type
                 return parseBasicTypeByText(TreeSitterParser.getNodeText(node, sourceText), loc);
         }
     }
     
+    /**
+     * Parse a template_instance node in type position: Pair!(int, string)
+     * template_instance has children: identifier, template_arguments
+     */
+    Type parseTemplateInstanceType(TSNode node, SourceLocation loc) {
+        string templateName;
+        Type[] templateArgs;
+
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+
+            if (childType == "identifier") {
+                templateName = TreeSitterParser.getNodeText(child, sourceText);
+            } else if (childType == "template_arguments") {
+                templateArgs = parseTemplateArgTypes(child);
+            }
+        }
+
+        auto ut = new UserType(loc, templateName);
+        ut.templateArgs = templateArgs;
+        return ut;
+    }
+
     /**
      * Parse basic type by text content
      */
@@ -1769,7 +1840,11 @@ class TreeSitterBridge {
             case "continue_statement":
                 return new ContinueStatement(loc);
             case "struct_declaration":
-                return new StructDeclarationStatement(loc, parseStructDeclaration(node));
+                auto structResult = parseStructDeclaration(node);
+                if (auto sd = cast(StructDecl)structResult)
+                    return new StructDeclarationStatement(loc, sd);
+                // Template struct in statement position — not yet supported
+                throw new ParseError("Template struct declarations inside functions are not yet supported", loc);
             case "comment":
                 // Skip comments - return null (handled by caller)
                 return null;

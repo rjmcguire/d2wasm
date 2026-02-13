@@ -631,7 +631,9 @@ class BinaryEmitter {
         
         // Second pass: collect local functions, global variables, and struct methods
         foreach (decl; decls) {
-            if (auto funcDecl = cast(FunctionDecl)decl) {
+            if (cast(TemplateDecl)decl) {
+                continue;  // Skip uninstantiated templates
+            } else if (auto funcDecl = cast(FunctionDecl)decl) {
                 collectFunction(funcDecl);
             } else if (auto varDecl = cast(VariableDecl)decl) {
                 collectGlobalVariable(varDecl);

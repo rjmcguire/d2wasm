@@ -905,47 +905,64 @@ class CTFEEvaluator {
             }
         }
 
+        // IFTI: if no direct FunctionDecl found, check for TemplateDecl
         if (!funcDecl) {
-            throw new CTFEError("CTFE: Function '" ~ funcName ~ "' not found", callExpr.location);
-        }
-
-        // IFTI: if the found function is a template, deduce type args from call args
-        if (funcDecl.isTemplate) {
             import semantic.template_instantiation : TemplateInstantiator;
 
-            // Deduce types from arguments (simple: assume int literals → Int32)
-            Type[] deducedTypes = new Type[funcDecl.templateParams.length];
-            foreach (i, param; funcDecl.parameters) {
-                if (i >= callExpr.arguments.length) break;
-                if (auto tpt = cast(TemplateParamType)param.type) {
-                    foreach (j, tp; funcDecl.templateParams) {
-                        if (tp.paramName == tpt.paramName && deducedTypes[j] is null) {
-                            deducedTypes[j] = deduceTypeFromExpression(callExpr.arguments[i]);
-                            break;
-                        }
+            TemplateDecl tmplDecl = null;
+            FunctionDecl tmplFunc = null;
+            foreach (decl; allDeclarations) {
+                if (auto td = cast(TemplateDecl)decl) {
+                    if (td.name == funcName) {
+                        tmplDecl = td;
+                        tmplFunc = cast(FunctionDecl)td.eponymousMember();
+                        break;
                     }
                 }
             }
 
-            // Verify all deduced
-            foreach (i, dt; deducedTypes) {
-                if (dt is null) {
-                    throw new CTFEError("CTFE: Cannot deduce template parameter '" ~
-                        funcDecl.templateParams[i].paramName ~ "'", callExpr.location);
+            if (tmplDecl !is null && tmplFunc !is null) {
+                // Deduce types from arguments
+                Type[] deducedTypes = new Type[tmplDecl.templateParams.length];
+                foreach (i, param; tmplFunc.parameters) {
+                    if (i >= callExpr.arguments.length) break;
+                    if (auto tpt = cast(TemplateParamType)param.type) {
+                        foreach (j, tp; tmplDecl.templateParams) {
+                            if (tp.paramName == tpt.paramName && deducedTypes[j] is null) {
+                                deducedTypes[j] = deduceTypeFromExpression(callExpr.arguments[i]);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Verify all deduced
+                foreach (i, dt; deducedTypes) {
+                    if (dt is null) {
+                        throw new CTFEError("CTFE: Cannot deduce template parameter '" ~
+                            tmplDecl.templateParams[i].paramName ~ "'", callExpr.location);
+                    }
+                }
+
+                auto instantiator = new TemplateInstantiator();
+                auto inst = cast(FunctionDecl)instantiator.instantiate(tmplDecl, deducedTypes);
+                if (!inst)
+                    throw new CTFEError("CTFE: Template did not produce a function", callExpr.location);
+                funcDecl = inst;
+                callExpr.resolvedInstantiation = funcDecl;
+
+                // Type-check the instantiation (save/restore scope for re-entrancy safety)
+                {
+                    auto saved = symbolTable.saveAndResetScope();
+                    scope(exit) symbolTable.restoreScope(saved);
+                    auto typeChecker = new TypeChecker(symbolTable);
+                    typeChecker.checkFunctionDeclaration(funcDecl);
                 }
             }
+        }
 
-            auto instantiator = new TemplateInstantiator();
-            funcDecl = instantiator.instantiate(funcDecl, deducedTypes);
-            callExpr.resolvedInstantiation = funcDecl;
-
-            // Type-check the instantiation (save/restore scope for re-entrancy safety)
-            {
-                auto saved = symbolTable.saveAndResetScope();
-                scope(exit) symbolTable.restoreScope(saved);
-                auto typeChecker = new TypeChecker(symbolTable);
-                typeChecker.checkFunctionDeclaration(funcDecl);
-            }
+        if (!funcDecl) {
+            throw new CTFEError("CTFE: Function '" ~ funcName ~ "' not found", callExpr.location);
         }
 
         // Check if function returns a string (dynamic ubyte[])
@@ -1017,22 +1034,24 @@ class CTFEEvaluator {
     void evaluateTemplateInstantiationCall(ManifestConstantDecl manifest, TemplateInstantiationExpression tmplInst) {
         import semantic.template_instantiation : TemplateInstantiator;
 
-        // Find the template function
-        FunctionDecl templateFunc = null;
+        // Find the template declaration
+        TemplateDecl tmplDecl = null;
         foreach (decl; allDeclarations) {
-            if (auto fd = cast(FunctionDecl)decl) {
-                if (fd.name == tmplInst.templateName && fd.isTemplate) {
-                    templateFunc = fd;
+            if (auto td = cast(TemplateDecl)decl) {
+                if (td.name == tmplInst.templateName) {
+                    tmplDecl = td;
                     break;
                 }
             }
         }
-        if (!templateFunc)
-            throw new CTFEError("CTFE: Template function '" ~ tmplInst.templateName ~ "' not found", tmplInst.location);
+        if (!tmplDecl)
+            throw new CTFEError("CTFE: Template '" ~ tmplInst.templateName ~ "' not found", tmplInst.location);
 
         // Instantiate the template
         auto instantiator = new TemplateInstantiator();
-        auto inst = instantiator.instantiate(templateFunc, tmplInst.templateArguments);
+        auto inst = cast(FunctionDecl)instantiator.instantiate(tmplDecl, tmplInst.templateArguments);
+        if (!inst)
+            throw new CTFEError("CTFE: Template '" ~ tmplInst.templateName ~ "' did not produce a function", tmplInst.location);
         tmplInst.resolvedInstantiation = inst;
 
         // Evaluate arguments
