@@ -918,6 +918,11 @@ class BinaryEmitter {
     }
     
     private void collectFunction(FunctionDecl decl) {
+        // Skip forward declarations (no body) — only the real definition is emitted
+        if (decl.body_ is null) {
+            return;
+        }
+
         // Skip template declarations — only instantiated functions are emitted
         if (decl.isTemplate) {
             return;

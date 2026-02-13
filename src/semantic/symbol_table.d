@@ -112,9 +112,20 @@ class Scope {
      */
     void addSymbol(Symbol symbol) {
         // Check current scope
-        if (symbol.name in symbols) {
+        if (auto existing = symbol.name in symbols) {
+            // Allow a function definition to replace a forward declaration (bodyless function)
+            if (symbol.kind == SymbolKind.Function && existing.kind == SymbolKind.Function) {
+                if (auto existingFunc = cast(FunctionDecl)existing.declaration) {
+                    if (existingFunc.body_ is null) {
+                        // Forward declaration — replace with the real definition
+                        symbols[symbol.name] = symbol;
+                        return;
+                    }
+                }
+            }
             throw new SemanticError(
-                format("Symbol '%s' is already defined in scope '%s'", symbol.name, name),
+                format("Symbol '%s' is already defined in scope '%s' (previously defined at %s)",
+                       symbol.name, name, existing.location.toString()),
                 symbol.location
             );
         }

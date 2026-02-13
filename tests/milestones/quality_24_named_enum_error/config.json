@@ -1,0 +1,5 @@
+{
+  "name": "named_enum_error",
+  "description": "Named enum member access produces an error instead of silently failing",
+  "type": "compile_error"
+}

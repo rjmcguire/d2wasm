@@ -1,0 +1,6 @@
+{
+  "name": "foreach_error",
+  "description": "foreach statement produces an error instead of being silently dropped",
+  "type": "compile_error",
+  "expected_error": "foreach"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "operator_overload_error",
+  "description": "Struct arithmetic produces a type error instead of silently failing",
+  "type": "compile_error"
+}

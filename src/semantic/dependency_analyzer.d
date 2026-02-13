@@ -309,14 +309,20 @@ class DependencyAnalyzer {
                 return null;
             }
 
-            // Look up in declarations
+            // Look up in declarations — prefer definition with body over forward declaration
+            FunctionDecl forwardDecl;
             foreach (decl; allDeclarations) {
                 if (auto funcDecl = cast(FunctionDecl)decl) {
                     if (funcDecl.name == funcName) {
-                        return funcDecl;
+                        if (funcDecl.body_ !is null)
+                            return funcDecl;
+                        if (forwardDecl is null)
+                            forwardDecl = funcDecl;
                     }
                 }
             }
+            if (forwardDecl !is null)
+                return forwardDecl;
 
             // Also check symbol table
             auto symbol = symbolTable.lookupSymbol(funcName);

@@ -275,6 +275,10 @@ class NativeCompiledFunction : CompiledFunction {
     private void compileFunction(FunctionDecl func) {
         import std.stdio : writeln;
 
+        // Skip forward declarations (no body)
+        if (func.body_ is null)
+            return;
+
         string name = getMangledName(func);
 
         // Bind function label (for multi-function mode)

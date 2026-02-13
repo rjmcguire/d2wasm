@@ -1,0 +1,5 @@
+{
+  "name": "static_if_stmt_error",
+  "description": "static if inside function body produces an error instead of being silently dropped",
+  "type": "compile_error"
+}

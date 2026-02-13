@@ -139,6 +139,7 @@ class TreeSitterBridge {
             }
 
             Declaration[] declarations;
+            ParseError firstError;
 
             uint childCount = TreeSitterParser.getChildCount(root);
             log(3, "Root has ", childCount, " children");
@@ -176,12 +177,16 @@ class TreeSitterBridge {
                     }
                 } catch (ParseError e) {
                     log(2, "Parse error in ", nodeType, ": ", e.msg);
-                    // Continue parsing other declarations
+                    if (firstError is null) firstError = e;
                 } catch (Exception e) {
                     log(2, "Unexpected error in ", nodeType, ": ", e.msg);
-                    // Continue parsing other declarations
+                    if (firstError is null)
+                        firstError = new ParseError(e.msg, SourceLocation(filename, 1, 1, 0, 0));
                 }
             }
+
+            if (firstError !is null)
+                throw firstError;
 
             return declarations;
         } catch (Exception e) {
@@ -703,13 +708,26 @@ class TreeSitterBridge {
         for (uint i = 0; i < childCount; i++) {
             TSNode child = TreeSitterParser.getChild(bodyNode, i);
             string nodeType = TreeSitterParser.getNodeType(child);
-            
+
             if (nodeType == "block_statement") {
                 return parseBlockStatement(child);
             }
+
+            // Shorthand body: int square(int n) => n * n;
+            // tree-sitter produces an expression child instead of block_statement.
+            if (nodeType != "=>" && nodeType != ";" && nodeType != "in" &&
+                nodeType != "out" && nodeType != "do" && nodeType != "body") {
+                auto loc = makeSourceLocation(child);
+                auto expr = parseExpression(child);
+                auto retStmt = new ReturnStatement(loc, expr);
+                return new CompoundStatement(loc, [retStmt]);
+            }
         }
-        
-        throw new ParseError("Function body missing block statement", makeSourceLocation(bodyNode));
+
+        // No block_statement or expression found — forward declaration
+        // (e.g., "int foo(int n);") where tree-sitter produces a function_body
+        // node containing just ";".
+        return null;
     }
     
     /**

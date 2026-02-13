@@ -1,0 +1,6 @@
+{
+  "name": "switch_error",
+  "description": "switch statement produces an error instead of being silently dropped",
+  "type": "compile_error",
+  "expected_error": "switch"
+}
