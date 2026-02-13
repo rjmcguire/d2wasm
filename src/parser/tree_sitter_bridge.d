@@ -133,69 +133,46 @@ class TreeSitterBridge {
             if (!TreeSitterParser.isValid(root)) {
                 throw new ParseError("Invalid parse tree root", SourceLocation(filename, 1, 1, 0, 0));
             }
-            
+
             if (TreeSitterParser.hasError(root)) {
                 throw new ParseError("Parse errors in source file", SourceLocation(filename, 1, 1, 0, 0));
             }
-            
+
             Declaration[] declarations;
-            
+
             uint childCount = TreeSitterParser.getChildCount(root);
             log(3, "Root has ", childCount, " children");
-            
+
             for (uint i = 0; i < childCount; i++) {
                 TSNode child = TreeSitterParser.getChild(root, i);
                 if (!TreeSitterParser.isValid(child)) {
                     log(2, "Warning: Invalid child node at index ", i);
                     continue;
                 }
-                
+
                 string nodeType = TreeSitterParser.getNodeType(child);
                 log(3, "Processing child ", i, " of type: ", nodeType);
-                
+
                 try {
+                    // Handle root-specific nodes, delegate everything else
+                    // to parseDeclarationNode (the single canonical dispatch).
                     if (nodeType == "module_def") {
-                        // module_def contains the module declaration + all file declarations
-                        // Parse contents recursively
-                        auto moduleDeclsResult = parseModuleDef(child);
-                        declarations ~= moduleDeclsResult;
+                        declarations ~= parseModuleDef(child);
                     } else if (nodeType == "module_declaration") {
-                        // Standalone module declaration (shouldn't happen at root, but handle it)
                         auto modDecl = parseModuleDeclaration(child);
                         if (modDecl !is null) {
                             declarations ~= modDecl;
                             log(2, "Parsed module declaration: ", modDecl.fullyQualifiedName());
                         }
-                    } else if (nodeType == "function_declaration") {
-                        auto decl = parseFunctionDeclaration(child);
-                        declarations ~= decl;
-                        log(3, "Successfully parsed function declaration: ", decl.name);
                     } else if (nodeType == "import_declaration") {
                         auto importDecl = parseImportDeclaration(child);
                         if (importDecl !is null) {
                             declarations ~= importDecl;
                         }
-                        // Note: magic modules like __ctfe_runtime return null
-                    } else if (nodeType == "class_declaration") {
-                        declarations ~= parseClassDeclaration(child);
-                    } else if (nodeType == "struct_declaration") {
-                        declarations ~= parseStructDeclaration(child);
-                    } else if (nodeType == "interface_declaration") {
-                        declarations ~= parseInterfaceDeclaration(child);
-                    } else if (nodeType == "variable_declaration") {
-                        declarations ~= parseVariableDeclaration(child);
-                    } else if (nodeType == "enum_declaration") {
-                        declarations ~= parseEnumDeclaration(child);
-                    } else if (nodeType == "manifest_constant") {
-                        declarations ~= parseManifestConstant(child);
-                    } else if (nodeType == "mixin_declaration") {
-                        declarations ~= parseMixinDeclaration(child);
-                    } else if (nodeType == "conditional_declaration") {
-                        declarations ~= parseConditionalDeclaration(child);
-                    } else if (nodeType == "static_assert") {
-                        declarations ~= parseStaticAssert(child);
-                    } else if (nodeType != "comment" && nodeType.length > 0) {
-                        log(2, "Warning: Skipping unknown top-level node: ", nodeType);
+                    } else if (nodeType == "comment" || nodeType.length == 0) {
+                        // skip
+                    } else {
+                        declarations ~= parseDeclarationNode(child);
                     }
                 } catch (ParseError e) {
                     log(2, "Parse error in ", nodeType, ": ", e.msg);
@@ -205,7 +182,7 @@ class TreeSitterBridge {
                     // Continue parsing other declarations
                 }
             }
-            
+
             return declarations;
         } catch (Exception e) {
             log(2, "Exception in parseSourceFileNode: ", e.msg);
@@ -460,53 +437,35 @@ class TreeSitterBridge {
      */
     Declaration[] parseModuleDef(TSNode node) {
         Declaration[] result;
-        
+
         uint childCount = TreeSitterParser.getChildCount(node);
         for (uint i = 0; i < childCount; i++) {
             TSNode child = TreeSitterParser.getChild(node, i);
             string childType = TreeSitterParser.getNodeType(child);
-            
+
             log(3, "module_def child ", i, ": type=", childType);
-            
+
+            // Handle module_def-specific nodes, delegate everything else
+            // to parseDeclarationNode (the single canonical dispatch).
             if (childType == "module_declaration") {
                 auto modDecl = parseModuleDeclaration(child);
                 if (modDecl !is null) {
                     result ~= modDecl;
                     log(2, "Parsed module declaration: ", modDecl.fullyQualifiedName());
                 }
-            } else if (childType == "function_declaration") {
-                auto decl = parseFunctionDeclaration(child);
-                result ~= decl;
-                log(3, "Parsed function in module: ", decl.name);
-            } else if (childType == "struct_declaration") {
-                result ~= parseStructDeclaration(child);
-            } else if (childType == "class_declaration") {
-                result ~= parseClassDeclaration(child);
-            } else if (childType == "interface_declaration") {
-                result ~= parseInterfaceDeclaration(child);
-            } else if (childType == "variable_declaration") {
-                result ~= parseVariableDeclaration(child);
-            } else if (childType == "enum_declaration") {
-                result ~= parseEnumDeclaration(child);
-            } else if (childType == "manifest_constant") {
-                result ~= parseManifestConstant(child);
-            } else if (childType == "static_assert") {
-                result ~= parseStaticAssert(child);
             } else if (childType == "import_declaration") {
                 auto importDecl = parseImportDeclaration(child);
                 if (importDecl !is null) {
                     result ~= importDecl;
                 }
-            } else if (childType == "mixin_declaration") {
-                result ~= parseMixinDeclaration(child);
-            } else if (childType == "conditional_declaration") {
-                result ~= parseConditionalDeclaration(child);
-            } else if (childType != "comment" && childType != "module" && 
-                       childType != ";" && childType.length > 0) {
-                log(2, "Warning: Skipping unknown node in module_def: ", childType);
+            } else if (childType == "comment" || childType == "module" ||
+                       childType == ";" || childType.length == 0) {
+                // skip
+            } else {
+                result ~= parseDeclarationNode(child);
             }
         }
-        
+
         return result;
     }
     
@@ -783,16 +742,17 @@ class TreeSitterBridge {
         Type baseClass = null;
         Type[] interfaces;
         Declaration[] members;
-        
+        string[] aliasThisNames;
+
         uint childCount = TreeSitterParser.getChildCount(node);
         for (uint i = 0; i < childCount; i++) {
             TSNode child = TreeSitterParser.getChild(node, i);
             string childType = TreeSitterParser.getNodeType(child);
-            
+
             if (childType == "identifier") {
                 name = TreeSitterParser.getNodeText(child, sourceText);
             } else if (childType == "aggregate_body") {
-                members = parseAggregateBody(child);
+                members = parseAggregateBody(child, aliasThisNames);
             } else if (childType == "base_class_list" || childType == "super_class" || childType == "base_class") {
                 // Parse inheritance - accumulate all base types
                 auto inheritTypes = parseBaseClassList(child);
@@ -818,6 +778,7 @@ class TreeSitterBridge {
         auto classDecl = new ClassDecl(loc, name, baseClass, interfaces, members);
         classDecl.visibility = vis;
         classDecl.attrs = dattrs;
+        classDecl.aliasThis = aliasThisNames;
 
         // Mark FunctionDecl members as methods and extract constructor/destructor
         foreach (member; members) {
@@ -873,6 +834,7 @@ class TreeSitterBridge {
 
         string name;
         Declaration[] members;
+        string[] aliasThisNames;
         TSNode templateParamsNode;
 
         uint childCount = TreeSitterParser.getChildCount(node);
@@ -885,7 +847,7 @@ class TreeSitterBridge {
             } else if (childType == "template_parameters") {
                 templateParamsNode = child;
             } else if (childType == "aggregate_body") {
-                members = parseAggregateBody(child);
+                members = parseAggregateBody(child, aliasThisNames);
             }
         }
 
@@ -924,6 +886,7 @@ class TreeSitterBridge {
         auto structDecl = new StructDecl(loc, name, members);
         structDecl.visibility = vis;
         structDecl.attrs = dattrs;
+        structDecl.aliasThis = aliasThisNames;
 
         // Mark any FunctionDecl members as methods and set their parent
         // Extract destructor if present
@@ -954,14 +917,14 @@ class TreeSitterBridge {
     /**
      * Parse aggregate body (struct/class body with member declarations)
      */
-    Declaration[] parseAggregateBody(TSNode node) {
+    Declaration[] parseAggregateBody(TSNode node, out string[] aliasThisNames) {
         Declaration[] members;
-        
+
         uint childCount = TreeSitterParser.getChildCount(node);
         for (uint i = 0; i < childCount; i++) {
             TSNode child = TreeSitterParser.getChild(node, i);
             string childType = TreeSitterParser.getNodeType(child);
-            
+
             if (childType == "variable_declaration" || childType == "field_declaration") {
                 members ~= parseVariableDeclaration(child);
             } else if (childType == "function_declaration") {
@@ -970,11 +933,53 @@ class TreeSitterBridge {
                 members ~= parseDestructor(child);
             } else if (childType == "constructor") {
                 members ~= parseConstructor(child);
+            } else if (childType == "alias_this") {
+                // alias identifier this;
+                auto name = extractAliasThisName(child);
+                if (name)
+                    aliasThisNames ~= name;
+            } else if (childType == "alias_declaration") {
+                // alias this = identifier; (alternative syntax)
+                auto name = extractAliasThisFromDecl(child);
+                if (name)
+                    aliasThisNames ~= name;
             }
             // Skip braces, semicolons, etc.
         }
-        
+
         return members;
+    }
+
+    /// Extract the identifier name from an `alias_this` node: `alias identifier this;`
+    private string extractAliasThisName(TSNode node) {
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            if (TreeSitterParser.getNodeType(child) == "identifier") {
+                return TreeSitterParser.getNodeText(child, sourceText);
+            }
+        }
+        return null;
+    }
+
+    /// Extract identifier from `alias_declaration` when it's `alias this = identifier;`
+    private string extractAliasThisFromDecl(TSNode node) {
+        // Look for pattern: "alias" "this" "=" identifier ";"
+        uint childCount = TreeSitterParser.getChildCount(node);
+        bool sawAlias = false;
+        bool sawThis = false;
+        bool sawEquals = false;
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string text = TreeSitterParser.getNodeText(child, sourceText);
+            string childType = TreeSitterParser.getNodeType(child);
+            if (text == "alias") sawAlias = true;
+            else if (text == "this" && sawAlias && !sawEquals) sawThis = true;
+            else if (text == "=" && sawThis) sawEquals = true;
+            else if (childType == "identifier" && sawEquals)
+                return text;
+        }
+        return null;
     }
     
     /**
@@ -1550,6 +1555,47 @@ class TreeSitterBridge {
     }
     
     /**
+     * Parse alias declaration: alias Name = Type;
+     * Tree-sitter structure: alias_declaration > alias_initializer > (identifier, type)
+     * May contain multiple alias_initializer children for multi-alias declarations.
+     * Skips alias_this variants (handled separately in parseAggregateBody).
+     */
+    private Declaration[] parseAliasDeclaration(TSNode node) {
+        SourceLocation loc = makeSourceLocation(node);
+        Declaration[] results;
+
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+
+            if (childType == "alias_initializer") {
+                string aliasName;
+                Type targetType;
+
+                uint initChildCount = TreeSitterParser.getChildCount(child);
+                for (uint j = 0; j < initChildCount; j++) {
+                    TSNode initChild = TreeSitterParser.getChild(child, j);
+                    string initChildType = TreeSitterParser.getNodeType(initChild);
+
+                    if (initChildType == "identifier" && aliasName is null) {
+                        aliasName = TreeSitterParser.getNodeText(initChild, sourceText);
+                    } else if (initChildType == "type" || initChildType == "primitive_type") {
+                        targetType = parseType(initChild);
+                    }
+                }
+
+                if (aliasName !is null && targetType !is null) {
+                    results ~= new AliasDecl(loc, aliasName, targetType);
+                    log(3, "Parsed alias declaration: alias ", aliasName, " = ", targetType.toString());
+                }
+            }
+        }
+
+        return results;
+    }
+
+    /**
      * Parse a single declaration node, returning an array (some nodes expand to multiple decls)
      */
     private Declaration[] parseDeclarationNode(TSNode node) {
@@ -1578,6 +1624,8 @@ class TreeSitterBridge {
             return [parseConditionalDeclaration(node)];
         } else if (nodeType == "static_assert") {
             return [parseStaticAssert(node)];
+        } else if (nodeType == "alias_declaration") {
+            return parseAliasDeclaration(node);
         } else if (nodeType == "declaration_or_statement") {
             // Some grammar variants use this wrapper
             uint childCount = TreeSitterParser.getChildCount(node);

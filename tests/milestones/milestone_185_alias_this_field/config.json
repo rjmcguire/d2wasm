@@ -1,0 +1,7 @@
+{
+  "name": "alias_this_field",
+  "description": "alias this member field forwarding",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 35
+}

@@ -63,6 +63,9 @@ class TypeChecker {
     // Template instantiation driver — shared across all type-checking in this compilation
     TemplateInstantiator templateInstantiator;
 
+    // Alias-this recursion guard (prevents infinite loops on cyclic alias-this chains)
+    private int aliasThisDepth;
+
     this(SymbolTable symbolTable) {
         this.symbolTable = symbolTable;
         this.templateInstantiator = new TemplateInstantiator();
@@ -125,6 +128,12 @@ class TypeChecker {
         // Reset unique local ID counter for this function
         symbolTable.nextLocalId = 0;
         
+        // Resolve transparent type aliases in return type and parameters
+        decl.returnType = resolveAliasType(decl.returnType);
+        foreach (ref param; decl.parameters) {
+            param.type = resolveAliasType(param.type);
+        }
+
         // Set current return type for return statement checking
         Type oldReturnType = currentFunctionReturnType;
         currentFunctionReturnType = decl.returnType;
@@ -262,11 +271,18 @@ class TypeChecker {
      * Type check variable declaration
      */
     void checkVariableDeclaration(VariableDecl decl) {
+        // Resolve transparent type aliases
+        decl.type = resolveAliasType(decl.type);
+
         // Type check initializer if present
         if (decl.initializer) {
             Type initType = checkExpression(decl.initializer);
             auto compat = checkTypeCompatibility(initType, decl.type);
             if (!compat.isCompatible) {
+                // Try alias-this unwrapping
+                if (tryAliasThisUnwrap(decl.initializer, initType, decl.type)) {
+                    return;  // Rewritten successfully
+                }
                 throw new TypeError(
                     format("Initializer type '%s' is not compatible with variable type '%s'",
                            initType.toString(), decl.type.toString()),
@@ -588,11 +604,14 @@ class TypeChecker {
                 }
                 auto compat = checkTypeCompatibility(returnType, currentFunctionReturnType);
                 if (!compat.isCompatible) {
-                    throw new TypeError(
-                        format("Return type '%s' is not compatible with function return type '%s'",
-                               returnType.toString(), currentFunctionReturnType.toString()),
-                        returnStmt.value.location
-                    );
+                    // Try alias-this unwrapping
+                    if (!tryAliasThisUnwrap(returnStmt.value, returnType, currentFunctionReturnType)) {
+                        throw new TypeError(
+                            format("Return type '%s' is not compatible with function return type '%s'",
+                                   returnType.toString(), currentFunctionReturnType.toString()),
+                            returnStmt.value.location
+                        );
+                    }
                 }
             } else {
                 // Void return
@@ -613,6 +632,9 @@ class TypeChecker {
             // Track for RAII unwind
             symbolTable.trackScopeVar(varDeclStmt.uniqueLocalId);
             
+            // Resolve transparent type aliases
+            varDeclStmt.type = resolveAliasType(varDeclStmt.type);
+
             // Link UserType to its declaration
             if (auto userType = cast(UserType)varDeclStmt.type) {
                 if (userType.templateArgs.length > 0) {
@@ -633,11 +655,14 @@ class TypeChecker {
                 Type initType = checkExpression(varDeclStmt.initializer);
                 auto compat = checkTypeCompatibility(initType, varDeclStmt.type);
                 if (!compat.isCompatible) {
-                    throw new TypeError(
-                        format("Initializer type '%s' is not compatible with variable type '%s'",
-                               initType.toString(), varDeclStmt.type.toString()),
-                        varDeclStmt.initializer.location
-                    );
+                    // Try alias-this unwrapping
+                    if (!tryAliasThisUnwrap(varDeclStmt.initializer, initType, varDeclStmt.type)) {
+                        throw new TypeError(
+                            format("Initializer type '%s' is not compatible with variable type '%s'",
+                                   initType.toString(), varDeclStmt.type.toString()),
+                            varDeclStmt.initializer.location
+                        );
+                    }
                 }
             }
             // Add the variable to the symbol table
@@ -1069,6 +1094,32 @@ class TypeChecker {
                 }
             }
             
+            // Try alias-this forwarding for method calls
+            if (!foundMethod) {
+                if (auto userType = cast(UserType)objectType) {
+                    AggregateDecl aggr;
+                    if (auto sd = cast(StructDecl)userType.declaration) aggr = sd;
+                    else if (auto cd = cast(ClassDecl)userType.declaration) aggr = cd;
+                    if (aggr && aggr.aliasThis.length > 0 && aliasThisDepth <= 10) {
+                        aliasThisDepth++;
+                        scope(exit) aliasThisDepth--;
+                        auto savedObject = memberExpr.object;
+                        foreach (aliasName; aggr.aliasThis) {
+                            auto aliasField = aggr.getField(aliasName);
+                            if (aliasField) {
+                                // Tentatively rewrite: obj.method() → obj.aliasName.method()
+                                memberExpr.object = new MemberExpression(expr.location, savedObject, aliasName);
+                                try {
+                                    return checkCallExpression(expr);
+                                } catch (TypeError) {
+                                    memberExpr.object = savedObject;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Check for built-in methods on array types
             if (!foundMethod) {
                 if (auto arrayType = cast(ArrayType)objectType) {
@@ -1199,14 +1250,17 @@ class TypeChecker {
             for (size_t i = 0; i < expr.arguments.length; i++) {
                 Type argType = checkExpression(expr.arguments[i]);
                 Type paramType = functionType.parameterTypes[i];
-                
+
                 auto compat = checkTypeCompatibility(argType, paramType);
                 if (!compat.isCompatible) {
-                    throw new TypeError(
-                        format("Argument %d: expected type '%s', got '%s'",
-                               i + 1, paramType.toString(), argType.toString()),
-                        expr.arguments[i].location
-                    );
+                    // Try alias-this unwrapping on argument
+                    if (!tryAliasThisUnwrap(expr.arguments[i], argType, paramType)) {
+                        throw new TypeError(
+                            format("Argument %d: expected type '%s', got '%s'",
+                                   i + 1, paramType.toString(), argType.toString()),
+                            expr.arguments[i].location
+                        );
+                    }
                 }
             }
         }
@@ -1729,16 +1783,24 @@ class TypeChecker {
                 if (field) {
                     return field.type;
                 }
+                // Try alias-this forwarding
+                if (auto rewritten = tryAliasThisFieldForward(expr, structDecl)) {
+                    return rewritten;
+                }
                 throw new TypeError(
                     format("Struct '%s' has no field '%s'", userType.name, expr.memberName),
                     expr.location);
             }
-            
+
             // Handle class field access (same as struct, but layout includes vtable_ptr)
             if (auto classDecl = cast(ClassDecl)userType.declaration) {
                 auto field = classDecl.getField(expr.memberName);
                 if (field) {
                     return field.type;
+                }
+                // Try alias-this forwarding
+                if (auto rewritten = tryAliasThisFieldForward(expr, classDecl)) {
+                    return rewritten;
                 }
                 throw new TypeError(
                     format("Class '%s' has no field '%s'", userType.name, expr.memberName),
@@ -1762,9 +1824,88 @@ class TypeChecker {
             expr.location);
     }
     
+    /// Resolve transparent type aliases. If type is a UserType that names an alias,
+    /// return the alias's target type (following chains). Otherwise return the type unchanged.
+    private Type resolveAliasType(Type type) {
+        if (auto ut = cast(UserType)type) {
+            auto sym = symbolTable.lookupSymbol(ut.name);
+            if (sym && sym.kind == SymbolKind.Alias) {
+                return resolveAliasType(sym.type);  // follow chains
+            }
+        }
+        return type;
+    }
+
+    /// Try alias-this forwarding for member field access.
+    /// Rewrites expr.object to insert the alias-this indirection.
+    /// Returns the resolved type if successful, null otherwise.
+    private Type tryAliasThisFieldForward(MemberExpression expr, AggregateDecl aggr) {
+        if (aliasThisDepth > 10) return null;  // cycle detection
+        aliasThisDepth++;
+        scope(exit) aliasThisDepth--;
+
+        auto savedObject = expr.object;
+        foreach (aliasName; aggr.aliasThis) {
+            auto aliasField = aggr.getField(aliasName);
+            if (aliasField) {
+                // Tentatively rewrite: obj.member → obj.aliasName.member
+                expr.object = new MemberExpression(expr.location, savedObject, aliasName);
+                try {
+                    return checkMemberExpression(expr);
+                } catch (TypeError) {
+                    // This alias path didn't work, try the next one
+                    expr.object = savedObject;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// Try to unwrap an expression via alias-this to make it compatible with targetType.
+    /// Rewrites expr in-place by wrapping it in a MemberExpression.
+    /// Returns the new type if successful, null otherwise.
+    private Type tryAliasThisUnwrap(ref Expression expr, Type fromType, Type targetType) {
+        auto aggr = getAliasThisAggregate(fromType);
+        if (!aggr) return null;
+        if (aliasThisDepth > 10) return null;
+        aliasThisDepth++;
+        scope(exit) aliasThisDepth--;
+
+        // Best-match: prefer exact over promotion
+        string bestAlias;
+        Type bestType;
+        bool bestExact = false;
+        int matchCount = 0;
+
+        foreach (aliasName; aggr.aliasThis) {
+            auto aliasField = aggr.getField(aliasName);
+            if (aliasField) {
+                auto compat = checkTypeCompatibility(aliasField.type, targetType);
+                if (compat.isCompatible) {
+                    bool exact = !compat.needsConversion;
+                    if (matchCount == 0 || (exact && !bestExact)) {
+                        bestAlias = aliasName;
+                        bestType = aliasField.type;
+                        bestExact = exact;
+                    }
+                    matchCount++;
+                }
+            }
+        }
+
+        if (matchCount == 1 || bestExact) {
+            expr = new MemberExpression(expr.location, expr, bestAlias);
+            return bestType;
+        }
+        return null;
+    }
+
     Type checkCastExpression(CastExpression expr) {
         Type sourceType = checkExpression(expr.expression);  // Verify source expression is valid
-        
+
+        // Resolve transparent type aliases in cast target
+        expr.targetType = resolveAliasType(expr.targetType);
+
         // Resolve UserType declarations if not already resolved
         if (auto userType = cast(UserType)expr.targetType) {
             if (!userType.declaration) {
@@ -1847,13 +1988,16 @@ class TypeChecker {
         
         auto compat = checkTypeCompatibility(rightType, leftType);
         if (!compat.isCompatible) {
-            throw new TypeError(
-                format("Cannot assign type '%s' to '%s'",
-                       rightType.toString(), leftType.toString()),
-                expr.location
-            );
+            // Try alias-this unwrapping on right-hand side
+            if (!tryAliasThisUnwrap(expr.right, rightType, leftType)) {
+                throw new TypeError(
+                    format("Cannot assign type '%s' to '%s'",
+                           rightType.toString(), leftType.toString()),
+                    expr.location
+                );
+            }
         }
-        
+
         return leftType;  // Assignment expression has type of left-hand side
     }
     
@@ -1895,8 +2039,8 @@ class TypeChecker {
      * Check if two types are compatible
      */
     TypeCompatibility checkTypeCompatibility(Type from, Type to) {
-        from = from.resolve();
-        to = to.resolve();
+        from = resolveAliasType(from.resolve());
+        to = resolveAliasType(to.resolve());
         // Exact type match
         if (typesEqual(from, to)) {
             return TypeCompatibility.compatible();
@@ -1978,8 +2122,21 @@ class TypeChecker {
             // Same kind (both dynamic or both static)
             return TypeCompatibility.compatible();
         }
-        
+
         return TypeCompatibility.incompatible();
+    }
+
+    /// Get the AggregateDecl for a type if it has alias-this members.
+    private AggregateDecl getAliasThisAggregate(Type t) {
+        if (auto ut = cast(UserType)t) {
+            if (auto sd = cast(StructDecl)ut.declaration) {
+                if (sd.aliasThis.length > 0) return sd;
+            }
+            if (auto cd = cast(ClassDecl)ut.declaration) {
+                if (cd.aliasThis.length > 0) return cd;
+            }
+        }
+        return null;
     }
     
     /**

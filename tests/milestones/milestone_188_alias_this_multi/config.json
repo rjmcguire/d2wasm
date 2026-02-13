@@ -1,0 +1,7 @@
+{
+  "name": "alias_this_multi",
+  "description": "Multiple alias this declarations",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 135
+}

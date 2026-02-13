@@ -334,6 +334,7 @@ abstract class AggregateDecl : Declaration {
     size_t aggregateAlign_;
     bool layoutComputed;
     FunctionDecl destructor;
+    string[] aliasThis;  // alias-this member names (multi-alias)
 
     this(SourceLocation loc, string name, bool isPublic) {
         super(loc, name, isPublic);
@@ -587,6 +588,23 @@ class ManifestConstantDecl : Declaration {
             return format("ManifestConstant(%s = %d)", name, ctfeValue);
         }
         return format("ManifestConstant(%s = %s)", name, initializer.toString());
+    }
+}
+
+/**
+ * Type alias: alias Name = Type;
+ * Transparent — Name becomes another name for Type with no runtime distinction.
+ */
+class AliasDecl : Declaration {
+    Type targetType;
+
+    this(SourceLocation loc, string name, Type targetType) {
+        super(loc, name, true);
+        this.targetType = targetType;
+    }
+
+    override string toString() const {
+        return format("AliasDecl(%s = %s)", name, targetType.toString());
     }
 }
 

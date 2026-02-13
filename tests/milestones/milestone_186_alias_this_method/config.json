@@ -1,0 +1,7 @@
+{
+  "name": "alias_this_method",
+  "description": "alias this method call forwarding",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 42
+}

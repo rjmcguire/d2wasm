@@ -24,7 +24,8 @@ enum SymbolKind {
     Type,
     Parameter,
     Field,
-    Template
+    Template,
+    Alias
 }
 
 /**
@@ -647,6 +648,8 @@ class SymbolCollector {
             collectEnumSymbol(enumDecl);
         } else if (auto manifestDecl = cast(ManifestConstantDecl)decl) {
             collectManifestConstant(manifestDecl);
+        } else if (auto aliasDecl = cast(AliasDecl)decl) {
+            collectAliasSymbol(aliasDecl);
         }
     }
     
@@ -921,7 +924,20 @@ class SymbolCollector {
         symbol.isConstant = true;  // Mark as constant
         symbolTable.addSymbol(symbol);
     }
-    
+
+    private void collectAliasSymbol(AliasDecl decl) {
+        auto symbol = new Symbol(
+            decl.name,
+            SymbolKind.Alias,
+            decl.targetType,
+            decl,
+            decl.location,
+            symbolTable.inGlobalScope(),
+            symbolTable.modulePath
+        );
+        symbolTable.addSymbol(symbol);
+    }
+
     private Type[] getFunctionParameterTypes(FunctionDecl decl) {
         Type[] types;
         foreach (param; decl.parameters) {

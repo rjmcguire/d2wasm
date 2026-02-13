@@ -1,0 +1,7 @@
+{
+  "name": "alias_struct",
+  "description": "Struct type alias (alias P = Point)",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 42
+}

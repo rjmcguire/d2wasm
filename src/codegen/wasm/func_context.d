@@ -3840,12 +3840,43 @@ class FuncContext {
      * The hidden 'this' pointer is passed as the first argument.
      */
     void emitMethodCall(ref Appender!(ubyte[]) out_, MemberExpression memberExpr, Expression[] args) {
+        // Handle nested MemberExpression objects (e.g., obj.field.method() from alias-this)
+        if (auto objMember = cast(MemberExpression)memberExpr.object) {
+            auto innerType = getMemberExpressionType(objMember);
+            if (auto innerStruct = innerType ? innerType.asStruct() : null) {
+                // Find the method on the inner struct
+                FunctionDecl method = null;
+                foreach (member; innerStruct.members) {
+                    if (auto funcDecl = cast(FunctionDecl)member) {
+                        if (funcDecl.name == memberExpr.memberName && funcDecl.isMethod) {
+                            method = funcDecl;
+                            break;
+                        }
+                    }
+                }
+                if (method) {
+                    // Emit 'this' pointer: address of the nested member
+                    emitMemberAddress(out_, objMember);
+                    // Emit arguments
+                    foreach (arg; args) {
+                        emitExpression(out_, arg);
+                    }
+                    // Direct call (struct method)
+                    uint funcIdx = emitter.getFuncIndex(method.mangledName);
+                    out_ ~= Op.call;
+                    leb128u(out_, funcIdx);
+                    return;
+                }
+            }
+            throw new EmitError("Cannot resolve method '" ~ memberExpr.memberName ~ "' on nested member expression");
+        }
+
         // Get the struct type from the object
         auto objIdent = cast(IdentifierExpression)memberExpr.object;
         if (!objIdent) {
             throw new EmitError("Method call on non-identifier object not yet supported");
         }
-        
+
         // Unified lookup
         auto objInfo = resolveVar(objIdent.resolvedLocalId, objIdent.name);
         if (objInfo) {
@@ -3869,7 +3900,7 @@ class FuncContext {
             if (objInfo.isStruct) structDecl = objInfo.structDecl;
             else if (objInfo.isClass) classDecl = objInfo.classDecl;
         }
-        
+
         if (!structDecl && !classDecl) {
             throw new EmitError("Cannot determine type for method call on " ~ objIdent.name);
         }

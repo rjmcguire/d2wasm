@@ -1,0 +1,7 @@
+{
+  "name": "alias_basic",
+  "description": "Basic type alias (alias myint = int)",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 42
+}

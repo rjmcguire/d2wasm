@@ -1,0 +1,7 @@
+{
+  "name": "alias_this_implicit",
+  "description": "alias this implicit conversion",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 42
+}

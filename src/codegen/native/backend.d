@@ -1717,6 +1717,38 @@ class NativeCompiledFunction : CompiledFunction {
      * then user arguments in x1, x2, etc.
      */
     private void emitMethodCall(MemberExpression memberExpr, Expression[] args) {
+        // Handle nested MemberExpression objects (e.g., obj.field.method() from alias-this)
+        if (auto objMember = cast(MemberExpression)memberExpr.object) {
+            auto innerStruct = getStructDeclFromExpr(objMember);
+            if (innerStruct) {
+                FunctionDecl method = null;
+                foreach (member; innerStruct.members) {
+                    if (auto funcDecl = cast(FunctionDecl)member) {
+                        if (funcDecl.name == memberExpr.memberName && funcDecl.isMethod) {
+                            method = funcDecl;
+                            break;
+                        }
+                    }
+                }
+                if (method) {
+                    string mangledMethodName = getMangledName(method);
+                    auto labelPtr = mangledMethodName in functionLabels;
+                    if (labelPtr is null)
+                        throw new Exception("Method not compiled: " ~ mangledMethodName);
+
+                    // Emit arguments into registers x1, x2, x3
+                    emitMethodArgs(args);
+
+                    // Compute 'this' pointer: address of nested member
+                    compileExpression(objMember);  // leaves address in x0
+
+                    gen.emitCall(*labelPtr);
+                    return;
+                }
+            }
+            throw new Exception("Cannot resolve method '" ~ memberExpr.memberName ~ "' on nested member expression");
+        }
+
         auto objIdent = cast(IdentifierExpression)memberExpr.object;
         if (!objIdent)
             throw new Exception("Method call on non-identifier object not yet supported in native backend");
@@ -1750,6 +1782,22 @@ class NativeCompiledFunction : CompiledFunction {
         if (labelPtr is null)
             throw new Exception("Method not compiled: " ~ mangledMethodName);
 
+        if (args.length > 3)
+            throw new Exception("Native backend: methods support max 3 user arguments (x0 reserved for this)");
+
+        // Emit arguments into registers
+        emitMethodArgs(args);
+
+        // Load 'this' pointer into x0 (stack address of the struct)
+        gen.emitStackAddress(info.offset);
+
+        // Emit the call
+        gen.emitCall(*labelPtr);
+        // Result is in x0
+    }
+
+    /// Emit method call arguments into registers x1, x2, x3.
+    private void emitMethodArgs(Expression[] args) {
         if (args.length > 3)
             throw new Exception("Native backend: methods support max 3 user arguments (x0 reserved for this)");
 
@@ -1793,13 +1841,6 @@ class NativeCompiledFunction : CompiledFunction {
                 }
             }
         }
-
-        // Load 'this' pointer into x0 (stack address of the struct)
-        gen.emitStackAddress(info.offset);
-
-        // Emit the call
-        gen.emitCall(*labelPtr);
-        // Result is in x0
     }
 
     /**
