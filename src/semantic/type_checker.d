@@ -69,6 +69,7 @@ class TypeChecker {
     this(SymbolTable symbolTable) {
         this.symbolTable = symbolTable;
         this.templateInstantiator = new TemplateInstantiator();
+        this.templateInstantiator.constraintEvaluator = symbolTable.constraintEvaluator;
     }
     
     /**
@@ -1302,7 +1303,7 @@ class TypeChecker {
             );
         }
 
-        // Instantiate
+        // Instantiate (constraint checked inside reparseAndSubstitute via CTFE)
         auto inst = templateInstantiator.instantiate(tmplDecl, expr.templateArguments);
 
         // Dispatch based on what the template contains
@@ -1395,6 +1396,7 @@ class TypeChecker {
             );
         }
 
+        // Constraint checked inside reparseAndSubstitute via CTFE
         auto inst = templateInstantiator.instantiate(tmplDecl, userType.templateArgs);
 
         if (auto structInst = cast(StructDecl)inst) {
@@ -1454,7 +1456,7 @@ class TypeChecker {
             }
         }
 
-        // Instantiate
+        // Instantiate (constraint checked inside reparseAndSubstitute via CTFE)
         auto inst = cast(FunctionDecl)templateInstantiator.instantiate(tmplDecl, deducedTypes);
         if (!inst)
             throw new TypeError("IFTI: template did not produce a function", expr.location);

@@ -282,7 +282,8 @@ class TreeSitterBridge {
         // - parameters
         // - function_body
 
-        TSNode linkageNode, returnTypeNode, nameNode, templateParamsNode, parametersNode, bodyNode;
+        TSNode linkageNode, returnTypeNode, nameNode, templateParamsNode, parametersNode, bodyNode,
+               constraintNode;
 
         uint childCount = TreeSitterParser.getChildCount(node);
         for (uint i = 0; i < childCount; i++) {
@@ -297,6 +298,8 @@ class TreeSitterBridge {
                 nameNode = child;
             } else if (nodeType == "template_parameters") {
                 templateParamsNode = child;
+            } else if (nodeType == "constraint") {
+                constraintNode = child;
             } else if (nodeType == "parameters") {
                 parametersNode = child;
             } else if (nodeType == "function_body") {
@@ -367,7 +370,11 @@ class TreeSitterBridge {
 
         // If this is a template function, wrap in TemplateDecl
         if (templateParams.length > 0) {
-            auto tmplDecl = new TemplateDecl(loc, name, templateParams, [funcDecl]);
+            Expression constraintExpr;
+            if (TreeSitterParser.isValid(constraintNode)) {
+                constraintExpr = parseConstraintExpression(constraintNode);
+            }
+            auto tmplDecl = new TemplateDecl(loc, name, templateParams, [funcDecl], constraintExpr);
             tmplDecl.sourceText = sourceText;
             tmplDecl.visibility = vis;
             tmplDecl.attrs = dattrs;
@@ -835,7 +842,7 @@ class TreeSitterBridge {
         string name;
         Declaration[] members;
         string[] aliasThisNames;
-        TSNode templateParamsNode;
+        TSNode templateParamsNode, constraintNode;
 
         uint childCount = TreeSitterParser.getChildCount(node);
         for (uint i = 0; i < childCount; i++) {
@@ -846,6 +853,8 @@ class TreeSitterBridge {
                 name = TreeSitterParser.getNodeText(child, sourceText);
             } else if (childType == "template_parameters") {
                 templateParamsNode = child;
+            } else if (childType == "constraint") {
+                constraintNode = child;
             } else if (childType == "aggregate_body") {
                 members = parseAggregateBody(child, aliasThisNames);
             }
@@ -904,7 +913,11 @@ class TreeSitterBridge {
 
         // If this is a template struct, wrap in TemplateDecl
         if (templateParams.length > 0) {
-            auto tmplDecl = new TemplateDecl(loc, name, templateParams, [structDecl]);
+            Expression constraintExpr;
+            if (TreeSitterParser.isValid(constraintNode)) {
+                constraintExpr = parseConstraintExpression(constraintNode);
+            }
+            auto tmplDecl = new TemplateDecl(loc, name, templateParams, [structDecl], constraintExpr);
             tmplDecl.sourceText = sourceText;
             tmplDecl.visibility = vis;
             tmplDecl.attrs = dattrs;
@@ -3007,6 +3020,19 @@ class TreeSitterBridge {
             }
         }
         return result;
+    }
+
+    /// Parse constraint node: if ( expression ) — extract the expression
+    private Expression parseConstraintExpression(TSNode node) {
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            if (childType != "if" && childType != "(" && childType != ")") {
+                return parseExpression(child);
+            }
+        }
+        return null;
     }
 
     /// Parse template_arguments node into types: !int or !(int, float)

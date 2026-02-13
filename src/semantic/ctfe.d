@@ -200,6 +200,9 @@ class CTFEEvaluator {
         
         // Register lazy resolver with symbol table
         symbolTable.ctfeResolver = &this.evaluateManifestConstant;
+
+        // Register template constraint evaluator
+        symbolTable.constraintEvaluator = &this.evaluateTemplateConstraint;
     }
     
     /**
@@ -301,8 +304,35 @@ class CTFEEvaluator {
     }
     
     /**
-     * Evaluate all manifest constants in the declarations
+     * Evaluate a template constraint expression via CTFE.
+     * Wraps the constraint in a synthetic function, compiles, and executes.
+     * Throws TypeError if constraint evaluates to false, or on CTFE error.
      */
+    void evaluateTemplateConstraint(Expression constraintExpr, SourceLocation loc) {
+        import ast.statements : ReturnStatement, CompoundStatement;
+
+        auto retStmt = new ReturnStatement(loc, constraintExpr);
+        auto body_ = new CompoundStatement(loc, [cast(Statement)retStmt]);
+        auto wrapper = new FunctionDecl(loc,
+            "__constraint_check_" ~ to!string(ctfeWrapperCounter++),
+            new BasicType(loc, BasicType.Kind.Bool), [], body_);
+
+        long result;
+        try {
+            result = executeViaBackend(wrapper, []);
+        } catch (CTFEError e) {
+            throw new TypeError(
+                format("While evaluating template constraint: %s", e.msg), loc);
+        } catch (Exception e) {
+            throw new TypeError(
+                format("While evaluating template constraint: %s", e.msg), loc);
+        }
+        if (result == 0) {
+            throw new TypeError("Template constraint not satisfied", loc);
+        }
+    }
+
+    /** Evaluate all manifest constants in the declarations. */
     void evaluateManifestConstants() {
         foreach (decl; allDeclarations) {
             if (auto manifest = cast(ManifestConstantDecl)decl) {

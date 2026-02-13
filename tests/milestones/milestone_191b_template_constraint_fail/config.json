@@ -1,0 +1,6 @@
+{
+  "name": "template_constraint_fail",
+  "description": "Rejects instantiation when template constraint is not satisfied",
+  "type": "compile_error",
+  "expected_error": "Template constraint not satisfied"
+}

@@ -216,6 +216,10 @@ class SymbolTable {
     
     // Lazy CTFE evaluation - callback set by CTFEEvaluator
     void delegate(ManifestConstantDecl) ctfeResolver;
+
+    // Template constraint evaluation - callback set by CTFEEvaluator
+    // Throws TypeError if constraint not satisfied, or on evaluation error.
+    void delegate(Expression, SourceLocation) constraintEvaluator;
     
     this() {
         globalScope = new Scope(null, "global");

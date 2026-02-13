@@ -449,11 +449,14 @@ class StructDecl : AggregateDecl {
 class TemplateDecl : Declaration {
     TemplateParamType[] templateParams;
     Declaration[] members;
+    Expression constraint;  // template constraint, e.g. __traits(isArithmetic, T)
 
-    this(SourceLocation loc, string name, TemplateParamType[] templateParams, Declaration[] members) {
+    this(SourceLocation loc, string name, TemplateParamType[] templateParams,
+         Declaration[] members, Expression constraint = null) {
         super(loc, name, false);
         this.templateParams = templateParams;
         this.members = members;
+        this.constraint = constraint;
     }
 
     /// Eponymous member — has the same name as the template

@@ -21,6 +21,10 @@ import std.format : format;
 class TemplateInstantiator {
     private Declaration[string] cache;
 
+    /// Delegate for evaluating template constraints via CTFE.
+    /// Throws on failure (TypeError if constraint not satisfied, or CTFE error).
+    void delegate(Expression, SourceLocation) constraintEvaluator;
+
     /// Instantiate a template for given type arguments.
     /// Returns the eponymous member Declaration (FunctionDecl, StructDecl, etc.).
     Declaration instantiate(TemplateDecl tmpl, Type[] typeArgs) {
@@ -72,6 +76,14 @@ class TemplateInstantiator {
         // Substitute types in all members
         foreach (member; freshTmpl.members) {
             substituteInDeclaration(member, typeMap);
+        }
+
+        // Substitute types in constraint and evaluate via CTFE
+        if (freshTmpl.constraint !is null) {
+            substituteInExpression(freshTmpl.constraint, typeMap);
+            if (constraintEvaluator !is null) {
+                constraintEvaluator(freshTmpl.constraint, tmpl.location);
+            }
         }
 
         // Find and rename the eponymous member
@@ -214,5 +226,8 @@ private void substituteInExpression(Expression expr, Type[string] typeMap) {
     } else if (auto arrLit = cast(ArrayLiteralExpression)expr) {
         foreach (elem; arrLit.elements)
             substituteInExpression(elem, typeMap);
+    } else if (auto traits = cast(TraitsExpression)expr) {
+        foreach (ref t; traits.typeArguments)
+            t = substituteType(t, typeMap);
     }
 }

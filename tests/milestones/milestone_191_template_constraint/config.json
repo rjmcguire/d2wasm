@@ -1,0 +1,7 @@
+{
+  "name": "template_constraint",
+  "description": "Template constraint with __traits (if clause)",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 42
+}
