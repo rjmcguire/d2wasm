@@ -1906,6 +1906,8 @@ class TreeSitterBridge {
                     return new StructDeclarationStatement(loc, sd);
                 // Template struct in statement position — not yet supported
                 throw new ParseError("Template struct declarations inside functions are not yet supported", loc);
+            case "auto_declaration":
+                return parseAutoDeclarationStatement(node, loc);
             case "comment":
                 // Skip comments - return null (handled by caller)
                 return null;
@@ -1913,7 +1915,43 @@ class TreeSitterBridge {
                 throw new ParseError("Unknown statement node: " ~ nodeType, loc);
         }
     }
-    
+
+    /**
+     * Parse auto declaration statement: auto x = expr;
+     * Tree-sitter auto_declaration: [storage_class("auto")] identifier "=" initializer ";"
+     * _auto_assignment is anonymous so its children are inlined into auto_declaration.
+     */
+    VariableDeclarationStatement parseAutoDeclarationStatement(TSNode node, SourceLocation loc) {
+        string name;
+        Expression initializer;
+        bool sawEquals = false;
+
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+
+            if (childType == "storage_class" || childType == ";" || childType == "auto") {
+                continue;  // skip storage classes and punctuation
+            } else if (childType == "=") {
+                sawEquals = true;
+            } else if (!sawEquals && childType == "identifier" && name.length == 0) {
+                name = TreeSitterParser.getNodeText(child, sourceText);
+            } else if (sawEquals) {
+                initializer = parseExpression(child);
+            }
+        }
+
+        if (name.length == 0) {
+            throw new ParseError("auto declaration missing variable name", loc);
+        }
+        if (initializer is null) {
+            throw new ParseError("auto declaration requires an initializer", loc);
+        }
+
+        return new VariableDeclarationStatement(loc, name, null, initializer);
+    }
+
     /**
      * Parse mixin statement: mixin(expression);
      * Returns a MixinStatement that will be expanded during semantic analysis.

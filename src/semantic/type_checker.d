@@ -637,36 +637,43 @@ class TypeChecker {
             // Track for RAII unwind
             symbolTable.trackScopeVar(varDeclStmt.uniqueLocalId);
             
-            // Resolve transparent type aliases
+            // Resolve transparent type aliases (skip for auto declarations where type is null)
             varDeclStmt.type = resolveAliasType(varDeclStmt.type);
 
-            // Link UserType to its declaration
-            if (auto userType = cast(UserType)varDeclStmt.type) {
-                if (userType.templateArgs.length > 0) {
-                    // Template type: Pair!(int, int) — instantiate the template
-                    resolveTemplateUserType(userType);
-                } else if (!userType.declaration) {
-                    auto typeSymbol = symbolTable.lookupSymbol(userType.name);
-                    if (typeSymbol && typeSymbol.kind == SymbolKind.Type) {
-                        userType.declaration = typeSymbol.declaration;
+            // Link UserType to its declaration (skip for auto declarations)
+            if (varDeclStmt.type !is null) {
+                if (auto userType = cast(UserType)varDeclStmt.type) {
+                    if (userType.templateArgs.length > 0) {
+                        // Template type: Pair!(int, int) — instantiate the template
+                        resolveTemplateUserType(userType);
+                    } else if (!userType.declaration) {
+                        auto typeSymbol = symbolTable.lookupSymbol(userType.name);
+                        if (typeSymbol && typeSymbol.kind == SymbolKind.Type) {
+                            userType.declaration = typeSymbol.declaration;
+                        }
                     }
+                    assert(userType.declaration !is null,
+                        "Failed to resolve type '" ~ userType.name ~ "' for variable '" ~ varDeclStmt.name ~ "'");
                 }
-                assert(userType.declaration !is null,
-                    "Failed to resolve type '" ~ userType.name ~ "' for variable '" ~ varDeclStmt.name ~ "'");
             }
-            
+
             // Type check initializer if present
             if (varDeclStmt.initializer) {
                 Type initType = checkExpression(varDeclStmt.initializer);
-                auto compat = checkTypeCompatibility(initType, varDeclStmt.type);
-                if (!compat.isCompatible) {
-                    // Try alias-this unwrapping
-                    if (!tryAliasThisUnwrap(varDeclStmt.initializer, initType, varDeclStmt.type)) {
-                        throw new TypeError(
-                            format("Initializer type '%s' is not compatible with variable type '%s'",
-                                   initType.toString(), varDeclStmt.type.toString()),
-                            varDeclStmt.initializer.location
-                        );
+                if (varDeclStmt.type is null) {
+                    // auto type inference
+                    varDeclStmt.type = initType;
+                } else {
+                    auto compat = checkTypeCompatibility(initType, varDeclStmt.type);
+                    if (!compat.isCompatible) {
+                        // Try alias-this unwrapping
+                        if (!tryAliasThisUnwrap(varDeclStmt.initializer, initType, varDeclStmt.type)) {
+                            throw new TypeError(
+                                format("Initializer type '%s' is not compatible with variable type '%s'",
+                                       initType.toString(), varDeclStmt.type.toString()),
+                                varDeclStmt.initializer.location
+                            );
+                        }
                     }
                 }
             }
