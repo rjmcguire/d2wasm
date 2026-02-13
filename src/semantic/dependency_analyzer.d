@@ -84,29 +84,30 @@ class DependencyAnalyzer {
             }
         }
 
-        // Find all calls in this function's body
+        // Find all calls and template instantiations in this function's body
         auto calls = findCallsInStatement(func.body_);
-
-        foreach (call; calls) {
-            // Try to resolve the call to a FunctionDecl
-            auto calledFunc = resolveFunction(call);
-            if (calledFunc !is null) {
-                collectDependencies(calledFunc, result);
-            }
-        }
-
-        // Also find template instantiation calls in the body
         auto tmplCalls = findTemplateCallsInStatement(func.body_);
+
+        // Process template instantiations first — struct deps must be known
+        // before resolveFunction searches them for method calls
         foreach (tmplCall; tmplCalls) {
-            if (tmplCall.resolvedInstantiation !is null) {
-                collectDependencies(tmplCall.resolvedInstantiation, result);
-            }
             if (tmplCall.resolvedStructInstantiation !is null) {
                 auto sd = tmplCall.resolvedStructInstantiation;
                 if (sd.name !in neededStructs) {
                     neededStructs[sd.name] = true;
                     structDeps ~= sd;
                 }
+            }
+            if (tmplCall.resolvedInstantiation !is null) {
+                collectDependencies(tmplCall.resolvedInstantiation, result);
+            }
+        }
+
+        foreach (call; calls) {
+            // Try to resolve the call to a FunctionDecl
+            auto calledFunc = resolveFunction(call);
+            if (calledFunc !is null) {
+                collectDependencies(calledFunc, result);
             }
         }
 
@@ -338,6 +339,17 @@ class DependencyAnalyzer {
                             if (fd.name == methodName && fd.isMethod) {
                                 return fd;
                             }
+                        }
+                    }
+                }
+            }
+
+            // Also search struct template instantiations (may not be in allDeclarations yet)
+            foreach (sd; structDeps) {
+                foreach (m; sd.members) {
+                    if (auto fd = cast(FunctionDecl)m) {
+                        if (fd.name == methodName && fd.isMethod) {
+                            return fd;
                         }
                     }
                 }

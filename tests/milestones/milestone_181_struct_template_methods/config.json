@@ -1,0 +1,7 @@
+{
+  "name": "struct_template_methods",
+  "description": "Struct template with methods",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 42
+}
