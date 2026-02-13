@@ -380,6 +380,12 @@ struct NativeCodeGen {
         // MOV x0, x1: ORR x0, xzr, x1 = 0xAA0103E0
         emitRaw32(0xAA0103E0);
     }
+
+    /// Move x2 to x0
+    void emitMoveX2ToX0() {
+        // MOV x0, x2: ORR x0, xzr, x2 = 0xAA0203E0
+        emitRaw32(0xAA0203E0);
+    }
     
     /// Move x2 to x1
     void emitMoveX2ToX1() {

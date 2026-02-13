@@ -138,7 +138,11 @@ class NativeCompiledFunction : CompiledFunction {
     // Method tracking (hidden 'this' parameter)
     private StructDecl currentMethodStruct;  // non-null when compiling a method
     private uint currentThisOffset;          // stack offset of 'this' pointer
-    
+
+    // Arena parameter tracking
+    private bool currentFunctionHasArena;
+    private uint currentFunctionArenaOffset;  // stack offset of arena pointer
+
     // For return statements to jump to
     private Label epilogueLabel;
 
@@ -345,6 +349,15 @@ class NativeCompiledFunction : CompiledFunction {
             }
         }
 
+        // For functions that allocate, register hidden arena parameter
+        currentFunctionHasArena = false;
+        currentFunctionArenaOffset = 0;
+        if (func.needsArena) {
+            currentFunctionHasArena = true;
+            currentFunctionArenaOffset = nextLocalOffset;
+            nextLocalOffset += 8;  // 64-bit pointer
+        }
+
         // Reserve space for parameters (x0/x1/x2... depending on hidden ptr)
         foreach (param; func.parameters) {
             NativeLocalInfo nli;
@@ -421,10 +434,25 @@ class NativeCompiledFunction : CompiledFunction {
             gen.emitStoreLocal(currentThisOffset);  // Save 64-bit pointer
         }
 
+        // Spill arena pointer from register to stack
+        if (currentFunctionHasArena) {
+            int arenaReg = (currentFunctionHasHiddenResult ? 1 : 0)
+                         + (currentMethodStruct !is null ? 1 : 0);
+            switch (arenaReg) {
+                case 0: break;  // already in x0
+                case 1: gen.emitMoveX1ToX0(); break;
+                case 2: gen.emitMoveX2ToX0(); break;
+                default: assert(0, "arena register > 2 not supported");
+            }
+            gen.emitStoreLocal(currentFunctionArenaOffset);
+        }
+
         // Spill parameters from registers to stack
         // ARM64 calling convention: first 8 args in x0-x7
-        // If hidden result ptr, params are shifted: x1, x2, x3... instead of x0, x1, x2...
-        int regOffset = (currentFunctionHasHiddenResult ? 1 : 0) + (currentMethodStruct !is null ? 1 : 0);
+        // Hidden params shift user params: result_ptr, this, arena, then user params
+        int regOffset = (currentFunctionHasHiddenResult ? 1 : 0)
+                      + (currentMethodStruct !is null ? 1 : 0)
+                      + (currentFunctionHasArena ? 1 : 0);
         foreach (i, param; func.parameters) {
             int regIdx = cast(int)i + regOffset;
             if (regIdx >= 4) {

@@ -684,7 +684,9 @@ class BinaryEmitter {
         
         // 'this' is an i32 (pointer to struct)
         sig.params = [ValType.i32];
-        
+        if (method.needsArena)
+            sig.params ~= ValType.i32;  // hidden __arena pointer
+
         // Add the declared parameters
         sig.params ~= method.parameters.map!(p => dTypeToValType(p.type)).array;
         
@@ -798,8 +800,10 @@ class BinaryEmitter {
         // Build signature with hidden 'this' pointer as first parameter
         FuncSig sig;
         sig.params = [ValType.i32];  // 'this' pointer
+        if (method.needsArena)
+            sig.params ~= ValType.i32;  // hidden __arena pointer
         sig.params ~= method.parameters.map!(p => dTypeToValType(p.type)).array;
-        
+
         if (!isVoidType(method.returnType)) {
             sig.results = [dTypeToValType(method.returnType)];
         }
@@ -979,11 +983,17 @@ class BinaryEmitter {
         if (largeReturn) {
             // Add hidden __result pointer as first parameter
             sig.params = [ValType.i32];
+            if (decl.needsArena)
+                sig.params ~= ValType.i32;  // hidden __arena pointer
             sig.params ~= paramsToValTypes(decl.parameters);
             // No result - caller reads from __result address
         } else {
-            sig.params = paramsToValTypes(decl.parameters);
-            
+            if (decl.needsArena)
+                sig.params = [ValType.i32];  // hidden __arena pointer
+            else
+                sig.params = null;
+            sig.params ~= paramsToValTypes(decl.parameters);
+
             auto retType = dTypeToValType(decl.returnType);
             if (retType != ValType.i32 || !isVoidType(decl.returnType)) {
                 // Non-void return

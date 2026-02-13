@@ -144,6 +144,10 @@ class FuncContext {
     uint resultPtrLocalIdx;          // WASM local index of hidden result pointer
     uint returnValueSize;            // Size of return value in bytes
     uint returnTempLocalIdx;         // Temp local for struct return copy (pre-allocated)
+
+    // Arena parameter info
+    bool hasArenaParam = false;      // Function has hidden __arena parameter
+    uint arenaLocalIdx;              // WASM local index of hidden __arena pointer
     
     // Call stack frame info (milestone 144)
     bool enableStackTrace = false;
@@ -222,6 +226,14 @@ class FuncContext {
             }
         }
         
+        // Register hidden arena parameter if function allocates
+        hasArenaParam = f.decl.needsArena;
+        if (hasArenaParam) {
+            arenaLocalIdx = cast(uint)localTypes.length;
+            localTypes ~= ValType.i32;  // Arena pointer is i32
+            localOffset++;
+        }
+
         // Parameters are the next locals
         // Use running wasmLocalIdx because interface params take 2 WASM locals
         uint wasmLocalIdx = localOffset;
@@ -591,16 +603,29 @@ class FuncContext {
         if (enableStackTrace) {
             emitCallStackPop(out_);
         }
-        
+
         if (frameSize == 0) return;
-        
+
         // $sp = savedSp
         out_ ~= Op.local_get;
         leb128u(out_, savedSpLocal);
         out_ ~= Op.global_set;
         leb128u(out_, emitter.spGlobal);
     }
-    
+
+    /// Push the current arena pointer onto the WASM stack.
+    /// Uses the function's hidden arena parameter if available,
+    /// otherwise falls back to the global root arena.
+    void emitArenaPointer(ref Appender!(ubyte[]) out_) {
+        if (hasArenaParam) {
+            out_ ~= Op.local_get;
+            leb128u(out_, arenaLocalIdx);
+        } else {
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.arenaBaseGlobal);
+        }
+    }
+
     /**
      * Emit call stack push - called at function entry.
      * 
@@ -2199,9 +2224,8 @@ class FuncContext {
         
         // --- Inside the if block ---
         
-        // Allocate new buffer: __arena_alloc(arena_base, newCapacity * 4)
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.arenaBaseGlobal);
+        // Allocate new buffer: __arena_alloc(arena, newCapacity * 4)
+        emitArenaPointer(out_);
         // Re-evaluate newCapacity (we consumed it in comparison)
         emitExpression(out_, args[0]);
         out_ ~= Op.i32_const;
@@ -2495,8 +2519,7 @@ class FuncContext {
         leb128u(out_, 0);
         
         // Allocate new buffer via arena
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.arenaBaseGlobal);
+        emitArenaPointer(out_);
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
@@ -3432,6 +3455,13 @@ class FuncContext {
             leb128u(out_, emitter.spGlobal);
         }
 
+        // Push hidden arena pointer if callee needs it
+        bool calleeNeedsArena = (calleeDecl && calleeDecl.needsArena)
+            || (expr.resolvedInstantiation && expr.resolvedInstantiation.needsArena);
+        if (calleeNeedsArena) {
+            emitArenaPointer(out_);
+        }
+
         // Emit arguments (copy structs for pass-by-value semantics)
         uint totalCopySize = 0;
         foreach (argIdx, arg; expr.arguments) {
@@ -3957,7 +3987,12 @@ class FuncContext {
         if (objInfo && (objInfo.isStruct || objInfo.isClass)) {
             emitVarAddress(out_, objInfo);
         }
-        
+
+        // Push hidden arena pointer if callee method needs it
+        if (method.needsArena) {
+            emitArenaPointer(out_);
+        }
+
         // Emit the other arguments
         foreach (arg; args) {
             emitExpression(out_, arg);
@@ -4586,9 +4621,8 @@ class FuncContext {
         out_ ~= Op.if_;
         out_ ~= cast(ubyte)0x40;
         
-        // Allocate new buffer: __arena_alloc(arena_base, newLength * 4)
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.arenaBaseGlobal);
+        // Allocate new buffer: __arena_alloc(arena, newLength * 4)
+        emitArenaPointer(out_);
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
