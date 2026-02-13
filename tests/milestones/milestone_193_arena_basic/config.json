@@ -1,0 +1,6 @@
+{
+  "name": "arena_basic",
+  "description": "Basic array operations work through arena allocator",
+  "type": "wasm_exec",
+  "expected_result": 60
+}

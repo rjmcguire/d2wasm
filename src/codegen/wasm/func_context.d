@@ -2199,15 +2199,17 @@ class FuncContext {
         
         // --- Inside the if block ---
         
-        // Allocate new buffer: __alloc(newCapacity * 4)
-        // First, re-evaluate newCapacity (we consumed it in comparison)
+        // Allocate new buffer: __arena_alloc(arena_base, newCapacity * 4)
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.arenaBaseGlobal);
+        // Re-evaluate newCapacity (we consumed it in comparison)
         emitExpression(out_, args[0]);
         out_ ~= Op.i32_const;
         leb128s(out_, 4);  // sizeof(int)
         out_ ~= Op.i32_mul;
-        
-        // Call __alloc
-        uint allocIdx = emitter.getFuncIndex("__alloc");
+
+        // Call __arena_alloc
+        uint allocIdx = emitter.getFuncIndex("__arena_alloc");
         out_ ~= Op.call;
         leb128u(out_, allocIdx);
         // Stack: [newBuffer]
@@ -2492,7 +2494,9 @@ class FuncContext {
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);
         
-        // Allocate new buffer
+        // Allocate new buffer via arena
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.arenaBaseGlobal);
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
@@ -2504,7 +2508,7 @@ class FuncContext {
         out_ ~= Op.i32_const;
         leb128s(out_, sliceInfo.elementSize);
         out_ ~= Op.i32_mul;
-        uint allocIdx = emitter.getFuncIndex("__alloc");
+        uint allocIdx = emitter.getFuncIndex("__arena_alloc");
         out_ ~= Op.call;
         leb128u(out_, allocIdx);
 
@@ -4582,7 +4586,9 @@ class FuncContext {
         out_ ~= Op.if_;
         out_ ~= cast(ubyte)0x40;
         
-        // Allocate new buffer: __alloc(newLength * 4)
+        // Allocate new buffer: __arena_alloc(arena_base, newLength * 4)
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.arenaBaseGlobal);
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
@@ -4594,7 +4600,7 @@ class FuncContext {
         out_ ~= Op.i32_const;
         leb128s(out_, 4);
         out_ ~= Op.i32_mul;
-        uint allocIdx = emitter.getFuncIndex("__alloc");
+        uint allocIdx = emitter.getFuncIndex("__arena_alloc");
         out_ ~= Op.call;
         leb128u(out_, allocIdx);
         

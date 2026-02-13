@@ -112,6 +112,14 @@ class BinaryEmitter {
         bool needsArraySupport;
         bool[string] neededCTFEImports;
         bool enableStackTrace;  // Stack trace option (milestone 144)
+
+        // Arena built-in functions
+        bool hasArenaBuiltins = false;
+        uint arenaAllocFuncIndex;
+        uint arenaNewFuncIndex;
+        uint arenaDropFuncIndex;
+        uint arenaBaseGlobal;        // Index of $arena_base global
+        uint arenaWatermarkGlobal;   // Index of $arena_wm_top global (watermark stack pointer)
     }
     
     private {
@@ -124,7 +132,7 @@ class BinaryEmitter {
         // Built-in functions
         bool hasBuiltins = false;
         uint allocFuncIndex;
-        
+
         // State
         EmitPhase phase = EmitPhase.init;
         string lastError;
@@ -308,7 +316,9 @@ class BinaryEmitter {
             // If string operations are needed, add built-ins
             if (needsArraySupport) {
                 addArrayBuiltins();
+                addArenaBuiltins();
                 finalizeHeapPtr();  // Set heap_ptr to after data section
+                finalizeArenaBase();  // Set arena_base to after heap
             }
             
             // Always add shadow stack for struct locals
@@ -418,18 +428,21 @@ class BinaryEmitter {
             nextDataOffset = MEMORY_RESERVED;
             needsArraySupport = true;  // We're evaluating strings
             hasBuiltins = false;
-            
+            hasArenaBuiltins = false;
+
             // Collect array literals from the expression
             collectArrayLiterals(expr);
             
-            // Add built-ins (__alloc, __array_concat)
+            // Add built-ins (__alloc, __array_concat, arena)
             addArrayBuiltins();
-            
+            addArenaBuiltins();
+
             // Add the __eval function
             addEvalFunction(expr);
-            
-            // Finalize heap pointer
+
+            // Finalize heap pointer and arena
             finalizeHeapPtr();
+            finalizeArenaBase();
             
             // Emit the module
             emitHeader();
@@ -475,6 +488,7 @@ class BinaryEmitter {
             nextDataOffset = MEMORY_RESERVED;
             needsArraySupport = false;
             hasBuiltins = false;
+            hasArenaBuiltins = false;
 
             // Add the __eval function
             addEvalFunction(expr);
@@ -1484,7 +1498,140 @@ class BinaryEmitter {
         
         hasBuiltins = true;
     }
-    
+
+    /**
+     * Add arena built-in functions for scope-based memory management:
+     * - $arena_base global (mutable i32, points to root ArenaHeader)
+     * - $arena_wm_top global (mutable i32, watermark stack top index)
+     * - $arena_alloc(arena: i32, size: i32) -> i32: bump allocator within arena
+     * - $arena_new(arena: i32) -> void: push watermark (save current offset)
+     * - $arena_drop(arena: i32) -> void: pop watermark (restore offset)
+     *
+     * Arena memory layout (set up at finalizeArenaBase):
+     *   arenaBase+0:    ArenaHeader (16 bytes: offset, end, parent, save_count)
+     *   arenaBase+16:   Watermark stack (256 × 4 = 1024 bytes)
+     *   arenaBase+1040: Allocation space starts here
+     */
+    private void addArenaBuiltins() {
+        import codegen.wasm.types : ARENA_HEADER_SIZE, ARENA_METADATA_SIZE;
+
+        // Add arena_base global — initialized after data section layout
+        arenaBaseGlobal = cast(uint)globals.length;
+        GlobalInfo arenaBase;
+        arenaBase.type = ValType.i32;
+        arenaBase.mutable = true;
+        arenaBase.initValue = 0;  // Finalized in finalizeArenaBase()
+        arenaBase.name = "__arena_base";
+        globals ~= arenaBase;
+
+        // Add watermark stack top global — index into watermark stack (0 = empty)
+        arenaWatermarkGlobal = cast(uint)globals.length;
+        GlobalInfo wmTop;
+        wmTop.type = ValType.i32;
+        wmTop.mutable = true;
+        wmTop.initValue = 0;  // Starts empty
+        wmTop.name = "__arena_wm_top";
+        globals ~= wmTop;
+
+        // __arena_alloc(arena: i32, size: i32) -> i32
+        FuncSig arenaAllocSig;
+        arenaAllocSig.params = [ValType.i32, ValType.i32];
+        arenaAllocSig.results = [ValType.i32];
+
+        uint arenaAllocTypeIdx;
+        if (auto existing = arenaAllocSig in typeIndex) {
+            arenaAllocTypeIdx = *existing;
+        } else {
+            arenaAllocTypeIdx = cast(uint)types.length;
+            types ~= arenaAllocSig;
+            typeIndex[arenaAllocSig] = arenaAllocTypeIdx;
+        }
+
+        arenaAllocFuncIndex = cast(uint)functions.length;
+        FuncInfo arenaAllocFunc;
+        arenaAllocFunc.name = "__arena_alloc";
+        arenaAllocFunc.typeIndex = arenaAllocTypeIdx;
+        arenaAllocFunc.decl = null;
+        arenaAllocFunc.exported = true;
+        funcIndex["__arena_alloc"] = arenaAllocFuncIndex;
+        functions ~= arenaAllocFunc;
+
+        // __arena_new(arena: i32) -> void
+        FuncSig arenaNewSig;
+        arenaNewSig.params = [ValType.i32];
+        arenaNewSig.results = [];
+
+        uint arenaNewTypeIdx;
+        if (auto existing = arenaNewSig in typeIndex) {
+            arenaNewTypeIdx = *existing;
+        } else {
+            arenaNewTypeIdx = cast(uint)types.length;
+            types ~= arenaNewSig;
+            typeIndex[arenaNewSig] = arenaNewTypeIdx;
+        }
+
+        arenaNewFuncIndex = cast(uint)functions.length;
+        FuncInfo arenaNewFunc;
+        arenaNewFunc.name = "__arena_new";
+        arenaNewFunc.typeIndex = arenaNewTypeIdx;
+        arenaNewFunc.decl = null;
+        arenaNewFunc.exported = true;
+        funcIndex["__arena_new"] = arenaNewFuncIndex;
+        functions ~= arenaNewFunc;
+
+        // __arena_drop(arena: i32) -> void
+        arenaDropFuncIndex = cast(uint)functions.length;
+        FuncInfo arenaDropFunc;
+        arenaDropFunc.name = "__arena_drop";
+        arenaDropFunc.typeIndex = arenaNewTypeIdx;  // Same signature: (i32) -> void
+        arenaDropFunc.decl = null;
+        arenaDropFunc.exported = true;
+        funcIndex["__arena_drop"] = arenaDropFuncIndex;
+        functions ~= arenaDropFunc;
+
+        hasArenaBuiltins = true;
+    }
+
+    /**
+     * Finalize the arena base address after data section and heap are laid out.
+     * Arena region sits after the heap region.
+     * Must be called after finalizeHeapPtr().
+     */
+    private void finalizeArenaBase() {
+        import codegen.wasm.types : ARENA_METADATA_SIZE, MEMORY_ALIGNMENT;
+
+        if (!hasArenaBuiltins) return;
+
+        // Arena base starts after the heap pointer, aligned to 8 bytes.
+        // We place it at a fixed offset above the initial heap_ptr.
+        // Since the heap grows upward, we give it some room (4KB).
+        uint heapStart = cast(uint)globals[heapPtrGlobal].initValue;
+        uint arenaStart = ((heapStart + 4096) + (MEMORY_ALIGNMENT - 1)) & ~(MEMORY_ALIGNMENT - 1);
+
+        globals[arenaBaseGlobal].initValue = arenaStart;
+
+        // Initialize the root ArenaHeader in the data section:
+        // offset = arenaStart + ARENA_METADATA_SIZE (first allocation address)
+        // end = 65536 - shadow_stack_size (top of available memory)
+        // parent = 0 (root, no parent)
+        // save_count = 0
+        uint allocStart = arenaStart + ARENA_METADATA_SIZE;
+        ubyte[16] headerData;
+        // offset field (bump pointer starts at allocation space)
+        headerData[0] = cast(ubyte)(allocStart & 0xFF);
+        headerData[1] = cast(ubyte)((allocStart >> 8) & 0xFF);
+        headerData[2] = cast(ubyte)((allocStart >> 16) & 0xFF);
+        headerData[3] = cast(ubyte)((allocStart >> 24) & 0xFF);
+        // end field (leave at 0 for now — no bounds checking in phase 1)
+        headerData[4..8] = 0;
+        // parent field (0 = root)
+        headerData[8..12] = 0;
+        // save_count field (0)
+        headerData[12..16] = 0;
+
+        dataEntries ~= DataEntry(arenaStart, headerData[].dup);
+    }
+
     /**
      * Finalize the heap pointer after data section is laid out
      */
@@ -1722,6 +1869,17 @@ class BinaryEmitter {
             }
             if (auto idx = "__array_concat" in funcIndex) {
                 concatFuncIndex = *idx + cast(uint)imports.length;
+            }
+        }
+        if (hasArenaBuiltins) {
+            if (auto idx = "__arena_alloc" in funcIndex) {
+                arenaAllocFuncIndex = *idx + cast(uint)imports.length;
+            }
+            if (auto idx = "__arena_new" in funcIndex) {
+                arenaNewFuncIndex = *idx + cast(uint)imports.length;
+            }
+            if (auto idx = "__arena_drop" in funcIndex) {
+                arenaDropFuncIndex = *idx + cast(uint)imports.length;
             }
         }
     }
@@ -2200,19 +2358,23 @@ class BinaryEmitter {
             body_ ~= Op.local_set;
             leb128u(body_, 6);  // new_len
             
-            // buffer = alloc(new_len)
+            // buffer = arena_alloc(arena_base, new_len)
+            body_ ~= Op.global_get;
+            leb128u(body_, arenaBaseGlobal);
             body_ ~= Op.local_get;
             leb128u(body_, 6);
             body_ ~= Op.call;
-            leb128u(body_, allocFuncIndex);
+            leb128u(body_, arenaAllocFuncIndex);
             body_ ~= Op.local_set;
             leb128u(body_, 7);  // buffer
-            
-            // result = alloc(12)  // Array struct size
+
+            // result = arena_alloc(arena_base, 12)  // Array struct size
+            body_ ~= Op.global_get;
+            leb128u(body_, arenaBaseGlobal);
             body_ ~= Op.i32_const;
             leb128s(body_, ARRAY_STRUCT_SIZE);
             body_ ~= Op.call;
-            leb128u(body_, allocFuncIndex);
+            leb128u(body_, arenaAllocFuncIndex);
             body_ ~= Op.local_set;
             leb128u(body_, 8);  // result
             
@@ -2275,6 +2437,200 @@ class BinaryEmitter {
             leb128u(body_, 8);
             body_ ~= Op.end;
             
+        } else if (f.name == "__arena_alloc") {
+            import codegen.wasm.types : ARENA_OFFSET_FIELD, MEMORY_ALIGNMENT;
+            // __arena_alloc(arena: i32, size: i32) -> i32
+            // Bump allocator within the arena.
+            //
+            // local 0 = arena (param, pointer to ArenaHeader)
+            // local 1 = size (param)
+            // local 2 = result (aligned current offset)
+            //
+            // result = (arena.offset + 7) & ~7  // align to 8
+            // arena.offset = result + size
+            // return result
+
+            leb128u(body_, 1);  // 1 local group
+            leb128u(body_, 1);  // 1 local
+            body_ ~= cast(ubyte)ValType.i32;
+
+            // result = (arena.offset + 7) & ~7
+            body_ ~= Op.local_get;
+            leb128u(body_, 0);  // arena
+            body_ ~= Op.i32_load;
+            leb128u(body_, 2);  // align
+            leb128u(body_, ARENA_OFFSET_FIELD);
+            body_ ~= Op.i32_const;
+            leb128s(body_, cast(int)(MEMORY_ALIGNMENT - 1));
+            body_ ~= Op.i32_add;
+            body_ ~= Op.i32_const;
+            leb128s(body_, cast(int)(~(MEMORY_ALIGNMENT - 1)));
+            body_ ~= Op.i32_and;
+            body_ ~= Op.local_set;
+            leb128u(body_, 2);  // result
+
+            // arena.offset = result + size
+            body_ ~= Op.local_get;
+            leb128u(body_, 0);  // arena
+            body_ ~= Op.local_get;
+            leb128u(body_, 2);  // result
+            body_ ~= Op.local_get;
+            leb128u(body_, 1);  // size
+            body_ ~= Op.i32_add;
+            body_ ~= Op.i32_store;
+            leb128u(body_, 2);  // align
+            leb128u(body_, ARENA_OFFSET_FIELD);
+
+            // return result
+            body_ ~= Op.local_get;
+            leb128u(body_, 2);
+            body_ ~= Op.end;
+
+        } else if (f.name == "__arena_new") {
+            import codegen.wasm.types : ARENA_OFFSET_FIELD, ARENA_SAVE_COUNT_FIELD,
+                                        ARENA_HEADER_SIZE;
+            // __arena_new(arena: i32) -> void
+            // Push current arena.offset onto the watermark stack.
+            //
+            // local 0 = arena (param)
+            // local 1 = wm_top (current watermark stack index)
+            //
+            // wm_top = global.__arena_wm_top
+            // watermark_stack[wm_top] = arena.offset
+            // global.__arena_wm_top = wm_top + 1
+            // arena.save_count += 1
+
+            leb128u(body_, 1);  // 1 local group
+            leb128u(body_, 1);  // 1 local
+            body_ ~= cast(ubyte)ValType.i32;
+
+            // wm_top = global.__arena_wm_top
+            body_ ~= Op.global_get;
+            leb128u(body_, arenaWatermarkGlobal);
+            body_ ~= Op.local_set;
+            leb128u(body_, 1);
+
+            // Store arena.offset at watermark_stack[wm_top]
+            // Address = arena_base + ARENA_HEADER_SIZE + wm_top * 4
+            body_ ~= Op.global_get;
+            leb128u(body_, arenaBaseGlobal);
+            body_ ~= Op.i32_const;
+            leb128s(body_, ARENA_HEADER_SIZE);
+            body_ ~= Op.i32_add;
+            body_ ~= Op.local_get;
+            leb128u(body_, 1);  // wm_top
+            body_ ~= Op.i32_const;
+            leb128s(body_, 4);
+            body_ ~= Op.i32_mul;
+            body_ ~= Op.i32_add;
+            // Now stack has the destination address
+            // Load arena.offset
+            body_ ~= Op.local_get;
+            leb128u(body_, 0);  // arena
+            body_ ~= Op.i32_load;
+            leb128u(body_, 2);  // align
+            leb128u(body_, ARENA_OFFSET_FIELD);
+            // Store
+            body_ ~= Op.i32_store;
+            leb128u(body_, 2);  // align
+            leb128u(body_, 0);  // offset 0
+
+            // global.__arena_wm_top = wm_top + 1
+            body_ ~= Op.local_get;
+            leb128u(body_, 1);
+            body_ ~= Op.i32_const;
+            leb128s(body_, 1);
+            body_ ~= Op.i32_add;
+            body_ ~= Op.global_set;
+            leb128u(body_, arenaWatermarkGlobal);
+
+            // arena.save_count += 1
+            body_ ~= Op.local_get;
+            leb128u(body_, 0);  // arena
+            body_ ~= Op.local_get;
+            leb128u(body_, 0);  // arena
+            body_ ~= Op.i32_load;
+            leb128u(body_, 2);  // align
+            leb128u(body_, ARENA_SAVE_COUNT_FIELD);
+            body_ ~= Op.i32_const;
+            leb128s(body_, 1);
+            body_ ~= Op.i32_add;
+            body_ ~= Op.i32_store;
+            leb128u(body_, 2);  // align
+            leb128u(body_, ARENA_SAVE_COUNT_FIELD);
+
+            body_ ~= Op.end;
+
+        } else if (f.name == "__arena_drop") {
+            import codegen.wasm.types : ARENA_OFFSET_FIELD, ARENA_SAVE_COUNT_FIELD,
+                                        ARENA_HEADER_SIZE;
+            // __arena_drop(arena: i32) -> void
+            // Pop watermark stack, restore arena.offset.
+            //
+            // local 0 = arena (param)
+            // local 1 = wm_top (new top after decrement)
+            //
+            // wm_top = global.__arena_wm_top - 1
+            // global.__arena_wm_top = wm_top
+            // arena.offset = watermark_stack[wm_top]
+            // arena.save_count -= 1
+
+            leb128u(body_, 1);  // 1 local group
+            leb128u(body_, 1);  // 1 local
+            body_ ~= cast(ubyte)ValType.i32;
+
+            // wm_top = global.__arena_wm_top - 1
+            body_ ~= Op.global_get;
+            leb128u(body_, arenaWatermarkGlobal);
+            body_ ~= Op.i32_const;
+            leb128s(body_, 1);
+            body_ ~= Op.i32_sub;
+            body_ ~= Op.local_tee;
+            leb128u(body_, 1);
+            // Also update global
+            body_ ~= Op.global_set;
+            leb128u(body_, arenaWatermarkGlobal);
+
+            // arena.offset = watermark_stack[wm_top]
+            // Load from: arena_base + ARENA_HEADER_SIZE + wm_top * 4
+            body_ ~= Op.local_get;
+            leb128u(body_, 0);  // arena (destination for store)
+            body_ ~= Op.global_get;
+            leb128u(body_, arenaBaseGlobal);
+            body_ ~= Op.i32_const;
+            leb128s(body_, ARENA_HEADER_SIZE);
+            body_ ~= Op.i32_add;
+            body_ ~= Op.local_get;
+            leb128u(body_, 1);  // wm_top
+            body_ ~= Op.i32_const;
+            leb128s(body_, 4);
+            body_ ~= Op.i32_mul;
+            body_ ~= Op.i32_add;
+            body_ ~= Op.i32_load;
+            leb128u(body_, 2);  // align
+            leb128u(body_, 0);  // offset 0
+            // Store to arena.offset
+            body_ ~= Op.i32_store;
+            leb128u(body_, 2);  // align
+            leb128u(body_, ARENA_OFFSET_FIELD);
+
+            // arena.save_count -= 1
+            body_ ~= Op.local_get;
+            leb128u(body_, 0);  // arena
+            body_ ~= Op.local_get;
+            leb128u(body_, 0);  // arena
+            body_ ~= Op.i32_load;
+            leb128u(body_, 2);  // align
+            leb128u(body_, ARENA_SAVE_COUNT_FIELD);
+            body_ ~= Op.i32_const;
+            leb128s(body_, 1);
+            body_ ~= Op.i32_sub;
+            body_ ~= Op.i32_store;
+            leb128u(body_, 2);  // align
+            leb128u(body_, ARENA_SAVE_COUNT_FIELD);
+
+            body_ ~= Op.end;
+
         } else if (f.name == "__eval") {
             // __eval() -> i32
             // Evaluates the stored expression and returns the result pointer

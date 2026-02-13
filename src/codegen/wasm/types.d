@@ -93,6 +93,17 @@ enum : uint {
     CALL_STACK_FRAME_SIZE = 24,   // 6 × u32 fields
     CALL_STACK_MAX_FRAMES = 64,
     CALL_STACK_STRING_POOL_OFFSET = 1544,  // 8 + 64*24
+
+    // Arena memory layout
+    // ArenaHeader: { offset: i32, end: i32, parent: i32, save_count: i32 }
+    ARENA_HEADER_SIZE = 16,
+    ARENA_OFFSET_FIELD = 0,     // Current bump pointer (absolute address)
+    ARENA_END_FIELD = 4,        // End of available space (future bounds checking)
+    ARENA_PARENT_FIELD = 8,     // Pointer to parent ArenaHeader (0 = root)
+    ARENA_SAVE_COUNT_FIELD = 12, // Number of watermarks pushed
+    ARENA_WATERMARK_MAX = 256,  // Max nested new_/drop_ pairs
+    ARENA_WATERMARK_STACK_SIZE = 1024, // 256 * 4 bytes
+    ARENA_METADATA_SIZE = ARENA_HEADER_SIZE + ARENA_WATERMARK_STACK_SIZE,  // 1040 bytes
 }
 
 //==============================================================================
