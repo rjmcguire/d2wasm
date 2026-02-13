@@ -1,0 +1,6 @@
+{
+  "name": "arena_analysis",
+  "description": "Arena allocation analysis: allocating and non-allocating functions coexist",
+  "type": "wasm_exec",
+  "expected_result": 42
+}

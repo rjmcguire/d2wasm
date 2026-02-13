@@ -314,12 +314,21 @@ int compileFile(CompilerOptions options) {
         }
 
         log(1, "Type checking passed");
-        
+
         // 6b. Evaluate remaining manifest constants (for side-effect-only CTFE like enum _ = ctfeMain())
         // Lazy evaluation only triggers when values are accessed; this ensures all CTFE runs
         log(2, "Evaluating manifest constants...");
         ctfeEvaluator.evaluateManifestConstants();
-        
+
+        // 6c. Arena allocation analysis
+        // Determine which functions allocate (directly or transitively)
+        // and mark them with needsArena for hidden parameter threading
+        {
+            import semantic.arena_analyzer : analyzeArenaNeeds;
+            log(2, "Analyzing arena allocation needs...");
+            analyzeArenaNeeds(ast);
+        }
+
         // 7. Code generation (binary WASM emission)
         if (!options.dryRun) {
             log(1, "Generating binary WASM...");

@@ -250,7 +250,8 @@ class FunctionDecl : Declaration {
         bool, "isTypeChecked", 1,  // already type-checked (avoid redundant passes)
         bool, "isDestructor",  1,  // ~this() destructor
         bool, "isConstructor", 1,  // this() constructor
-        uint, "",              2,  // padding
+        bool, "needsArena",    1,  // allocates (directly or transitively), needs __arena param
+        uint, "",              1,  // padding
     ));
 
     // Forward isStatic/isProperty to DeclAttrs on Declaration base
