@@ -1315,6 +1315,15 @@ class FuncContext {
             return;
         }
         
+        // Struct template construction: Pair!(int, int)(10, 20)
+        if (auto tmplInst = cast(TemplateInstantiationExpression)stmt.initializer) {
+            if (tmplInst.resolvedStructInstantiation) {
+                emitStructFieldsInit(out_, structDecl, tmplInst.callArguments,
+                                    EmitAddrMode.fromFP, info.frameOffset);
+                return;
+            }
+        }
+
         // Struct copy: Point b = a (copy from another struct variable)
         if (auto identExpr = cast(IdentifierExpression)stmt.initializer) {
             // Check if source is a local struct

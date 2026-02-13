@@ -694,8 +694,18 @@ class NativeCompiledFunction : CompiledFunction {
             // Compile initializer if present
             if (varDecl.initializer) {
                 if (nli.isStruct) {
-                    // Struct initialization
-                    if (auto call = cast(CallExpression)varDecl.initializer) {
+                    // Struct template construction: Pair!(int, int)(10, 20)
+                    if (auto tmplInst = cast(TemplateInstantiationExpression)varDecl.initializer) {
+                        if (tmplInst.resolvedStructInstantiation) {
+                            auto sd = tmplInst.resolvedStructInstantiation;
+                            for (size_t i = 0; i < sd.fields.length && i < tmplInst.callArguments.length; i++) {
+                                auto field = sd.fields[i];
+                                uint fieldOffset = nextLocalOffset + cast(uint)field.offset;
+                                compileExpression(tmplInst.callArguments[i]);
+                                gen.emitStoreLocal32(fieldOffset);
+                            }
+                        }
+                    } else if (auto call = cast(CallExpression)varDecl.initializer) {
                         if (auto funcIdent = cast(IdentifierExpression)call.function_) {
                             auto symbol = symbolTable.lookupSymbol(funcIdent.name);
                             assert(symbol !is null,

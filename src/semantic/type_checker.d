@@ -1287,12 +1287,9 @@ class TypeChecker {
 
         if (auto structInst = cast(StructDecl)inst) {
             // Struct template instantiation — register, layout, type-check, then check construction
-            auto collector = new SymbolCollector(symbolTable);
-            collector.collectStructSymbol(structInst);
-
-            if (!structInst.isTypeChecked) {
-                auto saved = symbolTable.saveAndResetScope();
-                scope(exit) symbolTable.restoreScope(saved);
+            if (!structInst.layoutComputed) {
+                auto collector = new SymbolCollector(symbolTable);
+                collector.collectStructSymbol(structInst);
                 checkStructDeclaration(structInst);
             }
 
@@ -1343,12 +1340,10 @@ class TypeChecker {
         auto inst = templateInstantiator.instantiate(tmplDecl, userType.templateArgs);
 
         if (auto structInst = cast(StructDecl)inst) {
-            auto collector = new SymbolCollector(symbolTable);
-            collector.collectStructSymbol(structInst);
-
-            if (!structInst.isTypeChecked) {
-                auto saved = symbolTable.saveAndResetScope();
-                scope(exit) symbolTable.restoreScope(saved);
+            // Only register if not already laid out (cached instantiation)
+            if (!structInst.layoutComputed) {
+                auto collector = new SymbolCollector(symbolTable);
+                collector.collectStructSymbol(structInst);
                 checkStructDeclaration(structInst);
             }
 
