@@ -35,9 +35,10 @@ class WASMBackend : Backend {
             return null;
         }
         
-        return new WASMCompiledFunction(func.name, wasmBytes);
+        return new WASMCompiledFunction(func.name, wasmBytes,
+            emitter.getArenaBaseValue(), buildNeedsArenaMap([func]));
     }
-    
+
     override CompiledFunction compileWithDependencies(FunctionDecl[] funcs, string entryFuncName) {
         import std.algorithm : map;
         import std.array : array;
@@ -61,14 +62,15 @@ class WASMBackend : Backend {
 
         auto emitter = new BinaryEmitter(symbolTable, enableStackTrace);
         auto wasmBytes = emitter.emit(decls);
-        
+
         if (wasmBytes is null) {
             lastError = emitter.error();
             lastErrorLoc = emitter.errorLocation();
             return null;
         }
-        
-        return new WASMCompiledFunction(entryFuncName, wasmBytes);
+
+        return new WASMCompiledFunction(entryFuncName, wasmBytes,
+            emitter.getArenaBaseValue(), buildNeedsArenaMap(funcs));
     }
     
     override ubyte[] compileModule(Declaration[] decls) {
@@ -84,6 +86,20 @@ class WASMBackend : Backend {
     override string error() { return lastError; }
     override SourceLocation errorLocation() { return lastErrorLoc; }
     override string name() { return "wasm"; }
+
+    /// Build a map of function names that have an arena parameter in their signature.
+    /// Exported free functions like "main" are excluded — they use the global fallback.
+    private static bool[string] buildNeedsArenaMap(FunctionDecl[] funcs) {
+        bool[string] result;
+        foreach (f; funcs) {
+            if (f.needsArena && f.name != "main") {
+                if (f.mangledName.length > 0)
+                    result[f.mangledName] = true;
+                result[f.name] = true;
+            }
+        }
+        return result;
+    }
 }
 
 /**
@@ -91,93 +107,102 @@ class WASMBackend : Backend {
  */
 class WASMCompiledFunction : CompiledFunction {
     import semantic.ctfe_runtime : CTFERuntime, CTFERuntimeError;
-    
+
     private string funcName;
     private ubyte[] wasmBytes;
     private CTFERuntime runtime;
-    
-    this(string name, ubyte[] wasm) {
+    private uint arenaBaseValue;
+    private bool[string] needsArenaFuncs;
+
+    this(string name, ubyte[] wasm, uint arenaBase = 0, bool[string] needsArena = null) {
         this.funcName = name;
         this.wasmBytes = wasm;
+        this.arenaBaseValue = arenaBase;
+        this.needsArenaFuncs = needsArena;
         this.runtime = new CTFERuntime();
         this.runtime.loadModule(wasm);
     }
-    
+
     override ExecutionResult call(long[] args) {
         try {
             int[] intArgs;
+            // Prepend arena if entry function needs it
+            if (funcName in needsArenaFuncs)
+                intArgs ~= cast(int)arenaBaseValue;
             foreach (arg; args) {
                 intArgs ~= cast(int)arg;
             }
-            
+
             auto result = runtime.callI32(funcName, intArgs);
             return ExecutionResult.fromInt(result.asInt());
-            
+
         } catch (CTFERuntimeError e) {
             return ExecutionResult.failure(e.msg);
         }
     }
-    
+
     override ExecutionResult callByName(string targetFuncName, long[] args) {
         try {
             int[] intArgs;
+            // Prepend arena if target function needs it
+            if (targetFuncName in needsArenaFuncs)
+                intArgs ~= cast(int)arenaBaseValue;
             foreach (arg; args) {
                 intArgs ~= cast(int)arg;
             }
-            
+
             auto result = runtime.callI32(targetFuncName, intArgs);
             return ExecutionResult.fromInt(result.asInt());
-            
+
         } catch (CTFERuntimeError e) {
             return ExecutionResult.failure(e.msg);
         }
     }
-    
+
     override ExecutionResult callWithLargeReturn(string targetFuncName, long[] args, uint resultSize) {
         try {
             // Use a fixed high address for result buffer
             // WASM memory starts at 64KB, use address near the top
             // This is safe for CTFE since we control the memory layout
             uint resultAddr = 65536 - 256 - resultSize;  // Leave some headroom
-            
-            // Prepend result address to args
+
+            // Prepend result address, then arena if needed, then user args
             int[] intArgs;
             intArgs ~= cast(int)resultAddr;
+            if (targetFuncName in needsArenaFuncs)
+                intArgs ~= cast(int)arenaBaseValue;
             foreach (arg; args) {
                 intArgs ~= cast(int)arg;
             }
-            
+
             // Call function (void return, writes to resultAddr)
             auto result = runtime.callI32(targetFuncName, intArgs);
             // Note: result is void but callI32 still works
-            
+
             // Read result bytes from memory
             ubyte[] resultBytes = runtime.readMemory(resultAddr, resultSize);
-            
+
             return ExecutionResult.fromArray(resultBytes);
-            
+
         } catch (CTFERuntimeError e) {
             return ExecutionResult.failure(e.msg);
         }
     }
-    
+
     override ubyte[] readMemory(uint offset, uint length) {
         return runtime.readMemory(offset, length);
     }
 
     override bool hasFunction(string targetFuncName) {
-        // WASM runtime exports all functions, so any compiled function should be callable
-        // For a proper implementation, we'd check the module exports
-        // For now, assume true (will fail at call time if not found)
         return true;
     }
-    
+
     override void dispose() {
         if (runtime) {
             destroy(runtime);
             runtime = null;
         }
     }
-    
+
     override string name() { return funcName; }
 }

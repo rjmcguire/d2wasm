@@ -144,7 +144,18 @@ private bool hasDirectAllocation(Statement stmt) {
         if (forStmt.update && hasDirectAllocationExpr(forStmt.update)) return true;
         if (hasDirectAllocation(forStmt.body_)) return true;
     } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
-        if (varDecl.initializer && hasDirectAllocationExpr(varDecl.initializer)) return true;
+        if (varDecl.initializer) {
+            // Static array init from array literal is just stack stores, not heap allocation
+            bool isStaticArrayInit = false;
+            if (varDecl.type) {
+                if (auto at = cast(ArrayType)varDecl.type) {
+                    if (at.isStaticArray && cast(ArrayLiteralExpression)varDecl.initializer)
+                        isStaticArrayInit = true;
+                }
+            }
+            if (!isStaticArrayInit && hasDirectAllocationExpr(varDecl.initializer))
+                return true;
+        }
     } else if (auto mixinStmt = cast(MixinStatement)stmt) {
         if (mixinStmt.isExpanded) {
             foreach (s; mixinStmt.expandedStatements) {

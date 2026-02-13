@@ -689,11 +689,11 @@ class BinaryEmitter {
 
         // Add the declared parameters
         sig.params ~= method.parameters.map!(p => dTypeToValType(p.type)).array;
-        
+
         if (!isVoidType(method.returnType)) {
             sig.results = [dTypeToValType(method.returnType)];
         }
-        
+
         // Get or create type index
         uint tIdx;
         if (auto existing = sig in typeIndex) {
@@ -703,7 +703,7 @@ class BinaryEmitter {
             types ~= sig;
             typeIndex[sig] = tIdx;
         }
-        
+
         // Generate D ABI mangled name
         import codegen.mangle : computeMangledName;
         method.mangledName = computeMangledName(symbolTable.modulePath, method);
@@ -719,7 +719,7 @@ class BinaryEmitter {
         funcIndex[method.mangledName] = cast(uint)functions.length;
         functions ~= info;
     }
-    
+
     /**
      * Collect methods from a class declaration and set up virtual dispatch.
      * 
@@ -980,15 +980,20 @@ class BinaryEmitter {
         
         import std.stdio : stderr;
         
+        // Exported free functions (like "main") don't get arena param in their
+        // signature — they're called by the host which doesn't know about arena.
+        // They use the global arena fallback instead.
+        bool addArenaParam = decl.needsArena && decl.name != "main";
+
         if (largeReturn) {
             // Add hidden __result pointer as first parameter
             sig.params = [ValType.i32];
-            if (decl.needsArena)
+            if (addArenaParam)
                 sig.params ~= ValType.i32;  // hidden __arena pointer
             sig.params ~= paramsToValTypes(decl.parameters);
             // No result - caller reads from __result address
         } else {
-            if (decl.needsArena)
+            if (addArenaParam)
                 sig.params = [ValType.i32];  // hidden __arena pointer
             else
                 sig.params = null;
@@ -2695,6 +2700,13 @@ class BinaryEmitter {
      *   0..N-1: imported functions
      *   N..:    local functions
      */
+    /// Get the initial value of the arena base global (for CTFE callers to prepend).
+    /// Returns 0 if arena builtins are not initialized.
+    package uint getArenaBaseValue() {
+        if (!hasArenaBuiltins) return 0;
+        return cast(uint)globals[arenaBaseGlobal].initValue;
+    }
+
     package uint getFuncIndex(string name) {
         // Check if it's an imported function
         if (auto idx = name in importIndex) {

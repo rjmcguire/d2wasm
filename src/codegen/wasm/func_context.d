@@ -226,8 +226,9 @@ class FuncContext {
             }
         }
         
-        // Register hidden arena parameter if function allocates
-        hasArenaParam = f.decl.needsArena;
+        // Register hidden arena parameter if function allocates.
+        // Exported free functions (like "main") don't get the param — they use the global fallback.
+        hasArenaParam = f.decl.needsArena && !(f.decl.name == "main" && f.structParent is null && f.classParent is null);
         if (hasArenaParam) {
             arenaLocalIdx = cast(uint)localTypes.length;
             localTypes ~= ValType.i32;  // Arena pointer is i32
@@ -3456,8 +3457,9 @@ class FuncContext {
         }
 
         // Push hidden arena pointer if callee needs it
-        bool calleeNeedsArena = (calleeDecl && calleeDecl.needsArena)
-            || (expr.resolvedInstantiation && expr.resolvedInstantiation.needsArena);
+        // (exported free functions like "main" don't take arena param)
+        bool calleeNeedsArena = (calleeDecl && calleeDecl.needsArena && calleeDecl.name != "main")
+                || (expr.resolvedInstantiation && expr.resolvedInstantiation.needsArena);
         if (calleeNeedsArena) {
             emitArenaPointer(out_);
         }

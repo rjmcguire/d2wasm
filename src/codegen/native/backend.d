@@ -93,6 +93,7 @@ class NativeCompiledFunction : CompiledFunction {
     private NativeCodeGen gen;  // renamed from codegen to avoid module name collision
     private size_t entryPoint;
     private size_t paramCount;           // number of function parameters
+    private bool entryNeedsArena;        // whether the entry function has needsArena
     private SymbolTable symbolTable;     // for looking up struct types
     
     /// Discriminant for variable types — used with `final switch` for exhaustive dispatch.
@@ -139,9 +140,9 @@ class NativeCompiledFunction : CompiledFunction {
     private StructDecl currentMethodStruct;  // non-null when compiling a method
     private uint currentThisOffset;          // stack offset of 'this' pointer
 
-    // Arena parameter tracking
+    // Arena tracking (hidden __arena parameter)
     private bool currentFunctionHasArena;
-    private uint currentFunctionArenaOffset;  // stack offset of arena pointer
+    private uint currentFunctionArenaOffset;
 
     // For return statements to jump to
     private Label epilogueLabel;
@@ -191,7 +192,8 @@ class NativeCompiledFunction : CompiledFunction {
         
         // Store parameter count for call()
         this.paramCount = func.parameters.length;
-        
+        this.entryNeedsArena = func.needsArena && func.name != "main";
+
         // Compile the function
         compileFunction(func);
         
@@ -240,6 +242,7 @@ class NativeCompiledFunction : CompiledFunction {
         // Find entry function and store its param count
         if (auto entryFunc = entryFuncName in functionDecls) {
             this.paramCount = (*entryFunc).parameters.length;
+            this.entryNeedsArena = (*entryFunc).needsArena && (*entryFunc).name != "main";
         } else {
             assert(0, "Entry function not found: " ~ entryFuncName);
         }
@@ -349,13 +352,13 @@ class NativeCompiledFunction : CompiledFunction {
             }
         }
 
-        // For functions that allocate, register hidden arena parameter
+        // Register hidden arena parameter if function allocates
         currentFunctionHasArena = false;
         currentFunctionArenaOffset = 0;
         if (func.needsArena) {
             currentFunctionHasArena = true;
             currentFunctionArenaOffset = nextLocalOffset;
-            nextLocalOffset += 8;  // 64-bit pointer
+            nextLocalOffset += 8;
         }
 
         // Reserve space for parameters (x0/x1/x2... depending on hidden ptr)
@@ -434,7 +437,7 @@ class NativeCompiledFunction : CompiledFunction {
             gen.emitStoreLocal(currentThisOffset);  // Save 64-bit pointer
         }
 
-        // Spill arena pointer from register to stack
+        // Spill hidden arena pointer from register to stack
         if (currentFunctionHasArena) {
             int arenaReg = (currentFunctionHasHiddenResult ? 1 : 0)
                          + (currentMethodStruct !is null ? 1 : 0);
@@ -775,10 +778,17 @@ class NativeCompiledFunction : CompiledFunction {
                                 }
                             } else if (symbol && symbol.kind == SymbolKind.Function) {
                                 // Function call returning struct — hidden result pointer pattern
-                                // ARM64: x0 = result ptr, x1..xN = actual args
+                                // ARM64: x0 = result ptr, [x1 = arena], x1/x2..xN = actual args
                                 assert((funcIdent.name in functionLabels) !is null,
                                     "Struct return call to '" ~ funcIdent.name ~
                                     "' but no function label exists");
+
+                                // Check if callee needs arena
+                                bool calleeNeedsArena = false;
+                                if (auto calleeDecl = funcIdent.name in functionDecls) {
+                                    calleeNeedsArena = (*calleeDecl).needsArena;
+                                }
+                                int arenaShift = calleeNeedsArena ? 1 : 0;
 
                                 // First, compile and save all arguments to temp slots
                                 uint tempOffset = nextLocalOffset + varSize;
@@ -789,25 +799,28 @@ class NativeCompiledFunction : CompiledFunction {
                                     argTemps ~= tempOffset;
                                     tempOffset += 4;
                                 }
-                                
-                                // Load args into registers in reverse order (x3, x2, x1)
-                                // to avoid clobbering
-                                if (argTemps.length > 2) {
-                                    gen.emitLoadLocal32(argTemps[2]);
-                                    gen.emitMoveX0ToX3();
+
+                                // Load args into registers in reverse order
+                                // User args go into x(1+arenaShift), x(2+arenaShift), ...
+                                for (long i = cast(long)argTemps.length - 1; i >= 0; i--) {
+                                    gen.emitLoadLocal32(argTemps[cast(size_t)i]);
+                                    switch (cast(int)i + 1 + arenaShift) {
+                                        case 1: gen.emitMoveX0ToX1(); break;
+                                        case 2: gen.emitMoveX0ToX2(); break;
+                                        case 3: gen.emitMoveX0ToX3(); break;
+                                        default: assert(0, "argument register > 3");
+                                    }
                                 }
-                                if (argTemps.length > 1) {
-                                    gen.emitLoadLocal32(argTemps[1]);
-                                    gen.emitMoveX0ToX2();
-                                }
-                                if (argTemps.length > 0) {
-                                    gen.emitLoadLocal32(argTemps[0]);
+
+                                // Load arena into x1 if callee needs it
+                                if (calleeNeedsArena) {
+                                    gen.emitLoadLocal(currentFunctionArenaOffset);
                                     gen.emitMoveX0ToX1();
                                 }
-                                
+
                                 // Load result address into x0 (first arg)
                                 gen.emitStackAddress(nextLocalOffset);
-                                
+
                                 // Call the function
                                 auto funcLabelPtr = funcIdent.name in functionLabels;
                                 if (funcLabelPtr is null) {
@@ -849,6 +862,13 @@ class NativeCompiledFunction : CompiledFunction {
                             if (funcLabelPtr is null)
                                 throw new Exception("Function not compiled: " ~ funcIdent.name);
 
+                            // Check if callee needs arena
+                            bool calleeNeedsArena = false;
+                            if (auto calleeDecl = funcIdent.name in functionDecls) {
+                                calleeNeedsArena = (*calleeDecl).needsArena;
+                            }
+                            int arenaShift = calleeNeedsArena ? 1 : 0;
+
                             // Compile and save all arguments to temp slots
                             uint tempOffset = nextLocalOffset + varSize;
                             uint[] argTemps;
@@ -860,16 +880,20 @@ class NativeCompiledFunction : CompiledFunction {
                             }
 
                             // Load args into registers in reverse order
-                            if (argTemps.length > 2) {
-                                gen.emitLoadLocal32(argTemps[2]);
-                                gen.emitMoveX0ToX3();
+                            // User args go into x(1+arenaShift), x(2+arenaShift), ...
+                            for (long i = cast(long)argTemps.length - 1; i >= 0; i--) {
+                                gen.emitLoadLocal32(argTemps[cast(size_t)i]);
+                                switch (cast(int)i + 1 + arenaShift) {
+                                    case 1: gen.emitMoveX0ToX1(); break;
+                                    case 2: gen.emitMoveX0ToX2(); break;
+                                    case 3: gen.emitMoveX0ToX3(); break;
+                                    default: assert(0, "argument register > 3");
+                                }
                             }
-                            if (argTemps.length > 1) {
-                                gen.emitLoadLocal32(argTemps[1]);
-                                gen.emitMoveX0ToX2();
-                            }
-                            if (argTemps.length > 0) {
-                                gen.emitLoadLocal32(argTemps[0]);
+
+                            // Load arena into x1 if callee needs it
+                            if (calleeNeedsArena) {
+                                gen.emitLoadLocal(currentFunctionArenaOffset);
                                 gen.emitMoveX0ToX1();
                             }
 
@@ -1334,10 +1358,17 @@ class NativeCompiledFunction : CompiledFunction {
 
                 // Check if this is a call to a known function
                 if (auto labelPtr = callName in functionLabels) {
-                    if (call.arguments.length > 4) {
+                    // Check if callee needs arena (shifts user args by 1 register)
+                    bool calleeNeedsArena = false;
+                    if (auto calleeDecl = callName in functionDecls) {
+                        calleeNeedsArena = (*calleeDecl).needsArena;
+                    }
+                    int arenaShift = calleeNeedsArena ? 1 : 0;
+
+                    if (call.arguments.length + arenaShift > 4) {
                         throw new Exception("Native backend: more than 4 arguments not yet supported");
                     }
-                    
+
                     // Check if any argument contains a function call that would clobber registers
                     bool hasNestedCalls = false;
                     foreach (arg; call.arguments) {
@@ -1346,7 +1377,7 @@ class NativeCompiledFunction : CompiledFunction {
                             break;
                         }
                     }
-                    
+
                     if (hasNestedCalls && call.arguments.length > 1) {
                         // Save arguments to temp slots, then load into registers
                         // This prevents register clobbering from nested calls
@@ -1358,10 +1389,10 @@ class NativeCompiledFunction : CompiledFunction {
                             argSlots ~= slot;
                         }
                         // Load from temp slots into argument registers (reverse order!)
-                        // Load x1/x2/x3 first, then x0 last (so we don't clobber x0)
+                        // Arena shifts user args: x0 -> x(0+shift), etc.
                         for (long i = cast(long)argSlots.length - 1; i >= 0; i--) {
                             gen.emitLoadLocal32(argSlots[cast(size_t)i]);
-                            switch (i) {
+                            switch (cast(int)i + arenaShift) {
                                 case 0: break;  // already in x0
                                 case 1: gen.emitMoveX0ToX1(); break;
                                 case 2: gen.emitMoveX0ToX2(); break;
@@ -1374,8 +1405,8 @@ class NativeCompiledFunction : CompiledFunction {
                         // Compile arguments in reverse order into their target registers
                         for (long i = cast(long)call.arguments.length - 1; i >= 0; i--) {
                             compileExpression(call.arguments[i]);
-                            // Move x0 to target register (x0 stays, others need mov)
-                            switch (i) {
+                            // Move x0 to target register (shifted by arena)
+                            switch (cast(int)i + arenaShift) {
                                 case 0: break;  // already in x0
                                 case 1: gen.emitMoveX0ToX1(); break;
                                 case 2: gen.emitMoveX0ToX2(); break;
@@ -1384,7 +1415,12 @@ class NativeCompiledFunction : CompiledFunction {
                             }
                         }
                     }
-                    
+
+                    // Load arena into x0 if callee needs it
+                    if (calleeNeedsArena) {
+                        gen.emitLoadLocal(currentFunctionArenaOffset);
+                    }
+
                     // Emit the call (BL instruction)
                     gen.emitCall(*labelPtr);
                     // Result is in x0
@@ -1669,16 +1705,25 @@ class NativeCompiledFunction : CompiledFunction {
             if (!labelPtr)
                 throw new Exception("Template instantiation label not found: " ~ inst.name);
 
-            // Compile arguments into registers
+            // Check if callee needs arena
+            bool calleeNeedsArena = inst.needsArena;
+            int arenaShift = calleeNeedsArena ? 1 : 0;
+
+            // Compile arguments into registers (shifted by arena)
             for (long i = cast(long)tmplInst.callArguments.length - 1; i >= 0; i--) {
                 compileExpression(tmplInst.callArguments[i]);
-                switch (i) {
+                switch (cast(int)i + arenaShift) {
                     case 0: break;
                     case 1: gen.emitMoveX0ToX1(); break;
                     case 2: gen.emitMoveX0ToX2(); break;
                     case 3: gen.emitMoveX0ToX3(); break;
                     default: assert(0, "argument register > 3");
                 }
+            }
+
+            // Load arena into x0 if callee needs it
+            if (calleeNeedsArena) {
+                gen.emitLoadLocal(currentFunctionArenaOffset);
             }
 
             gen.emitCall(*labelPtr);
@@ -1770,8 +1815,17 @@ class NativeCompiledFunction : CompiledFunction {
                     if (labelPtr is null)
                         throw new Exception("Method not compiled: " ~ mangledMethodName);
 
-                    // Emit arguments into registers x1, x2, x3
-                    emitMethodArgs(args);
+                    bool methodNeedsArena = method.needsArena;
+                    int methodArenaShift = methodNeedsArena ? 1 : 0;
+
+                    // Emit arguments into registers (shifted by arena)
+                    emitMethodArgs(args, methodArenaShift);
+
+                    // Load arena into x1 if method needs it
+                    if (methodNeedsArena) {
+                        gen.emitLoadLocal(currentFunctionArenaOffset);
+                        gen.emitMoveX0ToX1();
+                    }
 
                     // Compute 'this' pointer: address of nested member
                     compileExpression(objMember);  // leaves address in x0
@@ -1816,11 +1870,20 @@ class NativeCompiledFunction : CompiledFunction {
         if (labelPtr is null)
             throw new Exception("Method not compiled: " ~ mangledMethodName);
 
-        if (args.length > 3)
+        bool methodNeedsArena = method.needsArena;
+        int methodArenaShift = methodNeedsArena ? 1 : 0;
+
+        if (args.length + methodArenaShift > 3)
             throw new Exception("Native backend: methods support max 3 user arguments (x0 reserved for this)");
 
-        // Emit arguments into registers
-        emitMethodArgs(args);
+        // Emit arguments into registers (shifted by arena)
+        emitMethodArgs(args, methodArenaShift);
+
+        // Load arena into x1 if method needs it
+        if (methodNeedsArena) {
+            gen.emitLoadLocal(currentFunctionArenaOffset);
+            gen.emitMoveX0ToX1();
+        }
 
         // Load 'this' pointer into x0 (stack address of the struct)
         gen.emitStackAddress(info.offset);
@@ -1830,9 +1893,11 @@ class NativeCompiledFunction : CompiledFunction {
         // Result is in x0
     }
 
-    /// Emit method call arguments into registers x1, x2, x3.
-    private void emitMethodArgs(Expression[] args) {
-        if (args.length > 3)
+    /// Emit method call arguments into registers.
+    /// arenaShift=0: args go into x1, x2, x3 (no arena)
+    /// arenaShift=1: args go into x2, x3, x4 (x1 reserved for arena)
+    private void emitMethodArgs(Expression[] args, int arenaShift = 0) {
+        if (args.length + arenaShift > 3)
             throw new Exception("Native backend: methods support max 3 user arguments (x0 reserved for this)");
 
         // Check if any argument contains a function call that would clobber registers
@@ -1853,13 +1918,13 @@ class NativeCompiledFunction : CompiledFunction {
                 gen.emitStoreLocal32(slot);
                 argSlots ~= slot;
             }
-            // Load from temp slots into x1, x2, x3 (reverse order to not clobber)
+            // Load from temp slots into registers (reverse order to not clobber)
             for (long i = cast(long)argSlots.length - 1; i >= 0; i--) {
                 gen.emitLoadLocal32(argSlots[cast(size_t)i]);
-                switch (i) {
-                    case 0: gen.emitMoveX0ToX1(); break;
-                    case 1: gen.emitMoveX0ToX2(); break;
-                    case 2: gen.emitMoveX0ToX3(); break;
+                switch (cast(int)i + 1 + arenaShift) {
+                    case 1: gen.emitMoveX0ToX1(); break;
+                    case 2: gen.emitMoveX0ToX2(); break;
+                    case 3: gen.emitMoveX0ToX3(); break;
                     default: assert(0, "method argument register > 3");
                 }
             }
@@ -1867,10 +1932,10 @@ class NativeCompiledFunction : CompiledFunction {
             // No nested calls - direct register assignment (reverse order)
             for (long i = cast(long)args.length - 1; i >= 0; i--) {
                 compileExpression(args[i]);
-                switch (i) {
-                    case 0: gen.emitMoveX0ToX1(); break;
-                    case 1: gen.emitMoveX0ToX2(); break;
-                    case 2: gen.emitMoveX0ToX3(); break;
+                switch (cast(int)i + 1 + arenaShift) {
+                    case 1: gen.emitMoveX0ToX1(); break;
+                    case 2: gen.emitMoveX0ToX2(); break;
+                    case 3: gen.emitMoveX0ToX3(); break;
                     default: assert(0, "method argument register > 3");
                 }
             }
@@ -2626,166 +2691,165 @@ class NativeCompiledFunction : CompiledFunction {
 
     override ExecutionResult call(long[] args) {
         import codegen.native.codegen_interface : setjmp;
-        
+
         // Set up execution context for host functions
         NativeCTFEContext ctx;
         ctx.dataSection = &dataSection;
         ctx.errorKind = CTFEErrorKind.None;
         hostFunctions.setContext(&ctx);
         scope(exit) hostFunctions.setContext(null);
-        
+
         // Set up error recovery point - longjmp returns here on trap
         if (setjmp(ctx.errorJump) != 0) {
             // Got here via longjmp - error occurred
             return ExecutionResult.failure(ctfeErrorMessageWithStack(&ctx));
         }
-        
+
+        // Prepend arena (0) if entry function needs it (native uses __ctfe_alloc, not arena)
+        long[] fullArgs;
+        if (entryNeedsArena) fullArgs ~= 0L;
+        fullArgs ~= args;
+
         // Call the compiled function with appropriate number of arguments
         // ARM64 calling convention: first 8 args in x0-x7
         long result;
-        
-        switch (paramCount) {
+
+        switch (fullArgs.length) {
             case 0:
                 alias Fn0 = extern(C) long function();
                 result = (cast(Fn0)(gen.base + entryPoint))();
                 break;
             case 1:
                 alias Fn1 = extern(C) long function(long);
-                result = (cast(Fn1)(gen.base + entryPoint))(
-                    args.length > 0 ? args[0] : 0);
+                result = (cast(Fn1)(gen.base + entryPoint))(fullArgs[0]);
                 break;
             case 2:
                 alias Fn2 = extern(C) long function(long, long);
-                result = (cast(Fn2)(gen.base + entryPoint))(
-                    args.length > 0 ? args[0] : 0,
-                    args.length > 1 ? args[1] : 0);
+                result = (cast(Fn2)(gen.base + entryPoint))(fullArgs[0], fullArgs[1]);
                 break;
             case 3:
                 alias Fn3 = extern(C) long function(long, long, long);
-                result = (cast(Fn3)(gen.base + entryPoint))(
-                    args.length > 0 ? args[0] : 0,
-                    args.length > 1 ? args[1] : 0,
-                    args.length > 2 ? args[2] : 0);
+                result = (cast(Fn3)(gen.base + entryPoint))(fullArgs[0], fullArgs[1], fullArgs[2]);
                 break;
             case 4:
                 alias Fn4 = extern(C) long function(long, long, long, long);
-                result = (cast(Fn4)(gen.base + entryPoint))(
-                    args.length > 0 ? args[0] : 0,
-                    args.length > 1 ? args[1] : 0,
-                    args.length > 2 ? args[2] : 0,
-                    args.length > 3 ? args[3] : 0);
+                result = (cast(Fn4)(gen.base + entryPoint))(fullArgs[0], fullArgs[1], fullArgs[2], fullArgs[3]);
                 break;
             default:
                 throw new Exception("Native backend: too many parameters (max 4 for now)");
         }
-        
+
         return ExecutionResult.fromInt(cast(int)result);  // Sign-extend 32-bit to 64-bit
     }
     
     override ExecutionResult callByName(string targetFuncName, long[] args) {
         import codegen.native.codegen_interface : setjmp;
-        
+
         // Set up execution context for host functions
         NativeCTFEContext ctx;
         ctx.dataSection = &dataSection;
         ctx.errorKind = CTFEErrorKind.None;
         hostFunctions.setContext(&ctx);
         scope(exit) hostFunctions.setContext(null);
-        
+
         // Look up function entry point and param count
         auto labelPtr = targetFuncName in functionLabels;
         if (labelPtr is null) {
             return ExecutionResult.failure("Function not found: " ~ targetFuncName);
         }
-        
+
         auto funcDeclPtr = targetFuncName in functionDecls;
         if (funcDeclPtr is null) {
             return ExecutionResult.failure("Function decl not found: " ~ targetFuncName);
         }
-        
+
         size_t targetEntry = (*labelPtr).offset;
-        size_t targetParamCount = (*funcDeclPtr).parameters.length;
-        
+        bool needsArena = (*funcDeclPtr).needsArena;
+
         // Set up error recovery point - longjmp returns here on trap
         if (setjmp(ctx.errorJump) != 0) {
             // Got here via longjmp - error occurred
             return ExecutionResult.failure(ctfeErrorMessageWithStack(&ctx));
         }
-        
-        // Call with the target function's entry point and param count
+
+        // Prepend arena (0) if target function needs it
+        long[] fullArgs;
+        if (needsArena) fullArgs ~= 0L;
+        fullArgs ~= args;
+
+        // Call with the target function's entry point
         long result;
-        switch (targetParamCount) {
+        switch (fullArgs.length) {
             case 0:
                 alias Fn0 = extern(C) long function();
                 result = (cast(Fn0)(gen.base + targetEntry))();
                 break;
             case 1:
                 alias Fn1 = extern(C) long function(long);
-                result = (cast(Fn1)(gen.base + targetEntry))(
-                    args.length > 0 ? args[0] : 0);
+                result = (cast(Fn1)(gen.base + targetEntry))(fullArgs[0]);
                 break;
             case 2:
                 alias Fn2 = extern(C) long function(long, long);
-                result = (cast(Fn2)(gen.base + targetEntry))(
-                    args.length > 0 ? args[0] : 0,
-                    args.length > 1 ? args[1] : 0);
+                result = (cast(Fn2)(gen.base + targetEntry))(fullArgs[0], fullArgs[1]);
                 break;
             case 3:
                 alias Fn3 = extern(C) long function(long, long, long);
-                result = (cast(Fn3)(gen.base + targetEntry))(
-                    args.length > 0 ? args[0] : 0,
-                    args.length > 1 ? args[1] : 0,
-                    args.length > 2 ? args[2] : 0);
+                result = (cast(Fn3)(gen.base + targetEntry))(fullArgs[0], fullArgs[1], fullArgs[2]);
                 break;
             case 4:
                 alias Fn4 = extern(C) long function(long, long, long, long);
-                result = (cast(Fn4)(gen.base + targetEntry))(
-                    args.length > 0 ? args[0] : 0,
-                    args.length > 1 ? args[1] : 0,
-                    args.length > 2 ? args[2] : 0,
-                    args.length > 3 ? args[3] : 0);
+                result = (cast(Fn4)(gen.base + targetEntry))(fullArgs[0], fullArgs[1], fullArgs[2], fullArgs[3]);
                 break;
             default:
                 return ExecutionResult.failure("Too many parameters (max 4)");
         }
-        
+
         return ExecutionResult.fromInt(cast(int)result);  // Sign-extend 32-bit to 64-bit
     }
     
     override ExecutionResult callWithLargeReturn(string targetFuncName, long[] args, uint resultSize) {
         import codegen.native.codegen_interface : setjmp;
         import core.stdc.stdlib : malloc, free;
-        
+
         // Allocate buffer for result
         ubyte* resultBuf = cast(ubyte*)malloc(resultSize);
         if (resultBuf is null) {
             return ExecutionResult.failure("Failed to allocate result buffer");
         }
         scope(exit) free(resultBuf);
-        
+
         // Set up execution context for host functions
         NativeCTFEContext ctx;
         ctx.dataSection = &dataSection;
         ctx.errorKind = CTFEErrorKind.None;
         hostFunctions.setContext(&ctx);
         scope(exit) hostFunctions.setContext(null);
-        
+
         // Look up function entry point
         auto labelPtr = targetFuncName in functionLabels;
         if (labelPtr is null) {
             return ExecutionResult.failure("Function not found: " ~ targetFuncName);
         }
-        
+
+        // Check if target needs arena
+        bool needsArena = false;
+        if (auto funcDeclPtr = targetFuncName in functionDecls) {
+            needsArena = (*funcDeclPtr).needsArena;
+        }
+
         size_t targetEntry = (*labelPtr).offset;
-        
+
         // Set up error recovery point
         if (setjmp(ctx.errorJump) != 0) {
             return ExecutionResult.failure(ctfeErrorMessageWithStack(&ctx));
         }
-        
-        // Prepend result pointer to args
-        long[] fullArgs = [cast(long)resultBuf] ~ args;
-        
+
+        // Prepend result pointer, then arena (0) if needed, then user args
+        long[] fullArgs;
+        fullArgs ~= cast(long)resultBuf;
+        if (needsArena) fullArgs ~= 0L;
+        fullArgs ~= args;
+
         // Call function (void return, writes to resultBuf)
         switch (fullArgs.length) {
             case 1:
@@ -2807,10 +2871,10 @@ class NativeCompiledFunction : CompiledFunction {
             default:
                 return ExecutionResult.failure("Too many parameters (max 4)");
         }
-        
+
         // Copy result bytes
         ubyte[] resultBytes = resultBuf[0 .. resultSize].dup;
-        
+
         return ExecutionResult.fromArray(resultBytes);
     }
     
