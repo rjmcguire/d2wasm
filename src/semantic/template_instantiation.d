@@ -85,7 +85,7 @@ class TemplateInstantiator {
                 string[] bindings;
                 foreach (i, tp; tmpl.templateParams)
                     bindings ~= tp.paramName ~ " = " ~ typeArgs[i].toString();
-                constraintEvaluator(freshTmpl.constraint, tmpl.location,
+                constraintEvaluator(freshTmpl.constraint, tmpl.constraint.location,
                                     tmpl.name, bindings);
             }
         }
