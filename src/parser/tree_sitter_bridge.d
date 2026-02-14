@@ -1780,6 +1780,7 @@ class TreeSitterBridge {
     Type parseTemplateInstanceType(TSNode node, SourceLocation loc) {
         string templateName;
         Type[] templateArgs;
+        Expression[] templateArgExprs;
 
         uint childCount = TreeSitterParser.getChildCount(node);
         for (uint i = 0; i < childCount; i++) {
@@ -1789,12 +1790,13 @@ class TreeSitterBridge {
             if (childType == "identifier") {
                 templateName = TreeSitterParser.getNodeText(child, sourceText);
             } else if (childType == "template_arguments") {
-                templateArgs = parseTemplateArgTypes(child);
+                parseTemplateArgs(child, templateArgs, templateArgExprs);
             }
         }
 
         auto ut = new UserType(loc, templateName);
         ut.templateArgs = templateArgs;
+        ut.templateArgExprs = templateArgExprs;
         return ut;
     }
 
@@ -2650,11 +2652,12 @@ class TreeSitterBridge {
         return arguments;
     }
 
-    /// Parse a template instantiation call: max!int(3, 5)
+    /// Parse a template instantiation call: max!int(3, 5) or foo!(int, 5)(args)
     private Expression parseTemplateInstantiationCall(TSNode callNode, TSNode templateInstanceNode, SourceLocation loc) {
         // template_instance has children: identifier, template_arguments
         string templateName;
         Type[] templateArgs;
+        Expression[] templateArgExprs;
 
         uint tiChildCount = TreeSitterParser.getChildCount(templateInstanceNode);
         for (uint i = 0; i < tiChildCount; i++) {
@@ -2664,13 +2667,15 @@ class TreeSitterBridge {
             if (childType == "identifier") {
                 templateName = TreeSitterParser.getNodeText(child, sourceText);
             } else if (childType == "template_arguments") {
-                templateArgs = parseTemplateArgTypes(child);
+                parseTemplateArgs(child, templateArgs, templateArgExprs);
             }
         }
 
         Expression[] callArgs = parseCallArguments(callNode);
 
-        return new TemplateInstantiationExpression(loc, templateName, templateArgs, callArgs);
+        auto expr = new TemplateInstantiationExpression(loc, templateName, templateArgs, callArgs);
+        expr.templateArgExpressions = templateArgExprs;
+        return expr;
     }
     
     /**
@@ -3137,14 +3142,28 @@ class TreeSitterBridge {
             TSNode child = TreeSitterParser.getChild(node, i);
             string childType = TreeSitterParser.getNodeType(child);
             if (childType == "template_parameter") {
-                // template_parameter -> identifier (for type params)
+                // Scan children: type+identifier = value param, identifier only = type param
+                TSNode typeNode = TSNode.init;
+                TSNode identNode = TSNode.init;
                 uint tpChildCount = TreeSitterParser.getChildCount(child);
                 for (uint j = 0; j < tpChildCount; j++) {
                     TSNode tpChild = TreeSitterParser.getChild(child, j);
-                    if (TreeSitterParser.getNodeType(tpChild) == "identifier") {
-                        string paramName = TreeSitterParser.getNodeText(tpChild, sourceText);
+                    string tpChildType = TreeSitterParser.getNodeType(tpChild);
+                    if (tpChildType == "type" || tpChildType == "primitive_type") {
+                        typeNode = tpChild;
+                    } else if (tpChildType == "identifier") {
+                        identNode = tpChild;
+                    }
+                }
+                if (TreeSitterParser.isValid(identNode)) {
+                    string paramName = TreeSitterParser.getNodeText(identNode, sourceText);
+                    if (TreeSitterParser.isValid(typeNode)) {
+                        // Value parameter: e.g., int N
+                        Type valueType = parseType(typeNode);
+                        result ~= new TemplateParamType(loc, paramName, valueType);
+                    } else {
+                        // Type parameter: e.g., T
                         result ~= new TemplateParamType(loc, paramName);
-                        break;
                     }
                 }
             }
@@ -3165,9 +3184,10 @@ class TreeSitterBridge {
         return null;
     }
 
-    /// Parse template_arguments node into types: !int or !(int, float)
-    private Type[] parseTemplateArgTypes(TSNode node) {
-        Type[] result;
+    /// Parse template_arguments node into types and expressions: !int or !(int, 5)
+    /// Types and exprs are parallel arrays. For type args, exprs[i] is null.
+    /// For value args (literals), types[i] is null. For ambiguous identifiers, both are set.
+    private void parseTemplateArgs(TSNode node, out Type[] types, out Expression[] exprs) {
         uint childCount = TreeSitterParser.getChildCount(node);
         for (uint i = 0; i < childCount; i++) {
             TSNode child = TreeSitterParser.getChild(node, i);
@@ -3178,11 +3198,26 @@ class TreeSitterBridge {
 
             // type node wrapping a builtin_type or user type
             if (childType == "type" || childType == "primitive_type") {
-                result ~= parseType(child);
+                types ~= parseType(child);
+                exprs ~= null;
                 continue;
             }
 
-            // Single arg: _template_single_arg (identifier, builtin_type, literal)
+            // Single arg: _template_single_arg literals
+            if (childType == "int_literal" || childType == "float_literal" ||
+                childType == "string_literal" || childType == "char_literal") {
+                types ~= null;
+                exprs ~= parseExpression(child);
+                continue;
+            }
+            if (childType == "true" || childType == "false") {
+                auto argLoc = makeSourceLocation(child);
+                types ~= null;
+                exprs ~= LiteralExpression.boolean(argLoc, childType == "true");
+                continue;
+            }
+
+            // Builtin type keywords as single arg: Foo!int
             if (childType == "identifier" || childType == "int" || childType == "uint" ||
                 childType == "long" || childType == "ulong" || childType == "float" ||
                 childType == "double" || childType == "byte" || childType == "ubyte" ||
@@ -3190,26 +3225,22 @@ class TreeSitterBridge {
                 childType == "char" || childType == "void") {
                 auto argLoc = makeSourceLocation(child);
                 string text = TreeSitterParser.getNodeText(child, sourceText);
-                result ~= parseBasicTypeByText(text, argLoc);
+                // Try as builtin type first
+                auto bt = tryParseBasicTypeByText(text, argLoc);
+                if (bt !is null) {
+                    types ~= bt;
+                    exprs ~= null;
+                } else {
+                    // Ambiguous identifier: could be type name or value name
+                    types ~= new UserType(argLoc, text);
+                    exprs ~= new IdentifierExpression(argLoc, text);
+                }
                 continue;
             }
 
             // template_argument wraps a type or expression
             if (childType == "template_argument") {
-                uint taChildCount = TreeSitterParser.getChildCount(child);
-                for (uint j = 0; j < taChildCount; j++) {
-                    TSNode taChild = TreeSitterParser.getChild(child, j);
-                    string taChildType = TreeSitterParser.getNodeType(taChild);
-                    if (taChildType == "type") {
-                        result ~= parseType(taChild);
-                        break;
-                    } else if (taChildType == "identifier") {
-                        auto argLoc = makeSourceLocation(taChild);
-                        string text = TreeSitterParser.getNodeText(taChild, sourceText);
-                        result ~= new UserType(argLoc, text);
-                        break;
-                    }
-                }
+                parseTemplateSingleArg(child, types, exprs);
                 continue;
             }
 
@@ -3218,28 +3249,65 @@ class TreeSitterBridge {
                 uint talChildCount = TreeSitterParser.getChildCount(child);
                 for (uint j = 0; j < talChildCount; j++) {
                     TSNode talChild = TreeSitterParser.getChild(child, j);
-                    string talChildType = TreeSitterParser.getNodeType(talChild);
-                    if (talChildType == "template_argument") {
-                        uint taChildCount = TreeSitterParser.getChildCount(talChild);
-                        for (uint k = 0; k < taChildCount; k++) {
-                            TSNode taChild = TreeSitterParser.getChild(talChild, k);
-                            string taChildType = TreeSitterParser.getNodeType(taChild);
-                            if (taChildType == "type") {
-                                result ~= parseType(taChild);
-                                break;
-                            } else if (taChildType == "identifier") {
-                                auto argLoc = makeSourceLocation(taChild);
-                                string text = TreeSitterParser.getNodeText(taChild, sourceText);
-                                result ~= new UserType(argLoc, text);
-                                break;
-                            }
-                        }
+                    if (TreeSitterParser.getNodeType(talChild) == "template_argument") {
+                        parseTemplateSingleArg(talChild, types, exprs);
                     }
                 }
                 continue;
             }
         }
-        return result;
+    }
+
+    /// Parse a single template_argument node, appending to types/exprs arrays
+    private void parseTemplateSingleArg(TSNode argNode, ref Type[] types, ref Expression[] exprs) {
+        uint taChildCount = TreeSitterParser.getChildCount(argNode);
+        for (uint j = 0; j < taChildCount; j++) {
+            TSNode taChild = TreeSitterParser.getChild(argNode, j);
+            string taChildType = TreeSitterParser.getNodeType(taChild);
+            if (taChildType == "type") {
+                types ~= parseType(taChild);
+                exprs ~= null;
+                return;
+            } else if (taChildType == "int_literal" || taChildType == "float_literal" ||
+                       taChildType == "string_literal" || taChildType == "char_literal") {
+                auto argLoc = makeSourceLocation(taChild);
+                types ~= null;
+                exprs ~= parseExpression(taChild);
+                return;
+            } else if (taChildType == "true" || taChildType == "false") {
+                auto argLoc = makeSourceLocation(taChild);
+                types ~= null;
+                exprs ~= LiteralExpression.boolean(argLoc, taChildType == "true");
+                return;
+            } else if (taChildType == "identifier") {
+                auto argLoc = makeSourceLocation(taChild);
+                string text = TreeSitterParser.getNodeText(taChild, sourceText);
+                // Ambiguous: could be type name or manifest constant
+                types ~= new UserType(argLoc, text);
+                exprs ~= new IdentifierExpression(argLoc, text);
+                return;
+            }
+        }
+    }
+
+    /// Try to parse text as a builtin type, returns null if not a builtin.
+    private BasicType tryParseBasicTypeByText(string typeName, SourceLocation loc) {
+        switch (typeName) {
+            case "void": return new BasicType(loc, BasicType.Kind.Void);
+            case "bool": return new BasicType(loc, BasicType.Kind.Bool);
+            case "byte": return new BasicType(loc, BasicType.Kind.Int8);
+            case "short": return new BasicType(loc, BasicType.Kind.Int16);
+            case "int": return new BasicType(loc, BasicType.Kind.Int32);
+            case "long": return new BasicType(loc, BasicType.Kind.Int64);
+            case "ubyte": return new BasicType(loc, BasicType.Kind.UInt8);
+            case "ushort": return new BasicType(loc, BasicType.Kind.UInt16);
+            case "uint": return new BasicType(loc, BasicType.Kind.UInt32);
+            case "ulong": return new BasicType(loc, BasicType.Kind.UInt64);
+            case "float": return new BasicType(loc, BasicType.Kind.Float32);
+            case "double": return new BasicType(loc, BasicType.Kind.Float64);
+            case "char": return new BasicType(loc, BasicType.Kind.Char);
+            default: return null;
+        }
     }
 
     /// Replace UserType references matching template param names with the shared TemplateParamType.

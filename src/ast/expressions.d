@@ -183,6 +183,7 @@ class CallExpression : Expression {
 class TemplateInstantiationExpression : Expression {
     string templateName;
     Type[] templateArguments;
+    Expression[] templateArgExpressions;  // Parallel to templateArguments: non-null at value param positions
     Expression[] callArguments;
 
     // Set during semantic analysis

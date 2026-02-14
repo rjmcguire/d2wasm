@@ -1,0 +1,7 @@
+{
+  "name": "nttp",
+  "description": "CTFE parity: non-type template parameters",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 45
+}

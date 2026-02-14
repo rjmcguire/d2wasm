@@ -679,6 +679,10 @@ class BinaryEmitter {
      * Collect a struct method, adding hidden 'this' parameter.
      */
     private void collectMethod(StructDecl structDecl, FunctionDecl method) {
+        import std.stdio : stderr;
+        stderr.writeln("DEBUG collectMethod: ", structDecl.name, ".", method.name,
+            " params=", method.parameters.length);
+
         // Build signature with hidden 'this' pointer as first parameter
         FuncSig sig;
         
@@ -936,6 +940,11 @@ class BinaryEmitter {
     }
     
     private void collectFunction(FunctionDecl decl) {
+        import std.stdio : stderr;
+        stderr.writeln("DEBUG collectFunction: ", decl.name,
+            " isMethod=", decl.isMethod, " parent=", decl.parent !is null ? "yes" : "null",
+            " params=", decl.parameters.length);
+
         // Skip forward declarations (no body) — only the real definition is emitted
         if (decl.body_ is null) {
             return;
@@ -949,6 +958,7 @@ class BinaryEmitter {
         // Skip methods — they are collected via collectStructMethods/collectClassMethods
         // when their parent StructDecl/ClassDecl is processed (which sets structParent/classParent)
         if (decl.isMethod && decl.parent !is null) {
+            stderr.writeln("DEBUG   -> skipping method (has parent)");
             return;
         }
 
@@ -2195,6 +2205,13 @@ class BinaryEmitter {
     }
     
     private ubyte[] emitFunctionBody(FuncInfo f) {
+        import std.stdio : stderr;
+        import std.conv : to;
+        stderr.writeln("DEBUG emitFunctionBody: ", f.name,
+            " structParent=", f.structParent !is null ? f.structParent.name : "null",
+            " typeIdx=", f.typeIndex,
+            " paramCount=", f.decl !is null ? f.decl.parameters.length.to!string : "builtin");
+
         // Handle built-in functions
         if (f.decl is null) {
             return emitBuiltinBody(f);
@@ -2237,9 +2254,20 @@ class BinaryEmitter {
         
         // Emit shadow stack epilogue if needed (for implicit return)
         ctx.emitEpilogue(body_);
-        
+
         // End opcode
         body_ ~= Op.end;
+
+        // Debug: dump function body bytes
+        if (f.name == "test" || f.name == "addN_V10" || f.name == "_D8Sized_V36lengthMFZi") {
+            import std.stdio : stderr;
+            import std.format : format;
+            string hex;
+            auto result = body_.data;
+            foreach (b; result)
+                hex ~= format("%02x ", b);
+            stderr.writeln("DEBUG WASM body [", f.name, "] (", result.length, " bytes): ", hex);
+        }
         
         // Store in cache for next time
         auto result = body_.data;

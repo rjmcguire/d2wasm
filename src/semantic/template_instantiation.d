@@ -18,6 +18,16 @@ import ast.expressions;
 import std.array : join;
 import std.format : format;
 
+/// A single template argument — can be a type, an expression (value), or both
+/// (for ambiguous identifiers resolved by the type checker).
+/// Generalizable to alias/sequence params in the future.
+struct TemplateArg {
+    Type type;       // non-null for type args (e.g., T → int)
+    Expression expr; // non-null for value args (e.g., N → LiteralExpression(5))
+    // Future: Declaration decl; for alias params
+    // Future: TemplateArg[] seq; for sequence params
+}
+
 class TemplateInstantiator {
     private Declaration[string] cache;
 
@@ -25,16 +35,24 @@ class TemplateInstantiator {
     /// Throws on failure (TypeError if constraint not satisfied, or CTFE error).
     void delegate(Expression, SourceLocation, string, string[]) constraintEvaluator;
 
-    /// Instantiate a template for given type arguments.
+    /// Instantiate a template for given arguments (unified type + value).
     /// Returns the eponymous member Declaration (FunctionDecl, StructDecl, etc.).
-    Declaration instantiate(TemplateDecl tmpl, Type[] typeArgs) {
-        string key = mangleInstantiation(tmpl.name, typeArgs);
+    Declaration instantiate(TemplateDecl tmpl, TemplateArg[] args) {
+        string key = mangleInstantiation(tmpl.name, args);
         if (auto cached = key in cache)
             return *cached;
 
-        auto inst = reparseAndSubstitute(tmpl, typeArgs, key);
+        auto inst = reparseAndSubstitute(tmpl, args, key);
         cache[key] = inst;
         return inst;
+    }
+
+    /// Legacy overload: type-only args (for backward compat with existing callers).
+    Declaration instantiate(TemplateDecl tmpl, Type[] typeArgs) {
+        TemplateArg[] args;
+        foreach (t; typeArgs)
+            args ~= TemplateArg(t, null);
+        return instantiate(tmpl, args);
     }
 
     /// Get all cached instantiations (for emitter collection).
@@ -42,8 +60,8 @@ class TemplateInstantiator {
         return cache.values;
     }
 
-    /// Re-parse the template source text and substitute concrete types.
-    private Declaration reparseAndSubstitute(TemplateDecl tmpl, Type[] typeArgs, string mangledName) {
+    /// Re-parse the template source text and substitute concrete types/values.
+    private Declaration reparseAndSubstitute(TemplateDecl tmpl, TemplateArg[] args, string mangledName) {
         import parser.tree_sitter_bridge : TreeSitterBridge;
 
         // Extract source text from the template
@@ -68,23 +86,31 @@ class TemplateInstantiator {
         if (freshTmpl is null)
             throw new Exception(format("Re-parse of template '%s' failed to produce a TemplateDecl", tmpl.name));
 
-        // Build name → concrete type map from template params
-        Type[string] typeMap;
-        foreach (i, tp; tmpl.templateParams)
-            typeMap[tp.paramName] = typeArgs[i];
-
-        // Substitute types in all members
-        foreach (member; freshTmpl.members) {
-            substituteInDeclaration(member, typeMap);
+        // Build unified substitution map from template params
+        TemplateArg[string] substMap;
+        foreach (i, tp; tmpl.templateParams) {
+            if (i < args.length)
+                substMap[tp.paramName] = args[i];
         }
 
-        // Substitute types in constraint and evaluate via CTFE
+        // Substitute in all members
+        foreach (member; freshTmpl.members) {
+            substituteInDeclaration(member, substMap);
+        }
+
+        // Substitute in constraint and evaluate via CTFE
         if (freshTmpl.constraint !is null) {
-            substituteInExpression(freshTmpl.constraint, typeMap);
+            freshTmpl.constraint = substituteInExpression(freshTmpl.constraint, substMap);
             if (constraintEvaluator !is null) {
                 string[] bindings;
-                foreach (i, tp; tmpl.templateParams)
-                    bindings ~= tp.paramName ~ " = " ~ typeArgs[i].toString();
+                foreach (i, tp; tmpl.templateParams) {
+                    if (i < args.length) {
+                        if (args[i].type !is null)
+                            bindings ~= tp.paramName ~ " = " ~ args[i].type.toString();
+                        else if (args[i].expr !is null)
+                            bindings ~= tp.paramName ~ " = " ~ args[i].expr.toString();
+                    }
+                }
                 constraintEvaluator(freshTmpl.constraint, tmpl.constraint.location,
                                     tmpl.name, bindings);
             }
@@ -99,6 +125,18 @@ class TemplateInstantiator {
         return eponymous;
     }
 
+    static string mangleInstantiation(string templateName, TemplateArg[] args) {
+        string[] keys;
+        foreach (arg; args) {
+            if (arg.type !is null)
+                keys ~= typeKey(arg.type);
+            else if (arg.expr !is null)
+                keys ~= valueKey(arg.expr);
+        }
+        return templateName ~ "_" ~ keys.join("_");
+    }
+
+    /// Legacy overload for type-only mangling.
     static string mangleInstantiation(string templateName, Type[] typeArgs) {
         string[] typeKeys;
         foreach (t; typeArgs)
@@ -120,129 +158,146 @@ class TemplateInstantiator {
         }
         return t.toString();
     }
-}
 
-// ===== Type substitution helpers =====
-
-/// Substitute types in a declaration (dispatches by declaration kind).
-private void substituteInDeclaration(Declaration decl, Type[string] typeMap) {
-    if (auto fd = cast(FunctionDecl)decl) {
-        fd.returnType = substituteType(fd.returnType, typeMap);
-        foreach (ref p; fd.parameters)
-            p.type = substituteType(p.type, typeMap);
-        if (fd.body_)
-            substituteInStatement(fd.body_, typeMap);
-    } else if (auto sd = cast(StructDecl)decl) {
-        foreach (member; sd.members) {
-            substituteInDeclaration(member, typeMap);
-        }
-    } else if (auto vd = cast(VariableDecl)decl) {
-        vd.type = substituteType(vd.type, typeMap);
+    static string valueKey(Expression expr) {
+        if (auto lit = cast(LiteralExpression)expr)
+            return "V" ~ lit.toString();
+        return "V_";
     }
 }
 
-/// Replace TemplateParamType and UserType nodes matching template params with concrete types.
-private Type substituteType(Type type, Type[string] typeMap) {
+// ===== Substitution helpers (unified TemplateArg map) =====
+
+/// Substitute types and values in a declaration (dispatches by declaration kind).
+private void substituteInDeclaration(Declaration decl, TemplateArg[string] substMap) {
+    if (auto fd = cast(FunctionDecl)decl) {
+        fd.returnType = substituteType(fd.returnType, substMap);
+        foreach (ref p; fd.parameters)
+            p.type = substituteType(p.type, substMap);
+        if (fd.body_)
+            substituteInStatement(fd.body_, substMap);
+    } else if (auto sd = cast(StructDecl)decl) {
+        foreach (member; sd.members) {
+            substituteInDeclaration(member, substMap);
+        }
+    } else if (auto vd = cast(VariableDecl)decl) {
+        vd.type = substituteType(vd.type, substMap);
+    }
+}
+
+/// Replace TemplateParamType/UserType nodes matching template params with concrete types.
+/// Also substitutes value params in ArrayType.arraySize expressions.
+private Type substituteType(Type type, TemplateArg[string] substMap) {
     if (type is null) return null;
 
     if (auto tpt = cast(TemplateParamType)type) {
-        if (auto concrete = tpt.paramName in typeMap)
-            return *concrete;
+        if (auto arg = tpt.paramName in substMap) {
+            if (arg.type !is null) return arg.type;
+        }
         return type;
     }
     // After re-parsing, template param names in non-signature positions (e.g. __traits args)
     // appear as UserType, not TemplateParamType — substitute those too.
     if (auto ut = cast(UserType)type) {
-        if (auto concrete = ut.name in typeMap)
-            return *concrete;
+        if (auto arg = ut.name in substMap) {
+            if (arg.type !is null) return arg.type;
+        }
         return type;
     }
     if (auto at = cast(ArrayType)type) {
-        auto newElem = substituteType(at.elementType, typeMap);
-        if (newElem !is at.elementType)
-            at.elementType = newElem;
+        at.elementType = substituteType(at.elementType, substMap);
+        // Substitute value params in array size expression (T[N] → T[5])
+        if (at.arraySize !is null)
+            at.arraySize = substituteInExpression(at.arraySize, substMap);
         return type;
     }
     if (auto pt = cast(PointerType)type) {
-        auto newPointee = substituteType(pt.pointeeType, typeMap);
-        if (newPointee !is pt.pointeeType)
-            pt.pointeeType = newPointee;
+        pt.pointeeType = substituteType(pt.pointeeType, substMap);
         return type;
     }
     return type;
 }
 
-/// Walk a statement tree and substitute types.
-private void substituteInStatement(Statement stmt, Type[string] typeMap) {
+/// Walk a statement tree and substitute types and values.
+private void substituteInStatement(Statement stmt, TemplateArg[string] substMap) {
     if (stmt is null) return;
 
     if (auto cs = cast(CompoundStatement)stmt) {
         foreach (s; cs.statements)
-            substituteInStatement(s, typeMap);
+            substituteInStatement(s, substMap);
     } else if (auto ifs = cast(IfStatement)stmt) {
-        substituteInExpression(ifs.condition, typeMap);
-        substituteInStatement(ifs.thenStatement, typeMap);
-        substituteInStatement(ifs.elseStatement, typeMap);
+        ifs.condition = substituteInExpression(ifs.condition, substMap);
+        substituteInStatement(ifs.thenStatement, substMap);
+        substituteInStatement(ifs.elseStatement, substMap);
     } else if (auto ws = cast(WhileStatement)stmt) {
-        substituteInExpression(ws.condition, typeMap);
-        substituteInStatement(ws.body_, typeMap);
+        ws.condition = substituteInExpression(ws.condition, substMap);
+        substituteInStatement(ws.body_, substMap);
     } else if (auto fs = cast(ForStatement)stmt) {
-        substituteInStatement(fs.init, typeMap);
-        substituteInExpression(fs.condition, typeMap);
-        substituteInExpression(fs.update, typeMap);
-        substituteInStatement(fs.body_, typeMap);
+        substituteInStatement(fs.init, substMap);
+        fs.condition = substituteInExpression(fs.condition, substMap);
+        fs.update = substituteInExpression(fs.update, substMap);
+        substituteInStatement(fs.body_, substMap);
     } else if (auto rs = cast(ReturnStatement)stmt) {
-        substituteInExpression(rs.value, typeMap);
+        rs.value = substituteInExpression(rs.value, substMap);
     } else if (auto es = cast(ExpressionStatement)stmt) {
-        substituteInExpression(es.expression, typeMap);
+        es.expression = substituteInExpression(es.expression, substMap);
     } else if (auto vds = cast(VariableDeclarationStatement)stmt) {
-        vds.type = substituteType(vds.type, typeMap);
-        substituteInExpression(vds.initializer, typeMap);
+        vds.type = substituteType(vds.type, substMap);
+        vds.initializer = substituteInExpression(vds.initializer, substMap);
     }
 }
 
-/// Walk an expression tree and substitute types.
-private void substituteInExpression(Expression expr, Type[string] typeMap) {
-    if (expr is null) return;
+/// Walk an expression tree and substitute types and values.
+/// Returns the (possibly replaced) expression — callers must assign the result.
+private Expression substituteInExpression(Expression expr, TemplateArg[string] substMap) {
+    if (expr is null) return null;
+
+    // Value param substitution: IdentifierExpression("N") → LiteralExpression(5)
+    if (auto ident = cast(IdentifierExpression)expr) {
+        if (auto arg = ident.name in substMap) {
+            if (arg.expr !is null) return arg.expr;
+        }
+    }
 
     if (auto bin = cast(BinaryExpression)expr) {
-        substituteInExpression(bin.left, typeMap);
-        substituteInExpression(bin.right, typeMap);
+        bin.left = substituteInExpression(bin.left, substMap);
+        bin.right = substituteInExpression(bin.right, substMap);
     } else if (auto un = cast(UnaryExpression)expr) {
-        substituteInExpression(un.operand, typeMap);
+        un.operand = substituteInExpression(un.operand, substMap);
     } else if (auto call = cast(CallExpression)expr) {
-        substituteInExpression(call.function_, typeMap);
-        foreach (arg; call.arguments)
-            substituteInExpression(arg, typeMap);
+        call.function_ = substituteInExpression(call.function_, substMap);
+        foreach (ref arg; call.arguments)
+            arg = substituteInExpression(arg, substMap);
     } else if (auto ti = cast(TemplateInstantiationExpression)expr) {
         foreach (ref targ; ti.templateArguments)
-            targ = substituteType(targ, typeMap);
-        foreach (arg; ti.callArguments)
-            substituteInExpression(arg, typeMap);
+            targ = substituteType(targ, substMap);
+        foreach (ref arg; ti.callArguments)
+            arg = substituteInExpression(arg, substMap);
     } else if (auto idx = cast(IndexExpression)expr) {
-        substituteInExpression(idx.array, typeMap);
-        substituteInExpression(idx.index, typeMap);
+        idx.array = substituteInExpression(idx.array, substMap);
+        idx.index = substituteInExpression(idx.index, substMap);
     } else if (auto sl = cast(SliceExpression)expr) {
-        substituteInExpression(sl.array, typeMap);
-        substituteInExpression(sl.start, typeMap);
-        substituteInExpression(sl.end, typeMap);
+        sl.array = substituteInExpression(sl.array, substMap);
+        sl.start = substituteInExpression(sl.start, substMap);
+        sl.end = substituteInExpression(sl.end, substMap);
     } else if (auto mem = cast(MemberExpression)expr) {
-        substituteInExpression(mem.object, typeMap);
+        mem.object = substituteInExpression(mem.object, substMap);
     } else if (auto assign = cast(AssignmentExpression)expr) {
-        substituteInExpression(assign.left, typeMap);
-        substituteInExpression(assign.right, typeMap);
+        assign.left = substituteInExpression(assign.left, substMap);
+        assign.right = substituteInExpression(assign.right, substMap);
     } else if (auto cast_ = cast(CastExpression)expr) {
-        cast_.targetType = substituteType(cast_.targetType, typeMap);
-        substituteInExpression(cast_.expression, typeMap);
+        cast_.targetType = substituteType(cast_.targetType, substMap);
+        cast_.expression = substituteInExpression(cast_.expression, substMap);
     } else if (auto arrLit = cast(ArrayLiteralExpression)expr) {
-        foreach (elem; arrLit.elements)
-            substituteInExpression(elem, typeMap);
+        foreach (ref elem; arrLit.elements)
+            elem = substituteInExpression(elem, substMap);
     } else if (auto traits = cast(TraitsExpression)expr) {
         foreach (ref t; traits.typeArguments)
-            t = substituteType(t, typeMap);
+            t = substituteType(t, substMap);
     } else if (auto isExpr = cast(IsExpression)expr) {
-        isExpr.checkedType = substituteType(isExpr.checkedType, typeMap);
+        isExpr.checkedType = substituteType(isExpr.checkedType, substMap);
         if (isExpr.specType !is null)
-            isExpr.specType = substituteType(isExpr.specType, typeMap);
+            isExpr.specType = substituteType(isExpr.specType, substMap);
     }
+    return expr;
 }

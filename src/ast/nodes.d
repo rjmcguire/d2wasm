@@ -775,6 +775,7 @@ class UserType : Type {
     string name;
     Declaration declaration;  // Set during semantic analysis
     Type[] templateArgs;  // Non-null for Pair!(int, string) in type position
+    Expression[] templateArgExprs;  // Parallel to templateArgs: non-null at value param positions
 
     this(SourceLocation loc, string name) {
         super(loc);
@@ -875,10 +876,21 @@ class UserType : Type {
 class TemplateParamType : Type {
     string paramName;
     Type boundType;
+    Type valueType;        // Non-null for value params (the declared type, e.g. int in `int N`)
+    Expression boundValue; // For value params: concrete value after binding
+
+    @property bool isValueParam() const { return valueType !is null; }
 
     this(SourceLocation loc, string paramName) {
         super(loc);
         this.paramName = paramName;
+    }
+
+    /// Constructor for value (non-type) template parameters
+    this(SourceLocation loc, string paramName, Type valueType) {
+        super(loc);
+        this.paramName = paramName;
+        this.valueType = valueType;
     }
 
     override bool isBasicType() const { return boundType ? boundType.isBasicType() : false; }

@@ -1302,18 +1302,12 @@ class TypeChecker {
             );
         }
 
-        // Validate template argument count
-        if (expr.templateArguments.length != tmplDecl.templateParams.length) {
-            throw new TypeError(
-                format("Template '%s' expects %d type arguments, got %d",
-                       expr.templateName, tmplDecl.templateParams.length,
-                       expr.templateArguments.length),
-                expr.location
-            );
-        }
+        // Build TemplateArg[] from parsed args, using param kinds to disambiguate
+        auto tmplArgs = buildTemplateArgs(tmplDecl, expr.templateArguments,
+                                          expr.templateArgExpressions, expr.location);
 
         // Instantiate (constraint checked inside reparseAndSubstitute via CTFE)
-        auto inst = templateInstantiator.instantiate(tmplDecl, expr.templateArguments);
+        auto inst = templateInstantiator.instantiate(tmplDecl, tmplArgs);
 
         // Dispatch based on what the template contains
         if (auto funcInst = cast(FunctionDecl)inst) {
@@ -1396,17 +1390,12 @@ class TypeChecker {
             );
         }
 
-        if (userType.templateArgs.length != tmplDecl.templateParams.length) {
-            throw new TypeError(
-                format("Template '%s' expects %d type arguments, got %d",
-                       userType.name, tmplDecl.templateParams.length,
-                       userType.templateArgs.length),
-                userType.location
-            );
-        }
+        // Build TemplateArg[] from parsed args, using param kinds to disambiguate
+        auto tmplArgs = buildTemplateArgs(tmplDecl, userType.templateArgs,
+                                          userType.templateArgExprs, userType.location);
 
         // Constraint checked inside reparseAndSubstitute via CTFE
-        auto inst = templateInstantiator.instantiate(tmplDecl, userType.templateArgs);
+        auto inst = templateInstantiator.instantiate(tmplDecl, tmplArgs);
 
         if (auto structInst = cast(StructDecl)inst) {
             // Only register if not already laid out (cached instantiation)
@@ -1424,6 +1413,93 @@ class TypeChecker {
                 userType.location
             );
         }
+    }
+
+    /**
+     * Build a TemplateArg[] from parsed type/expression arrays,
+     * using template parameter kinds to disambiguate ambiguous identifiers.
+     */
+    private TemplateArg[] buildTemplateArgs(TemplateDecl tmplDecl, Type[] parsedTypes,
+                                            Expression[] parsedExprs, SourceLocation loc) {
+        // Count provided args (max of both parallel arrays)
+        size_t providedCount = parsedTypes.length;
+        if (parsedExprs.length > providedCount)
+            providedCount = parsedExprs.length;
+
+        if (providedCount != tmplDecl.templateParams.length) {
+            throw new TypeError(
+                format("Template '%s' expects %d arguments, got %d",
+                       tmplDecl.name, tmplDecl.templateParams.length, providedCount),
+                loc
+            );
+        }
+
+        TemplateArg[] result = new TemplateArg[tmplDecl.templateParams.length];
+        foreach (i, param; tmplDecl.templateParams) {
+            Type parsedType = (i < parsedTypes.length) ? parsedTypes[i] : null;
+            Expression parsedExpr = (parsedExprs && i < parsedExprs.length) ? parsedExprs[i] : null;
+
+            if (param.isValueParam) {
+                // Value parameter — need an expression
+                Expression valExpr = parsedExpr;
+                // If parser only stored it as a type (ambiguous identifier), extract as expression
+                if (valExpr is null && parsedType !is null) {
+                    if (auto ut = cast(UserType)parsedType) {
+                        valExpr = new IdentifierExpression(ut.location, ut.name);
+                    }
+                }
+                if (valExpr is null) {
+                    throw new TypeError(
+                        format("Template '%s' parameter '%s' expects a value, not a type",
+                               tmplDecl.name, param.paramName),
+                        loc
+                    );
+                }
+                result[i] = TemplateArg(null, resolveValueArg(valExpr, param.valueType, loc));
+            } else {
+                // Type parameter — need a type
+                Type typeArg = parsedType;
+                if (typeArg is null) {
+                    throw new TypeError(
+                        format("Template '%s' parameter '%s' expects a type, not a value",
+                               tmplDecl.name, param.paramName),
+                        loc
+                    );
+                }
+                result[i] = TemplateArg(typeArg, null);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Resolve a value template argument expression to a compile-time constant.
+     * Handles literal expressions directly; for identifiers, looks up manifest constants.
+     */
+    private Expression resolveValueArg(Expression expr, Type expectedType, SourceLocation loc) {
+        if (auto lit = cast(LiteralExpression)expr) {
+            // Already a literal — good to go
+            return lit;
+        }
+        if (auto ident = cast(IdentifierExpression)expr) {
+            // Try to resolve as a manifest constant
+            auto sym = symbolTable.lookupSymbol(ident.name);
+            if (sym && sym.isConstant) {
+                if (auto manifest = cast(ManifestConstantDecl)sym.declaration) {
+                    if (manifest.ctfeComplete) {
+                        return LiteralExpression.integer(ident.location, manifest.ctfeValue);
+                    }
+                }
+            }
+            throw new TypeError(
+                format("'%s' is not a compile-time constant", ident.name),
+                ident.location
+            );
+        }
+        throw new TypeError(
+            format("Template value argument must be a compile-time constant"),
+            loc
+        );
     }
 
     /**

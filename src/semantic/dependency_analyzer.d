@@ -103,6 +103,10 @@ class DependencyAnalyzer {
             }
         }
 
+        // Scan variable declarations for struct types (including template instantiations
+        // in type position like `Sized!(3) s;` which aren't TemplateInstantiationExpressions)
+        collectStructDepsFromStatements(func.body_);
+
         foreach (call; calls) {
             // Try to resolve the call to a FunctionDecl
             auto calledFunc = resolveFunction(call);
@@ -293,6 +297,35 @@ class DependencyAnalyzer {
                 result ~= findTemplateCallsInExpression(assign.loweredCall);
         }
         return result;
+    }
+
+    /// Scan statements for variable declarations with struct types and add to structDeps.
+    /// This catches struct template instantiations used in type position (e.g. `Sized!(3) s;`)
+    /// which don't appear as TemplateInstantiationExpressions.
+    private void collectStructDepsFromStatements(Statement stmt) {
+        if (stmt is null) return;
+
+        if (auto compound = cast(CompoundStatement)stmt) {
+            foreach (s; compound.statements)
+                collectStructDepsFromStatements(s);
+        } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
+            if (auto ut = cast(UserType)varDecl.type) {
+                if (auto sd = ut.asStruct()) {
+                    if (sd.name !in neededStructs) {
+                        neededStructs[sd.name] = true;
+                        structDeps ~= sd;
+                    }
+                }
+            }
+        } else if (auto ifStmt = cast(IfStatement)stmt) {
+            collectStructDepsFromStatements(ifStmt.thenStatement);
+            collectStructDepsFromStatements(ifStmt.elseStatement);
+        } else if (auto whileStmt = cast(WhileStatement)stmt) {
+            collectStructDepsFromStatements(whileStmt.body_);
+        } else if (auto forStmt = cast(ForStatement)stmt) {
+            collectStructDepsFromStatements(forStmt.init);
+            collectStructDepsFromStatements(forStmt.body_);
+        }
     }
 
     /**

@@ -568,8 +568,8 @@ class NativeCompiledFunction : CompiledFunction {
             if (auto userType = cast(UserType)varDecl.type) {
                 userType.ensureResolved(symbolTable);
                 if (auto sd = userType.asStruct()) {
-                    assert(sd.structSize > 0, "StructDecl has zero size");
-                    bytes = cast(uint)sd.structSize;
+                    // Zero-size structs (methods-only, no data fields) are valid
+                    bytes = sd.structSize > 0 ? cast(uint)sd.structSize : 0;
                 } else {
                     bytes = 4;
                 }
@@ -679,10 +679,9 @@ class NativeCompiledFunction : CompiledFunction {
             if (auto userType = cast(UserType)varDecl.type) {
                 userType.ensureResolved(symbolTable);
                 if (auto sd = userType.asStruct()) {
-                    assert(sd.structSize > 0,
-                        "StructDecl '" ~ sd.name ~ "' has zero size - layout not computed");
+                    // Zero-size structs (methods-only, no data fields) are valid
                     structType = sd;
-                    varSize = cast(uint)sd.structSize;
+                    varSize = sd.structSize > 0 ? cast(uint)sd.structSize : 0;
                 }
             } else if (auto arrType = cast(ArrayType)varDecl.type) {
                 if (arrType.arraySize is null) {
