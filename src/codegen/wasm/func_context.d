@@ -367,12 +367,6 @@ class FuncContext {
                     vi.frameOffset = frameSize;
                     vi.type = varDecl.type;
                     vi.structDecl = structDecl;
-                    {
-                        import std.stdio : stderr;
-                        stderr.writeln("DEBUG collectLocals struct: ", varDecl.name,
-                            " uniqueLocalId=", varDecl.uniqueLocalId,
-                            " structSize=", structDecl.structSize);
-                    }
                     if (varDecl.uniqueLocalId != uint.max)
                         varsByLocalId[varDecl.uniqueLocalId] = vi;
                     varsByName[varDecl.name] = vi;
@@ -507,11 +501,6 @@ class FuncContext {
             vi.addrMode = AddrMode.wasmLocal;
             vi.wasmLocalIdx = wasmIdx;
             vi.type = varDecl.type;
-            {
-                import std.stdio : stderr;
-                stderr.writeln("DEBUG collectLocals scalar: ", varDecl.name,
-                    " uniqueLocalId=", varDecl.uniqueLocalId, " wasmIdx=", wasmIdx);
-            }
             if (varDecl.uniqueLocalId != uint.max)
                 varsByLocalId[varDecl.uniqueLocalId] = vi;
             varsByName[varDecl.name] = vi;
@@ -3763,9 +3752,6 @@ class FuncContext {
      * The resolved instantiation has a mangled name that the emitter collected.
      */
     void emitTemplateCall(ref Appender!(ubyte[]) out_, TemplateInstantiationExpression expr) {
-        import std.stdio : stderr;
-        import std.conv : to;
-
         // Struct template construction: Pair!(int, int)(10, 20)
         if (expr.resolvedStructInstantiation) {
             emitStructConstructionToTemp(out_, expr.resolvedStructInstantiation, expr.callArguments);
@@ -3775,10 +3761,6 @@ class FuncContext {
         auto inst = expr.resolvedInstantiation;
         if (!inst)
             throw new EmitError("Template instantiation not resolved: " ~ expr.templateName);
-
-        stderr.writeln("DEBUG emitTemplateCall: ", expr.templateName,
-            " -> ", inst.name, " callArgs=", expr.callArguments.length,
-            " funcIdx=", emitter.getFuncIndex(inst.name));
 
         // Emit call arguments
         foreach (arg; expr.callArguments) {
@@ -4020,13 +4002,6 @@ class FuncContext {
         
         // For structs: direct call (no polymorphism)
         // For classes: call_indirect through vtable (virtual dispatch)
-        {
-            import std.stdio : stderr;
-            stderr.writeln("DEBUG emitMethodCall: ", memberExpr.memberName,
-                " mangledName=", method.mangledName,
-                " funcIdx=", emitter.getFuncIndex(method.mangledName),
-                " fpLocal=", fpLocal, " frameSize=", frameSize);
-        }
         if (structDecl) {
             // Struct method: direct call
             uint funcIdx = emitter.getFuncIndex(method.mangledName);

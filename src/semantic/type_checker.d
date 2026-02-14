@@ -1402,6 +1402,10 @@ class TypeChecker {
             if (!structInst.layoutComputed) {
                 auto collector = new SymbolCollector(symbolTable);
                 collector.collectStructSymbol(structInst);
+                // Save/restore scope state: checkStructDeclaration type-checks
+                // methods which reset nextLocalId, corrupting the caller's IDs.
+                auto saved = symbolTable.saveAndResetScope();
+                scope(exit) symbolTable.restoreScope(saved);
                 checkStructDeclaration(structInst);
             }
 
