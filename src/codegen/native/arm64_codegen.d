@@ -173,9 +173,9 @@ struct NativeCodeGen {
     }
     
     /// Load 32-bit value from [x9 + offset] into x0
-    void emitLoadFromX9Offset(uint offset) {
+    void emitLoadFromX9Offset(size_t offset) {
         // LDR w0, [x9, #offset]
-        uint imm12 = offset / 4;  // Scaled offset for 32-bit load
+        uint imm12 = cast(uint)(offset / 4);  // Scaled offset for 32-bit load
         emitRaw32(0xB9400120 | (imm12 << 10));  // LDR w0, [x9, #imm]
     }
     
@@ -216,12 +216,12 @@ struct NativeCodeGen {
     }
     
     /// Compute x0 = SP + offset (for getting address of stack variable)
-    void emitStackAddress(uint offset) {
+    void emitStackAddress(size_t offset) {
         // ADD x0, sp, #offset
         // Encoding: 1001 0001 00 [imm12] [11111] [00000]
         //           sf=1 op=0 S=0 imm12 Rn=sp Rd=x0
         if (offset < 4096) {
-            emitRaw32(0x910003E0 | (offset << 10));
+            emitRaw32(0x910003E0 | (cast(uint)offset << 10));
         } else {
             // For larger offsets, use MOV + ADD
             emitLoadImm64(offset);          // x0 = offset
@@ -510,10 +510,10 @@ struct NativeCodeGen {
     //   sp+localBytes:  saved x29, x30
     
     /// Emit prologue with stack space for locals
-    void emitPrologueWithLocals(uint localBytes) {
+    void emitPrologueWithLocals(size_t localBytes) {
         // Align to 16 bytes
-        uint frameSize = ((localBytes + 15) & ~15) + 16;  // +16 for x29,x30
-        
+        uint frameSize = cast(uint)(((localBytes + 15) & ~15) + 16);  // +16 for x29,x30
+
         // SUB sp, sp, #frameSize
         emitRaw32(0xD10003FF | (frameSize << 10));
         // STP x29, x30, [sp, #localBytes]
@@ -522,10 +522,10 @@ struct NativeCodeGen {
         // ADD x29, sp, #localBytes (set frame pointer)
         emitRaw32(0x910003FD | (offset << 10));
     }
-    
+
     /// Emit epilogue that deallocates stack frame
-    void emitEpilogueWithLocals(uint localBytes) {
-        uint frameSize = ((localBytes + 15) & ~15) + 16;
+    void emitEpilogueWithLocals(size_t localBytes) {
+        uint frameSize = cast(uint)(((localBytes + 15) & ~15) + 16);
         uint offset = frameSize - 16;
         
         // LDP x29, x30, [sp, #localBytes]
@@ -537,62 +537,78 @@ struct NativeCodeGen {
     }
     
     /// Store x0 to local at offset (64-bit)
-    void emitStoreLocal(uint offset) {
+    void emitStoreLocal(size_t offset) {
         // STR x0, [sp, #offset]
-        uint imm12 = offset / 8;
+        uint imm12 = cast(uint)(offset / 8);
         emitRaw32(0xF90003E0 | (imm12 << 10));
     }
-    
+
     /// Load from local to x0 (64-bit)
-    void emitLoadLocal(uint offset) {
+    void emitLoadLocal(size_t offset) {
         // LDR x0, [sp, #offset]
-        uint imm12 = offset / 8;
+        uint imm12 = cast(uint)(offset / 8);
         emitRaw32(0xF94003E0 | (imm12 << 10));
     }
-    
+
     /// Store x0 to local at offset (32-bit)
-    void emitStoreLocal32(uint offset) {
+    void emitStoreLocal32(size_t offset) {
         // STR w0, [sp, #offset]
-        uint imm12 = offset / 4;
+        uint imm12 = cast(uint)(offset / 4);
         emitRaw32(0xB90003E0 | (imm12 << 10));
     }
-    
+
     /// Store x1 to local at offset (32-bit) - for second parameter
-    void emitStoreLocal32FromX1(uint offset) {
+    void emitStoreLocal32FromX1(size_t offset) {
         // STR w1, [sp, #offset]
-        uint imm12 = offset / 4;
+        uint imm12 = cast(uint)(offset / 4);
         emitRaw32(0xB90003E1 | (imm12 << 10));
     }
-    
+
     /// Store x2 to local at offset (32-bit) - for third parameter
-    void emitStoreLocal32FromX2(uint offset) {
+    void emitStoreLocal32FromX2(size_t offset) {
         // STR w2, [sp, #offset]
-        uint imm12 = offset / 4;
+        uint imm12 = cast(uint)(offset / 4);
         emitRaw32(0xB90003E2 | (imm12 << 10));
     }
-    
+
     /// Store x3 to local at offset (32-bit) - for fourth parameter
-    void emitStoreLocal32FromX3(uint offset) {
+    void emitStoreLocal32FromX3(size_t offset) {
         // STR w3, [sp, #offset]
-        uint imm12 = offset / 4;
+        uint imm12 = cast(uint)(offset / 4);
         emitRaw32(0xB90003E3 | (imm12 << 10));
     }
-    
+
     // Abstract aliases for parameter spilling
     alias emitStoreArg1ToLocal32 = emitStoreLocal32FromX1;
     alias emitStoreArg2ToLocal32 = emitStoreLocal32FromX2;
     alias emitStoreArg3ToLocal32 = emitStoreLocal32FromX3;
-    
+
+    /// Store a pointer-sized value from x0 to a stack slot.
+    /// On ARM64, pointers are 64-bit. Offset MUST be 8-byte aligned.
+    /// Use this (not emitStoreLocal/emitStoreLocal32) when storing addresses,
+    /// heap pointers, or any value that could be a pointer.
+    void emitStorePtr(size_t offset) {
+        assert(offset % 8 == 0, "emitStorePtr: offset not 8-byte aligned");
+        emitStoreLocal(offset);
+    }
+
+    /// Load a pointer-sized value from a stack slot into x0.
+    /// On ARM64, pointers are 64-bit. Offset MUST be 8-byte aligned.
+    void emitLoadPtr(size_t offset) {
+        assert(offset % 8 == 0, "emitLoadPtr: offset not 8-byte aligned");
+        emitLoadLocal(offset);
+    }
+
     /// Load from local to x0 (32-bit, zero-extended)
-    void emitLoadLocal32(uint offset) {
+    void emitLoadLocal32(size_t offset) {
         // LDR w0, [sp, #offset]
-        uint imm12 = offset / 4;
+        uint imm12 = cast(uint)(offset / 4);
         emitRaw32(0xB94003E0 | (imm12 << 10));
     }
-    
+
     /// Increment 32-bit local in place: [fp + offset]++
     /// Result left in x0
-    void emitIncLocal32(uint offset) {
+    void emitIncLocal32(size_t offset) {
         emitImm32(stencil_inc_local_i32, cast(int)offset);
     }
     
@@ -606,35 +622,35 @@ struct NativeCodeGen {
     }
     
     /// Load 32-bit value from pointer in x0 with offset: LDR w0, [x0, #offset]
-    void emitLoadFromPointer(uint offset) {
+    void emitLoadFromPointer(size_t offset) {
         // LDR w0, [x0, #offset] where offset is scaled by 4
-        uint imm12 = offset / 4;
+        uint imm12 = cast(uint)(offset / 4);
         emitRaw32(0xB9400000 | (imm12 << 10));
     }
 
     /// Load unsigned byte from pointer in x0 with offset: LDRB w0, [x0, #offset]
-    void emitLoadByteFromPointer(uint offset) {
+    void emitLoadByteFromPointer(size_t offset) {
         // LDRB w0, [x0, #offset] — unsigned byte load, zero-extended to 32 bits
-        emitRaw32(0x39400000 | (offset << 10));
+        emitRaw32(0x39400000 | (cast(uint)offset << 10));
     }
 
     /// Store 32-bit value from x1 to pointer in x0 with offset: STR w1, [x0, #offset]
-    void emitStoreToPointer(uint offset) {
+    void emitStoreToPointer(size_t offset) {
         // STR w1, [x0, #offset] where offset is scaled by 4
-        uint imm12 = offset / 4;
+        uint imm12 = cast(uint)(offset / 4);
         emitRaw32(0xB9000001 | (imm12 << 10));
     }
 
     /// Store byte from w1 to pointer in x0 with offset: STRB w1, [x0, #offset]
-    void emitStoreByteToPointer(uint offset) {
+    void emitStoreByteToPointer(size_t offset) {
         // STRB w1, [x0, #offset] — store low byte of w1
-        emitRaw32(0x39000001 | (offset << 10));
+        emitRaw32(0x39000001 | (cast(uint)offset << 10));
     }
-    
+
     /// Store 32-bit value from x9 to pointer in x0 with offset: STR w9, [x0, #offset]
-    void emitStoreToPointerFromX9(uint offset) {
+    void emitStoreToPointerFromX9(size_t offset) {
         // STR w9, [x0, #offset] where offset is scaled by 4
-        uint imm12 = offset / 4;
+        uint imm12 = cast(uint)(offset / 4);
         emitRaw32(0xB9000009 | (imm12 << 10));  // Rt = w9 = 9
     }
     
