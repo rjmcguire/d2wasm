@@ -1,0 +1,7 @@
+{
+  "name": "matrix_ops",
+  "description": "CTFE parity: 3x3 matrix multiply and determinant with structs",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 47
+}

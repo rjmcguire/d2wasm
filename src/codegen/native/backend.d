@@ -1257,12 +1257,47 @@ class NativeCompiledFunction : CompiledFunction {
                 compileExpression(binOp.loweredCall);
                 return;
             }
+
+            // Short-circuit evaluation for && and ||
+            if (binOp.operator == BinaryExpression.Operator.LogicalAnd) {
+                // a && b: evaluate a; if 0, result=0; else evaluate b, normalize to 0/1
+                compileExpression(binOp.left);
+                auto skipRight = gen.newLabel();
+                auto done = gen.newLabel();
+                gen.emitBranchIfZero(skipRight);
+                compileExpression(binOp.right);
+                gen.emitMoveX0ToX1();
+                gen.emitImm32(stencil_load_imm32, 0);
+                gen.emit(stencil_ne_i32);
+                gen.emitBranch(done);
+                gen.bindLabel(skipRight);
+                gen.emitImm32(stencil_load_imm32, 0);
+                gen.bindLabel(done);
+                return;
+            }
+            if (binOp.operator == BinaryExpression.Operator.LogicalOr) {
+                // a || b: evaluate a; if non-zero, result=1; else evaluate b, normalize to 0/1
+                compileExpression(binOp.left);
+                auto evalRight = gen.newLabel();
+                auto done = gen.newLabel();
+                gen.emitBranchIfZero(evalRight);
+                gen.emitImm32(stencil_load_imm32, 1);
+                gen.emitBranch(done);
+                gen.bindLabel(evalRight);
+                compileExpression(binOp.right);
+                gen.emitMoveX0ToX1();
+                gen.emitImm32(stencil_load_imm32, 0);
+                gen.emit(stencil_ne_i32);
+                gen.bindLabel(done);
+                return;
+            }
+
             // Check if left operand might clobber x1 (function call, nested binary expr, or index expr)
             // IndexExpression uses x1 internally for address calculation
-            bool leftMightClobber = containsFunctionCall(binOp.left) || 
+            bool leftMightClobber = containsFunctionCall(binOp.left) ||
                                     cast(BinaryExpression)binOp.left !is null ||
                                     cast(IndexExpression)binOp.left !is null;
-            
+
             // Compile right operand first (into x0)
             compileExpression(binOp.right);
             
@@ -1343,11 +1378,9 @@ class NativeCompiledFunction : CompiledFunction {
                 case BinaryExpression.Operator.UnsignedShiftRight:
                     assert(0, "UnsignedShiftRight should be lowered to opUnsignedShiftRight call");
                 case BinaryExpression.Operator.LogicalAnd:
-                    gen.emit(stencil_logical_and_i32);
-                    break;
+                    assert(0, "LogicalAnd should be handled by short-circuit above");
                 case BinaryExpression.Operator.LogicalOr:
-                    gen.emit(stencil_logical_or_i32);
-                    break;
+                    assert(0, "LogicalOr should be handled by short-circuit above");
                 case BinaryExpression.Operator.Concat:
                     throw new Exception("Operator not yet supported in native backend");
             }

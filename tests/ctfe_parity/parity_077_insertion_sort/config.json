@@ -1,0 +1,7 @@
+{
+  "name": "insertion_sort",
+  "description": "CTFE parity: Insertion sort on static array returning median",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 27
+}

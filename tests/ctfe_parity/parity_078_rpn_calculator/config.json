@@ -1,0 +1,7 @@
+{
+  "name": "rpn_calculator",
+  "description": "CTFE parity: Reverse Polish Notation calculator with stack simulation",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 44
+}

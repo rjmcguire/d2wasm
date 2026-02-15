@@ -3405,6 +3405,42 @@ class FuncContext {
             return;
         }
 
+        // Short-circuit evaluation for && and ||
+        if (expr.operator == BinaryExpression.Operator.LogicalAnd) {
+            // a && b  →  if(a) { b != 0 } else { 0 }
+            emitExpression(out_, expr.left);
+            out_ ~= Op.if_;
+            out_ ~= cast(ubyte)BlockType.i32;
+            blockDepth++;
+            emitExpression(out_, expr.right);
+            out_ ~= Op.i32_const;
+            leb128s(out_, 0);
+            out_ ~= Op.i32_ne;
+            out_ ~= Op.else_;
+            out_ ~= Op.i32_const;
+            leb128s(out_, 0);
+            blockDepth--;
+            out_ ~= Op.end;
+            return;
+        }
+        if (expr.operator == BinaryExpression.Operator.LogicalOr) {
+            // a || b  →  if(a) { 1 } else { b != 0 }
+            emitExpression(out_, expr.left);
+            out_ ~= Op.if_;
+            out_ ~= cast(ubyte)BlockType.i32;
+            blockDepth++;
+            out_ ~= Op.i32_const;
+            leb128s(out_, 1);
+            out_ ~= Op.else_;
+            emitExpression(out_, expr.right);
+            out_ ~= Op.i32_const;
+            leb128s(out_, 0);
+            out_ ~= Op.i32_ne;
+            blockDepth--;
+            out_ ~= Op.end;
+            return;
+        }
+
         // Emit operands
         emitExpression(out_, expr.left);
         emitExpression(out_, expr.right);
@@ -3424,13 +3460,9 @@ class FuncContext {
             case BinaryExpression.Operator.Greater: op = Op.i32_gt_s; break;
             case BinaryExpression.Operator.GreaterEqual: op = Op.i32_ge_s; break;
             case BinaryExpression.Operator.LogicalAnd:
-                // a && b -> a ? b : 0
-                // For now, simple: both operands, then and
-                op = Op.i32_and;
-                break;
+                assert(0, "LogicalAnd should be handled by short-circuit above");
             case BinaryExpression.Operator.LogicalOr:
-                op = Op.i32_or;
-                break;
+                assert(0, "LogicalOr should be handled by short-circuit above");
             case BinaryExpression.Operator.BitwiseAnd: op = Op.i32_and; break;
             case BinaryExpression.Operator.BitwiseOr: op = Op.i32_or; break;
             case BinaryExpression.Operator.BitwiseXor: op = Op.i32_xor; break;

@@ -1,0 +1,7 @@
+{
+  "name": "csv_number_sum",
+  "description": "CTFE parity: CSV string parsing and number summation",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 150
+}
