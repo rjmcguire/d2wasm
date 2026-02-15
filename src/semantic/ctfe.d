@@ -1058,19 +1058,23 @@ class CTFEEvaluator {
         
         log(3, "CTFE: Calling ", funcName, " (returns string: ", returnsString, ")");
         
-        // For string-returning functions, compile via backend and extract string from memory
+        // For string-returning functions, use hidden result pointer pattern
+        // (strings are slices = 12-byte {ptr, len, cap} struct in WASM)
         if (returnsString) {
-            long structPtr = executeViaBackend(funcDecl, []);
-            // Read {ptr, len} from the array struct in execution memory
-            ubyte[] structBytes = cachedContext.readMemory(cast(uint)structPtr, 8);
-            uint dataPtr = (cast(uint)structBytes[0]) |
-                           (cast(uint)structBytes[1] << 8) |
-                           (cast(uint)structBytes[2] << 16) |
-                           (cast(uint)structBytes[3] << 24);
-            uint len = (cast(uint)structBytes[4]) |
-                       (cast(uint)structBytes[5] << 8) |
-                       (cast(uint)structBytes[6] << 16) |
-                       (cast(uint)structBytes[7] << 24);
+            ensureCompiledForFunction(funcDecl);
+            enum sliceStructSize = 12;  // {ptr:i32, len:i32, cap:i32}
+            auto result = cachedContext.callWithLargeReturn(funcDecl.name, [], sliceStructSize);
+            if (!result.success)
+                throw new CTFEError("CTFE execution error: " ~ result.error, callExpr.location);
+            ubyte[] sliceBytes = result.arrayBytes;
+            uint dataPtr = (cast(uint)sliceBytes[0]) |
+                           (cast(uint)sliceBytes[1] << 8) |
+                           (cast(uint)sliceBytes[2] << 16) |
+                           (cast(uint)sliceBytes[3] << 24);
+            uint len = (cast(uint)sliceBytes[4]) |
+                       (cast(uint)sliceBytes[5] << 8) |
+                       (cast(uint)sliceBytes[6] << 16) |
+                       (cast(uint)sliceBytes[7] << 24);
             ubyte[] strBytes = cachedContext.readMemory(dataPtr, len);
             return CTFEResult.fromString(cast(string)strBytes.idup);
         }
@@ -1827,9 +1831,13 @@ class CTFEEvaluator {
      * Execute a function via the configured backend.
      * This is the new unified path that works with both WASM and Native backends.
      */
-    long executeViaBackend(FunctionDecl funcDecl, long[] args) {
+    /**
+     * Ensure the function and its dependencies are compiled in the cached context.
+     * Shared compilation step used by all CTFE execution paths.
+     */
+    private void ensureCompiledForFunction(FunctionDecl funcDecl) {
         import semantic.dependency_analyzer : DependencyAnalyzer;
-        import std.algorithm : map, filter, canFind;
+        import std.algorithm : map, filter;
         import std.array : array, join;
 
         // Expand any mixin statements in function body before compilation
@@ -1846,9 +1854,8 @@ class CTFEEvaluator {
 
         // Check which functions are new (not yet in context)
         auto newFuncs = dependencies.filter!(f => ctfeFuncKey(f) !in compiledFunctions).array;
-        bool needsRecompile = newFuncs.length > 0;
 
-        if (needsRecompile) {
+        if (newFuncs.length > 0) {
             statCacheMisses++;
             statFunctionsCompiled += cast(uint)newFuncs.length;
             log(3, "CTFE: ", funcDecl.name, " needs: [",
@@ -1895,6 +1902,10 @@ class CTFEEvaluator {
             statCacheHits++;
             log(3, "CTFE: Reusing cached context for ", funcDecl.name);
         }
+    }
+
+    long executeViaBackend(FunctionDecl funcDecl, long[] args) {
+        ensureCompiledForFunction(funcDecl);
 
         // Execute - use callByName to call any function in the context
         auto t2 = MonoTime.currTime;

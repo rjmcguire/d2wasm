@@ -695,9 +695,10 @@ class ArrayType : Type {
     /// Arrays (both static and dynamic/slices) are aggregates
     override bool isAggregate() const { return true; }
 
-    /// Static arrays are large returns (passed via hidden pointer)
+    /// All arrays are large returns — both static arrays and dynamic slices
+    /// are multi-word value types that don't fit in a single WASM scalar.
     override bool isLargeReturn() const {
-        return arraySize !is null;
+        return true;
     }
     
     override size_t size() const {

@@ -326,6 +326,12 @@ class NativeCompiledFunction : CompiledFunction {
                 }
                 resultPtrOffset = nextLocalOffset;
                 nextLocalOffset += 8;  // 64-bit pointer
+            } else {
+                // Dynamic array (slice) return — same mechanism, different size
+                hasHiddenResultPtr = true;
+                returnArrayBytes = cast(uint)NativeSliceLayout.sizeof;  // 16
+                resultPtrOffset = nextLocalOffset;
+                nextLocalOffset += 8;  // 64-bit pointer
             }
         }
         currentFunctionHasHiddenResult = hasHiddenResultPtr;
@@ -620,47 +626,34 @@ class NativeCompiledFunction : CompiledFunction {
             }
         } else if (auto ret = cast(ReturnStatement)stmt) {
             if (ret.value) {
-                if (currentFunctionHasHiddenResult && currentFunctionReturnStructDecl !is null) {
-                    // Struct return: copy result to hidden result pointer
-                    assert(currentFunctionReturnStructDecl.structSize > 0,
-                        "Struct return with zero-size struct");
-                    assert(tempSlot + 8 + 8 <= totalLocalBytes,
-                        "srcTempSlot overflows frame");
-                    // First compile the expression once to get source address
-                    compileExpression(ret.value);  // x0 = address of result struct
+                if (currentFunctionHasHiddenResult) {
+                    // Unified large return: copy N bytes from source to result pointer
+                    // Works for structs, static arrays, and slices — all use the same mechanism
+                    uint returnSize = 0;
+                    if (currentFunctionReturnStructDecl !is null)
+                        returnSize = cast(uint)currentFunctionReturnStructDecl.structSize;
+                    else if (currentFunctionReturnArrayBytes > 0)
+                        returnSize = currentFunctionReturnArrayBytes;
 
-                    // Save source pointer to a temp slot
-                    uint srcTempSlot = tempSlot + 8;  // Use temp slot area
-                    gen.emitStoreLocal(srcTempSlot);  // Save 64-bit ptr
+                    if (returnSize > 0) {
+                        compileExpression(ret.value);  // x0 = source address
 
-                    // Copy struct data word by word
-                    uint structSize = cast(uint)currentFunctionReturnStructDecl.structSize;
-                    for (uint off = 0; off < structSize; off += 4) {
-                        // Load from source
-                        gen.emitLoadLocal(srcTempSlot);      // x0 = src ptr
-                        gen.emitLoadFromPointer(off);        // x0 = *(src + off)
-                        gen.emitMoveX0ToX9();                // x9 = value
+                        // Allocate srcTempSlot AFTER compileExpression —
+                        // expression temps (e.g., standalone SliceExpression)
+                        // may have advanced nextLocalOffset past tempSlot.
+                        uint srcTempSlot = (nextLocalOffset + 7) & ~7;
+                        assert(srcTempSlot + 8 <= totalLocalBytes,
+                            "srcTempSlot overflows frame");
+                        gen.emitStoreLocal(srcTempSlot);  // Save 64-bit ptr
 
-                        // Store to dest
-                        gen.emitLoadLocal(currentFunctionResultPtrOffset);  // x0 = dest ptr
-                        gen.emitStoreToPointerFromX9(off);   // *(dest + off) = x9
-                    }
-                } else if (currentFunctionHasHiddenResult && currentFunctionReturnArrayBytes > 0) {
-                    // Static array return: copy array data to hidden result pointer
-                    assert(tempSlot + 8 + 8 <= totalLocalBytes,
-                        "srcTempSlot overflows frame");
-                    compileExpression(ret.value);  // x0 = address of source array
+                        for (uint off = 0; off < returnSize; off += 4) {
+                            gen.emitLoadLocal(srcTempSlot);      // x0 = src ptr
+                            gen.emitLoadFromPointer(off);        // x0 = *(src + off)
+                            gen.emitMoveX0ToX9();                // x9 = value
 
-                    uint srcTempSlot = tempSlot + 8;
-                    gen.emitStoreLocal(srcTempSlot);  // Save 64-bit ptr
-
-                    for (uint off = 0; off < currentFunctionReturnArrayBytes; off += 4) {
-                        gen.emitLoadLocal(srcTempSlot);      // x0 = src ptr
-                        gen.emitLoadFromPointer(off);        // x0 = *(src + off)
-                        gen.emitMoveX0ToX9();                // x9 = value
-
-                        gen.emitLoadLocal(currentFunctionResultPtrOffset);  // x0 = dest ptr
-                        gen.emitStoreToPointerFromX9(off);   // *(dest + off) = x9
+                            gen.emitLoadLocal(currentFunctionResultPtrOffset);  // x0 = dest ptr
+                            gen.emitStoreToPointerFromX9(off);   // *(dest + off) = x9
+                        }
                     }
                 } else {
                     compileExpression(ret.value);
@@ -901,8 +894,54 @@ class NativeCompiledFunction : CompiledFunction {
                         gen.emitMoveX9ToX0();
                         gen.emit(stencil_sub_i32);
                         gen.emitStoreLocal32(nli.offset + NativeSliceLayout.CAPACITY_OFFSET);
+                    } else if (auto callExpr = cast(CallExpression)varDecl.initializer) {
+                        // Function call returning slice — hidden result pointer pattern
+                        if (auto funcIdent = cast(IdentifierExpression)callExpr.function_) {
+                            auto funcLabelPtr = funcIdent.name in functionLabels;
+                            if (funcLabelPtr is null)
+                                throw new Exception("Function not compiled: " ~ funcIdent.name);
+
+                            bool calleeNeedsArena = false;
+                            if (auto calleeDecl = funcIdent.name in functionDecls)
+                                calleeNeedsArena = (*calleeDecl).needsArena;
+                            int arenaShift = calleeNeedsArena ? 1 : 0;
+
+                            // Compile and save all arguments to temp slots (64-bit for pointer args)
+                            uint tempOffset = (nextLocalOffset + varSize + 7) & ~7;  // 8-byte align
+                            uint[] argTemps;
+                            foreach (arg; callExpr.arguments) {
+                                compileExpression(arg);
+                                gen.emitStoreLocal(tempOffset);  // 64-bit store — pointers need full width
+                                argTemps ~= tempOffset;
+                                tempOffset += 8;
+                            }
+
+                            // Load args into registers (user args after result ptr + arena)
+                            for (long i = cast(long)argTemps.length - 1; i >= 0; i--) {
+                                gen.emitLoadLocal(argTemps[cast(size_t)i]);  // 64-bit load
+                                switch (cast(int)i + 1 + arenaShift) {
+                                    case 1: gen.emitMoveX0ToX1(); break;
+                                    case 2: gen.emitMoveX0ToX2(); break;
+                                    case 3: gen.emitMoveX0ToX3(); break;
+                                    default: assert(0, "argument register > 3");
+                                }
+                            }
+
+                            // Load arena into x1 if callee needs it
+                            if (calleeNeedsArena) {
+                                gen.emitLoadLocal(currentFunctionArenaOffset);
+                                gen.emitMoveX0ToX1();
+                            }
+
+                            // x0 = result ptr (stack address of this slice variable)
+                            gen.emitStackAddress(nli.offset);
+
+                            gen.emitCall(*funcLabelPtr);
+                        } else {
+                            throw new Exception("Complex call target not supported for slice init");
+                        }
                     } else {
-                        throw new Exception("Slice can only be initialized from array literal, string literal, slice, or import()");
+                        throw new Exception("Slice can only be initialized from array literal, string literal, slice, call, or import()");
                     }
                 } else if (nli.isStaticArray) {
                     // Static array initialization from array literal
@@ -1438,17 +1477,19 @@ class NativeCompiledFunction : CompiledFunction {
                     if (hasNestedCalls && call.arguments.length > 1) {
                         // Save arguments to temp slots, then load into registers
                         // This prevents register clobbering from nested calls
+                        // Use 64-bit store/load — pointer args (slice, struct) need full width
+                        uint argBase = (tempSlot + 7) & ~7;  // 8-byte align
                         uint[] argSlots;
                         foreach (i, arg; call.arguments) {
                             compileExpression(arg);
-                            uint slot = tempSlot + cast(uint)(i * 4);
-                            gen.emitStoreLocal32(slot);
+                            uint slot = argBase + cast(uint)(i * 8);
+                            gen.emitStoreLocal(slot);
                             argSlots ~= slot;
                         }
                         // Load from temp slots into argument registers (reverse order!)
                         // Arena shifts user args: x0 -> x(0+shift), etc.
                         for (long i = cast(long)argSlots.length - 1; i >= 0; i--) {
-                            gen.emitLoadLocal32(argSlots[cast(size_t)i]);
+                            gen.emitLoadLocal(argSlots[cast(size_t)i]);
                             switch (cast(int)i + arenaShift) {
                                 case 0: break;  // already in x0
                                 case 1: gen.emitMoveX0ToX1(); break;

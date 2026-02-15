@@ -1,0 +1,7 @@
+{
+  "name": "slice_return",
+  "description": "CTFE parity: function returning a dynamic slice",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 90
+}

@@ -1012,7 +1012,7 @@ class FuncContext {
         if (auto ident = cast(IdentifierExpression)value) {
             // Check if it's a struct or static array local (on shadow stack)
             if (auto info = resolveVar(ident.resolvedLocalId, ident.name)) {
-                if ((info.isStruct || info.isStaticArray) && info.addrMode == AddrMode.shadowStack) {
+                if ((info.isStruct || info.isStaticArray || info.isSlice) && info.addrMode == AddrMode.shadowStack) {
                     emitMemoryCopy(out_, resultPtrLocalIdx, info.frameOffset, returnValueSize);
                     return;
                 }
@@ -1922,6 +1922,14 @@ class FuncContext {
             return;
         }
         
+        // Function call returning a slice — same hidden result pointer pattern as structs
+        if (auto callExpr = cast(CallExpression)stmt.initializer) {
+            if (auto ident = cast(IdentifierExpression)callExpr.function_) {
+                emitStructReturnCall(out_, ident.name, callExpr.arguments, info.frameOffset);
+                return;
+            }
+        }
+
         throw new EmitError("Unsupported slice initializer", stmt.initializer.toString());
     }
 
@@ -4392,6 +4400,17 @@ class FuncContext {
             out_ ~= Op.i32_const;
             leb128s(out_, resultFrameOffset);
             out_ ~= Op.i32_add;
+        }
+
+        // Push hidden arena pointer if callee needs it
+        // Parameter order: [result_ptr] [arena?] [user_args...]
+        if (auto fi = funcName in emitter.funcIndex) {
+            if (*fi < emitter.functions.length) {
+                auto calleeDecl = emitter.functions[*fi].decl;
+                if (calleeDecl.needsArena && calleeDecl.name != "main") {
+                    emitArenaPointer(out_);
+                }
+            }
         }
 
         // Emit arguments (with struct/slice pass-by-value handling)
