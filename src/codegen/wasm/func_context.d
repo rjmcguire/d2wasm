@@ -3316,9 +3316,9 @@ class FuncContext {
             return;
         }
 
-        // Lowered shift operators — emit the call instead of raw opcode
+        // Lowered operators (shifts, struct comparison) — emit the lowered expression
         if (expr.loweredCall) {
-            emitCall(out_, expr.loweredCall);
+            emitExpression(out_, expr.loweredCall);
             return;
         }
 
@@ -4565,7 +4565,7 @@ class FuncContext {
                 // Scalar local/param — local_set/local_tee
                 auto wasmIdx = info.wasmLocalIdx;
                 if (expr.loweredCall) {
-                    emitCall(out_, expr.loweredCall);
+                    emitExpression(out_, expr.loweredCall);
                 } else if (expr.operator != AssignmentExpression.Operator.Assign) {
                     out_ ~= Op.local_get;
                     leb128u(out_, wasmIdx);
@@ -4588,7 +4588,7 @@ class FuncContext {
             if (auto varDecl = cast(VariableDecl)symbol.declaration) {
                 if (varDecl.wasmGlobalIndex != uint.max) {
                     if (expr.loweredCall) {
-                        emitCall(out_, expr.loweredCall);
+                        emitExpression(out_, expr.loweredCall);
                     } else if (expr.operator != AssignmentExpression.Operator.Assign) {
                         out_ ~= Op.global_get;
                         leb128u(out_, varDecl.wasmGlobalIndex);

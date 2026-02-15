@@ -1,0 +1,7 @@
+{
+  "name": "struct_equality",
+  "description": "CTFE parity: compiler-generated default struct equality (== and !=)",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 30
+}

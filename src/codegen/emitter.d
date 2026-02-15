@@ -2997,9 +2997,9 @@ private class EvalContext {
             emitArrayConcat(out_, expr);
             return;
         }
-        // Lowered shift operators — emit the call instead of raw opcode
+        // Lowered operators (shifts, struct comparison) — emit the lowered expression
         if (expr.loweredCall) {
-            emitCallExpr(out_, expr.loweredCall);
+            emitExpression(out_, expr.loweredCall);
             return;
         }
         // LogicalAnd/LogicalOr need boolean normalization (eqz+eqz converts to 0/1)

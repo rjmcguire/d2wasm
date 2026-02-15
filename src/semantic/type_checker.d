@@ -759,9 +759,9 @@ class TypeChecker {
         }
         
         // Comparison operators
-        if (expr.operator >= BinaryExpression.Operator.Equal && 
+        if (expr.operator >= BinaryExpression.Operator.Equal &&
             expr.operator <= BinaryExpression.Operator.GreaterEqual) {
-            
+
             // Check for null types first
             if (!leftType) {
                 throw new TypeError(
@@ -775,7 +775,18 @@ class TypeChecker {
                     expr.location
                 );
             }
-            
+
+            // Struct comparison: lower to field-wise == or user-defined opEquals
+            if ((expr.operator == BinaryExpression.Operator.Equal ||
+                 expr.operator == BinaryExpression.Operator.NotEqual)) {
+                auto leftStruct = leftType.asStruct();
+                auto rightStruct = rightType.asStruct();
+                if (leftStruct !is null && rightStruct !is null && leftStruct is rightStruct) {
+                    expr.loweredCall = synthesizeStructEquals(expr, leftStruct);
+                    return new BasicType(expr.location, BasicType.Kind.Bool);
+                }
+            }
+
             auto compat = checkTypeCompatibility(leftType, rightType);
             if (!compat.isCompatible && !checkTypeCompatibility(rightType, leftType).isCompatible) {
                 throw new TypeError(
@@ -784,7 +795,7 @@ class TypeChecker {
                     expr.location
                 );
             }
-            
+
             return new BasicType(expr.location, BasicType.Kind.Bool);
         }
         
@@ -1834,6 +1845,36 @@ class TypeChecker {
 
         expr.evaluate();
         return new BasicType(loc, BasicType.Kind.Bool);
+    }
+
+    /**
+     * Synthesize field-wise equality for struct comparison.
+     * Generates: left.f1 == right.f1 && left.f2 == right.f2 && ...
+     * For != operator, wraps in LogicalNot.
+     */
+    private Expression synthesizeStructEquals(BinaryExpression expr, StructDecl structDecl) {
+        auto loc = expr.location;
+        Expression synthesized = null;
+
+        foreach (field; structDecl.fields) {
+            auto leftField = new MemberExpression(loc, expr.left, field.name);
+            auto rightField = new MemberExpression(loc, expr.right, field.name);
+            auto fieldCmp = new BinaryExpression(loc, leftField, BinaryExpression.Operator.Equal, rightField);
+            checkExpression(fieldCmp);  // type-check synthesized comparison
+            if (synthesized is null)
+                synthesized = fieldCmp;
+            else
+                synthesized = new BinaryExpression(loc, synthesized, BinaryExpression.Operator.LogicalAnd, fieldCmp);
+        }
+
+        // No fields: always equal
+        if (synthesized is null)
+            synthesized = LiteralExpression.integer(loc, 1);
+
+        if (expr.operator == BinaryExpression.Operator.NotEqual)
+            synthesized = new UnaryExpression(loc, UnaryExpression.Operator.LogicalNot, synthesized);
+
+        return synthesized;
     }
 
     private bool checkCompilesTrait(TraitsExpression expr) {
