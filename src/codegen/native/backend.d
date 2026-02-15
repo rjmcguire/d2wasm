@@ -707,6 +707,11 @@ class NativeCompiledFunction : CompiledFunction {
             }
             
             // Allocate stack slot for this variable
+            // Slices contain a 64-bit pointer and need 8-byte alignment
+            // for STR x0, [sp, #imm] encoding (imm must be multiple of 8)
+            if (isSlice) {
+                nextLocalOffset = (nextLocalOffset + 7) & ~7;
+            }
             NativeLocalInfo nli;
             nli.offset = nextLocalOffset;
             if (structType) {
@@ -855,14 +860,47 @@ class NativeCompiledFunction : CompiledFunction {
                         }
                     } else if (auto sliceExpr = cast(SliceExpression)varDecl.initializer) {
                         // Slice init from another array: int[] s = arr[1..4]
-                        compileExpression(sliceExpr);  // puts temp slice address in x0
-                        // Copy 16-byte slice struct from temp to variable offset
-                        gen.emitMoveX0ToX9();
-                        for (uint off = 0; off < NativeSliceLayout.sizeof; off += 4) {
-                            gen.emitMoveX9ToX0();
-                            gen.emitLoadFromPointer(off);
-                            gen.emitStoreLocal32(nextLocalOffset + off);
+                        auto sourceIdent = cast(IdentifierExpression)sliceExpr.array;
+                        if (!sourceIdent)
+                            throw new Exception("Complex slice source not supported in native slice init");
+                        auto srcInfo = sourceIdent.name in localVars;
+                        if (srcInfo is null || (!srcInfo.isSlice && !srcInfo.isStaticArray))
+                            throw new Exception("Can only slice array-like variables in native slice init");
+                        uint srcElemSize = srcInfo.elemSize;
+
+                        // Compute ptr = base + start * elemSize → store at nli.offset
+                        if (srcInfo.isSlice) {
+                            gen.emitLoadLocal(srcInfo.offset);  // 64-bit ptr
+                        } else {
+                            gen.emitStackAddress(srcInfo.offset);  // static array address
                         }
+                        gen.emitMoveX0ToX9();  // x9 = base ptr
+                        compileExpression(sliceExpr.start);
+                        gen.emitMoveX0ToX1();
+                        gen.emitImm32(stencil_load_imm32, srcElemSize);
+                        gen.emit(stencil_mul_i32);  // x0 = start * elemSize
+                        gen.emitMoveX0ToX1();
+                        gen.emitMoveX9ToX0();
+                        gen.emit(stencil_add_i32);  // x0 = base + start * elemSize
+                        gen.emitStoreLocal(nli.offset);  // store 64-bit ptr
+
+                        // Compute length = end - start → store at nli.offset + LENGTH_OFFSET
+                        compileExpression(sliceExpr.end);
+                        gen.emitMoveX0ToX9();
+                        compileExpression(sliceExpr.start);
+                        gen.emitMoveX0ToX1();
+                        gen.emitMoveX9ToX0();
+                        gen.emit(stencil_sub_i32);  // x0 = end - start
+                        gen.emitStoreLocal32(nli.offset + NativeSliceLayout.LENGTH_OFFSET);
+
+                        // Capacity = length
+                        compileExpression(sliceExpr.end);
+                        gen.emitMoveX0ToX9();
+                        compileExpression(sliceExpr.start);
+                        gen.emitMoveX0ToX1();
+                        gen.emitMoveX9ToX0();
+                        gen.emit(stencil_sub_i32);
+                        gen.emitStoreLocal32(nli.offset + NativeSliceLayout.CAPACITY_OFFSET);
                     } else {
                         throw new Exception("Slice can only be initialized from array literal, string literal, slice, or import()");
                     }
