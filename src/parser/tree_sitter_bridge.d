@@ -2695,24 +2695,27 @@ class TreeSitterBridge {
         
         Expression array = parseExpression(arrayNode);
         
-        // Check if this is a slice expression by looking for '..' in the index text
-        string indexText = TreeSitterParser.getNodeText(indexNode, sourceText);
-        import std.string : indexOf;
-        auto dotdotPos = indexOf(indexText, "..");
-        
-        if (dotdotPos >= 0) {
-            // This is a slice expression: arr[start..end]
-            // Parse start and end from the text
-            import std.conv : to;
-            import std.string : strip;
-            
-            string startText = indexText[0..dotdotPos].strip();
-            string endText = indexText[dotdotPos+2..$].strip();
-            
-            // Parse start and end as expressions (for now, just integers)
-            Expression startExpr = LiteralExpression.integer(loc, to!long(startText));
-            Expression endExpr = LiteralExpression.integer(loc, to!long(endText));
-            
+        // Detect slice expression by scanning index node children for ".." token.
+        // Grammar: index = seq(expression, optional(seq("..", expression)))
+        uint indexChildCount = TreeSitterParser.getChildCount(indexNode);
+        bool isSlice = false;
+        int firstExprChild = -1;
+        int secondExprChild = -1;
+        for (uint i = 0; i < indexChildCount; i++) {
+            TSNode child = TreeSitterParser.getChild(indexNode, i);
+            string childText = TreeSitterParser.getNodeText(child, sourceText);
+            if (childText == "..") {
+                isSlice = true;
+            } else if (!isSlice) {
+                firstExprChild = cast(int)i;
+            } else {
+                secondExprChild = cast(int)i;
+                break;
+            }
+        }
+        if (isSlice && firstExprChild >= 0 && secondExprChild >= 0) {
+            auto startExpr = parseExpression(TreeSitterParser.getChild(indexNode, cast(uint)firstExprChild));
+            auto endExpr = parseExpression(TreeSitterParser.getChild(indexNode, cast(uint)secondExprChild));
             return new SliceExpression(loc, array, startExpr, endExpr);
         }
         

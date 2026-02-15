@@ -1,0 +1,7 @@
+{
+  "name": "slice_variable_bounds",
+  "description": "CTFE parity: slice expression with variable bounds",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 90
+}

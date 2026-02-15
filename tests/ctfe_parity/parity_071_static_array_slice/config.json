@@ -1,0 +1,7 @@
+{
+  "name": "static_array_slice",
+  "description": "CTFE parity: slicing a static array into a dynamic slice",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 90
+}

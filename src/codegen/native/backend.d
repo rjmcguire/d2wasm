@@ -853,8 +853,18 @@ class NativeCompiledFunction : CompiledFunction {
                         } else {
                             throw new Exception("Unsupported literal type for slice init");
                         }
+                    } else if (auto sliceExpr = cast(SliceExpression)varDecl.initializer) {
+                        // Slice init from another array: int[] s = arr[1..4]
+                        compileExpression(sliceExpr);  // puts temp slice address in x0
+                        // Copy 16-byte slice struct from temp to variable offset
+                        gen.emitMoveX0ToX9();
+                        for (uint off = 0; off < NativeSliceLayout.sizeof; off += 4) {
+                            gen.emitMoveX9ToX0();
+                            gen.emitLoadFromPointer(off);
+                            gen.emitStoreLocal32(nextLocalOffset + off);
+                        }
                     } else {
-                        throw new Exception("Slice can only be initialized from array literal, string literal, or import()");
+                        throw new Exception("Slice can only be initialized from array literal, string literal, slice, or import()");
                     }
                 } else if (nli.isStaticArray) {
                     // Static array initialization from array literal
@@ -1649,16 +1659,19 @@ class NativeCompiledFunction : CompiledFunction {
                 throw new Exception("Complex slice source not supported in native backend");
 
             auto info = sourceIdent.name in localVars;
-            if (info is null || !info.isSlice)
-                throw new Exception("Can only sub-slice a slice variable in native backend");
+            if (info is null || (!info.isSlice && !info.isStaticArray))
+                throw new Exception("Can only slice array-like variables in native backend");
 
             uint elemSize = info.elemSize;
             uint tempOffset = (nextLocalOffset + 7) & ~7;  // 8-byte align for 64-bit ptr store
             nextLocalOffset = tempOffset + cast(uint)NativeSliceLayout.sizeof;
 
-            // Compute new ptr = source.ptr + start * elemSize
-            // Load source.ptr (64-bit)
-            gen.emitLoadLocal(info.offset);
+            // Compute new ptr = base + start * elemSize
+            if (info.isSlice) {
+                gen.emitLoadLocal(info.offset);  // load 64-bit ptr from slice struct
+            } else {
+                gen.emitStackAddress(info.offset);  // static array: stack address IS data
+            }
             gen.emitMoveX0ToX9();  // x9 = source.ptr
 
             // Compute start * elemSize

@@ -1853,28 +1853,29 @@ class FuncContext {
             }
             
             auto sourceInfo = resolveVar(sourceIdent.resolvedLocalId, sourceIdent.name);
-            if (sourceInfo && !sourceInfo.isSlice) sourceInfo = null;
-            if (!sourceInfo) {
+            if (!sourceInfo || (!sourceInfo.isSlice && !sourceInfo.isStaticArray)) {
                 throw new EmitError("Can only slice local arrays for now");
             }
-            
-            // Calculate ptr = source.ptr + start * elemSize
+
+            // Calculate ptr = base + start * elemSize
             // Store at FP + frameOffset (slice.ptr)
             out_ ~= Op.local_get;
             leb128u(out_, fpLocal);
             out_ ~= Op.i32_const;
             leb128s(out_, info.frameOffset);
             out_ ~= Op.i32_add;
-            
-            // Load source.ptr
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, sourceInfo.frameOffset);  // source.ptr at offset 0
-            out_ ~= Op.i32_add;
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+
+            // Load base address
+            if (sourceInfo.isSlice) {
+                // Slice source: load .ptr field
+                emitVarAddress(out_, sourceInfo);
+                out_ ~= Op.i32_load;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+            } else {
+                // Static array source: address IS the data
+                emitVarAddress(out_, sourceInfo);
+            }
             
             // Add start * elemSize
             emitExpression(out_, sliceExpr.start);
@@ -1923,7 +1924,83 @@ class FuncContext {
         
         throw new EmitError("Unsupported slice initializer", stmt.initializer.toString());
     }
-    
+
+    /**
+     * Emit a slice expression to a 12-byte temp on the SP-based stack.
+     * Pushes the temp's i32 address onto the WASM value stack.
+     * Handles both slice and static array sources.
+     */
+    void emitSliceExpressionToTemp(ref Appender!(ubyte[]) out_, SliceExpression sliceExpr) {
+        auto sourceIdent = cast(IdentifierExpression)sliceExpr.array;
+        if (!sourceIdent)
+            throw new EmitError("Complex slice source not supported");
+        auto srcInfo = resolveVar(sourceIdent.resolvedLocalId, sourceIdent.name);
+        if (!srcInfo || (!srcInfo.isSlice && !srcInfo.isStaticArray))
+            throw new EmitError("Can only slice array-like variables");
+        uint elemSize = srcInfo.elementSize;
+        enum sliceSize = WasmSliceLayout.sizeof;  // 12
+
+        // Allocate temp: SP -= 12
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceSize);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.global_set;
+        leb128u(out_, emitter.spGlobal);
+
+        // Store ptr = base + start * elemSize at SP+0
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        if (srcInfo.isSlice) {
+            emitVarAddress(out_, srcInfo);
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);  // load .ptr field
+        } else {
+            // static array: address IS the data
+            emitVarAddress(out_, srcInfo);
+        }
+        emitExpression(out_, sliceExpr.start);
+        out_ ~= Op.i32_const;
+        leb128s(out_, elemSize);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+
+        // Store length = end - start at SP+LENGTH_OFFSET
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, WasmSliceLayout.LENGTH_OFFSET);
+        out_ ~= Op.i32_add;
+        emitExpression(out_, sliceExpr.end);
+        emitExpression(out_, sliceExpr.start);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+
+        // Store capacity = length at SP+CAPACITY_OFFSET
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, WasmSliceLayout.CAPACITY_OFFSET);
+        out_ ~= Op.i32_add;
+        emitExpression(out_, sliceExpr.end);
+        emitExpression(out_, sliceExpr.start);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+
+        // Push temp address
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+    }
+
     /**
      * Emit static array local variable declaration
      * Static arrays are stored directly on the shadow stack (no slice struct)
@@ -1998,9 +2075,7 @@ class FuncContext {
         } else if (auto indexExpr = cast(IndexExpression)expr) {
             emitIndex(out_, indexExpr);
         } else if (auto sliceExpr = cast(SliceExpression)expr) {
-            // Slice expressions as standalone expressions are complex
-            // For now, we only support them as initializers (handled in emitSliceVarDecl)
-            throw new EmitError("Slice expressions only supported as initializers for now");
+            emitSliceExpressionToTemp(out_, sliceExpr);
         } else if (auto traits = cast(TraitsExpression)expr) {
             traits.evaluate();
             out_ ~= Op.i32_const;
@@ -3755,8 +3830,8 @@ class FuncContext {
                 }
 
                 auto srcInfo = resolveVar(sourceIdent.resolvedLocalId, sourceIdent.name);
-                if (!srcInfo || !srcInfo.isSlice) {
-                    throw new EmitError("Can only sub-slice a slice variable: " ~ sourceIdent.name);
+                if (!srcInfo || (!srcInfo.isSlice && !srcInfo.isStaticArray)) {
+                    throw new EmitError("Can only sub-slice array-like variables: " ~ sourceIdent.name);
                 }
                 uint sourceElemSize = srcInfo.elementSize;
 
@@ -3771,15 +3846,20 @@ class FuncContext {
                 out_ ~= Op.global_set;
                 leb128u(out_, emitter.spGlobal);
 
-                // Store ptr = source.ptr + start * elemSize at SP+0
+                // Store ptr = base + start * elemSize at SP+0
                 out_ ~= Op.global_get;
                 leb128u(out_, emitter.spGlobal);
 
-                // Load source.ptr
-                emitVarAddress(out_, srcInfo);
-                out_ ~= Op.i32_load;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                // Load base address
+                if (srcInfo.isSlice) {
+                    emitVarAddress(out_, srcInfo);
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);  // load .ptr field
+                } else {
+                    // Static array: address IS the data
+                    emitVarAddress(out_, srcInfo);
+                }
 
                 // Add start * elemSize
                 emitExpression(out_, sliceArg.start);

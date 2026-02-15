@@ -1790,9 +1790,13 @@ class TypeChecker {
                 expr.end.location);
         }
         
-        // Array slicing returns the same array type (a view)
+        // Array slicing returns a dynamic array type (a view)
         if (auto arrType = cast(ArrayType)arrayType) {
-            return arrType;  // Same type - it's a view
+            if (arrType.isStaticArray) {
+                // static array slice → dynamic array (view into static data)
+                return new ArrayType(expr.location, arrType.elementType);
+            }
+            return arrType;  // dynamic slice → same type
         }
         
         throw new TypeError(
