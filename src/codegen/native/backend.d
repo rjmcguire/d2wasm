@@ -800,7 +800,16 @@ class NativeCompiledFunction : CompiledFunction {
             }
             // else: kind stays VarKind.scalar (default)
             localVars[varDecl.name] = nli;
-            
+
+            // Zero-initialize static arrays and structs without explicit initializer
+            // (D guarantees .init = 0 for int arrays and zero-init for struct fields)
+            if (!varDecl.initializer && varSize > 0 && (nli.isStaticArray || nli.isStruct)) {
+                gen.emitImm32(stencil_load_imm32, 0);
+                for (size_t off = 0; off < varSize; off += 4) {
+                    gen.emitStoreLocal32(nli.offset + off);
+                }
+            }
+
             // Compile initializer if present
             if (varDecl.initializer) {
                 if (nli.isStruct) {
@@ -942,7 +951,7 @@ class NativeCompiledFunction : CompiledFunction {
                         gen.emit(stencil_mul_i32);  // x0 = start * elemSize
                         gen.emitMoveX0ToX1();
                         gen.emitMoveX9ToX0();
-                        gen.emit(stencil_add_i32);  // x0 = base + start * elemSize
+                        gen.emit(stencil_add_i64);  // x0 = base + start * elemSize (64-bit ptr)
                         gen.emitStorePtr(nli.offset);  // store 64-bit ptr
 
                         // Compute length = end - start → store at nli.offset + LENGTH_OFFSET
@@ -1713,7 +1722,7 @@ class NativeCompiledFunction : CompiledFunction {
                 if (fieldOffset > 0) {
                     gen.emitMoveX0ToX1();
                     gen.emitImm32(stencil_load_imm32, cast(int)fieldOffset);
-                    gen.emit(stencil_add_i32);
+                    gen.emit(stencil_add_i64);  // 64-bit ptr arithmetic
                 }
                 // x0 now has address of nested aggregate
             } else {
@@ -1744,22 +1753,22 @@ class NativeCompiledFunction : CompiledFunction {
             gen.emitLoadStackPointer();
             gen.emitMoveX0ToX1();
             gen.emitImm32(stencil_load_imm32, cast(int)dataOffset);
-            gen.emit(stencil_add_i32);
+            gen.emit(stencil_add_i64);  // 64-bit ptr arithmetic
             gen.emitStorePtr(sliceOffset);  // store 64-bit ptr
-            
+
             // length = elemCount
             gen.emitImm32(stencil_load_imm32, cast(int)elemCount);
             gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);  // store length
-            
+
             // capacity = elemCount
             gen.emitImm32(stencil_load_imm32, cast(int)elemCount);
             gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.CAPACITY_OFFSET);  // store capacity
-            
+
             // Leave pointer to slice struct in x0
             gen.emitLoadStackPointer();
             gen.emitMoveX0ToX1();
             gen.emitImm32(stencil_load_imm32, cast(int)sliceOffset);
-            gen.emit(stencil_add_i32);
+            gen.emit(stencil_add_i64);  // 64-bit ptr arithmetic
             
         } else if (auto indexExpr = cast(IndexExpression)expr) {
             // Array/slice indexing: arr[i]
@@ -1786,7 +1795,7 @@ class NativeCompiledFunction : CompiledFunction {
                             gen.emit(stencil_mul_i32);  // x0 = index * elemSize
                             gen.emitMoveX0ToX1();  // x1 = byte offset
                             gen.emitStackAddress(info.offset);  // x0 = base address
-                            gen.emit(stencil_add_i32);  // x0 = element address
+                            gen.emit(stencil_add_i64);  // x0 = element address (64-bit ptr)
                             // Aggregate elements: leave address in x0
                             if (saElemSz <= 4)
                                 gen.emitLoadFromPointer(0);
@@ -1813,7 +1822,7 @@ class NativeCompiledFunction : CompiledFunction {
                             gen.emitLoadPtr(info.offset);  // x0 = ptr (64-bit!)
 
                             // Compute address: ptr + byte offset
-                            gen.emit(stencil_add_i32);
+                            gen.emit(stencil_add_i64);  // 64-bit ptr arithmetic
 
                             // Aggregate elements: leave address in x0
                             if (info.elemSize <= 4) {
@@ -1871,7 +1880,7 @@ class NativeCompiledFunction : CompiledFunction {
             // ptr + start * elemSize (64-bit add: x9 + x0)
             gen.emitMoveX0ToX1();  // x1 = byte offset
             gen.emitMoveX9ToX0();  // x0 = source.ptr
-            gen.emit(stencil_add_i32);  // x0 = new ptr
+            gen.emit(stencil_add_i64);  // x0 = new ptr (64-bit)
             gen.emitStorePtr(tempOffset);  // store 64-bit ptr
 
             // Compute length = end - start
@@ -1972,7 +1981,7 @@ class NativeCompiledFunction : CompiledFunction {
                     gen.emit(stencil_mul_i32);  // x0 = index * elemSize
                     gen.emitMoveX0ToX1();
                     gen.emitStackAddress(info.offset);
-                    gen.emit(stencil_add_i32);  // x0 = dst address (64-bit)
+                    gen.emit(stencil_add_i64);  // x0 = dst address (64-bit ptr)
                     gen.emitStorePtr(dstTemp);
                     compileExpression(value);   // x0 = src address (64-bit)
                     gen.emitStorePtr(srcTemp);
@@ -2004,7 +2013,7 @@ class NativeCompiledFunction : CompiledFunction {
                 gen.emit(stencil_mul_i32);  // x0 = index * elemSize
                 gen.emitMoveX0ToX1();
                 gen.emitStackAddress(info.offset);
-                gen.emit(stencil_add_i32);  // x0 = target address
+                gen.emit(stencil_add_i64);  // x0 = target address (64-bit ptr)
                 gen.emitStoreToPointerFromX9(0);
                 return;
 
@@ -2019,7 +2028,7 @@ class NativeCompiledFunction : CompiledFunction {
                     gen.emit(stencil_mul_i32);
                     gen.emitMoveX0ToX1();
                     gen.emitLoadPtr(info.offset);  // x0 = slice ptr (64-bit)
-                    gen.emit(stencil_add_i32);  // x0 = dst address
+                    gen.emit(stencil_add_i64);  // x0 = dst address (64-bit ptr)
                     gen.emitStorePtr(dstTemp);
                     compileExpression(value);   // x0 = src address (64-bit)
                     gen.emitStorePtr(srcTemp);
@@ -2040,8 +2049,8 @@ class NativeCompiledFunction : CompiledFunction {
                 gen.emitImm32(stencil_load_imm32, es);
                 gen.emit(stencil_mul_i32);
                 gen.emitMoveX0ToX1();
-                gen.emitLoadPtr(info.offset);  // x0 = slice ptr
-                gen.emit(stencil_add_i32);  // x0 = target address
+                gen.emitLoadPtr(info.offset);  // x0 = slice ptr (64-bit)
+                gen.emit(stencil_add_i64);  // x0 = target address (64-bit ptr)
                 gen.emitStoreToPointerFromX9(0);
                 return;
 
@@ -2479,7 +2488,7 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitLoadStackPointer();
         gen.emitMoveX0ToX1();
         gen.emitImm32(stencil_load_imm32, cast(int)structOffset);
-        gen.emit(stencil_add_i32);
+        gen.emit(stencil_add_i64);  // 64-bit ptr arithmetic
         // Now x0 = pointer to struct
     }
     
@@ -2506,7 +2515,7 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitLoadStackPointer();
         gen.emitMoveX0ToX1();
         gen.emitImm32(stencil_load_imm32, cast(int)dataOffset);
-        gen.emit(stencil_add_i32);
+        gen.emit(stencil_add_i64);  // 64-bit ptr arithmetic
         gen.emitStorePtr(sliceOffset);  // store 64-bit ptr
         
         // length = elemCount (32-bit at offset 8)
@@ -2711,7 +2720,7 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emit(stencil_mul_i32);              // x0 = i * 4
         gen.emitMoveX0ToX1();                   // x1 = i * 4
         gen.emitLoadPtr(sliceOffset);         // x0 = oldPtr
-        gen.emit(stencil_add_i32);              // x0 = oldPtr + i*4
+        gen.emit(stencil_add_i64);              // x0 = oldPtr + i*4 (64-bit ptr)
         gen.emit(stencil_load_i32);             // x0 = oldPtr[i]
         gen.emitStoreLocal32(tempLoopVal);  // save loaded value
         
@@ -2726,7 +2735,7 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emit(stencil_mul_i32);              // x0 = i * 4
         gen.emitMoveX0ToX1();                   // x1 = i * 4
         gen.emitLoadPtr(tempNewPtr);          // x0 = newPtr
-        gen.emit(stencil_add_i32);              // x0 = newPtr + i*4 (dest addr)
+        gen.emit(stencil_add_i64);              // x0 = newPtr + i*4 (64-bit ptr)
         gen.emitMoveX0ToX1();                   // x1 = dest addr
         gen.emitLoadLocal32(tempLoopVal);   // x0 = value to store
         gen.emitMoveX0ToX2();                   // x2 = value
@@ -2767,7 +2776,7 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emit(stencil_mul_i32);              // x0 = length * 4
         gen.emitMoveX0ToX1();                   // x1 = length * 4
         gen.emitLoadPtr(sliceOffset);         // x0 = ptr
-        gen.emit(stencil_add_i32);              // x0 = ptr + length*4
+        gen.emit(stencil_add_i64);              // x0 = ptr + length*4 (64-bit ptr)
         gen.emitMoveX0ToX1();                   // x1 = dest addr
         gen.emitLoadLocal32(tempElement);       // x0 = element value
         gen.emitMoveX0ToX2();                   // x2 = element

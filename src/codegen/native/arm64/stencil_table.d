@@ -28,42 +28,52 @@ import codegen.native.stencil_catalog;
 
 // ----- Arithmetic -----
 
+// All i32 arithmetic uses 32-bit (w) registers for correct wrapping of negative values.
+// Zero-extended 32-bit values in 64-bit registers would break signed arithmetic
+// (e.g., -1 + 1 would yield 0x100000000 instead of 0).
+
 immutable stencil_add_i32 = Stencil(
     "add_i32",
-    cast(immutable ubyte[])[0x20, 0x00, 0x00, 0x8b],  // ADD x0, x0, x1 (using 64-bit for simplicity)
+    cast(immutable ubyte[])[0x20, 0x00, 0x00, 0x0b],  // ADD w0, w1, w0 (32-bit, wraps correctly)
+    []
+);
+
+immutable stencil_add_i64 = Stencil(
+    "add_i64",
+    cast(immutable ubyte[])[0x20, 0x00, 0x00, 0x8b],  // ADD x0, x1, x0 (64-bit, for pointer arithmetic)
     []
 );
 
 immutable stencil_sub_i32 = Stencil(
     "sub_i32",
-    cast(immutable ubyte[])[0x00, 0x00, 0x01, 0xcb],  // SUB x0, x0, x1
+    cast(immutable ubyte[])[0x00, 0x00, 0x01, 0x4b],  // SUB w0, w0, w1 (32-bit)
     []
 );
 
 immutable stencil_mul_i32 = Stencil(
     "mul_i32",
-    cast(immutable ubyte[])[0x20, 0x7c, 0x00, 0x9b],  // MUL x0, x1, x0
+    cast(immutable ubyte[])[0x20, 0x7c, 0x00, 0x1b],  // MUL w0, w1, w0 (32-bit)
     []
 );
 
 immutable stencil_div_i32 = Stencil(
     "div_i32",
-    cast(immutable ubyte[])[0x00, 0x0c, 0xc1, 0x9a],  // SDIV x0, x0, x1
+    cast(immutable ubyte[])[0x00, 0x0c, 0xc1, 0x1a],  // SDIV w0, w0, w1 (32-bit)
     []
 );
 
 immutable stencil_mod_i32 = Stencil(
     "mod_i32",
     cast(immutable ubyte[])[
-        0x08, 0x0c, 0xc1, 0x9a,  // SDIV x8, x0, x1
-        0x00, 0x81, 0x01, 0x9b   // MSUB x0, x8, x1, x0
+        0x08, 0x0c, 0xc1, 0x1a,  // SDIV w8, w0, w1 (32-bit)
+        0x00, 0x81, 0x01, 0x1b   // MSUB w0, w8, w1, w0 (32-bit)
     ],
     []
 );
 
 immutable stencil_neg_i32 = Stencil(
     "neg_i32",
-    cast(immutable ubyte[])[0x00, 0x00, 0x00, 0xcb],  // NEG x0, x0 (SUB x0, xzr, x0)
+    cast(immutable ubyte[])[0x00, 0x00, 0x00, 0x4b],  // NEG w0, w0 (SUB w0, wzr, w0) (32-bit)
     []
 );
 
@@ -696,6 +706,7 @@ immutable Stencil*[string] stencilTable;
 shared static this() {
     // Arithmetic
     stencilTable["add_i32"] = &stencil_add_i32;
+    stencilTable["add_i64"] = &stencil_add_i64;
     stencilTable["sub_i32"] = &stencil_sub_i32;
     stencilTable["mul_i32"] = &stencil_mul_i32;
     stencilTable["div_i32"] = &stencil_div_i32;
