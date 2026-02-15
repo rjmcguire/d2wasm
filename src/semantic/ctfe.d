@@ -432,12 +432,49 @@ class CTFEEvaluator {
 
         // Check for __traits expression (e.g., enum IS_INT = __traits(isArithmetic, int))
         if (auto traits = cast(TraitsExpression)manifest.initializer) {
+            // Resolve type arguments for allMembers etc.
+            if (traits.typeArguments.length > 0 && traits.typeArguments[0] !is null) {
+                if (auto ut = cast(UserType)traits.typeArguments[0])
+                    ut.ensureResolved(symbolTable);
+            }
             traits.evaluate();
+
+            if (traits.traitName == "allMembers") {
+                manifest.ctfeStringArrayValue = traits.stringArrayResult;
+                manifest.ctfeComplete = true;
+                manifest.isStringArrayType = true;
+                auto charType = new BasicType(manifest.location, BasicType.Kind.Char);
+                auto stringType = new ArrayType(manifest.location, charType);
+                manifest.inferredType = new ArrayType(manifest.location, stringType);
+                log(3, "CTFE: ", manifest.name, " = string[", cast(int)traits.stringArrayResult.length, "] (__traits allMembers)");
+                return;
+            }
+
             manifest.ctfeValue = traits.boolResult ? 1 : 0;
             manifest.ctfeComplete = true;
             manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Bool);
             log(3, "CTFE: ", manifest.name, " = ", traits.boolResult ? "true" : "false", " (__traits)");
             return;
+        }
+
+        // Check for MemberExpression on __traits (e.g., enum N = __traits(allMembers, T).length)
+        if (auto memberExpr = cast(MemberExpression)manifest.initializer) {
+            if (auto traits = cast(TraitsExpression)memberExpr.object) {
+                // Resolve type arguments
+                if (traits.typeArguments.length > 0 && traits.typeArguments[0] !is null) {
+                    if (auto ut = cast(UserType)traits.typeArguments[0])
+                        ut.ensureResolved(symbolTable);
+                }
+                traits.evaluate();
+
+                if (traits.traitName == "allMembers" && memberExpr.memberName == "length") {
+                    manifest.ctfeValue = cast(long)traits.stringArrayResult.length;
+                    manifest.ctfeComplete = true;
+                    manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Int32);
+                    log(3, "CTFE: ", manifest.name, " = ", manifest.ctfeValue, " (__traits allMembers .length)");
+                    return;
+                }
+            }
         }
 
         // Check for is(...) expression (e.g., enum IS_STRUCT = is(Point == struct))

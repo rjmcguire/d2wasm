@@ -1,0 +1,7 @@
+{
+  "name": "traits_allMembers",
+  "description": "CTFE parity: __traits(allMembers, T).length returns member count",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 3
+}

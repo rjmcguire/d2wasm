@@ -1824,6 +1824,14 @@ class TypeChecker {
             return new ArrayType(loc, charType);
         }
 
+        // Special case: allMembers returns string[] type
+        if (expr.traitName == "allMembers") {
+            expr.evaluate();
+            auto charType = new BasicType(loc, BasicType.Kind.Char);
+            auto stringType = new ArrayType(loc, charType);
+            return new ArrayType(loc, stringType);
+        }
+
         expr.evaluate();
         return new BasicType(loc, BasicType.Kind.Bool);
     }

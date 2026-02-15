@@ -578,6 +578,7 @@ class TraitsExpression : Expression {
     // Evaluation results (set during semantic analysis)
     bool boolResult;
     string stringResult;
+    string[] stringArrayResult;  // For allMembers
     bool evaluated = false;
 
     this(SourceLocation loc, string traitName, Expression[] arguments, Type[] typeArguments) {
@@ -635,6 +636,9 @@ class TraitsExpression : Expression {
                         stringResult = ident.name;
                 }
                 break;
+            case "allMembers":
+                stringArrayResult = evaluateAllMembers(resolvedType);
+                break;
             default:
                 assert(0, "unhandled __trait: " ~ traitName);
         }
@@ -661,6 +665,19 @@ class TraitsExpression : Expression {
                 if (m.name == memberName) return true;
         }
         return false;
+    }
+
+    private string[] evaluateAllMembers(Type resolvedType) {
+        if (resolvedType is null) return [];
+        string[] result;
+        if (auto sd = resolvedType.asStruct()) {
+            foreach (m; sd.members)
+                result ~= m.name;
+        } else if (auto cd = resolvedType.asClass()) {
+            foreach (m; cd.members)
+                result ~= m.name;
+        }
+        return result;
     }
 
     override bool isConstant() const {
