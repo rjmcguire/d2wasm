@@ -116,6 +116,8 @@ class FuncContext {
     uint frameSize = 0;        // Total size of struct/slice locals on shadow stack
     uint savedSpLocal;         // Local index to store saved SP (for epilogue restore)
     uint fpLocal;              // Local index for frame pointer (stable, never changes)
+    uint tempLocalA;           // Temp local for aggregate copy (dst addr)
+    uint tempLocalB;           // Temp local for aggregate copy (src addr)
     
     // Block depth for br instructions
     uint blockDepth = 0;
@@ -553,6 +555,11 @@ class FuncContext {
             savedSpLocal = cast(uint)localTypes.length;
             localTypes ~= ValType.i32;
             fpLocal = cast(uint)localTypes.length;
+            localTypes ~= ValType.i32;
+            // Temp locals for aggregate copy (index assignment of structs, etc.)
+            tempLocalA = cast(uint)localTypes.length;
+            localTypes ~= ValType.i32;
+            tempLocalB = cast(uint)localTypes.length;
             localTypes ~= ValType.i32;
         }
     }
@@ -2041,7 +2048,9 @@ class FuncContext {
                 leb128s(out_, info.elementSize);
                 out_ ~= Op.i32_mul;
                 out_ ~= Op.i32_add;
-                emitLoadForSize(out_, info.elementSize);
+                // Aggregate elements: leave address on stack (like struct variables)
+                if (info.elementSize <= 4)
+                    emitLoadForSize(out_, info.elementSize);
                 return;
             } else if (info.isSlice) {
                 // Load ptr from slice struct (offset 0), then add index * elemSize
@@ -2054,7 +2063,9 @@ class FuncContext {
                 leb128s(out_, info.elementSize);
                 out_ ~= Op.i32_mul;
                 out_ ~= Op.i32_add;
-                emitLoadForSize(out_, info.elementSize);
+                // Aggregate elements: leave address on stack (like struct variables)
+                if (info.elementSize <= 4)
+                    emitLoadForSize(out_, info.elementSize);
                 return;
             } else {
                 assert(0, "Cannot index " ~ arrayIdent.name ~ " (not an array type)");
@@ -2113,36 +2124,66 @@ class FuncContext {
         if (!arrayIdent) {
             throw new EmitError("Complex array index assignment not yet supported");
         }
-        
+
         // Check if it's a local on the shadow stack
         // Unified variable lookup
         if (auto info = resolveVar(arrayIdent.resolvedLocalId, arrayIdent.name)) {
-            if (info.isStaticArray) {
-                // Static array: base address + index * elemSize
-                emitVarAddress(out_, info);
+            if (info.isStaticArray || info.isSlice) {
+                // Compute destination address
+                if (info.isStaticArray) {
+                    emitVarAddress(out_, info);
+                } else {
+                    // Slice: load ptr field
+                    emitVarAddress(out_, info);
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                }
                 emitExpression(out_, indexExpr.index);
                 out_ ~= Op.i32_const;
                 leb128s(out_, info.elementSize);
                 out_ ~= Op.i32_mul;
                 out_ ~= Op.i32_add;
-                emitExpression(out_, value);
-                emitStoreForSize(out_, info.elementSize);
-                emitExpression(out_, value);
-                return;
-            } else if (info.isSlice) {
-                // Load ptr from slice struct, then add index * elemSize
-                emitVarAddress(out_, info);
-                out_ ~= Op.i32_load;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
-                emitExpression(out_, indexExpr.index);
-                out_ ~= Op.i32_const;
-                leb128s(out_, info.elementSize);
-                out_ ~= Op.i32_mul;
-                out_ ~= Op.i32_add;
-                emitExpression(out_, value);
-                emitStoreForSize(out_, info.elementSize);
-                emitExpression(out_, value);
+
+                if (info.elementSize > 4) {
+                    // Aggregate element: copy elementSize bytes from src to dst
+                    out_ ~= Op.local_set;
+                    leb128u(out_, tempLocalA);  // save dst addr
+                    emitExpression(out_, value);  // src addr (aggregate convention)
+                    out_ ~= Op.local_set;
+                    leb128u(out_, tempLocalB);  // save src addr
+                    // Copy 4 bytes at a time
+                    for (uint offset = 0; offset < info.elementSize; offset += 4) {
+                        out_ ~= Op.local_get;
+                        leb128u(out_, tempLocalA);
+                        if (offset > 0) {
+                            out_ ~= Op.i32_const;
+                            leb128s(out_, offset);
+                            out_ ~= Op.i32_add;
+                        }
+                        out_ ~= Op.local_get;
+                        leb128u(out_, tempLocalB);
+                        if (offset > 0) {
+                            out_ ~= Op.i32_const;
+                            leb128s(out_, offset);
+                            out_ ~= Op.i32_add;
+                        }
+                        out_ ~= Op.i32_load;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                        out_ ~= Op.i32_store;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                    }
+                    // Expression value: push dst addr
+                    out_ ~= Op.local_get;
+                    leb128u(out_, tempLocalA);
+                } else {
+                    // Scalar element: simple store
+                    emitExpression(out_, value);
+                    emitStoreForSize(out_, info.elementSize);
+                    emitExpression(out_, value);
+                }
                 return;
             } else {
                 assert(0, "Cannot index-assign " ~ arrayIdent.name ~ " (not an array type)");
@@ -2954,12 +2995,53 @@ class FuncContext {
                 }
             }
         }        
+        // Handle member access through index expression (points[i].x)
+        if (auto indexExpr = cast(IndexExpression)expr.object) {
+            // emitIntrinsicOpIndex leaves element address on stack for aggregates
+            emitIntrinsicOpIndex(out_, indexExpr);
+            auto elemType = getIndexExpressionElementType(indexExpr);
+            if (auto structDecl = elemType.asStruct()) {
+                auto field = structDecl.getField(expr.memberName);
+                if (field) {
+                    if (field.offset > 0) {
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, cast(int)field.offset);
+                        out_ ~= Op.i32_add;
+                    }
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                    return;
+                }
+            }
+            // Slice element — handle .length, .ptr
+            if (elemType) {
+                if (cast(ArrayType)elemType) {
+                    int fieldOffset = -1;
+                    if (expr.memberName == "ptr") fieldOffset = 0;
+                    else if (expr.memberName == "length") fieldOffset = 4;
+                    else if (expr.memberName == "capacity") fieldOffset = 8;
+                    if (fieldOffset >= 0) {
+                        if (fieldOffset > 0) {
+                            out_ ~= Op.i32_const;
+                            leb128s(out_, fieldOffset);
+                            out_ ~= Op.i32_add;
+                        }
+                        out_ ~= Op.i32_load;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                        return;
+                    }
+                }
+            }
+        }
+
         // Handle chained member access (o.i.a where object is MemberExpression)
         if (auto innerMember = cast(MemberExpression)expr.object) {
             // Get the type of the inner member to find the field
             // Emit address of inner member, then add field offset and load
             emitMemberAddress(out_, innerMember);
-            
+
             // Now we need to find the field within the type of innerMember
             // Get the struct type of innerMember
             auto innerType = getMemberExpressionType(innerMember);
@@ -2979,7 +3061,7 @@ class FuncContext {
                 }
             }
         }
-        
+
         throw new EmitError("Member access not yet fully implemented", expr.toString());
     }
     
@@ -3007,6 +3089,20 @@ class FuncContext {
                 }
             }
         }
+        // Handle index expression as object (points[i].x in address context)
+        if (auto indexExpr = cast(IndexExpression)expr.object) {
+            emitIntrinsicOpIndex(out_, indexExpr);
+            auto elemType = getIndexExpressionElementType(indexExpr);
+            if (auto structDecl = elemType.asStruct()) {
+                auto field = structDecl.getField(expr.memberName);
+                if (field && field.offset > 0) {
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, cast(int)field.offset);
+                    out_ ~= Op.i32_add;
+                }
+                return;
+            }
+        }
         // Recursive case: object is also a MemberExpression
         if (auto innerMember = cast(MemberExpression)expr.object) {
             emitMemberAddress(out_, innerMember);
@@ -3025,6 +3121,19 @@ class FuncContext {
     }
     
     /**
+     * Get the element type of an index expression (e.g., Point for Point[3]).
+     * Returns null if the array variable can't be found.
+     */
+    Type getIndexExpressionElementType(IndexExpression expr) {
+        auto arrayIdent = cast(IdentifierExpression)expr.array;
+        if (!arrayIdent) return null;
+        if (auto info = resolveVar(arrayIdent.resolvedLocalId, arrayIdent.name)) {
+            return info.elementType;
+        }
+        return null;
+    }
+
+    /**
      * Get the type of a member expression (for determining nested field offsets).
      */
     Type getMemberExpressionType(MemberExpression expr) {
@@ -3042,15 +3151,18 @@ class FuncContext {
             }
         } else if (auto innerMember = cast(MemberExpression)expr.object) {
             objType = getMemberExpressionType(innerMember);
+        } else if (auto indexExpr = cast(IndexExpression)expr.object) {
+            // Array element type (e.g., points[i] → Point)
+            objType = getIndexExpressionElementType(indexExpr);
         }
-        
+
         if (auto structDecl = objType.asStruct()) {
             auto field = structDecl.getField(expr.memberName);
             if (field) {
                 return field.type;
             }
         }
-        
+
         return null;
     }
     
@@ -4522,6 +4634,30 @@ class FuncContext {
      * Emit assignment to a struct field (p.x = value)
      */
     void emitMemberAssignment(ref Appender!(ubyte[]) out_, MemberExpression member, Expression value) {
+        // Handle index expression objects (points[i].x = value)
+        if (auto indexExpr = cast(IndexExpression)member.object) {
+            // Emit element address (aggregate mode leaves address on stack)
+            emitIntrinsicOpIndex(out_, indexExpr);
+            auto elemType = getIndexExpressionElementType(indexExpr);
+            if (auto structDecl = elemType.asStruct()) {
+                auto field = structDecl.getField(member.memberName);
+                if (field) {
+                    if (field.offset > 0) {
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, cast(int)field.offset);
+                        out_ ~= Op.i32_add;
+                    }
+                    emitExpression(out_, value);
+                    out_ ~= Op.i32_store;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                    // Re-emit value for expression result
+                    emitExpression(out_, value);
+                    return;
+                }
+            }
+        }
+
         auto objIdent = cast(IdentifierExpression)member.object;
         if (!objIdent) {
             throw new EmitError("Complex member assignment targets not yet supported");

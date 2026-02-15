@@ -109,6 +109,7 @@ class NativeCompiledFunction : CompiledFunction {
         VarKind kind;
         uint offset;              // Stack offset
         StructDecl structDecl;    // Non-null when kind == struct_
+        Type elementType;         // Element type for staticArray/slice
         uint staticArraySize;     // Element count when kind == staticArray
         uint staticArrayElemSize; // Element byte size when kind == staticArray
         uint sliceElemSize;       // Element byte size when kind == slice
@@ -698,7 +699,9 @@ class NativeCompiledFunction : CompiledFunction {
                     assert(sizeLit !is null, "Static array size is not a LiteralExpression");
                     assert(sizeLit.value.type == typeid(long), "Static array size literal is not a long");
                     uint length = cast(uint)sizeLit.value.get!long();
-                    varSize = length * 4;  // 4 bytes per element
+                    size_t elemSz = arrType.elementType.size();
+                    if (elemSz == 0) elemSz = 4;
+                    varSize = length * cast(uint)elemSz;
                     staticArrayLength = length;
                 }
             }
@@ -712,6 +715,7 @@ class NativeCompiledFunction : CompiledFunction {
             } else if (isSlice) {
                 nli.kind = VarKind.slice;
                 if (auto at = cast(ArrayType)varDecl.type) {
+                    nli.elementType = at.elementType;
                     nli.sliceElemSize = cast(uint)at.elementType.size();
                     if (nli.sliceElemSize == 0) nli.sliceElemSize = 4;
                 } else {
@@ -720,7 +724,13 @@ class NativeCompiledFunction : CompiledFunction {
             } else if (staticArrayLength > 0) {
                 nli.kind = VarKind.staticArray;
                 nli.staticArraySize = staticArrayLength;
-                nli.staticArrayElemSize = 4;
+                if (auto at = cast(ArrayType)varDecl.type) {
+                    nli.elementType = at.elementType;
+                    nli.staticArrayElemSize = cast(uint)at.elementType.size();
+                    if (nli.staticArrayElemSize == 0) nli.staticArrayElemSize = 4;
+                } else {
+                    nli.staticArrayElemSize = 4;
+                }
             }
             // else: kind stays VarKind.scalar (default)
             localVars[varDecl.name] = nli;
@@ -1562,26 +1572,28 @@ class NativeCompiledFunction : CompiledFunction {
                     final switch (info.kind) {
                         case VarKind.staticArray:
                             // Static array: elements stored inline at offset
-                            // For constant index, load directly
-                            if (auto indexLit = cast(LiteralExpression)indexExpr.index) {
-                                if (indexLit.value.type == typeid(long)) {
-                                    uint idx = cast(uint)indexLit.value.get!long();
-                                    gen.emitLoadLocal32(info.offset + idx * 4);
-                                    return;
+                            uint saElemSz = info.staticArrayElemSize;
+                            // For constant index, load directly (scalars only)
+                            if (saElemSz <= 4) {
+                                if (auto indexLit = cast(LiteralExpression)indexExpr.index) {
+                                    if (indexLit.value.type == typeid(long)) {
+                                        uint idx = cast(uint)indexLit.value.get!long();
+                                        gen.emitLoadLocal32(info.offset + idx * saElemSz);
+                                        return;
+                                    }
                                 }
                             }
-                            // For dynamic index, compute offset
+                            // For dynamic index (or aggregate elements), compute address
                             compileExpression(indexExpr.index);
-                            // x0 = index, compute index * 4
                             gen.emitMoveX0ToX1();  // x1 = index
-                            gen.emitImm32(stencil_load_imm32, 4);
-                            gen.emit(stencil_mul_i32);  // x0 = index * 4
-                            gen.emitMoveX0ToX1();  // x1 = index * 4
-                            // Get base address of array
-                            gen.emitStackAddress(info.offset);  // x0 = SP + offset
-                            gen.emit(stencil_add_i32);  // x0 = base + index * 4
-                            // Load from computed address
-                            gen.emitLoadFromPointer(0);
+                            gen.emitImm32(stencil_load_imm32, saElemSz);
+                            gen.emit(stencil_mul_i32);  // x0 = index * elemSize
+                            gen.emitMoveX0ToX1();  // x1 = byte offset
+                            gen.emitStackAddress(info.offset);  // x0 = base address
+                            gen.emit(stencil_add_i32);  // x0 = element address
+                            // Aggregate elements: leave address in x0
+                            if (saElemSz <= 4)
+                                gen.emitLoadFromPointer(0);
                             return;
 
                         case VarKind.slice:
@@ -1607,11 +1619,13 @@ class NativeCompiledFunction : CompiledFunction {
                             // Compute address: ptr + byte offset
                             gen.emit(stencil_add_i32);
 
-                            // Load value from computed address (byte or word)
-                            if (info.elemSize == 1)
-                                gen.emitLoadByteFromPointer(0);
-                            else
-                                gen.emitLoadFromPointer(0);
+                            // Aggregate elements: leave address in x0
+                            if (info.elemSize <= 4) {
+                                if (info.elemSize == 1)
+                                    gen.emitLoadByteFromPointer(0);
+                                else
+                                    gen.emitLoadFromPointer(0);
+                            }
                             return;
 
                         case VarKind.struct_:
@@ -1744,42 +1758,90 @@ class NativeCompiledFunction : CompiledFunction {
         if (info is null)
             throw new Exception("Unknown variable in native backend: " ~ ident.name);
 
+        uint es = info.elemSize;
         final switch (info.kind) {
             case VarKind.staticArray:
-                // For constant index, store directly to stack
+                if (es > 4) {
+                    // Aggregate element: save 64-bit addresses to 8-byte-aligned temp slots
+                    uint dstTemp = (tempSlot + 24 + 7) & ~cast(uint)7;
+                    uint srcTemp = dstTemp + 8;
+                    compileExpression(indexExpr.index);  // x0 = index
+                    gen.emitMoveX0ToX1();
+                    gen.emitImm32(stencil_load_imm32, es);
+                    gen.emit(stencil_mul_i32);  // x0 = index * elemSize
+                    gen.emitMoveX0ToX1();
+                    gen.emitStackAddress(info.offset);
+                    gen.emit(stencil_add_i32);  // x0 = dst address (64-bit)
+                    gen.emitStoreLocal(dstTemp);
+                    compileExpression(value);   // x0 = src address (64-bit)
+                    gen.emitStoreLocal(srcTemp);
+                    // Copy es bytes: 4 bytes at a time
+                    for (uint off = 0; off < es; off += 4) {
+                        gen.emitLoadLocal(srcTemp);        // x0 = src (64-bit ptr)
+                        gen.emitLoadFromPointer(off);      // x0 = *(src + off)
+                        gen.emitMoveX0ToX1();              // x1 = value
+                        gen.emitLoadLocal(dstTemp);        // x0 = dst (64-bit ptr)
+                        gen.emitStoreToPointer(off);       // *(dst + off) = x1
+                    }
+                    return;
+                }
+                // Scalar: constant index optimization
                 if (auto indexLit = cast(LiteralExpression)indexExpr.index) {
                     if (indexLit.value.type == typeid(long)) {
                         uint idx = cast(uint)indexLit.value.get!long();
                         compileExpression(value);  // x0 = value
-                        gen.emitStoreLocal32(info.offset + idx * 4);
+                        gen.emitStoreLocal32(info.offset + idx * es);
                         return;
                     }
                 }
-                // Dynamic index: compute value, save to x9, compute address, store
-                compileExpression(value);  // x0 = value
-                gen.emitMoveX0ToX9();      // x9 = value (preserved across address calc)
-                compileExpression(indexExpr.index);  // x0 = index
-                gen.emitMoveX0ToX1();      // x1 = index
-                gen.emitImm32(stencil_load_imm32, 4);
-                gen.emit(stencil_mul_i32);  // x0 = index * 4
-                gen.emitMoveX0ToX1();      // x1 = byte offset
-                gen.emitStackAddress(info.offset);  // x0 = base address
-                gen.emit(stencil_add_i32);  // x0 = target address
-                gen.emitStoreToPointerFromX9(0);    // STR w9, [x0, #0]
-                return;
-
-            case VarKind.slice:
-                // Slice index assignment: load ptr, compute offset, store
+                // Scalar: dynamic index
                 compileExpression(value);  // x0 = value
                 gen.emitMoveX0ToX9();      // x9 = value
                 compileExpression(indexExpr.index);  // x0 = index
-                gen.emitMoveX0ToX1();      // x1 = index
-                gen.emitImm32(stencil_load_imm32, 4);
-                gen.emit(stencil_mul_i32);  // x0 = index * 4
-                gen.emitMoveX0ToX1();      // x1 = byte offset
-                gen.emitLoadLocal(info.offset);  // x0 = slice ptr (64-bit)
+                gen.emitMoveX0ToX1();
+                gen.emitImm32(stencil_load_imm32, es);
+                gen.emit(stencil_mul_i32);  // x0 = index * elemSize
+                gen.emitMoveX0ToX1();
+                gen.emitStackAddress(info.offset);
                 gen.emit(stencil_add_i32);  // x0 = target address
-                gen.emitStoreToPointerFromX9(0);    // STR w9, [x0, #0]
+                gen.emitStoreToPointerFromX9(0);
+                return;
+
+            case VarKind.slice:
+                if (es > 4) {
+                    // Aggregate element: save 64-bit addresses to 8-byte-aligned temp slots
+                    uint dstTemp = (tempSlot + 24 + 7) & ~cast(uint)7;
+                    uint srcTemp = dstTemp + 8;
+                    compileExpression(indexExpr.index);  // x0 = index
+                    gen.emitMoveX0ToX1();
+                    gen.emitImm32(stencil_load_imm32, es);
+                    gen.emit(stencil_mul_i32);
+                    gen.emitMoveX0ToX1();
+                    gen.emitLoadLocal(info.offset);  // x0 = slice ptr (64-bit)
+                    gen.emit(stencil_add_i32);  // x0 = dst address
+                    gen.emitStoreLocal(dstTemp);
+                    compileExpression(value);   // x0 = src address (64-bit)
+                    gen.emitStoreLocal(srcTemp);
+                    for (uint off = 0; off < es; off += 4) {
+                        gen.emitLoadLocal(srcTemp);
+                        gen.emitLoadFromPointer(off);
+                        gen.emitMoveX0ToX1();
+                        gen.emitLoadLocal(dstTemp);
+                        gen.emitStoreToPointer(off);
+                    }
+                    return;
+                }
+                // Scalar: store single value
+                compileExpression(value);  // x0 = value
+                gen.emitMoveX0ToX9();
+                compileExpression(indexExpr.index);  // x0 = index
+                gen.emitMoveX0ToX1();
+                gen.emitImm32(stencil_load_imm32, es);
+                gen.emit(stencil_mul_i32);
+                gen.emitMoveX0ToX1();
+                gen.emitLoadLocal(info.offset);  // x0 = slice ptr
+                gen.emit(stencil_add_i32);  // x0 = target address
+                gen.emitStoreToPointerFromX9(0);
                 return;
 
             case VarKind.struct_:
@@ -2673,6 +2735,15 @@ class NativeCompiledFunction : CompiledFunction {
                 auto field = baseDecl.getField(member.memberName);
                 if (field !is null) {
                     return field.type.asStruct();
+                }
+            }
+        }
+        // For index expressions (array element access), get element struct type
+        if (auto indexExpr = cast(IndexExpression)expr) {
+            if (auto ident = cast(IdentifierExpression)indexExpr.array) {
+                if (auto info = ident.name in localVars) {
+                    if (info.elementType)
+                        return info.elementType.asStruct();
                 }
             }
         }

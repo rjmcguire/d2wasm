@@ -1,0 +1,7 @@
+{
+  "name": "array_of_struct_index",
+  "description": "CTFE parity: array of struct indexing and field access",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 50
+}
