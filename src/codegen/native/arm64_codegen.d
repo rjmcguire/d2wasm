@@ -738,21 +738,22 @@ extern(C) {
 // All functions receive NativeCTFEContext* as first parameter
 // Using _native_ prefix to avoid name collisions
 
-/// CTFE allocator - bump allocates from the context's data section
-/// Returns pointer to allocated memory, or 0 if out of space
+/// CTFE allocator - bump allocates from the context's data section.
+/// Grows committed region via mprotect when needed (mirrors WASM memory.grow).
 private extern(C) long _native_ctfe_alloc(NativeCTFEContext* ctx, long size, long, long) nothrow {
     if (ctx is null || ctx.dataSection is null) return 0;
-    
+
     auto ds = ctx.dataSection;
-    
+
     // Align size to 8 bytes
     size_t alignedSize = (cast(size_t)size + 7) & ~cast(size_t)7;
-    
-    // Check if we have space
+
+    // Grow committed region if needed
     if (ds.used + alignedSize > ds.capacity) {
-        return 0;  // out of memory
+        if (!ds.grow(ds.used + alignedSize))
+            return 0;  // out of virtual address space (256MB exceeded)
     }
-    
+
     // Bump allocate
     long ptr = cast(long)(ds.base + ds.used);
     ds.used += alignedSize;

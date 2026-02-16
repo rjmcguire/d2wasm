@@ -140,7 +140,7 @@ class BinaryEmitter {
         
         // Memory tracking
         bool needsMemory = false;
-        uint memoryPages = 1;
+        uint memoryPages = 2;  // Page 0: data+stack, Page 1+: arena (growable)
         
         // Globals (heap_ptr, etc.)
         struct GlobalInfo {
@@ -1606,26 +1606,25 @@ class BinaryEmitter {
     }
 
     /**
-     * Finalize the arena base address after data section and heap are laid out.
-     * Arena region sits after the heap region.
-     * Must be called after finalizeHeapPtr().
+     * Finalize the arena base address.
+     * Arena lives on page 1+ (65536+), separate from shadow stack (page 0).
+     * This allows the arena to grow via memory.grow without conflicting with the stack.
      */
     private void finalizeArenaBase() {
-        import codegen.wasm.types : ARENA_METADATA_SIZE, MEMORY_ALIGNMENT;
+        import codegen.wasm.types : ARENA_METADATA_SIZE;
 
         if (!hasArenaBuiltins) return;
 
-        // Arena base starts after the heap pointer, aligned to 8 bytes.
-        // We place it at a fixed offset above the initial heap_ptr.
-        // Since the heap grows upward, we give it some room (4KB).
-        uint heapStart = cast(uint)globals[heapPtrGlobal].initValue;
-        uint arenaStart = ((heapStart + 4096) + (MEMORY_ALIGNMENT - 1)) & ~(MEMORY_ALIGNMENT - 1);
+        // Arena starts at page 1 boundary — completely separate from page 0
+        // (data section, heap, shadow stack all live in page 0)
+        uint arenaStart = 65536;
+        uint arenaEnd = memoryPages * 65536;  // initial memory ceiling
 
         globals[arenaBaseGlobal].initValue = arenaStart;
 
         // Initialize the root ArenaHeader in the data section:
         // offset = arenaStart + ARENA_METADATA_SIZE (first allocation address)
-        // end = 65536 - shadow_stack_size (top of available memory)
+        // end = arenaEnd (current memory ceiling — __arena_alloc grows via memory.grow)
         // parent = 0 (root, no parent)
         // save_count = 0
         uint allocStart = arenaStart + ARENA_METADATA_SIZE;
@@ -1635,8 +1634,11 @@ class BinaryEmitter {
         headerData[1] = cast(ubyte)((allocStart >> 8) & 0xFF);
         headerData[2] = cast(ubyte)((allocStart >> 16) & 0xFF);
         headerData[3] = cast(ubyte)((allocStart >> 24) & 0xFF);
-        // end field (leave at 0 for now — no bounds checking in phase 1)
-        headerData[4..8] = 0;
+        // end field (memory ceiling — arena_alloc grows memory when exceeded)
+        headerData[4] = cast(ubyte)(arenaEnd & 0xFF);
+        headerData[5] = cast(ubyte)((arenaEnd >> 8) & 0xFF);
+        headerData[6] = cast(ubyte)((arenaEnd >> 16) & 0xFF);
+        headerData[7] = cast(ubyte)((arenaEnd >> 24) & 0xFF);
         // parent field (0 = root)
         headerData[8..12] = 0;
         // save_count field (0)
@@ -1658,15 +1660,15 @@ class BinaryEmitter {
     
     /**
      * Add shadow stack pointer global.
-     * The shadow stack grows downward from top of memory (64KB for 1 page).
-     * Used for struct locals that can't fit in WASM locals.
+     * The shadow stack lives in page 0, growing downward from 65536.
+     * Arena lives on page 1+ and grows upward via memory.grow — no collision possible.
      */
     private void addShadowStackGlobal() {
         spGlobal = cast(uint)globals.length;
         GlobalInfo sp;
         sp.type = ValType.i32;
         sp.mutable = true;
-        sp.initValue = 65536;  // Top of first memory page (stack grows down)
+        sp.initValue = 65536;  // Top of page 0 (stack grows down, arena grows up from page 1)
         sp.name = "__sp";
         globals ~= sp;
     }
@@ -2457,20 +2459,26 @@ class BinaryEmitter {
             body_ ~= Op.end;
             
         } else if (f.name == "__arena_alloc") {
-            import codegen.wasm.types : ARENA_OFFSET_FIELD, MEMORY_ALIGNMENT;
+            import codegen.wasm.types : ARENA_OFFSET_FIELD, ARENA_END_FIELD, MEMORY_ALIGNMENT;
             // __arena_alloc(arena: i32, size: i32) -> i32
-            // Bump allocator within the arena.
+            // Bump allocator with automatic memory growth.
             //
             // local 0 = arena (param, pointer to ArenaHeader)
             // local 1 = size (param)
             // local 2 = result (aligned current offset)
+            // local 3 = new_end (result + size)
             //
-            // result = (arena.offset + 7) & ~7  // align to 8
-            // arena.offset = result + size
+            // result = (arena.offset + 7) & ~7
+            // new_end = result + size
+            // if new_end > arena.end:
+            //     pages = (new_end - arena.end + 65535) >> 16
+            //     if memory.grow(pages) == -1: unreachable
+            //     arena.end = memory.size * 65536
+            // arena.offset = new_end
             // return result
 
             leb128u(body_, 1);  // 1 local group
-            leb128u(body_, 1);  // 1 local
+            leb128u(body_, 2);  // 2 locals
             body_ ~= cast(ubyte)ValType.i32;
 
             // result = (arena.offset + 7) & ~7
@@ -2488,14 +2496,73 @@ class BinaryEmitter {
             body_ ~= Op.local_set;
             leb128u(body_, 2);  // result
 
-            // arena.offset = result + size
-            body_ ~= Op.local_get;
-            leb128u(body_, 0);  // arena
+            // new_end = result + size
             body_ ~= Op.local_get;
             leb128u(body_, 2);  // result
             body_ ~= Op.local_get;
             leb128u(body_, 1);  // size
             body_ ~= Op.i32_add;
+            body_ ~= Op.local_set;
+            leb128u(body_, 3);  // new_end
+
+            // if new_end > arena.end:
+            body_ ~= Op.local_get;
+            leb128u(body_, 3);  // new_end
+            body_ ~= Op.local_get;
+            leb128u(body_, 0);  // arena
+            body_ ~= Op.i32_load;
+            leb128u(body_, 2);  // align
+            leb128u(body_, ARENA_END_FIELD);
+            body_ ~= Op.i32_gt_u;
+            body_ ~= Op.if_;
+            body_ ~= cast(ubyte)0x40;  // void block
+
+                // pages = (new_end - arena.end + 65535) >> 16
+                body_ ~= Op.local_get;
+                leb128u(body_, 3);  // new_end
+                body_ ~= Op.local_get;
+                leb128u(body_, 0);  // arena
+                body_ ~= Op.i32_load;
+                leb128u(body_, 2);  // align
+                leb128u(body_, ARENA_END_FIELD);
+                body_ ~= Op.i32_sub;  // overshoot
+                body_ ~= Op.i32_const;
+                leb128s(body_, 65535);
+                body_ ~= Op.i32_add;  // overshoot + 65535
+                body_ ~= Op.i32_const;
+                leb128s(body_, 16);
+                body_ ~= Op.i32_shr_u;  // pages = ceil div 65536
+
+                // if memory.grow(pages) == -1: unreachable
+                body_ ~= Op.memory_grow;
+                body_ ~= cast(ubyte)0x00;  // memory index 0
+                body_ ~= Op.i32_const;
+                leb128s(body_, -1);
+                body_ ~= Op.i32_eq;
+                body_ ~= Op.if_;
+                body_ ~= cast(ubyte)0x40;  // void block
+                    body_ ~= Op.unreachable;
+                body_ ~= Op.end;  // end OOM check
+
+                // arena.end = memory.size * 65536
+                body_ ~= Op.local_get;
+                leb128u(body_, 0);  // arena
+                body_ ~= Op.memory_size;
+                body_ ~= cast(ubyte)0x00;  // memory index 0
+                body_ ~= Op.i32_const;
+                leb128s(body_, 16);
+                body_ ~= Op.i32_shl;  // memory.size * 65536
+                body_ ~= Op.i32_store;
+                leb128u(body_, 2);  // align
+                leb128u(body_, ARENA_END_FIELD);
+
+            body_ ~= Op.end;  // end growth check
+
+            // arena.offset = new_end
+            body_ ~= Op.local_get;
+            leb128u(body_, 0);  // arena
+            body_ ~= Op.local_get;
+            leb128u(body_, 3);  // new_end
             body_ ~= Op.i32_store;
             leb128u(body_, 2);  // align
             leb128u(body_, ARENA_OFFSET_FIELD);

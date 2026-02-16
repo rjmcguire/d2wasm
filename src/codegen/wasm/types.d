@@ -69,10 +69,16 @@ enum : uint {
 //==============================================================================
 // Memory Layout
 //==============================================================================
-// Memory is organized as:
+// Page 0 (0-65535):
 //   0-2047:     Reserved (call stack buffer + scratch space)
 //   2048+:      Data section (string literals, array structs)
-//   heap_start: After data section, managed by arena allocator
+//   heap_start: After data section (legacy __alloc bump allocator)
+//   ...65535:   Shadow stack (grows downward from 65536)
+//
+// Page 1+ (65536+): Arena region (growable via memory.grow)
+//   65536:      ArenaHeader (16 bytes: offset, end, parent, save_count)
+//   65552:      Watermark stack (1024 bytes)
+//   66576+:     Arena allocations (bump allocator, grows upward)
 //
 // Call Stack Buffer Layout (when enabled):
 //   0-3:        depth (u32) - current stack depth

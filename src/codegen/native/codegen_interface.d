@@ -180,40 +180,65 @@ struct InlineFrame {
 
 struct NativeDataSection {
     ubyte* base;
-    size_t capacity;
+    size_t reserved;     // total virtual reservation (mmap size)
+    size_t capacity;     // committed (usable) bytes — grows via mprotect
     size_t used;
     bool stackReserved;  // whether inline call stack is reserved
-    
-    /// Allocate a data section with the given capacity
-    static NativeDataSection alloc(size_t size) {
-        // Use mmap for memory that's separate from code
-        // READ+WRITE initially, could be made READ-only later
-        void* mem = mmap(null, size,
-            PROT_READ | PROT_WRITE,
+
+    /// Virtual address space reservation size (256MB).
+    /// Only physical pages that are touched consume RAM (demand paging).
+    enum RESERVE_SIZE = 256 * 1024 * 1024;
+
+    /// Allocate a data section: reserves 256MB virtual, commits initialCommit bytes.
+    /// Mirrors WASM memory.grow: start small, grow transparently, base never moves.
+    static NativeDataSection alloc(size_t initialCommit) {
+        // Reserve large virtual address range (PROT_NONE = no access yet)
+        void* mem = mmap(null, RESERVE_SIZE,
+            PROT_NONE,
             MAP_PRIVATE | MAP_ANONYMOUS,
             -1, 0);
-        
+
         if (mem == MAP_FAILED) {
             return NativeDataSection.init;
         }
-        
-        return NativeDataSection(cast(ubyte*)mem, size, 0);
+
+        // Commit initial pages (make readable + writable)
+        if (mprotect(mem, initialCommit, PROT_READ | PROT_WRITE) != 0) {
+            munmap(mem, RESERVE_SIZE);
+            return NativeDataSection.init;
+        }
+
+        return NativeDataSection(cast(ubyte*)mem, RESERVE_SIZE, initialCommit, 0);
     }
-    
-    /// Add data to the section, returns pointer to the data
-    /// Returns null if out of space
+
+    /// Grow committed region to fit `needed` bytes. Doubles capacity until sufficient.
+    /// Returns false only if we exceed the 256MB virtual reservation.
+    bool grow(size_t needed) nothrow {
+        if (needed <= capacity) return true;
+        size_t newCap = capacity;
+        while (newCap < needed) newCap *= 2;
+        if (newCap > reserved) return false;
+        if (mprotect(base + capacity, newCap - capacity, PROT_READ | PROT_WRITE) != 0)
+            return false;
+        capacity = newCap;
+        return true;
+    }
+
+    /// Add data to the section, returns pointer to the data.
+    /// Grows committed region automatically if needed.
     ubyte* addData(const(ubyte)[] data) {
         if (used + data.length > capacity) {
-            return null;  // Out of space
+            if (!grow(used + data.length))
+                return null;
         }
-        
+
         ubyte* ptr = base + used;
         memcpy(ptr, data.ptr, data.length);
         used += data.length;
-        
+
         // Align to 8 bytes for next allocation
         used = (used + 7) & ~7;
-        
+
         return ptr;
     }
     
@@ -234,11 +259,12 @@ struct NativeDataSection {
         return mprotect(base, capacity, PROT_READ) == 0;
     }
     
-    /// Free the data section
+    /// Free the data section (releases entire virtual reservation)
     void free() {
         if (base !is null) {
-            munmap(base, capacity);
+            munmap(base, reserved);
             base = null;
+            reserved = 0;
             capacity = 0;
             used = 0;
         }
