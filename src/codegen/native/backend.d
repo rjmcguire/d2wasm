@@ -801,12 +801,17 @@ class NativeCompiledFunction : CompiledFunction {
             // else: kind stays VarKind.scalar (default)
             localVars[varDecl.name] = nli;
 
-            // Zero-initialize static arrays and structs without explicit initializer
-            // (D guarantees .init = 0 for int arrays and zero-init for struct fields)
-            if (!varDecl.initializer && varSize > 0 && (nli.isStaticArray || nli.isStruct)) {
-                gen.emitImm32(stencil_load_imm32, 0);
-                for (size_t off = 0; off < varSize; off += 4) {
-                    gen.emitStoreLocal32(nli.offset + off);
+            // Zero-initialize variables without explicit initializer
+            // (D guarantees .init = 0 for int types, null for slices)
+            if (!varDecl.initializer && varSize > 0) {
+                if (nli.isStaticArray || nli.isStruct || nli.isSlice) {
+                    gen.emitImm32(stencil_load_imm32, 0);
+                    for (size_t off = 0; off < varSize; off += 4) {
+                        gen.emitStoreLocal32(nli.offset + off);
+                    }
+                } else if (nli.kind == VarKind.scalar) {
+                    gen.emitImm32(stencil_load_imm32, 0);
+                    gen.emitStoreLocal32(nli.offset);
                 }
             }
 
@@ -2820,7 +2825,7 @@ class NativeCompiledFunction : CompiledFunction {
             compileExpression(args[1]);
             gen.emitMoveX0ToX1();
             compileExpression(args[0]);
-            gen.emit(stencil_shr_i32);  // TODO: unsigned shift variant
+            gen.emit(stencil_lsr_i32);  // unsigned (logical) shift right
         } else if (name == "__intrinsic_unreachable") {
             // BRK #1 — triggers SIGTRAP
             gen.emitRaw32(0xD4200020);

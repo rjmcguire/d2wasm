@@ -2018,8 +2018,21 @@ class FuncContext {
         assert(infoPtr !is null && infoPtr.isStaticArray, "Expected static array local: " ~ stmt.name);
         auto info = *infoPtr;
         
-        // No initializer - leave as zero-initialized (shadow stack is zeroed)
+        // Explicitly zero-initialize (shadow stack may have stale data from prior calls)
         if (!stmt.initializer) {
+            auto totalBytes = info.elementCount * info.elementSize;
+            for (uint offset = 0; offset < totalBytes; offset += 4) {
+                out_ ~= Op.local_get;
+                leb128u(out_, fpLocal);
+                out_ ~= Op.i32_const;
+                leb128s(out_, info.frameOffset + offset);
+                out_ ~= Op.i32_add;
+                out_ ~= Op.i32_const;
+                leb128s(out_, 0);
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+            }
             return;
         }
         

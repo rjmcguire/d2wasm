@@ -78,16 +78,17 @@ immutable stencil_neg_i32 = Stencil(
 );
 
 // ----- Bitwise -----
+// All i32 bitwise ops use 32-bit (w) registers to match int type semantics.
 
 immutable stencil_and_i32 = Stencil(
     "and_i32",
-    cast(immutable ubyte[])[0x20, 0x00, 0x00, 0x8a],  // AND x0, x0, x1 (using 64-bit AND preserves behavior)
+    cast(immutable ubyte[])[0x20, 0x00, 0x00, 0x0a],  // AND w0, w1, w0 (32-bit)
     []
 );
 
 immutable stencil_or_i32 = Stencil(
     "or_i32",
-    cast(immutable ubyte[])[0x20, 0x00, 0x00, 0xaa],  // ORR x0, x0, x1 (64-bit)
+    cast(immutable ubyte[])[0x20, 0x00, 0x00, 0x2a],  // ORR w0, w1, w0 (32-bit)
     []
 );
 
@@ -117,31 +118,31 @@ immutable stencil_logical_or_i32 = Stencil(
 
 immutable stencil_xor_i32 = Stencil(
     "xor_i32",
-    cast(immutable ubyte[])[0x20, 0x00, 0x00, 0xca],  // EOR x0, x0, x1 (64-bit)
+    cast(immutable ubyte[])[0x20, 0x00, 0x00, 0x4a],  // EOR w0, w1, w0 (32-bit)
     []
 );
 
 immutable stencil_shl_i32 = Stencil(
     "shl_i32",
-    cast(immutable ubyte[])[
-        0x28, 0x7c, 0x40, 0x93,  // SXTW x8, w1 (sign-extend shift amount)
-        0x00, 0x20, 0xc8, 0x9a   // LSL x0, x0, x8
-    ],
+    cast(immutable ubyte[])[0x00, 0x20, 0xc1, 0x1a],  // LSL w0, w0, w1 (32-bit)
     []
 );
 
 immutable stencil_shr_i32 = Stencil(
     "shr_i32",
-    cast(immutable ubyte[])[
-        0x28, 0x7c, 0x40, 0x93,  // SXTW x8, w1
-        0x00, 0x28, 0xc8, 0x9a   // ASR x0, x0, x8 (arithmetic shift)
-    ],
+    cast(immutable ubyte[])[0x00, 0x28, 0xc1, 0x1a],  // ASR w0, w0, w1 (32-bit arithmetic shift)
     []
 );
 
 immutable stencil_not_i32 = Stencil(
     "not_i32",
-    cast(immutable ubyte[])[0x00, 0x00, 0x20, 0xaa],  // MVN x0, x0 (ORN x0, xzr, x0)
+    cast(immutable ubyte[])[0xe0, 0x03, 0x20, 0x2a],  // MVN w0, w0 (ORN w0, wzr, w0) (32-bit)
+    []
+);
+
+immutable stencil_lsr_i32 = Stencil(
+    "lsr_i32",
+    cast(immutable ubyte[])[0x00, 0x24, 0xc1, 0x1a],  // LSR w0, w0, w1 (32-bit logical shift right)
     []
 );
 
@@ -719,6 +720,7 @@ shared static this() {
     stencilTable["xor_i32"] = &stencil_xor_i32;
     stencilTable["shl_i32"] = &stencil_shl_i32;
     stencilTable["shr_i32"] = &stencil_shr_i32;
+    stencilTable["lsr_i32"] = &stencil_lsr_i32;
     stencilTable["not_i32"] = &stencil_not_i32;
     
     // Logical
