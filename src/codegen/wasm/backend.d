@@ -1,6 +1,6 @@
 /**
  * WASM Backend Implementation
- * 
+ *
  * Implements the Backend interface for WebAssembly target.
  * Uses BinaryEmitter for code generation and wasm3 (via CTFERuntime) for execution.
  */
@@ -19,22 +19,22 @@ class WASMBackend : Backend {
     private string lastError;
     private SourceLocation lastErrorLoc;
     private bool enableStackTrace;
-    
+
     this(SymbolTable st, bool enableStackTrace = true) {
         this.symbolTable = st;
         this.enableStackTrace = enableStackTrace;
     }
-    
+
     override CompiledFunction compile(FunctionDecl func) {
         auto emitter = new BinaryEmitter(symbolTable, enableStackTrace);
         auto wasmBytes = emitter.emit([func]);
-        
+
         if (wasmBytes is null) {
             lastError = emitter.error();
             lastErrorLoc = emitter.errorLocation();
             return null;
         }
-        
+
         return new WASMCompiledFunction(func.name, wasmBytes,
             emitter.getArenaBaseValue(), buildNeedsArenaMap([func]));
     }
@@ -68,11 +68,16 @@ class WASMBackend : Backend {
             lastErrorLoc = emitter.errorLocation();
             return null;
         }
+        // Debug: dump CTFE WASM module for disassembly
+        try {
+            import std.file : fwrite = write;
+            fwrite("/tmp/ctfe_debug.wasm", wasmBytes);
+        } catch (Exception) {}
 
         return new WASMCompiledFunction(entryFuncName, wasmBytes,
             emitter.getArenaBaseValue(), buildNeedsArenaMap(funcs));
     }
-    
+
     override ubyte[] compileModule(Declaration[] decls) {
         auto emitter = new BinaryEmitter(symbolTable, enableStackTrace);
         auto result = emitter.emit(decls);
@@ -82,7 +87,7 @@ class WASMBackend : Backend {
         }
         return result;
     }
-    
+
     override string error() { return lastError; }
     override SourceLocation errorLocation() { return lastErrorLoc; }
     override string name() { return "wasm"; }

@@ -2401,15 +2401,19 @@ class FuncContext {
         out_ ~= Op.call;
         leb128u(out_, allocIdx);
         // Stack: [newBuffer]
-        
+
         // Store newBuffer in a temp location (use SP - 4)
+        // Save return value to temp local first (i32.store needs [addr, val] order)
+        out_ ~= Op.local_set;
+        leb128u(out_, tempLocalA);
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
         leb128s(out_, 4);
         out_ ~= Op.i32_sub;
-        // Stack: [newBuffer, tempAddr]
-        // Swap and store
+        out_ ~= Op.local_get;
+        leb128u(out_, tempLocalA);
+        // Stack: [SP-4, newBuffer]
         out_ ~= Op.i32_store;
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);
@@ -2674,8 +2678,8 @@ class FuncContext {
         out_ ~= Op.i32_mul;
         out_ ~= Op.i32_const;
         leb128s(out_, 4);
-        out_ ~= Op.i32_lt_u;
-        out_ ~= Op.select;  // picks 4 if capacity*2 < 4, else capacity*2
+        out_ ~= Op.i32_ge_u;
+        out_ ~= Op.select;  // picks capacity*2 if capacity*2 >= 4, else 4
         
         // Now stack has [SP-8, newCapacity], store
         out_ ~= Op.i32_store;
@@ -2700,11 +2704,17 @@ class FuncContext {
         leb128u(out_, allocIdx);
 
         // Store newBuffer at SP-12
+        // Save return value to temp local first (i32.store needs [addr, val] order)
+        out_ ~= Op.local_set;
+        leb128u(out_, tempLocalA);
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
         leb128s(out_, 12);
         out_ ~= Op.i32_sub;
+        out_ ~= Op.local_get;
+        leb128u(out_, tempLocalA);
+        // Stack: [SP-12, newBuffer]
         out_ ~= Op.i32_store;
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);
@@ -4955,15 +4965,21 @@ class FuncContext {
         leb128u(out_, allocIdx);
         
         // Store newBuffer at SP-8
+        // Save return value to temp local first (i32.store needs [addr, val] order)
+        out_ ~= Op.local_set;
+        leb128u(out_, tempLocalA);
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
         leb128s(out_, 8);
         out_ ~= Op.i32_sub;
+        out_ ~= Op.local_get;
+        leb128u(out_, tempLocalA);
+        // Stack: [SP-8, newBuffer]
         out_ ~= Op.i32_store;
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);
-        
+
         // Copy loop: for i = 0 to oldLength-1
         // Init counter at SP-12
         out_ ~= Op.global_get;
