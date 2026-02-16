@@ -318,7 +318,16 @@ class TypeChecker {
                             throw new TypeError("Class cannot inherit from itself: " ~ decl.name, decl.location);
                         }
                         
-                        // TODO: Check for circular inheritance
+                        // Check for circular inheritance (A : B, B : A)
+                        ClassDecl walker = baseClassDecl;
+                        while (walker.baseClassDecl) {
+                            walker = walker.baseClassDecl;
+                            if (walker is decl) {
+                                throw new TypeError(
+                                    "Circular inheritance detected: " ~ decl.name ~ " -> ... -> " ~ decl.name,
+                                    decl.location);
+                            }
+                        }
                     } else if (auto ifaceDecl = cast(InterfaceDecl)typeSymbol.declaration) {
                         // First item is an interface, not a base class
                         // Move it to interfaces list and clear baseClass
@@ -530,7 +539,43 @@ class TypeChecker {
      * Type check enum declaration
      */
     void checkEnumDeclaration(EnumDecl decl) {
-        // TODO: Check enum member values are compatible with base type
+        if (decl.baseType is null) return;  // default int, no range check needed
+
+        auto basic = cast(BasicType)decl.baseType;
+        if (basic is null) return;  // user-defined base type, skip for now
+
+        foreach (member; decl.members) {
+            if (member.value is null) continue;  // auto-incremented
+            if (auto lit = cast(LiteralExpression)member.value) {
+                if (lit.value.type == typeid(long)) {
+                    long val = lit.value.get!long();
+                    if (!fitsInBasicType(val, basic.kind)) {
+                        throw new TypeError(
+                            format("Enum member '%s' value %d does not fit in base type '%s'",
+                                   member.name, val, basic.toString()),
+                            decl.location);
+                    }
+                }
+            }
+        }
+    }
+
+    private static bool fitsInBasicType(long val, BasicType.Kind kind) {
+        final switch (kind) {
+            case BasicType.Kind.Int8:    return val >= -128 && val <= 127;
+            case BasicType.Kind.UInt8:   return val >= 0 && val <= 255;
+            case BasicType.Kind.Char:    return val >= 0 && val <= 255;
+            case BasicType.Kind.Int16:   return val >= -32_768 && val <= 32_767;
+            case BasicType.Kind.UInt16:  return val >= 0 && val <= 65_535;
+            case BasicType.Kind.Int32:   return val >= int.min && val <= int.max;
+            case BasicType.Kind.UInt32:  return val >= 0 && val <= uint.max;
+            case BasicType.Kind.Int64:   return true;  // long fits in long
+            case BasicType.Kind.UInt64:  return val >= 0;
+            case BasicType.Kind.Bool:    return val == 0 || val == 1;
+            case BasicType.Kind.Float32: return true;
+            case BasicType.Kind.Float64: return true;
+            case BasicType.Kind.Void:    return false;
+        }
     }
     
     /**
@@ -1721,7 +1766,12 @@ class TypeChecker {
                                operandType.toString()),
                         expr.location);
                 }
-                // TODO: Check that operand is an lvalue
+                if (!expr.operand.hasLValue()) {
+                    throw new TypeError(
+                        format("Increment/decrement requires an lvalue, not '%s'",
+                               expr.operand.toString()),
+                        expr.location);
+                }
                 return operandType;
                 
             case UnaryExpression.Operator.AddressOf:
