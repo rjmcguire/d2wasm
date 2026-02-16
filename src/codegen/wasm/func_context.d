@@ -2678,8 +2678,7 @@ class FuncContext {
         out_ ~= Op.i32_mul;
         out_ ~= Op.i32_const;
         leb128s(out_, 4);
-        out_ ~= Op.i32_ge_u;
-        out_ ~= Op.select;  // picks capacity*2 if capacity*2 >= 4, else 4
+        emitUnsignedMaxSelect(out_);  // max(capacity*2, 4)
         
         // Now stack has [SP-8, newCapacity], store
         out_ ~= Op.i32_store;
@@ -3298,6 +3297,15 @@ class FuncContext {
         return null;
     }
     
+    /// Emit WASM `select` as unsigned-max: max(val1, val2).
+    /// Stack before: [val1, val2, val1, val2]
+    ///   (first pair = select candidates, second pair = comparison operands)
+    /// Stack after: [max(val1, val2)]
+    static void emitUnsignedMaxSelect(ref Appender!(ubyte[]) out_) {
+        out_ ~= Op.i32_ge_u;   // [val1, val2, (val1 >= val2)]
+        out_ ~= Op.select;      // returns val1 if val1 >= val2, else val2
+    }
+
     /// Emit a load instruction appropriate for the given element size.
     void emitLoadForSize(ref Appender!(ubyte[]) out_, uint elemSize) {
         if (elemSize == 1) {
