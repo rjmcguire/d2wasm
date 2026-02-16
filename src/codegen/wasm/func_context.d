@@ -3427,6 +3427,13 @@ class FuncContext {
                     uint structAddr = emitter.registerArrayLiteral(manifest.ctfeStringValue);
                     out_ ~= Op.i32_const;
                     leb128s(out_, structAddr);
+                } else if (manifest.isFloatType) {
+                    if (!manifest.ctfeComplete) {
+                        emitter.symbolTable.resolveManifestValue(manifest);
+                    }
+                    out_ ~= Op.f64_const;
+                    double val = manifest.ctfeFloatValue;
+                    out_ ~= (cast(ubyte*)&val)[0 .. 8];
                 } else {
                     out_ ~= Op.i32_const;
                     leb128s(out_, emitter.symbolTable.resolveManifestValue(manifest));
@@ -4136,12 +4143,23 @@ class FuncContext {
                     out_ ~= Op.call;
                     leb128u(out_, funcIdx);
                 }
+                else if (literal.value.type == typeid(double)) {
+                    // Float literal: emit __ctfe_write_f64(value)
+                    double val = literal.value.get!double();
+                    out_ ~= Op.f64_const;
+                    out_ ~= (cast(ubyte*)&val)[0 .. 8];
+
+                    emitter.neededCTFEImports["__ctfe_write_f64"] = true;
+                    uint funcIdx = emitter.getFuncIndex("__ctfe_write_f64");
+                    out_ ~= Op.call;
+                    leb128u(out_, funcIdx);
+                }
                 else if (literal.value.type == typeid(bool)) {
                     // Boolean literal: emit __ctfe_write_bool(0 or 1)
                     bool val = literal.value.get!bool();
                     out_ ~= Op.i32_const;
                     leb128s(out_, val ? 1 : 0);
-                    
+
                     emitter.neededCTFEImports["__ctfe_write_bool"] = true;
                     uint funcIdx = emitter.getFuncIndex("__ctfe_write_bool");
                     out_ ~= Op.call;
@@ -4173,6 +4191,19 @@ class FuncContext {
                 out_ ~= Op.call;
                 leb128u(out_, funcIdx);
             }
+            else if (auto manifestFloat = getFloatManifest(arg)) {
+                // Float manifest constant — emit f64_const + __ctfe_write_f64
+                if (!manifestFloat.ctfeComplete)
+                    emitter.symbolTable.resolveManifestValue(manifestFloat);
+                double val = manifestFloat.ctfeFloatValue;
+                out_ ~= Op.f64_const;
+                out_ ~= (cast(ubyte*)&val)[0 .. 8];
+
+                emitter.neededCTFEImports["__ctfe_write_f64"] = true;
+                uint funcIdx = emitter.getFuncIndex("__ctfe_write_f64");
+                out_ ~= Op.call;
+                leb128u(out_, funcIdx);
+            }
             else {
                 // Non-literal, non-string expression: evaluate and print as i32
                 emitExpression(out_, arg);
@@ -4198,6 +4229,20 @@ class FuncContext {
             if (symbol && symbol.isConstant) {
                 if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
                     if (manifest.isStringType)
+                        return manifest;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// If expression is an identifier referencing a float manifest constant, return it.
+    private ManifestConstantDecl getFloatManifest(Expression arg) {
+        if (auto ident = cast(IdentifierExpression)arg) {
+            auto symbol = emitter.symbolTable.lookupSymbol(ident.name);
+            if (symbol && symbol.isConstant) {
+                if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
+                    if (manifest.isFloatType)
                         return manifest;
                 }
             }

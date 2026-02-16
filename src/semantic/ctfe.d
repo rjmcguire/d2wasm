@@ -331,6 +331,14 @@ class CTFEEvaluator {
                 log(3, "CTFE: ", manifest.name, " = ", manifest.ctfeValue ? "true" : "false", " (bool literal)");
                 return;
             }
+            if (literal.value.type == typeid(double)) {
+                manifest.ctfeFloatValue = literal.value.get!double();
+                manifest.ctfeComplete = true;
+                manifest.isFloatType = true;
+                manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Float64);
+                log(3, "CTFE: ", manifest.name, " = ", manifest.ctfeFloatValue, " (float literal)");
+                return;
+            }
         }
 
         // Check for __traits expression (e.g., enum IS_INT = __traits(isArithmetic, int))
@@ -392,10 +400,20 @@ class CTFEEvaluator {
             return;
         }
 
-        // Check for unary expression (e.g., -42)
+        // Check for unary expression (e.g., -42 or -3.14)
         if (auto unaryExpr = cast(UnaryExpression)manifest.initializer) {
             if (unaryExpr.operator == UnaryExpression.Operator.Minus) {
-                // Evaluate the operand
+                // Check if the operand is a float expression
+                if (isFloatExpression(unaryExpr.operand)) {
+                    double value = evaluateFloatExpressionViaBackend(unaryExpr);
+                    manifest.ctfeFloatValue = value;
+                    manifest.ctfeComplete = true;
+                    manifest.isFloatType = true;
+                    manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Float64);
+                    log(3, "CTFE: ", manifest.name, " = ", manifest.ctfeFloatValue, " (float unary minus)");
+                    return;
+                }
+                // Integer negation
                 long operand = extractLiteralValue(unaryExpr.operand);
                 long value = -operand;
                 // Allow both signed i32 and unsigned u32 range
@@ -450,7 +468,17 @@ class CTFEEvaluator {
                 log(3, "CTFE: ", manifest.name, " = ", manifest.ctfeValue, " (checked shift)");
                 return;
             }
-            // Arithmetic/comparison — evaluate via backend
+            // Float arithmetic — evaluate via float backend
+            if (isFloatExpression(binaryExpr)) {
+                double value = evaluateFloatExpressionViaBackend(binaryExpr);
+                manifest.ctfeFloatValue = value;
+                manifest.ctfeComplete = true;
+                manifest.isFloatType = true;
+                manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Float64);
+                log(3, "CTFE: ", manifest.name, " = ", manifest.ctfeFloatValue, " (float binary expression)");
+                return;
+            }
+            // Integer arithmetic/comparison — evaluate via backend
             long value = evaluateExpressionViaBackend(binaryExpr);
             manifest.ctfeValue = value;
             manifest.ctfeComplete = true;
@@ -1373,7 +1401,65 @@ class CTFEEvaluator {
             throw new CTFEError("CTFE execution error: " ~ e.msg, expr.location);
         }
     }
-    
+
+    /**
+     * Check if an expression involves float/double values.
+     * Used to route to the float evaluation path.
+     */
+    private bool isFloatExpression(Expression expr) {
+        if (auto literal = cast(LiteralExpression)expr) {
+            return literal.value.type == typeid(double);
+        }
+        if (auto ident = cast(IdentifierExpression)expr) {
+            foreach (decl; allDeclarations) {
+                if (auto manifest = cast(ManifestConstantDecl)decl) {
+                    if (manifest.name == ident.name) {
+                        if (!manifest.ctfeComplete)
+                            evaluateManifestConstant(manifest);
+                        return manifest.isFloatType;
+                    }
+                }
+            }
+            return false;
+        }
+        if (auto unary = cast(UnaryExpression)expr) {
+            return isFloatExpression(unary.operand);
+        }
+        if (auto binary = cast(BinaryExpression)expr) {
+            return isFloatExpression(binary.left) || isFloatExpression(binary.right);
+        }
+        return false;
+    }
+
+    /**
+     * Evaluate a float expression by compiling it to WASM and executing.
+     * Same as evaluateExpressionViaBackend but uses f64 return type.
+     */
+    double evaluateFloatExpressionViaBackend(Expression expr) {
+        import semantic.ctfe_runtime : CTFERuntime, CTFERuntimeError;
+
+        ensureDependenciesEvaluated(expr);
+
+        auto emitter = new BinaryEmitter(symbolTable, enableStackTrace);
+        ubyte[] wasmBytes = emitter.emitFloatExpressionModule(expr);
+        if (wasmBytes is null) {
+            auto errLoc = emitter.errorLocation();
+            throw new CTFEError("CTFE compile error: " ~ emitter.error(),
+                errLoc.filename ? errLoc : expr.location);
+        }
+
+        auto runtime = new CTFERuntime();
+        scope(exit) destroy(runtime);
+
+        try {
+            runtime.loadModule(wasmBytes);
+            auto result = runtime.callF64("__eval");
+            return result.asDouble();
+        } catch (CTFERuntimeError e) {
+            throw new CTFEError("CTFE execution error: " ~ e.msg, expr.location);
+        }
+    }
+
     /**
      * Execute a function via the configured backend.
      * This is the new unified path that works with both WASM and Native backends.

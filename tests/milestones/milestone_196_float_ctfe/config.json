@@ -1,0 +1,7 @@
+{
+  "name": "float_ctfe",
+  "description": "CTFE with float/double manifest constants and arithmetic",
+  "type": "compile_output",
+  "expected_output": "3.14159\n6.28319\n-3.14159",
+  "capability": "Float manifest constants, float CTFE arithmetic"
+}

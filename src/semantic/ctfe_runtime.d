@@ -77,6 +77,13 @@ struct CTFEValue {
         return val;
     }
     
+    static CTFEValue fromF64(double v) {
+        CTFEValue val;
+        val.type = CTFEType.f64;
+        val.f64Val = v;
+        return val;
+    }
+
     static CTFEValue void_() {
         CTFEValue val;
         val.type = CTFEType.void_;
@@ -97,6 +104,13 @@ struct CTFEValue {
         return i32Val;
     }
     
+    double asDouble() const {
+        if (type != CTFEType.f64) {
+            throw new Exception("CTFEValue is not an f64");
+        }
+        return f64Val;
+    }
+
     long asLong() const {
         if (type == CTFEType.i32) return i32Val;
         if (type == CTFEType.i64) return i64Val;
@@ -175,6 +189,17 @@ extern(C) const(void)* hostWriteStr(IM3Runtime runtime, IM3ImportContext ctx, ui
 extern(C) const(void)* hostWriteBool(IM3Runtime runtime, IM3ImportContext ctx, uint* stack, void* mem) {
     int value = cast(int)(*stack);
     write(value != 0 ? "true" : "false");
+    return null;
+}
+
+/**
+ * Host implementation of __ctfe_write_f64
+ * Building block for __writeln - prints f64 value.
+ */
+extern(C) const(void)* hostWriteF64(IM3Runtime runtime, IM3ImportContext ctx, uint* stack, void* mem) {
+    // wasm3 raw stack: f64 occupies two 32-bit slots
+    double value = *(cast(double*)&stack[0]);
+    write(value);
     return null;
 }
 
@@ -334,6 +359,12 @@ class CTFERuntime {
             throw new CTFERuntimeError("Failed to link __ctfe_write_str: " ~ fromStringz(result).idup);
         }
         
+        // __ctfe_write_f64: void(f64)
+        result = m3_LinkRawFunction(mod, "ctfe".ptr, "__ctfe_write_f64".ptr, "v(F)".ptr, &hostWriteF64);
+        if (result !is null && result != m3Err_functionLookupFailed) {
+            throw new CTFERuntimeError("Failed to link __ctfe_write_f64: " ~ fromStringz(result).idup);
+        }
+
         // __ctfe_write_bool: void(i32)
         result = m3_LinkRawFunction(mod, "ctfe".ptr, "__ctfe_write_bool".ptr, "v(i)".ptr, &hostWriteBool);
         if (result !is null && result != m3Err_functionLookupFailed) {
@@ -408,6 +439,36 @@ class CTFERuntime {
         return CTFEValue.fromI32(returnValue);
     }
     
+    /**
+     * Call a function that returns f64
+     */
+    CTFEValue callF64(string funcName) {
+        if (!initialized) {
+            throw new CTFERuntimeError("Runtime not initialized");
+        }
+
+        IM3Function func;
+        auto result = m3_FindFunction(&func, runtime, funcName.toStringz());
+        if (result !is null) {
+            throw new CTFERuntimeError("Function not found: " ~ funcName ~ " - " ~ fromStringz(result).idup);
+        }
+
+        result = m3_CallV(func);
+        if (result !is null) {
+            string baseError = "CTFE execution failed: " ~ fromStringz(result).idup;
+            throw new CTFERuntimeError(formatErrorWithStack(baseError));
+        }
+
+        // Get f64 return value
+        double returnValue;
+        auto getResult = m3_GetResultsV(func, &returnValue);
+        if (getResult !is null) {
+            // No result is OK for some functions
+        }
+
+        return CTFEValue.fromF64(returnValue);
+    }
+
     /**
      * Call a void function
      */

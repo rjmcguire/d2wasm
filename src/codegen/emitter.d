@@ -514,6 +514,52 @@ class BinaryEmitter {
     }
 
     /**
+     * Emit a minimal module that evaluates a float expression.
+     * Used by CTFE to evaluate float arithmetic expressions via the backend.
+     *
+     * The module exports:
+     * - __eval(): f64  - evaluates expression, returns the float result
+     */
+    ubyte[] emitFloatExpressionModule(Expression expr) {
+        try {
+            // Reset state for a fresh module
+            output.clear();
+            types.length = 0;
+            typeIndex.clear();
+            functions.length = 0;
+            funcIndex.clear();
+            globals.length = 0;
+            dataEntries.length = 0;
+            arrayLiterals.clear();
+            manifestArrayAddrs.clear();
+            nextDataOffset = MEMORY_RESERVED;
+            needsArraySupport = false;
+            hasBuiltins = false;
+            hasArenaBuiltins = false;
+
+            // Add the __eval function with f64 return type
+            addEvalFunction(expr, ValType.f64);
+
+            // Emit the module (minimal — no memory, no data)
+            emitHeader();
+            emitTypeSection();
+            emitFunctionSection();
+            emitExportSection();
+            emitCodeSection();
+
+            return output.data.dup;
+
+        } catch (EmitError e) {
+            lastError = e.msg;
+            lastErrorLocation = e.sourceLocation;
+            return null;
+        } catch (Exception e) {
+            lastError = "Internal error: " ~ e.msg;
+            return null;
+        }
+    }
+
+    /**
      * Recursively collect array literals from an expression.
      */
     private void collectArrayLiterals(Expression expr) {
@@ -601,11 +647,10 @@ class BinaryEmitter {
     /**
      * Add the __eval function that evaluates the expression.
      */
-    private void addEvalFunction(Expression expr) {
-        // Type: () -> i32
+    private void addEvalFunction(Expression expr, ValType returnType = ValType.i32) {
         FuncSig evalSig;
         evalSig.params = [];
-        evalSig.results = [ValType.i32];
+        evalSig.results = [returnType];
         
         uint evalTypeIdx;
         if (auto existing = evalSig in typeIndex) {
@@ -1152,6 +1197,8 @@ class BinaryEmitter {
                             if (auto literal = cast(LiteralExpression)arg) {
                                 if (literal.value.type == typeid(string)) {
                                     neededCTFEImports["__ctfe_write_str"] = true;
+                                } else if (literal.value.type == typeid(double)) {
+                                    neededCTFEImports["__ctfe_write_f64"] = true;
                                 } else if (literal.value.type == typeid(long) ||
                                            literal.value.type == typeid(int)) {
                                     neededCTFEImports["__ctfe_write_i32"] = true;
@@ -1159,9 +1206,11 @@ class BinaryEmitter {
                                     neededCTFEImports["__ctfe_write_bool"] = true;
                                 }
                             } else {
-                                // Check if non-literal arg is string-typed (e.g. manifest constant)
+                                // Check if non-literal arg is string/float-typed (e.g. manifest constant)
                                 if (isStringTypedExpression(arg)) {
                                     neededCTFEImports["__ctfe_write_str"] = true;
+                                } else if (isFloatTypedExpression(arg)) {
+                                    neededCTFEImports["__ctfe_write_f64"] = true;
                                 } else {
                                     neededCTFEImports["__ctfe_write_i32"] = true;
                                 }
@@ -1199,6 +1248,22 @@ class BinaryEmitter {
             if (symbol && symbol.isConstant) {
                 if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
                     return manifest.isStringType;
+                }
+            }
+        }
+        return false;
+    }
+
+    /// Check if an expression has float/double type (for __writeln type-aware lowering).
+    private bool isFloatTypedExpression(Expression expr) {
+        if (auto literal = cast(LiteralExpression)expr) {
+            return literal.value.type == typeid(double);
+        }
+        if (auto ident = cast(IdentifierExpression)expr) {
+            auto symbol = symbolTable.lookupSymbol(ident.name);
+            if (symbol && symbol.isConstant) {
+                if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
+                    return manifest.isFloatType;
                 }
             }
         }
@@ -1707,6 +1772,9 @@ class BinaryEmitter {
                     break;
                 case "__ctfe_write_bool":
                     sig.params = [ValType.i32];
+                    break;
+                case "__ctfe_write_f64":
+                    sig.params = [ValType.f64];
                     break;
                 case "__ctfe_write_newline":
                     sig.params = [];
@@ -2658,8 +2726,8 @@ class BinaryEmitter {
             body_ ~= Op.end;
 
         } else if (f.name == "__eval") {
-            // __eval() -> i32
-            // Evaluates the stored expression and returns the result pointer
+            // __eval() -> i32/f64
+            // Evaluates the stored expression and returns the result
             
             leb128u(body_, 0);  // No locals
             
@@ -2847,11 +2915,17 @@ private class EvalContext {
 
     void emitUnary(ref Appender!(ubyte[]) out_, UnaryExpression expr) {
         if (expr.operator == UnaryExpression.Operator.Minus) {
-            // -x => 0 - x
-            out_ ~= Op.i32_const;
-            leb128s(out_, 0);
-            emitExpression(out_, expr.operand);
-            out_ ~= Op.i32_sub;
+            if (isFloatExpr(expr.operand)) {
+                // f64 negation
+                emitExpression(out_, expr.operand);
+                out_ ~= Op.f64_neg;
+            } else {
+                // -x => 0 - x
+                out_ ~= Op.i32_const;
+                leb128s(out_, 0);
+                emitExpression(out_, expr.operand);
+                out_ ~= Op.i32_sub;
+            }
         } else if (expr.operator == UnaryExpression.Operator.BitwiseNot) {
             // ~x => x ^ -1
             emitExpression(out_, expr.operand);
@@ -2974,6 +3048,10 @@ private class EvalContext {
             uint structAddr = emitter.registerArrayLiteral(s);
             out_ ~= Op.i32_const;
             leb128s(out_, structAddr);
+        } else if (expr.value.type == typeid(double)) {
+            out_ ~= Op.f64_const;
+            double val = expr.value.get!double();
+            out_ ~= (cast(ubyte*)&val)[0 .. 8];
         } else if (expr.value.type == typeid(long)) {
             out_ ~= Op.i32_const;
             leb128s(out_, expr.value.get!long());
@@ -2995,6 +3073,13 @@ private class EvalContext {
                     uint structAddr = emitter.registerArrayLiteral(manifest.ctfeStringValue);
                     out_ ~= Op.i32_const;
                     leb128s(out_, structAddr);
+                } else if (manifest.isFloatType) {
+                    if (!manifest.ctfeComplete) {
+                        emitter.symbolTable.resolveManifestValue(manifest);
+                    }
+                    out_ ~= Op.f64_const;
+                    double val = manifest.ctfeFloatValue;
+                    out_ ~= (cast(ubyte*)&val)[0 .. 8];
                 } else {
                     out_ ~= Op.i32_const;
                     leb128s(out_, emitter.symbolTable.resolveManifestValue(manifest));
@@ -3039,43 +3124,96 @@ private class EvalContext {
         // Arithmetic/comparison — emit both operands then the operator
         emitExpression(out_, expr.left);
         emitExpression(out_, expr.right);
-        final switch (expr.operator) {
-            case BinaryExpression.Operator.Add: out_ ~= Op.i32_add; break;
-            case BinaryExpression.Operator.Subtract: out_ ~= Op.i32_sub; break;
-            case BinaryExpression.Operator.Multiply: out_ ~= Op.i32_mul; break;
-            case BinaryExpression.Operator.Divide: out_ ~= Op.i32_div_s; break;
-            case BinaryExpression.Operator.Modulo: out_ ~= Op.i32_rem_s; break;
-            case BinaryExpression.Operator.Equal: out_ ~= Op.i32_eq; break;
-            case BinaryExpression.Operator.NotEqual: out_ ~= Op.i32_ne; break;
-            case BinaryExpression.Operator.Less: out_ ~= Op.i32_lt_s; break;
-            case BinaryExpression.Operator.LessEqual: out_ ~= Op.i32_le_s; break;
-            case BinaryExpression.Operator.Greater: out_ ~= Op.i32_gt_s; break;
-            case BinaryExpression.Operator.GreaterEqual: out_ ~= Op.i32_ge_s; break;
-            case BinaryExpression.Operator.LogicalAnd: assert(0); // handled above
-            case BinaryExpression.Operator.LogicalOr: assert(0); // handled above
-            case BinaryExpression.Operator.BitwiseAnd: out_ ~= Op.i32_and; break;
-            case BinaryExpression.Operator.BitwiseOr: out_ ~= Op.i32_or; break;
-            case BinaryExpression.Operator.BitwiseXor: out_ ~= Op.i32_xor; break;
-            case BinaryExpression.Operator.ShiftLeft:
-                assert(0, "ShiftLeft should be lowered to opShiftLeft call");
-            case BinaryExpression.Operator.ShiftRight:
-                assert(0, "ShiftRight should be lowered to opShiftRight call");
-            case BinaryExpression.Operator.UnsignedShiftRight:
-                assert(0, "UnsignedShiftRight should be lowered to opUnsignedShiftRight call");
-            case BinaryExpression.Operator.Concat: assert(0); // handled above
+        if (isFloatExpr(expr.left) || isFloatExpr(expr.right)) {
+            // Float arithmetic/comparison
+            final switch (expr.operator) {
+                case BinaryExpression.Operator.Add: out_ ~= Op.f64_add; break;
+                case BinaryExpression.Operator.Subtract: out_ ~= Op.f64_sub; break;
+                case BinaryExpression.Operator.Multiply: out_ ~= Op.f64_mul; break;
+                case BinaryExpression.Operator.Divide: out_ ~= Op.f64_div; break;
+                case BinaryExpression.Operator.Modulo:
+                    throw new EmitError("Modulo not supported for float in __eval", expr.location);
+                case BinaryExpression.Operator.Equal: out_ ~= Op.f64_eq; break;
+                case BinaryExpression.Operator.NotEqual: out_ ~= Op.f64_ne; break;
+                case BinaryExpression.Operator.Less: out_ ~= Op.f64_lt; break;
+                case BinaryExpression.Operator.LessEqual: out_ ~= Op.f64_le; break;
+                case BinaryExpression.Operator.Greater: out_ ~= Op.f64_gt; break;
+                case BinaryExpression.Operator.GreaterEqual: out_ ~= Op.f64_ge; break;
+                case BinaryExpression.Operator.LogicalAnd: assert(0);
+                case BinaryExpression.Operator.LogicalOr: assert(0);
+                case BinaryExpression.Operator.BitwiseAnd:
+                case BinaryExpression.Operator.BitwiseOr:
+                case BinaryExpression.Operator.BitwiseXor:
+                    throw new EmitError("Bitwise ops not supported for float in __eval", expr.location);
+                case BinaryExpression.Operator.ShiftLeft:
+                case BinaryExpression.Operator.ShiftRight:
+                case BinaryExpression.Operator.UnsignedShiftRight:
+                    throw new EmitError("Shift ops not supported for float in __eval", expr.location);
+                case BinaryExpression.Operator.Concat: assert(0);
+            }
+        } else {
+            // Integer arithmetic/comparison
+            final switch (expr.operator) {
+                case BinaryExpression.Operator.Add: out_ ~= Op.i32_add; break;
+                case BinaryExpression.Operator.Subtract: out_ ~= Op.i32_sub; break;
+                case BinaryExpression.Operator.Multiply: out_ ~= Op.i32_mul; break;
+                case BinaryExpression.Operator.Divide: out_ ~= Op.i32_div_s; break;
+                case BinaryExpression.Operator.Modulo: out_ ~= Op.i32_rem_s; break;
+                case BinaryExpression.Operator.Equal: out_ ~= Op.i32_eq; break;
+                case BinaryExpression.Operator.NotEqual: out_ ~= Op.i32_ne; break;
+                case BinaryExpression.Operator.Less: out_ ~= Op.i32_lt_s; break;
+                case BinaryExpression.Operator.LessEqual: out_ ~= Op.i32_le_s; break;
+                case BinaryExpression.Operator.Greater: out_ ~= Op.i32_gt_s; break;
+                case BinaryExpression.Operator.GreaterEqual: out_ ~= Op.i32_ge_s; break;
+                case BinaryExpression.Operator.LogicalAnd: assert(0);
+                case BinaryExpression.Operator.LogicalOr: assert(0);
+                case BinaryExpression.Operator.BitwiseAnd: out_ ~= Op.i32_and; break;
+                case BinaryExpression.Operator.BitwiseOr: out_ ~= Op.i32_or; break;
+                case BinaryExpression.Operator.BitwiseXor: out_ ~= Op.i32_xor; break;
+                case BinaryExpression.Operator.ShiftLeft:
+                    assert(0, "ShiftLeft should be lowered to opShiftLeft call");
+                case BinaryExpression.Operator.ShiftRight:
+                    assert(0, "ShiftRight should be lowered to opShiftRight call");
+                case BinaryExpression.Operator.UnsignedShiftRight:
+                    assert(0, "UnsignedShiftRight should be lowered to opUnsignedShiftRight call");
+                case BinaryExpression.Operator.Concat: assert(0);
+            }
         }
     }
 
     void emitArrayConcat(ref Appender!(ubyte[]) out_, BinaryExpression expr) {
         // Emit left operand (string pointer)
         emitExpression(out_, expr.left);
-        
+
         // Emit right operand (string pointer)
         emitExpression(out_, expr.right);
-        
+
         // Call __array_concat
         out_ ~= Op.call;
         leb128u(out_, emitter.concatFuncIndex);
+    }
+
+    /// Check if an expression produces a float value.
+    private bool isFloatExpr(Expression expr) {
+        if (auto literal = cast(LiteralExpression)expr) {
+            return literal.value.type == typeid(double);
+        }
+        if (auto ident = cast(IdentifierExpression)expr) {
+            auto symbol = emitter.symbolTable.lookupSymbol(ident.name);
+            if (symbol && symbol.isConstant) {
+                if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
+                    return manifest.isFloatType;
+                }
+            }
+            return false;
+        }
+        if (auto unary = cast(UnaryExpression)expr) {
+            return isFloatExpr(unary.operand);
+        }
+        if (auto binary = cast(BinaryExpression)expr) {
+            return isFloatExpr(binary.left) || isFloatExpr(binary.right);
+        }
+        return false;
     }
 }
 

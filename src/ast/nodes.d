@@ -566,6 +566,7 @@ class ManifestConstantDecl : Declaration {
     Expression initializer;  // The expression to evaluate at compile time
     Type inferredType;       // Type inferred after CTFE (null before)
     long ctfeValue;          // Value after CTFE evaluation (for integral types)
+    double ctfeFloatValue;   // Value for float/double types
     string ctfeStringValue;  // Value for string types
     long[] ctfeArrayValue;   // Value for array types (elements as longs)
     ubyte[] ctfeArrayBytes;  // Raw bytes for array data (for codegen)
@@ -573,6 +574,7 @@ class ManifestConstantDecl : Declaration {
     bool ctfeComplete;       // Whether CTFE has been performed
     bool ctfeInProgress;     // True while CTFE evaluation is running (cycle detection)
     bool isStringType;       // True if this is a string constant
+    bool isFloatType;        // True if this is a float/double constant
     bool isArrayType;        // True if this is an array constant
     string[] ctfeStringArrayValue;  // For string[] constants (allMembers)
     bool isStringArrayType;         // True if this is a string[] constant
@@ -590,6 +592,9 @@ class ManifestConstantDecl : Declaration {
         if (ctfeComplete) {
             if (isStringType) {
                 return format("ManifestConstant(%s = \"%s\")", name, ctfeStringValue);
+            }
+            if (isFloatType) {
+                return format("ManifestConstant(%s = %g)", name, ctfeFloatValue);
             }
             return format("ManifestConstant(%s = %d)", name, ctfeValue);
         }
