@@ -636,11 +636,22 @@ class FuncContext {
 
     /// Emit __arena_new (save watermark) or __arena_drop (restore watermark).
     /// No-op if this function doesn't have an arena parameter.
+    /// Also skipped for functions returning slices — their arena allocations
+    /// must survive into the caller's scope (the caller's drop handles cleanup).
     void emitArenaScopeCall(ref Appender!(ubyte[]) out_, bool isNew) {
         if (!hasArenaParam) return;
+        if (returnsArenaData) return;
         emitArenaPointer(out_);
         out_ ~= Op.call;
         leb128u(out_, isNew ? emitter.arenaNewFuncIndex : emitter.arenaDropFuncIndex);
+    }
+
+    /// Returns true if this function's return type contains pointers to arena memory
+    /// (dynamic slices). Static arrays are on the shadow stack, so they're safe to drop.
+    private bool returnsArenaData() {
+        if (auto arrType = cast(ArrayType)func.decl.returnType)
+            return arrType.arraySize is null;  // Dynamic slice, not static array
+        return false;
     }
 
     /**

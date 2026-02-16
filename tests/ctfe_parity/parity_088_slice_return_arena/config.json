@@ -1,0 +1,7 @@
+{
+  "name": "slice_return_arena",
+  "description": "CTFE parity: slice-returning functions must not have data overwritten by arena drop",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 0
+}
