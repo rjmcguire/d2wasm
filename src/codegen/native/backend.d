@@ -657,8 +657,8 @@ class NativeCompiledFunction : CompiledFunction {
                 }
             } else if (auto arrType = cast(ArrayType)varDecl.type) {
                 if (arrType.arraySize is null) {
-                    // Slice struct + data
-                    bytes = NativeSliceLayout.sizeof;
+                    // Slice struct + worst-case 8-byte alignment padding
+                    bytes = NativeSliceLayout.sizeof + 8;
                     // Add data size if initialized with literal
                     if (auto arrLit = cast(ArrayLiteralExpression)varDecl.initializer) {
                         size_t elemSz = arrType.elementType.size();
