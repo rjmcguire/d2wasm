@@ -2227,12 +2227,18 @@ class BinaryEmitter {
         
         // Emit shadow stack prologue if needed
         ctx.emitPrologue(body_);
-        
+
+        // Save arena watermark at function entry
+        ctx.emitArenaScopeCall(body_, true);
+
         // Emit body
         if (f.decl.body_) {
             ctx.emitStatement(body_, f.decl.body_);
         }
-        
+
+        // Restore arena watermark for implicit return
+        ctx.emitArenaScopeCall(body_, false);
+
         // Emit shadow stack epilogue if needed (for implicit return)
         ctx.emitEpilogue(body_);
 

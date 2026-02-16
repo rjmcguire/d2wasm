@@ -634,6 +634,15 @@ class FuncContext {
         }
     }
 
+    /// Emit __arena_new (save watermark) or __arena_drop (restore watermark).
+    /// No-op if this function doesn't have an arena parameter.
+    void emitArenaScopeCall(ref Appender!(ubyte[]) out_, bool isNew) {
+        if (!hasArenaParam) return;
+        emitArenaPointer(out_);
+        out_ ~= Op.call;
+        leb128u(out_, isNew ? emitter.arenaNewFuncIndex : emitter.arenaDropFuncIndex);
+    }
+
     /**
      * Emit call stack push - called at function entry.
      * 
@@ -978,10 +987,13 @@ class FuncContext {
         if (hasLargeReturn && stmt.value) {
             // Large return: copy value to hidden result pointer
             emitLargeReturnCopy(out_, stmt.value);
-            
+
             // Call destructors for all scopes being unwound (RAII)
             emitUnwindDestructors(out_, stmt.unwindChain);
-            
+
+            // Restore arena watermark before returning
+            emitArenaScopeCall(out_, false);
+
             // Restore shadow stack before returning (void return)
             emitEpilogue(out_);
             out_ ~= Op.return_;
@@ -990,10 +1002,13 @@ class FuncContext {
             if (stmt.value) {
                 emitExpression(out_, stmt.value);
             }
-            
+
             // Call destructors for all scopes being unwound (RAII)
             emitUnwindDestructors(out_, stmt.unwindChain);
-            
+
+            // Restore arena watermark before returning
+            emitArenaScopeCall(out_, false);
+
             // Restore shadow stack before returning
             emitEpilogue(out_);
             out_ ~= Op.return_;
