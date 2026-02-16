@@ -1,0 +1,5 @@
+{
+  "name": "lvalue_increment",
+  "description": "Increment/decrement on non-lvalue produces a clear error",
+  "type": "compile_error"
+}

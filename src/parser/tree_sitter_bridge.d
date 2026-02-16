@@ -1339,19 +1339,55 @@ class TreeSitterBridge {
     
     EnumDecl parseEnumDeclaration(TSNode node) {
         SourceLocation loc = makeSourceLocation(node);
-        
-        TSNode nameNode = TreeSitterParser.getChildByFieldName(node, "name");
-        if (!TreeSitterParser.isValid(nameNode)) {
+
+        string name;
+        Type baseType;
+        EnumMember[] members;
+
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+
+            if (childType == "identifier" && name is null) {
+                name = TreeSitterParser.getNodeText(child, sourceText);
+            } else if (childType == "type") {
+                baseType = parseType(child);
+            } else if (childType == "enum_member") {
+                members ~= parseEnumMember(child);
+            }
+        }
+
+        if (name is null) {
             throw new ParseError("Enum declaration missing name", loc);
         }
-        
-        string name = TreeSitterParser.getNodeText(nameNode, sourceText);
-        
-        // TODO: Parse base type and enum members
-        Type baseType = new BasicType(loc, BasicType.Kind.Int32);
-        EnumMember[] members;
-        
+
+        // Default base type is int
+        if (baseType is null) {
+            baseType = new BasicType(loc, BasicType.Kind.Int32);
+        }
+
         return new EnumDecl(loc, name, baseType, members);
+    }
+
+    EnumMember parseEnumMember(TSNode node) {
+        string name;
+        Expression value;
+
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+
+            if (childType == "identifier") {
+                name = TreeSitterParser.getNodeText(child, sourceText);
+            } else if (childType == "int_literal" || childType == "float_literal" ||
+                       childType == "unary_expression" || childType.endsWith("_expression")) {
+                value = parseExpression(child);
+            }
+        }
+
+        return EnumMember(name, value);
     }
     
     /**

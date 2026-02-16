@@ -1,0 +1,5 @@
+{
+  "name": "circular_inheritance",
+  "description": "Circular class inheritance is detected and produces a clear error",
+  "type": "compile_error"
+}

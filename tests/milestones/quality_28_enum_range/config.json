@@ -1,0 +1,5 @@
+{
+  "name": "enum_range",
+  "description": "Enum member value exceeding base type range produces a clear error",
+  "type": "compile_error"
+}
