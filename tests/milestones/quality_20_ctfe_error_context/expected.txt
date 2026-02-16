@@ -1,4 +1,4 @@
-error: CTFE compile error: Unknown identifier: r
+error: CTFE compile error: Cannot access module-level variable 'r' during CTFE
 return r;
 ^
 note: while evaluating `enum RESULT`

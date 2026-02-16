@@ -3399,6 +3399,10 @@ class FuncContext {
                     leb128u(out_, varDecl.wasmGlobalIndex);
                     return;
                 }
+                // Global exists but wasn't collected — happens during CTFE
+                throw new EmitError(
+                    "Cannot access module-level variable '" ~ expr.name ~ "' during CTFE",
+                    expr.location);
             }
         }
 
@@ -4747,6 +4751,10 @@ class FuncContext {
                     leb128u(out_, varDecl.wasmGlobalIndex);
                     return;
                 }
+                // Global exists but wasn't collected — happens during CTFE
+                throw new EmitError(
+                    "Cannot access module-level variable '" ~ ident.name ~ "' during CTFE",
+                    ident.location);
             }
         }
         throw new EmitError("Unknown identifier in assignment: " ~ ident.name, ident.location);

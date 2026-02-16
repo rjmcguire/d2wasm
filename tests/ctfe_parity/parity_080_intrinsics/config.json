@@ -1,0 +1,7 @@
+{
+  "name": "intrinsics",
+  "description": "CTFE parity: compiler intrinsics (shift left, arithmetic shift right)",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 20
+}

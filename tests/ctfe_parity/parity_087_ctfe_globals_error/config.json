@@ -1,0 +1,5 @@
+{
+  "name": "ctfe_globals_error",
+  "description": "CTFE parity: clear error when accessing module-level variables during CTFE",
+  "type": "compile_error"
+}

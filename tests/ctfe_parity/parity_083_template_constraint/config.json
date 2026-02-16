@@ -1,0 +1,7 @@
+{
+  "name": "template_constraint",
+  "description": "CTFE parity: template with __traits constraint",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 42
+}

@@ -64,7 +64,7 @@ run_test_with_backend() {
     
     # Only handle CTFE-relevant test types
     case "$test_type" in
-        compile_output|wasm_exec) ;;
+        compile_output|wasm_exec|compile_error) ;;
         *)
             echo -e "${YELLOW}SKIP${NC} $test_name [$backend] (not a CTFE test type: $test_type)"
             return 0
@@ -84,12 +84,61 @@ run_test_with_backend() {
     local compile_status=$?
     
     if [ $compile_status -ne 0 ]; then
+        if [ "$test_type" = "compile_error" ]; then
+            # Expected to fail — check error message content
+            local expected_file="$test_dir/expected.txt"
+            if [ -f "$expected_file" ]; then
+                local all_matched=true
+                local failed_line=""
+                while IFS= read -r line || [ -n "$line" ]; do
+                    line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+                    [ -z "$line" ] && continue
+                    if ! echo "$compile_output" | grep -qF -- "$line"; then
+                        all_matched=false
+                        failed_line="$line"
+                        break
+                    fi
+                done < "$expected_file"
+                if [ "$all_matched" = true ]; then
+                    echo -e "${GREEN}PASS${NC} $test_name [$backend] (compile error as expected)"
+                    return 0
+                else
+                    echo -e "${RED}FAIL${NC} $test_name [$backend]"
+                    echo "  Missing expected line: $failed_line"
+                    echo "  Actual output:"
+                    echo "$compile_output" | sed 's/^/    /'
+                    return 1
+                fi
+            fi
+            local expected_error=$(jq -r '.expected_error // empty' "$config_file")
+            if [ -n "$expected_error" ]; then
+                if echo "$compile_output" | grep -qF "$expected_error"; then
+                    echo -e "${GREEN}PASS${NC} $test_name [$backend] (compile error as expected)"
+                    return 0
+                else
+                    echo -e "${RED}FAIL${NC} $test_name [$backend]"
+                    echo "  Expected error text: $expected_error"
+                    echo "  Actual output:"
+                    echo "$compile_output" | sed 's/^/    /'
+                    return 1
+                fi
+            fi
+            echo -e "${GREEN}PASS${NC} $test_name [$backend] (compile error)"
+            return 0
+        fi
         echo -e "${RED}FAIL${NC} $test_name [$backend]"
         echo "  Compilation failed:"
         echo "$compile_output" | sed 's/^/    /'
         return 1
     fi
-    
+
+    # compile_error tests should have failed above
+    if [ "$test_type" = "compile_error" ]; then
+        echo -e "${RED}FAIL${NC} $test_name [$backend]"
+        echo "  Expected compilation to fail, but it succeeded"
+        return 1
+    fi
+
     case "$test_type" in
         compile_output)
             local expected_output=$(jq -r '.expected_output' "$config_file")

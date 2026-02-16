@@ -1,0 +1,7 @@
+{
+  "name": "struct_mutable_state",
+  "description": "CTFE parity: shared mutable state via struct fields with multi-step mutation",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 0
+}

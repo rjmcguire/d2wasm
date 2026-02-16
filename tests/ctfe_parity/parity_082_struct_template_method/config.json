@@ -1,0 +1,7 @@
+{
+  "name": "struct_template_method",
+  "description": "CTFE parity: struct template with method call",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 42
+}

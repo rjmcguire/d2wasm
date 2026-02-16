@@ -22,9 +22,18 @@ import semantic.type_checker;
 
 alias ArrayType = ast.nodes.ArrayType;
 
+class NativeCompileError : Exception {
+    SourceLocation location;
+    this(string msg, SourceLocation loc) {
+        super(msg);
+        this.location = loc;
+    }
+}
+
 class NativeBackend : Backend {
     private SymbolTable symbolTable;
     private string lastError;
+    private SourceLocation lastErrorLoc;
     private bool enableStackTrace;
     
     this(SymbolTable st, bool enableStackTrace = true) {
@@ -44,12 +53,17 @@ class NativeBackend : Backend {
         
         try {
             return new NativeCompiledFunction(func, symbolTable, enableStackTrace);
+        } catch (NativeCompileError e) {
+            lastError = "Native compile error: " ~ e.msg;
+            lastErrorLoc = e.location;
+            return null;
         } catch (Exception e) {
             lastError = "Native compile error: " ~ e.msg;
+            lastErrorLoc = SourceLocation.init;
             return null;
         }
     }
-    
+
     override CompiledFunction compileWithDependencies(FunctionDecl[] funcs, string entryFuncName) {
         // Type-check all functions first
         auto typeChecker = new TypeChecker(symbolTable);
@@ -61,11 +75,16 @@ class NativeBackend : Backend {
                 return null;
             }
         }
-        
+
         try {
             return new NativeCompiledFunction(funcs, entryFuncName, symbolTable, enableStackTrace);
+        } catch (NativeCompileError e) {
+            lastError = "Native compile error: " ~ e.msg;
+            lastErrorLoc = e.location;
+            return null;
         } catch (Exception e) {
             lastError = "Native compile error: " ~ e.msg;
+            lastErrorLoc = SourceLocation.init;
             return null;
         }
     }
@@ -78,7 +97,7 @@ class NativeBackend : Backend {
     }
     
     override string error() { return lastError; }
-    override SourceLocation errorLocation() { return SourceLocation.init; }
+    override SourceLocation errorLocation() { return lastErrorLoc; }
     override string name() { return "native"; }
 }
 
@@ -1437,9 +1456,19 @@ class NativeCompiledFunction : CompiledFunction {
                     gen.emitLoadFromPointer(field.offset);  // x0 = this.field
                     return;
                 }
-                throw new Exception("Unknown variable in native backend: " ~ ident.name);
+                auto symbol = symbolTable.lookupSymbol(ident.name);
+                if (symbol && cast(VariableDecl)symbol.declaration)
+                    throw new NativeCompileError(
+                        "Cannot access module-level variable '" ~ ident.name ~ "' during CTFE",
+                        ident.location);
+                throw new NativeCompileError("Unknown variable in native backend: " ~ ident.name, ident.location);
             } else {
-                throw new Exception("Unknown variable in native backend: " ~ ident.name);
+                auto symbol = symbolTable.lookupSymbol(ident.name);
+                if (symbol && cast(VariableDecl)symbol.declaration)
+                    throw new NativeCompileError(
+                        "Cannot access module-level variable '" ~ ident.name ~ "' during CTFE",
+                        ident.location);
+                throw new NativeCompileError("Unknown variable in native backend: " ~ ident.name, ident.location);
             }
         } else if (auto assign = cast(AssignmentExpression)expr) {
             // Check for index assignment (arr[i] = value)
@@ -1452,9 +1481,15 @@ class NativeCompiledFunction : CompiledFunction {
                 }
             }
 
+            // Check for member expression assignment (c.value = 10)
+            if (auto member = cast(MemberExpression)assign.left) {
+                compileMemberAssignment(member, assign);
+                return;
+            }
+
             auto targetIdent = cast(IdentifierExpression)assign.left;
             if (targetIdent is null) {
-                throw new Exception("Assignment to non-identifier not yet supported in native backend");
+                throw new NativeCompileError("Assignment to non-identifier not yet supported in native backend", assign.location);
             }
             
             auto info = targetIdent.name in localVars;
@@ -1470,7 +1505,12 @@ class NativeCompiledFunction : CompiledFunction {
                         return;
                     }
                 }
-                throw new Exception("Unknown variable in native backend: " ~ targetIdent.name);
+                auto symbol = symbolTable.lookupSymbol(targetIdent.name);
+                if (symbol && cast(VariableDecl)symbol.declaration)
+                    throw new NativeCompileError(
+                        "Cannot access module-level variable '" ~ targetIdent.name ~ "' during CTFE",
+                        targetIdent.location);
+                throw new NativeCompileError("Unknown variable in native backend: " ~ targetIdent.name, targetIdent.location);
             }
 
             // Handle slice append specially (~=)
@@ -2924,6 +2964,34 @@ class NativeCompiledFunction : CompiledFunction {
         return false;
     }
     
+    /**
+     * Compile struct field assignment: obj.field = value
+     */
+    private void compileMemberAssignment(MemberExpression member, AssignmentExpression assign) {
+        auto structDecl = getStructDeclFromExpr(member.object);
+        if (structDecl is null)
+            throw new NativeCompileError("Cannot determine struct type for member assignment", assign.location);
+
+        auto field = structDecl.getField(member.memberName);
+        if (field is null)
+            throw new NativeCompileError("Unknown field: " ~ member.memberName, assign.location);
+
+        // Local struct variable: direct store at known offset
+        if (auto ident = cast(IdentifierExpression)member.object) {
+            if (auto varInfo = ident.name in localVars) {
+                compileExpression(assign.right);
+                gen.emitStoreLocal32(varInfo.offset + field.offset);
+                return;
+            }
+        }
+
+        // Pointer-based target (nested access, index, etc.)
+        compileExpression(assign.right);
+        gen.emitMoveX0ToX9();
+        compileExpression(member.object);
+        gen.emitStoreToPointerFromX9(field.offset);
+    }
+
     /**
      * Get the StructDecl from an expression (for member access type resolution)
      */
