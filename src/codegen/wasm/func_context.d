@@ -4148,11 +4148,35 @@ class FuncContext {
                     leb128u(out_, funcIdx);
                 }
             }
+            else if (auto manifestStr = getStringManifest(arg)) {
+                // String manifest constant — resolve value and emit like string literal
+                if (!manifestStr.ctfeComplete)
+                    emitter.symbolTable.resolveManifestValue(manifestStr);
+                uint structAddr = emitter.registerArrayLiteral(manifestStr.ctfeStringValue);
+
+                // Load ptr from struct (offset 0)
+                out_ ~= Op.i32_const;
+                leb128u(out_, structAddr);
+                out_ ~= Op.i32_load;
+                out_ ~= cast(ubyte)0x02;  // align=4
+                leb128u(out_, 0);          // offset=0
+
+                // Load length from struct (offset 4)
+                out_ ~= Op.i32_const;
+                leb128u(out_, structAddr + 4);
+                out_ ~= Op.i32_load;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+
+                emitter.neededCTFEImports["__ctfe_write_str"] = true;
+                uint funcIdx = emitter.getFuncIndex("__ctfe_write_str");
+                out_ ~= Op.call;
+                leb128u(out_, funcIdx);
+            }
             else {
-                // Non-literal expression: evaluate and print as i32
-                // TODO: Support other types via expression type analysis
+                // Non-literal, non-string expression: evaluate and print as i32
                 emitExpression(out_, arg);
-                
+
                 emitter.neededCTFEImports["__ctfe_write_i32"] = true;
                 uint funcIdx = emitter.getFuncIndex("__ctfe_write_i32");
                 out_ ~= Op.call;
@@ -4166,12 +4190,42 @@ class FuncContext {
         out_ ~= Op.call;
         leb128u(out_, newlineIdx);
     }
-    
+
+    /// If expression is an identifier referencing a string manifest constant, return it.
+    private ManifestConstantDecl getStringManifest(Expression arg) {
+        if (auto ident = cast(IdentifierExpression)arg) {
+            auto symbol = emitter.symbolTable.lookupSymbol(ident.name);
+            if (symbol && symbol.isConstant) {
+                if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
+                    if (manifest.isStringType)
+                        return manifest;
+                }
+            }
+        }
+        return null;
+    }
+
     /**
      * Emit a method call (obj.method(args)).
      * The hidden 'this' pointer is passed as the first argument.
      */
     void emitMethodCall(ref Appender!(ubyte[]) out_, MemberExpression memberExpr, Expression[] args) {
+        // Handle __ctfe_runtime magic module calls — emit as imported host function calls
+        if (auto objIdent = cast(IdentifierExpression)memberExpr.object) {
+            if (objIdent.name == "__ctfe_runtime") {
+                // Emit arguments
+                foreach (arg; args) {
+                    emitExpression(out_, arg);
+                }
+                // Call the imported function
+                string importName = "__ctfe_runtime_" ~ memberExpr.memberName;
+                uint funcIdx = emitter.getFuncIndex(importName);
+                out_ ~= Op.call;
+                leb128u(out_, funcIdx);
+                return;
+            }
+        }
+
         // Handle nested MemberExpression objects (e.g., obj.field.method() from alias-this)
         if (auto objMember = cast(MemberExpression)memberExpr.object) {
             auto innerType = getMemberExpressionType(objMember);
@@ -5329,6 +5383,12 @@ class FuncContext {
             if (auto memberExpr = cast(MemberExpression)call.function_) {
                 auto objIdent = cast(IdentifierExpression)memberExpr.object;
                 if (objIdent) {
+                    // __ctfe_runtime: alloc/remaining return i32, push/pop are void
+                    if (objIdent.name == "__ctfe_runtime") {
+                        return memberExpr.memberName == "alloc"
+                            || memberExpr.memberName == "remaining";
+                    }
+
                     // Check unified locals/params
                     StructDecl structDecl = null;
                     auto objInfo = resolveVar(objIdent.resolvedLocalId, objIdent.name);

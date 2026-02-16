@@ -111,6 +111,7 @@ class BinaryEmitter {
         uint callStackDepthGlobal;  // Global for call stack depth (milestone 144)
         bool needsArraySupport;
         bool[string] neededCTFEImports;
+        bool ctfeMode;  // When true, compile CTFE-only functions (don't skip them)
         bool enableStackTrace;  // Stack trace option (milestone 144)
 
         // Arena built-in functions
@@ -952,14 +953,10 @@ class BinaryEmitter {
             return;
         }
 
-        // Skip CTFE-only functions that use:
-        // - variadic intrinsics (like __writeln) - until we implement variadic args struct
-        // - __ctfe_runtime module - until we implement host linking for it
-        // Non-variadic CTFE calls (like __ctfe_print_i32) become imports.
-        if (isCtfeOnlyFunction(decl)) {
-            if (usesVariadicCTFE(decl) || usesCTFERuntime(decl.body_)) {
-                return;
-            }
+        // In module output mode, skip CTFE-only functions (they run at compile time only).
+        // In CTFE mode, compile everything — host functions are linked via wasm3 imports.
+        if (!ctfeMode && isCtfeOnlyFunction(decl)) {
+            return;
         }
         
         // Resolve return type if needed
@@ -1078,6 +1075,7 @@ class BinaryEmitter {
             if (cast(ArrayType)varDecl.type) {
                 needsArraySupport = true;
             }
+            if (varDecl.initializer) scanExpressionForCTFECalls(varDecl.initializer);
         } else if (auto ifStmt = cast(IfStatement)stmt) {
             scanStatementForSliceTypes(ifStmt.thenStatement);
             if (ifStmt.elseStatement) {
@@ -1148,25 +1146,37 @@ class BinaryEmitter {
                         // Pre-register all __ctfe_write_* imports that might be needed
                         // We always need newline
                         neededCTFEImports["__ctfe_write_newline"] = true;
-                        
+
                         // Scan arguments to determine which typed writers we need
                         foreach (arg; call.arguments) {
                             if (auto literal = cast(LiteralExpression)arg) {
                                 if (literal.value.type == typeid(string)) {
                                     neededCTFEImports["__ctfe_write_str"] = true;
-                                } else if (literal.value.type == typeid(long) || 
+                                } else if (literal.value.type == typeid(long) ||
                                            literal.value.type == typeid(int)) {
                                     neededCTFEImports["__ctfe_write_i32"] = true;
                                 } else if (literal.value.type == typeid(bool)) {
                                     neededCTFEImports["__ctfe_write_bool"] = true;
                                 }
                             } else {
-                                // Non-literal expressions default to i32
-                                neededCTFEImports["__ctfe_write_i32"] = true;
+                                // Check if non-literal arg is string-typed (e.g. manifest constant)
+                                if (isStringTypedExpression(arg)) {
+                                    neededCTFEImports["__ctfe_write_str"] = true;
+                                } else {
+                                    neededCTFEImports["__ctfe_write_i32"] = true;
+                                }
                             }
                         }
                     } else {
                         neededCTFEImports[ident.name] = true;
+                    }
+                }
+            }
+            // Handle __ctfe_runtime.method() member calls
+            if (auto member = cast(MemberExpression)call.function_) {
+                if (auto obj = cast(IdentifierExpression)member.object) {
+                    if (obj.name == "__ctfe_runtime") {
+                        neededCTFEImports["__ctfe_runtime_" ~ member.memberName] = true;
                     }
                 }
             }
@@ -1181,7 +1191,20 @@ class BinaryEmitter {
             scanExpressionForCTFECalls(unary.operand);
         }
     }
-    
+
+    /// Check if an expression has string type (for __writeln type-aware lowering).
+    private bool isStringTypedExpression(Expression expr) {
+        if (auto ident = cast(IdentifierExpression)expr) {
+            auto symbol = symbolTable.lookupSymbol(ident.name);
+            if (symbol && symbol.isConstant) {
+                if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
+                    return manifest.isStringType;
+                }
+            }
+        }
+        return false;
+    }
+
     /**
      * Check if a function contains only CTFE intrinsics (like __writeln)
      * Such functions are evaluated at compile-time and don't need WASM emission
@@ -1189,145 +1212,53 @@ class BinaryEmitter {
     private bool isCtfeOnlyFunction(FunctionDecl decl) {
         if (!decl.body_) return false;
         // Functions using __ctfe_runtime are CTFE-only
-        if (usesCTFERuntime(decl.body_)) return true;
+        if (statementUsesCTFERuntime(decl.body_)) return true;
         return containsOnlyCtfeIntrinsics(decl.body_);
     }
-    
-    /**
-     * Check if a function uses variadic CTFE functions (like __writeln)
-     * These require special handling and are still interpreted for now.
-     */
-    private bool usesVariadicCTFE(FunctionDecl decl) {
-        if (!decl.body_) return false;
-        return statementUsesVariadicCTFE(decl.body_);
-    }
-    
-    private bool statementUsesVariadicCTFE(Statement stmt) {
+
+    private bool statementUsesCTFERuntime(Statement stmt) {
         if (auto compound = cast(CompoundStatement)stmt) {
             foreach (s; compound.statements) {
-                if (statementUsesVariadicCTFE(s)) return true;
+                if (statementUsesCTFERuntime(s)) return true;
             }
             return false;
         }
         if (auto exprStmt = cast(ExpressionStatement)stmt) {
-            return expressionUsesVariadicCTFE(exprStmt.expression);
-        }
-        if (auto returnStmt = cast(ReturnStatement)stmt) {
-            if (returnStmt.value) return expressionUsesVariadicCTFE(returnStmt.value);
-            return false;
-        }
-        if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
-            if (varDecl.initializer) return expressionUsesVariadicCTFE(varDecl.initializer);
-            return false;
-        }
-        if (auto ifStmt = cast(IfStatement)stmt) {
-            if (statementUsesVariadicCTFE(ifStmt.thenStatement)) return true;
-            if (ifStmt.elseStatement && statementUsesVariadicCTFE(ifStmt.elseStatement)) return true;
-            return false;
-        }
-        if (auto whileStmt = cast(WhileStatement)stmt) {
-            return statementUsesVariadicCTFE(whileStmt.body_);
-        }
-        if (auto forStmt = cast(ForStatement)stmt) {
-            if (forStmt.init && statementUsesVariadicCTFE(forStmt.init)) return true;
-            if (forStmt.body_ && statementUsesVariadicCTFE(forStmt.body_)) return true;
-            return false;
-        }
-        if (cast(BreakStatement)stmt || cast(ContinueStatement)stmt
-            || cast(MixinStatement)stmt || cast(StructDeclarationStatement)stmt) {
-            return false;
-        }
-        assert(0, "statementUsesVariadicCTFE: unhandled statement type: " ~ typeid(stmt).name);
-    }
-    
-    private bool expressionUsesVariadicCTFE(Expression expr) {
-        if (auto call = cast(CallExpression)expr) {
-            if (auto ident = cast(IdentifierExpression)call.function_) {
-                // __writeln is lowered to typed calls, so it's no longer "variadic" for emission purposes
-                if (ident.name == "__writeln") {
-                    return false;
-                }
-                auto symbol = symbolTable.lookupSymbol(ident.name);
-                if (symbol && symbol.isCTFEOnly && symbol.isVariadic) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-    
-    /**
-     * Check if a statement uses __ctfe_runtime calls.
-     */
-    private bool usesCTFERuntime(Statement stmt) {
-        if (auto compound = cast(CompoundStatement)stmt) {
-            foreach (s; compound.statements) {
-                if (usesCTFERuntime(s)) return true;
-            }
-            return false;
-        }
-        if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
-            if (varDecl.initializer && expressionUsesCTFERuntime(varDecl.initializer)) {
-                return true;
-            }
-            return false;
-        }
-        if (auto exprStmt = cast(ExpressionStatement)stmt) {
-            return expressionUsesCTFERuntime(exprStmt.expression);
-        }
-        if (auto returnStmt = cast(ReturnStatement)stmt) {
-            if (returnStmt.value) return expressionUsesCTFERuntime(returnStmt.value);
-            return false;
-        }
-        if (auto ifStmt = cast(IfStatement)stmt) {
-            if (usesCTFERuntime(ifStmt.thenStatement)) return true;
-            if (ifStmt.elseStatement && usesCTFERuntime(ifStmt.elseStatement)) return true;
-            return false;
-        }
-        if (auto whileStmt = cast(WhileStatement)stmt) {
-            return usesCTFERuntime(whileStmt.body_);
-        }
-        if (auto forStmt = cast(ForStatement)stmt) {
-            if (forStmt.init && usesCTFERuntime(forStmt.init)) return true;
-            if (forStmt.body_ && usesCTFERuntime(forStmt.body_)) return true;
-            return false;
-        }
-        if (cast(BreakStatement)stmt || cast(ContinueStatement)stmt
-            || cast(MixinStatement)stmt || cast(StructDeclarationStatement)stmt) {
-            return false;
-        }
-        assert(0, "usesCTFERuntime: unhandled statement type: " ~ typeid(stmt).name);
-    }
-    
-    /**
-     * Check if an expression uses __ctfe_runtime.
-     */
-    private bool expressionUsesCTFERuntime(Expression expr) {
-        if (auto call = cast(CallExpression)expr) {
-            if (auto member = cast(MemberExpression)call.function_) {
-                if (auto obj = cast(IdentifierExpression)member.object) {
-                    if (obj.name == "__ctfe_runtime") {
-                        return true;
+            if (auto call = cast(CallExpression)exprStmt.expression) {
+                if (auto member = cast(MemberExpression)call.function_) {
+                    if (auto obj = cast(IdentifierExpression)member.object) {
+                        if (obj.name == "__ctfe_runtime") return true;
                     }
                 }
             }
-            // Check arguments too
-            foreach (arg; call.arguments) {
-                if (expressionUsesCTFERuntime(arg)) return true;
-            }
+            return false;
         }
-        
-        if (auto member = cast(MemberExpression)expr) {
-            return expressionUsesCTFERuntime(member.object);
+        if (auto returnStmt = cast(ReturnStatement)stmt) {
+            return false;
         }
-        
-        if (auto binary = cast(BinaryExpression)expr) {
-            return expressionUsesCTFERuntime(binary.left) || expressionUsesCTFERuntime(binary.right);
+        if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
+            return false;
         }
-        
+        if (auto ifStmt = cast(IfStatement)stmt) {
+            if (statementUsesCTFERuntime(ifStmt.thenStatement)) return true;
+            if (ifStmt.elseStatement && statementUsesCTFERuntime(ifStmt.elseStatement)) return true;
+            return false;
+        }
+        if (auto whileStmt = cast(WhileStatement)stmt) {
+            return statementUsesCTFERuntime(whileStmt.body_);
+        }
+        if (auto forStmt = cast(ForStatement)stmt) {
+            if (forStmt.init && statementUsesCTFERuntime(forStmt.init)) return true;
+            if (forStmt.body_ && statementUsesCTFERuntime(forStmt.body_)) return true;
+            return false;
+        }
+        if (cast(BreakStatement)stmt || cast(ContinueStatement)stmt
+            || cast(MixinStatement)stmt || cast(StructDeclarationStatement)stmt) {
+            return false;
+        }
         return false;
     }
-    
+
     private bool containsOnlyCtfeIntrinsics(Statement stmt) {
         if (auto compound = cast(CompoundStatement)stmt) {
             foreach (s; compound.statements) {
@@ -1759,10 +1690,6 @@ class BinaryEmitter {
      */
     private void addCTFEImports() {
         foreach (name; neededCTFEImports.byKey()) {
-            // Look up the builtin to get its signature
-            auto symbol = symbolTable.lookupSymbol(name);
-            if (!symbol) continue;
-            
             // Build signature based on the function
             FuncSig sig;
             switch (name) {
@@ -1770,7 +1697,7 @@ class BinaryEmitter {
                 case "__ctfe_print_i32":
                     sig.params = [ValType.i32];
                     break;
-                    
+
                 // Building blocks for __writeln
                 case "__ctfe_write_i32":
                     sig.params = [ValType.i32];
@@ -1784,7 +1711,20 @@ class BinaryEmitter {
                 case "__ctfe_write_newline":
                     sig.params = [];
                     break;
-                    
+
+                // __ctfe_runtime host functions
+                case "__ctfe_runtime_alloc":
+                    sig.params = [ValType.i32];    // size
+                    sig.results = [ValType.i32];   // pointer
+                    break;
+                case "__ctfe_runtime_push":
+                case "__ctfe_runtime_pop":
+                    // no params, no results
+                    break;
+                case "__ctfe_runtime_remaining":
+                    sig.results = [ValType.i32];   // remaining bytes
+                    break;
+
                 case "__writeln":
                     // Variadic - lowered to typed calls at emit time, don't import
                     continue;

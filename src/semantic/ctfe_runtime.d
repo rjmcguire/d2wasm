@@ -187,6 +187,58 @@ extern(C) const(void)* hostWriteNewline(IM3Runtime runtime, IM3ImportContext ctx
     return null;
 }
 
+// ---- __ctfe_runtime host functions ----
+// Arena state for __ctfe_runtime.alloc/push/pop/remaining.
+// Reset on each loadModule() call. Single-threaded, non-reentrant.
+private __gshared uint g_arenaOffset = 2048;     // First 2KB reserved (MEMORY_RESERVED)
+private __gshared uint[] g_arenaSaveStack;
+
+/**
+ * __ctfe_runtime.alloc(size) → pointer
+ * 8-byte aligned bump allocator in WASM linear memory.
+ */
+extern(C) const(void)* hostCtfeRuntimeAlloc(IM3Runtime runtime, IM3ImportContext ctx, uint* stack, void* mem) {
+    uint size = stack[0];
+    // 8-byte align
+    uint aligned = (g_arenaOffset + 7) & ~7;
+    g_arenaOffset = aligned + size;
+    // Return pointer via stack[0] (wasm3 convention for return values)
+    stack[0] = aligned;
+    return null;
+}
+
+/**
+ * __ctfe_runtime.push() → void
+ * Save current watermark for later restore.
+ */
+extern(C) const(void)* hostCtfeRuntimePush(IM3Runtime runtime, IM3ImportContext ctx, uint* stack, void* mem) {
+    g_arenaSaveStack ~= g_arenaOffset;
+    return null;
+}
+
+/**
+ * __ctfe_runtime.pop() → void
+ * Restore watermark from last push.
+ */
+extern(C) const(void)* hostCtfeRuntimePop(IM3Runtime runtime, IM3ImportContext ctx, uint* stack, void* mem) {
+    if (g_arenaSaveStack.length == 0) {
+        return "CTFE: Arena pop without matching push".ptr;
+    }
+    g_arenaOffset = g_arenaSaveStack[$ - 1];
+    g_arenaSaveStack = g_arenaSaveStack[0 .. $ - 1];
+    return null;
+}
+
+/**
+ * __ctfe_runtime.remaining() → int
+ * Returns available bytes in the 64KB WASM memory.
+ */
+extern(C) const(void)* hostCtfeRuntimeRemaining(IM3Runtime runtime, IM3ImportContext ctx, uint* stack, void* mem) {
+    enum MEMORY_SIZE = 64 * 1024;
+    stack[0] = MEMORY_SIZE - g_arenaOffset;
+    return null;
+}
+
 /**
  * CTFE Runtime Error
  */
@@ -245,9 +297,13 @@ class CTFERuntime {
             throw new CTFERuntimeError("Failed to load WASM: " ~ fromStringz(result).idup);
         }
         
+        // Reset __ctfe_runtime arena state for each new module
+        g_arenaOffset = 2048;
+        g_arenaSaveStack = [];
+
         // Link CTFE host functions
         linkCTFEHostFunctions();
-        
+
         initialized = true;
     }
     
@@ -288,6 +344,24 @@ class CTFERuntime {
         result = m3_LinkRawFunction(mod, "ctfe".ptr, "__ctfe_write_newline".ptr, "v()".ptr, &hostWriteNewline);
         if (result !is null && result != m3Err_functionLookupFailed) {
             throw new CTFERuntimeError("Failed to link __ctfe_write_newline: " ~ fromStringz(result).idup);
+        }
+
+        // __ctfe_runtime host functions (arena management)
+        result = m3_LinkRawFunction(mod, "ctfe".ptr, "__ctfe_runtime_alloc".ptr, "i(i)".ptr, &hostCtfeRuntimeAlloc);
+        if (result !is null && result != m3Err_functionLookupFailed) {
+            throw new CTFERuntimeError("Failed to link __ctfe_runtime_alloc: " ~ fromStringz(result).idup);
+        }
+        result = m3_LinkRawFunction(mod, "ctfe".ptr, "__ctfe_runtime_push".ptr, "v()".ptr, &hostCtfeRuntimePush);
+        if (result !is null && result != m3Err_functionLookupFailed) {
+            throw new CTFERuntimeError("Failed to link __ctfe_runtime_push: " ~ fromStringz(result).idup);
+        }
+        result = m3_LinkRawFunction(mod, "ctfe".ptr, "__ctfe_runtime_pop".ptr, "v()".ptr, &hostCtfeRuntimePop);
+        if (result !is null && result != m3Err_functionLookupFailed) {
+            throw new CTFERuntimeError("Failed to link __ctfe_runtime_pop: " ~ fromStringz(result).idup);
+        }
+        result = m3_LinkRawFunction(mod, "ctfe".ptr, "__ctfe_runtime_remaining".ptr, "i()".ptr, &hostCtfeRuntimeRemaining);
+        if (result !is null && result != m3Err_functionLookupFailed) {
+            throw new CTFERuntimeError("Failed to link __ctfe_runtime_remaining: " ~ fromStringz(result).idup);
         }
     }
     

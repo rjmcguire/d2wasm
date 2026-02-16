@@ -27,6 +27,7 @@ class WASMBackend : Backend {
 
     override CompiledFunction compile(FunctionDecl func) {
         auto emitter = new BinaryEmitter(symbolTable, enableStackTrace);
+        emitter.ctfeMode = true;
         auto wasmBytes = emitter.emit([func]);
 
         if (wasmBytes is null) {
@@ -61,6 +62,7 @@ class WASMBackend : Backend {
         }
 
         auto emitter = new BinaryEmitter(symbolTable, enableStackTrace);
+        emitter.ctfeMode = true;
         auto wasmBytes = emitter.emit(decls);
 
         if (wasmBytes is null) {
@@ -68,11 +70,13 @@ class WASMBackend : Backend {
             lastErrorLoc = emitter.errorLocation();
             return null;
         }
-        // Debug: dump CTFE WASM module for disassembly
-        try {
-            import std.file : fwrite = write;
-            fwrite("/tmp/ctfe_debug.wasm", wasmBytes);
-        } catch (Exception) {}
+        version(none) {
+            // Debug: dump CTFE WASM module for disassembly
+            try {
+                import std.file : fwrite = write;
+                fwrite("/tmp/ctfe_debug.wasm", wasmBytes);
+            } catch (Exception) {}
+        }
 
         return new WASMCompiledFunction(entryFuncName, wasmBytes,
             emitter.getArenaBaseValue(), buildNeedsArenaMap(funcs));
