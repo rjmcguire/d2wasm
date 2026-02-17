@@ -22,6 +22,15 @@ import std.algorithm : map, canFind;
 import std.conv : to;
 import std.format : format;
 
+/// Compute element size for a type in WASM target context.
+/// Dynamic array elements are slice structs (WasmSliceLayout.sizeof).
+private uint wasmElementSize(Type elemType) {
+    if (auto at = cast(ArrayType)elemType)
+        if (!at.isStaticArray) return WasmSliceLayout.sizeof;
+    auto s = elemType.size();
+    return s == 0 ? 4 : cast(uint)s;
+}
+
 class FuncContext {
     BinaryEmitter emitter;
     FuncInfo func;
@@ -291,17 +300,13 @@ class FuncContext {
                         vi.addrMode = AddrMode.paramPointer;
                         vi.elementType = arrayType.elementType;
                         vi.elementCount = evaluateStaticArraySize(arrayType.arraySize);
-                        size_t elemSize = arrayType.elementType.size();
-                        if (elemSize == 0) elemSize = 4;
-                        vi.elementSize = cast(uint)elemSize;
+                        vi.elementSize = wasmElementSize(arrayType.elementType);
                     } else {
                         // Dynamic array (slice)
                         vi.kind = VarKind.slice;
                         vi.addrMode = AddrMode.paramPointer;
                         vi.elementType = arrayType.elementType;
-                        size_t sliceElemSize = arrayType.elementType.size();
-                        if (sliceElemSize == 0) sliceElemSize = 4;
-                        vi.elementSize = cast(uint)sliceElemSize;
+                        vi.elementSize = wasmElementSize(arrayType.elementType);
                     }
                 } else {
                     // Scalar parameter
@@ -433,9 +438,8 @@ class FuncContext {
                     
                     // Evaluate array size (must be compile-time constant)
                     uint elemCount = evaluateStaticArraySize(arrayType.arraySize);
-                    size_t elemSize = arrayType.elementType.size();
-                    if (elemSize == 0) elemSize = 4;  // Default to 4 for i32
-                    
+                    uint elemSize = wasmElementSize(arrayType.elementType);
+
                     VarInfo vi;
                     vi.kind = VarKind.staticArray;
                     vi.addrMode = AddrMode.shadowStack;
@@ -443,12 +447,12 @@ class FuncContext {
                     vi.type = varDecl.type;
                     vi.elementType = arrayType.elementType;
                     vi.elementCount = elemCount;
-                    vi.elementSize = cast(uint)elemSize;
+                    vi.elementSize = elemSize;
                     if (varDecl.uniqueLocalId != uint.max)
                         varsByLocalId[varDecl.uniqueLocalId] = vi;
                     varsByName[varDecl.name] = vi;
 
-                    frameSize += elemCount * cast(uint)elemSize;
+                    frameSize += elemCount * elemSize;
                     return;
                 }
                 
@@ -464,11 +468,7 @@ class FuncContext {
                 vi.frameOffset = frameSize;
                 vi.type = varDecl.type;
                 vi.elementType = arrayType.elementType;
-                {
-                    size_t sliceElemSize = arrayType.elementType.size();
-                    if (sliceElemSize == 0) sliceElemSize = 4;
-                    vi.elementSize = cast(uint)sliceElemSize;
-                }
+                vi.elementSize = wasmElementSize(arrayType.elementType);
 
                 // Slice struct is WasmSliceLayout.sizeof bytes (ptr: i32, length: i32, capacity: i32)
                 frameSize += WasmSliceLayout.sizeof;
@@ -2667,27 +2667,59 @@ class FuncContext {
                          VarInfo* sliceInfo, Expression value) {
         int sliceAddr = sliceInfo.frameOffset;
         bool isFloat = isF64ElementType(sliceInfo.elementType);
+        uint elementSize = sliceInfo.elementSize;
+        bool isAggregate = (elementSize > 4 && !isFloat);
         // SP scratch layout: value takes valSize bytes, then 3 i32 temporaries
-        int valSize = isFloat ? 8 : 4;
+        int valSize = isAggregate ? cast(int)elementSize : (isFloat ? 8 : 4);
         int capOff = valSize + 4;   // newCapacity offset from SP
         int bufOff = valSize + 8;   // newBuffer offset from SP
         int ctrOff = valSize + 12;  // loop counter offset from SP
 
-        // Store value at SP-valSize (we need it later)
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, valSize);
-        out_ ~= Op.i32_sub;
-        emitExpression(out_, value);
-        if (isFloat) {
-            out_ ~= Op.f64_store;
-            out_ ~= cast(ubyte)0x03;  // alignment log2(8)
-            leb128u(out_, 0);
+        // Store value at SP scratch area (we need it later)
+        if (isAggregate) {
+            // Expression pushes an address to the element data — copy elementSize bytes word by word
+            emitExpression(out_, value);
+            out_ ~= Op.local_set;
+            leb128u(out_, tempLocalA);
+            for (uint w = 0; w < elementSize; w += 4) {
+                // dest = SP - valSize + w
+                out_ ~= Op.global_get;
+                leb128u(out_, emitter.spGlobal);
+                out_ ~= Op.i32_const;
+                leb128s(out_, valSize - w);
+                out_ ~= Op.i32_sub;
+                // src = tempLocalA + w
+                out_ ~= Op.local_get;
+                leb128u(out_, tempLocalA);
+                if (w > 0) {
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, w);
+                    out_ ~= Op.i32_add;
+                }
+                out_ ~= Op.i32_load;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+                // store
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+            }
         } else {
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.spGlobal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, valSize);
+            out_ ~= Op.i32_sub;
+            emitExpression(out_, value);
+            if (isFloat) {
+                out_ ~= Op.f64_store;
+                out_ ~= cast(ubyte)0x03;  // alignment log2(8)
+                leb128u(out_, 0);
+            } else {
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+            }
         }
 
         // Check if length >= capacity
@@ -2833,50 +2865,125 @@ class FuncContext {
         leb128u(out_, 1);
 
         // newBuffer[i] = oldPtr[i]
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, bufOff);
-        out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, ctrOff);
-        out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceInfo.elementSize);
-        out_ ~= Op.i32_mul;
-        out_ ~= Op.i32_add;
+        if (isAggregate) {
+            // Compute dest address: newBuffer + i * elementSize → tempLocalA
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.spGlobal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, bufOff);
+            out_ ~= Op.i32_sub;
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.spGlobal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, ctrOff);
+            out_ ~= Op.i32_sub;
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            out_ ~= Op.i32_const;
+            leb128s(out_, elementSize);
+            out_ ~= Op.i32_mul;
+            out_ ~= Op.i32_add;
+            out_ ~= Op.local_set;
+            leb128u(out_, tempLocalA);
 
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr);
-        out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, ctrOff);
-        out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceInfo.elementSize);
-        out_ ~= Op.i32_mul;
-        out_ ~= Op.i32_add;
-        emitLoadForSize(out_, sliceInfo.elementSize, isFloat);
+            // Compute source address: oldPtr + i * elementSize → tempLocalB
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, sliceAddr);
+            out_ ~= Op.i32_add;
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.spGlobal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, ctrOff);
+            out_ ~= Op.i32_sub;
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            out_ ~= Op.i32_const;
+            leb128s(out_, elementSize);
+            out_ ~= Op.i32_mul;
+            out_ ~= Op.i32_add;
+            out_ ~= Op.local_set;
+            leb128u(out_, tempLocalB);
 
-        emitStoreForSize(out_, sliceInfo.elementSize, isFloat);
+            // Word-by-word copy
+            for (uint w = 0; w < elementSize; w += 4) {
+                out_ ~= Op.local_get;
+                leb128u(out_, tempLocalA);
+                if (w > 0) {
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, w);
+                    out_ ~= Op.i32_add;
+                }
+                out_ ~= Op.local_get;
+                leb128u(out_, tempLocalB);
+                if (w > 0) {
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, w);
+                    out_ ~= Op.i32_add;
+                }
+                out_ ~= Op.i32_load;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+            }
+        } else {
+            // Scalar copy: dest address on stack, load source, store
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.spGlobal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, bufOff);
+            out_ ~= Op.i32_sub;
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.spGlobal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, ctrOff);
+            out_ ~= Op.i32_sub;
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            out_ ~= Op.i32_const;
+            leb128s(out_, elementSize);
+            out_ ~= Op.i32_mul;
+            out_ ~= Op.i32_add;
+
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, sliceAddr);
+            out_ ~= Op.i32_add;
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.spGlobal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, ctrOff);
+            out_ ~= Op.i32_sub;
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            out_ ~= Op.i32_const;
+            leb128s(out_, elementSize);
+            out_ ~= Op.i32_mul;
+            out_ ~= Op.i32_add;
+            emitLoadForSize(out_, elementSize, isFloat);
+
+            emitStoreForSize(out_, elementSize, isFloat);
+        }
 
         // i++
         out_ ~= Op.global_get;
@@ -2943,43 +3050,95 @@ class FuncContext {
         out_ ~= Op.end;  // end if (need grow)
 
         // Store value at ptr[length]
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr);
-        out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);
-        out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceInfo.elementSize);
-        out_ ~= Op.i32_mul;
-        out_ ~= Op.i32_add;
-
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, valSize);
-        out_ ~= Op.i32_sub;
-        if (isFloat) {
-            out_ ~= Op.f64_load;
-            out_ ~= cast(ubyte)0x03;
-            leb128u(out_, 0);
-        } else {
+        if (isAggregate) {
+            // Compute dest address: ptr + length * elementSize → tempLocalA
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, sliceAddr);
+            out_ ~= Op.i32_add;
             out_ ~= Op.i32_load;
             out_ ~= cast(ubyte)0x02;
             leb128u(out_, 0);
-        }
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);
+            out_ ~= Op.i32_add;
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            out_ ~= Op.i32_const;
+            leb128s(out_, elementSize);
+            out_ ~= Op.i32_mul;
+            out_ ~= Op.i32_add;
+            out_ ~= Op.local_set;
+            leb128u(out_, tempLocalA);
 
-        emitStoreForSize(out_, sliceInfo.elementSize, isFloat);
+            // Word-by-word copy from scratch area to destination
+            for (uint w = 0; w < elementSize; w += 4) {
+                // dest word
+                out_ ~= Op.local_get;
+                leb128u(out_, tempLocalA);
+                if (w > 0) {
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, w);
+                    out_ ~= Op.i32_add;
+                }
+                // source word from scratch
+                out_ ~= Op.global_get;
+                leb128u(out_, emitter.spGlobal);
+                out_ ~= Op.i32_const;
+                leb128s(out_, valSize - w);
+                out_ ~= Op.i32_sub;
+                out_ ~= Op.i32_load;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+                // store
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+            }
+        } else {
+            // Scalar: compute dest, load from scratch, store
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, sliceAddr);
+            out_ ~= Op.i32_add;
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);
+            out_ ~= Op.i32_add;
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            out_ ~= Op.i32_const;
+            leb128s(out_, elementSize);
+            out_ ~= Op.i32_mul;
+            out_ ~= Op.i32_add;
+
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.spGlobal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, valSize);
+            out_ ~= Op.i32_sub;
+            if (isFloat) {
+                out_ ~= Op.f64_load;
+                out_ ~= cast(ubyte)0x03;
+                leb128u(out_, 0);
+            } else {
+                out_ ~= Op.i32_load;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+            }
+
+            emitStoreForSize(out_, elementSize, isFloat);
+        }
         
         // Increment length
         out_ ~= Op.local_get;

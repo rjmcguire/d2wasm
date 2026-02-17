@@ -101,6 +101,15 @@ class NativeBackend : Backend {
     override string name() { return "native"; }
 }
 
+/// Compute element size for a type in native target context.
+/// Dynamic array elements are slice structs (NativeSliceLayout.sizeof).
+private uint nativeElementSize(Type elemType) {
+    if (auto at = cast(ArrayType)elemType)
+        if (!at.isStaticArray) return NativeSliceLayout.sizeof;
+    auto s = elemType.size();
+    return s == 0 ? 4 : cast(uint)s;
+}
+
 /**
  * Native compiled function - executes ARM64 code directly
  */
@@ -144,11 +153,50 @@ class NativeCompiledFunction : CompiledFunction {
             return 4;
         }
     }
+    /// Stack-style temporary offset allocator for expression evaluation scratch space.
+    /// All allocations are 8-byte aligned. Supports save/restore for LIFO batch deallocation.
+    private struct TempAllocator {
+        private size_t base;      // absolute stack offset where temp zone starts
+        private size_t watermark; // current allocation point (bytes from base)
+        private size_t capacity;  // total bytes available
+
+        alias Mark = size_t;
+
+        void initialize(size_t baseOffset, size_t cap) {
+            base = baseOffset;
+            watermark = 0;
+            capacity = cap;
+        }
+
+        /// Allocate `nbytes` of scratch space (8-byte aligned). Returns absolute stack offset.
+        size_t alloc(size_t nbytes) {
+            import std.conv : to;
+            size_t aligned = (watermark + 7) & ~cast(size_t)7;
+            size_t allocSize = (nbytes + 7) & ~cast(size_t)7;
+            assert(aligned + allocSize <= capacity,
+                "TempAllocator overflow: need " ~ (aligned + allocSize).to!string ~
+                " bytes, capacity " ~ capacity.to!string);
+            watermark = aligned + allocSize;
+            return base + aligned;
+        }
+
+        /// Save current watermark for later restore.
+        Mark save() { return watermark; }
+
+        /// Restore watermark to a previously saved position.
+        void restore(Mark m) {
+            assert(m <= watermark, "TempAllocator: restoring to future position");
+            watermark = m;
+        }
+
+        /// Base offset of the temp zone (for frame overflow asserts).
+        size_t tempBase() const { return base; }
+    }
+
     private NativeLocalInfo[string] localVars;
     private size_t nextLocalOffset;
     private size_t totalLocalBytes;
-    private size_t tempSlot;             // stack offset for expression temporaries
-    private uint tempSlotDepth;          // nesting depth for temp slot usage (count, not bytes)
+    private TempAllocator temps;
 
     // Large return tracking (hidden result pointer pattern)
     private bool currentFunctionHasHiddenResult;
@@ -416,8 +464,7 @@ class NativeCompiledFunction : CompiledFunction {
                 } else {
                     // Dynamic array (slice) param
                     nli.kind = VarKind.slice;
-                    nli.sliceElemSize = cast(uint)arrayType.elementType.size();
-                    if (nli.sliceElemSize == 0) nli.sliceElemSize = 4;
+                    nli.sliceElemSize = nativeElementSize(arrayType.elementType);
                     paramSize = NativeSliceLayout.sizeof;
                 }
             }
@@ -428,12 +475,13 @@ class NativeCompiledFunction : CompiledFunction {
         // Count bytes needed for locals in the body
         size_t bodyLocalBytes = countLocalBytesInStatement(func.body_);
 
-        // Reserve extra space for expression temporaries
-        // Need 40 bytes for slice append temps: element(4) + newCap(4) + newPtr(8) + loopIdx(4) + loopVal(4) + padding
-        // Plus space for struct construction temps (at tempSlot + 16 onwards)
+        // Reserve temp zone for expression evaluation scratch space.
+        // All temp offsets are managed by `temps` allocator (no magic arithmetic).
         size_t tempSlotOffset = nextLocalOffset + bodyLocalBytes;
-        tempSlot = (tempSlotOffset + 7) & ~7;  // 8-byte align for pointer-safe scratch
-        size_t totalNeeded = tempSlotOffset + 64;  // 64 bytes for temps (struct construction + slice append)
+        size_t tempBase = (tempSlotOffset + 7) & ~cast(size_t)7;
+        enum TEMP_CAPACITY = 128;  // 8-byte-aligned slots; covers slice append (5x8=40), struct construction, expression nesting
+        temps.initialize(tempBase, TEMP_CAPACITY);
+        size_t totalNeeded = tempBase + TEMP_CAPACITY;
         totalLocalBytes = (totalNeeded + 15) & ~15;  // 16-byte aligned
         
         // Create epilogue label for return statements
@@ -723,14 +771,13 @@ class NativeCompiledFunction : CompiledFunction {
                         returnSize = currentFunctionReturnArrayBytes;
 
                     if (returnSize > 0) {
-                        compileExpression(ret.value);  // x0 = source address
+                        // Allocate srcTempSlot BEFORE compileExpression so that
+                        // struct construction (which also uses temps) gets a
+                        // non-overlapping offset.
+                        auto returnMark = temps.save();
+                        size_t srcTempSlot = temps.alloc(8);
 
-                        // Allocate srcTempSlot AFTER compileExpression —
-                        // expression temps (e.g., standalone SliceExpression)
-                        // may have advanced nextLocalOffset past tempSlot.
-                        size_t srcTempSlot = (nextLocalOffset + 7) & ~7;
-                        assert(srcTempSlot + 8 <= totalLocalBytes,
-                            "srcTempSlot overflows frame");
+                        compileExpression(ret.value);  // x0 = source address
                         gen.emitStorePtr(srcTempSlot);  // Save 64-bit ptr
 
                         for (size_t off = 0; off < returnSize; off += 4) {
@@ -741,6 +788,8 @@ class NativeCompiledFunction : CompiledFunction {
                             gen.emitLoadPtr(currentFunctionResultPtrOffset);  // x0 = dest ptr
                             gen.emitStoreToPointerFromX9(off);   // *(dest + off) = x9
                         }
+
+                        temps.restore(returnMark);
                     }
                 } else {
                     compileExpression(ret.value);
@@ -801,8 +850,7 @@ class NativeCompiledFunction : CompiledFunction {
                 nli.kind = VarKind.slice;
                 if (auto at = cast(ArrayType)varDecl.type) {
                     nli.elementType = at.elementType;
-                    nli.sliceElemSize = cast(uint)at.elementType.size();
-                    if (nli.sliceElemSize == 0) nli.sliceElemSize = 4;
+                    nli.sliceElemSize = nativeElementSize(at.elementType);
                 } else {
                     nli.sliceElemSize = 4;
                 }
@@ -1110,8 +1158,8 @@ class NativeCompiledFunction : CompiledFunction {
             }
             
             nextLocalOffset += varSize;
-            assert(nextLocalOffset <= tempSlot,
-                "Frame overflow in var decl: nextLocalOffset exceeds tempSlot");
+            assert(nextLocalOffset <= temps.tempBase(),
+                "Frame overflow in var decl: nextLocalOffset exceeds temp zone");
         } else if (auto ifStmt = cast(IfStatement)stmt) {
             // Compile: if (cond) { then } else { else }
             auto elseLabel = gen.newLabel();
@@ -1307,8 +1355,8 @@ class NativeCompiledFunction : CompiledFunction {
                 string strVal = lit.value.get!string();
                 size_t tempOffset = (nextLocalOffset + 7) & ~7;  // 8-byte align
                 nextLocalOffset = tempOffset + NativeSliceLayout.sizeof;
-                assert(nextLocalOffset <= tempSlot,
-                    "Frame overflow in string literal: nextLocalOffset exceeds tempSlot");
+                assert(nextLocalOffset <= temps.tempBase(),
+                    "Frame overflow in string literal: nextLocalOffset exceeds temp zone");
                 compileStringLiteralInit(tempOffset, strVal);
                 gen.emitStackAddress(tempOffset);
             } else if (lit.value.type == typeid(double)) {
@@ -1369,16 +1417,14 @@ class NativeCompiledFunction : CompiledFunction {
             if (isF64Expression(binOp.left)) {
                 // Evaluate right → d0, save to temp
                 compileExpression(binOp.right);
-                size_t myTemp = (tempSlot + 16 + (tempSlotDepth * 8) + 7) & ~cast(size_t)7;
-                assert(myTemp % 8 == 0, "f64 binary temp not 8-byte aligned");
-                assert(myTemp + 8 <= totalLocalBytes, "f64 binary temp exceeds frame");
-                tempSlotDepth++;
+                auto mark = temps.save();
+                size_t myTemp = temps.alloc(8);
                 gen.emitStoreLocalF64(myTemp);
                 // Evaluate left → d0
                 compileExpression(binOp.left);
                 // Load right into d1 (does not clobber d0)
                 gen.emitLoadLocalF64ToD1(myTemp);
-                tempSlotDepth--;
+                temps.restore(mark);
                 // Emit f64 operation
                 switch (binOp.operator) {
                     case BinaryExpression.Operator.Add: gen.emit(stencil_add_f64); break;
@@ -1408,21 +1454,20 @@ class NativeCompiledFunction : CompiledFunction {
 
             if (leftMightClobber) {
                 // Save right result to temp slot (function calls clobber x0-x7)
-                // Use depth-aware temp slot; +16 reserves first 16 bytes for inline push/pop saves
-                size_t myTempSlot = tempSlot + 16 + (tempSlotDepth * 8);
-                tempSlotDepth++;
-                gen.emitStoreLocal32(myTempSlot);  // store w0 to temp slot (32-bit)
+                auto mark = temps.save();
+                size_t myTempSlot = temps.alloc(8);
+                gen.emitStoreLocal32(myTempSlot);
                 // Compile left operand (into x0)
                 compileExpression(binOp.left);
-                tempSlotDepth--;
                 // Now x0 = left result
                 // Save left to x8 (safe since no more calls)
                 gen.emitMoveX0ToX8();  // x8 = left
                 // Load right from temp slot
-                gen.emitLoadLocal32(myTempSlot);  // x0 = right (from temp slot)
+                gen.emitLoadLocal32(myTempSlot);  // x0 = right
                 gen.emitMoveX0ToX1();  // x1 = right
                 // Restore left from x8
                 gen.emitMoveX8ToX0();  // x0 = left
+                temps.restore(mark);
             } else {
                 gen.emitMoveX0ToX1();  // Move to x1
                 // Compile left operand (into x0)
@@ -1713,12 +1758,11 @@ class NativeCompiledFunction : CompiledFunction {
                     if (hasNestedCalls && call.arguments.length > 1) {
                         // Save arguments to temp slots, then load into registers
                         // This prevents register clobbering from nested calls
-                        // Use 64-bit store/load — pointer args (slice, struct) need full width
-                        size_t argBase = (tempSlot + 7) & ~7;  // 8-byte align
+                        auto mark = temps.save();
                         size_t[] argSlots;
                         foreach (i, arg; call.arguments) {
                             compileExpression(arg);
-                            size_t slot = argBase + (i * 8);
+                            size_t slot = temps.alloc(8);
                             gen.emitStorePtr(slot);
                             argSlots ~= slot;
                         }
@@ -1734,6 +1778,7 @@ class NativeCompiledFunction : CompiledFunction {
                                 default: assert(0, "argument register > 3");
                             }
                         }
+                        temps.restore(mark);
                     } else {
                         // No nested calls - use the faster direct approach
                         // Compile arguments in reverse order into their target registers
@@ -1861,8 +1906,8 @@ class NativeCompiledFunction : CompiledFunction {
             nextLocalOffset += dataSize;
             size_t sliceOffset = (nextLocalOffset + 7) & ~7;  // 8-byte align for 64-bit ptr field
             nextLocalOffset = sliceOffset + sliceSize;
-            assert(nextLocalOffset <= tempSlot,
-                "Frame overflow in array literal: nextLocalOffset exceeds tempSlot");
+            assert(nextLocalOffset <= temps.tempBase(),
+                "Frame overflow in array literal: nextLocalOffset exceeds temp zone");
 
             // Initialize data elements
             foreach (i, elem; arrLit.elements) {
@@ -2007,8 +2052,8 @@ class NativeCompiledFunction : CompiledFunction {
             uint elemSize = info.elemSize;
             size_t tempOffset = (nextLocalOffset + 7) & ~7;  // 8-byte align for 64-bit ptr store
             nextLocalOffset = tempOffset + NativeSliceLayout.sizeof;
-            assert(nextLocalOffset <= tempSlot,
-                "Frame overflow in slice expression: nextLocalOffset exceeds tempSlot");
+            assert(nextLocalOffset <= temps.tempBase(),
+                "Frame overflow in slice expression: nextLocalOffset exceeds temp zone");
 
             // Compute new ptr = base + start * elemSize
             if (info.isSlice) {
@@ -2119,9 +2164,10 @@ class NativeCompiledFunction : CompiledFunction {
         final switch (info.kind) {
             case VarKind.staticArray:
                 if (es > 4) {
-                    // Aggregate element: save 64-bit addresses to 8-byte-aligned temp slots
-                    size_t dstTemp = (tempSlot + 24 + 7) & ~cast(size_t)7;
-                    size_t srcTemp = dstTemp + 8;
+                    // Aggregate element: save 64-bit addresses to temp slots
+                    auto mark = temps.save();
+                    size_t dstTemp = temps.alloc(8);
+                    size_t srcTemp = temps.alloc(8);
                     compileExpression(indexExpr.index);  // x0 = index
                     gen.emitMoveX0ToX1();
                     gen.emitImm32(stencil_load_imm32, es);
@@ -2140,6 +2186,7 @@ class NativeCompiledFunction : CompiledFunction {
                         gen.emitLoadPtr(dstTemp);        // x0 = dst (64-bit ptr)
                         gen.emitStoreToPointer(off);       // *(dst + off) = x1
                     }
+                    temps.restore(mark);
                     return;
                 }
                 // Scalar: constant index optimization
@@ -2166,9 +2213,10 @@ class NativeCompiledFunction : CompiledFunction {
 
             case VarKind.slice:
                 if (es > 4) {
-                    // Aggregate element: save 64-bit addresses to 8-byte-aligned temp slots
-                    size_t dstTemp = (tempSlot + 24 + 7) & ~cast(size_t)7;
-                    size_t srcTemp = dstTemp + 8;
+                    // Aggregate element: save 64-bit addresses to temp slots
+                    auto mark = temps.save();
+                    size_t dstTemp = temps.alloc(8);
+                    size_t srcTemp = temps.alloc(8);
                     compileExpression(indexExpr.index);  // x0 = index
                     gen.emitMoveX0ToX1();
                     gen.emitImm32(stencil_load_imm32, es);
@@ -2186,6 +2234,7 @@ class NativeCompiledFunction : CompiledFunction {
                         gen.emitLoadPtr(dstTemp);
                         gen.emitStoreToPointer(off);
                     }
+                    temps.restore(mark);
                     return;
                 }
                 // Scalar: store single value
@@ -2329,16 +2378,17 @@ class NativeCompiledFunction : CompiledFunction {
 
         if (hasNestedCalls && args.length > 1) {
             // Save arguments to temp slots, then load into registers
+            auto mark = temps.save();
             size_t[] argSlots;
             foreach (i, arg; args) {
                 compileExpression(arg);
-                size_t slot = tempSlot + (i * 4);
-                gen.emitStoreLocal32(slot);
+                size_t slot = temps.alloc(8);
+                gen.emitStorePtr(slot);
                 argSlots ~= slot;
             }
             // Load from temp slots into registers (reverse order to not clobber)
             for (long i = cast(long)argSlots.length - 1; i >= 0; i--) {
-                gen.emitLoadLocal32(argSlots[cast(size_t)i]);
+                gen.emitLoadPtr(argSlots[cast(size_t)i]);
                 switch (cast(int)i + 1 + arenaShift) {
                     case 1: gen.emitMoveX0ToX1(); break;
                     case 2: gen.emitMoveX0ToX2(); break;
@@ -2346,6 +2396,7 @@ class NativeCompiledFunction : CompiledFunction {
                     default: assert(0, "method argument register > 3");
                 }
             }
+            temps.restore(mark);
         } else {
             // No nested calls - direct register assignment (reverse order)
             for (long i = cast(long)args.length - 1; i >= 0; i--) {
@@ -2432,7 +2483,9 @@ class NativeCompiledFunction : CompiledFunction {
         if (framePtr is null) return;
         
         // Save x0 (might contain pointer — must use 64-bit store)
-        gen.emitStorePtr(tempSlot);
+        auto mark = temps.save();
+        size_t pushSave = temps.alloc(8);
+        gen.emitStorePtr(pushSave);
 
         // Load data section base into x10
         gen.emitLoadImm64(cast(ulong)dataSection.base);
@@ -2442,7 +2495,8 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitInlineStackPush(cast(uint)frameDataOffset);
 
         // Restore x0
-        gen.emitLoadPtr(tempSlot);
+        gen.emitLoadPtr(pushSave);
+        temps.restore(mark);
     }
     
     /**
@@ -2451,8 +2505,9 @@ class NativeCompiledFunction : CompiledFunction {
      */
     private void emitInlinePopCall() {
         // Save x0 (return value) to stack FIRST, before we clobber it
-        // Use tempSlot+8 to avoid conflicts with push save slot at tempSlot+0
-        gen.emitStorePtr(tempSlot + 8);
+        auto mark = temps.save();
+        size_t popSave = temps.alloc(8);
+        gen.emitStorePtr(popSave);
 
         // Load data section base into x10 (clobbers x0, but we saved it)
         gen.emitLoadImm64(cast(ulong)dataSection.base);
@@ -2462,7 +2517,8 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitInlineStackPop();
 
         // Restore x0 (return value) from stack
-        gen.emitLoadPtr(tempSlot + 8);
+        gen.emitLoadPtr(popSave);
+        temps.restore(mark);
     }
     
     /**
@@ -2477,25 +2533,23 @@ class NativeCompiledFunction : CompiledFunction {
         auto errorLabel = gen.newLabel();
         auto okLabel = gen.newLabel();
         
-        // Use depth-aware temp slot; +16 reserves first 16 bytes for inline push/pop saves
-        // Use 8-byte stride to avoid overlap with f64 temp slots at the same depth
-        size_t myTempSlot = tempSlot + 16 + (tempSlotDepth * 8);
-        tempSlotDepth++;
+        auto mark = temps.save();
+        size_t myTempSlot = temps.alloc(8);
 
         // Save index to temp (we need it after bounds check)
         gen.emitStoreLocal32(myTempSlot);
-        
+
         // Load length from slice (offset 8 = after 64-bit ptr)
         gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);  // x0 = length
         gen.emitMoveX0ToX1();  // x1 = length
-        
+
         // Reload index
         gen.emitLoadLocal32(myTempSlot);  // x0 = index
-        
+
         // Compare: if index < length (unsigned), OK; else error
         gen.emit(stencil_lt_u32);  // x0 = (index < length) ? 1 : 0
         gen.emitBranchIfNonZero(okLabel);  // branch if index < length
-        
+
         // Out of bounds - call trap with location
         ubyte* filePtr = dataSection.addString(fileName);
         ErrorLocData errData;
@@ -2504,19 +2558,19 @@ class NativeCompiledFunction : CompiledFunction {
         errData.line = line;
         errData.column = column;
         errData.errorKind = cast(uint)CTFEErrorKind.OutOfBounds;
-        
+
         ubyte* errLocPtr = dataSection.addData((cast(ubyte*)&errData)[0..ErrorLocData.sizeof]);
         gen.emitLoadImm64(cast(ulong)errLocPtr);
-        
+
         ulong trapSlot = hostFunctions.getFunctionSlotAddress("__ctfe_trap");
         ulong contextSlot = hostFunctions.getContextSlotAddress();
         gen.emitHostCall(trapSlot, contextSlot);
-        
+
         gen.bindLabel(okLabel);
         // Restore index to x0
         gen.emitLoadLocal32(myTempSlot);  // x0 = index
-        
-        tempSlotDepth--;
+
+        temps.restore(mark);
     }
     
     /**
@@ -2606,14 +2660,9 @@ class NativeCompiledFunction : CompiledFunction {
      * Compile struct construction: allocate space on stack, initialize fields
      */
     private void compileStructConstruction(StructDecl structDecl, Expression[] args) {
-        // Use temp slot area for struct (don't grow nextLocalOffset during emission)
-        // tempSlot + 16 onwards is available for struct construction temps
         size_t structSize = structDecl.structSize;
-        size_t structOffset = tempSlot + 16;  // After other temp slots
-        import std.format : format;
-        assert(structOffset + structSize <= totalLocalBytes,
-            format("Struct construction temp overflows frame: offset=%d size=%d frame=%d",
-                structOffset, structSize, totalLocalBytes));
+        auto mark = temps.save();
+        size_t structOffset = temps.alloc(structSize);
         assert(structDecl.fields.length > 0,
             "Struct '" ~ structDecl.name ~ "' has no fields");
         
@@ -2637,7 +2686,8 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitMoveX0ToX1();
         gen.emitImm32(stencil_load_imm32, cast(int)structOffset);
         gen.emit(stencil_add_i64);  // 64-bit ptr arithmetic
-        // Now x0 = pointer to struct
+        // Now x0 = pointer to struct (stack memory persists; caller copies before next alloc)
+        temps.restore(mark);
     }
     
     /**
@@ -2764,31 +2814,14 @@ class NativeCompiledFunction : CompiledFunction {
      * 5. Increment length
      */
     private void compileSliceAppend(size_t sliceOffset, Expression element, uint elemSize, bool isFloat = false) {
-        // Temp slots for intermediate values (use pre-allocated temp area)
-        // tempSlot is at the end of the frame, with 64 bytes reserved
-        // For f64 elements, we need 8-byte aligned slots for FP loads/stores
-        size_t tempElement, tempNewCap, tempNewPtr, tempLoopIdx, tempLoopVal;
-        if (isFloat) {
-            assert(elemSize == 8, "f64 slice append: elemSize must be 8, got " ~
-                   (cast(char)('0' + elemSize)) ~ "");
-            // All offsets 8-byte aligned for f64 compatibility
-            tempElement = (tempSlot + 7) & ~cast(size_t)7;  // 8 bytes for f64
-            tempNewCap  = tempElement + 8;                    // 4 bytes (i32), but 8-aligned
-            tempNewPtr  = tempNewCap + 8;                     // 8 bytes (ptr)
-            tempLoopIdx = tempNewPtr + 8;                     // 4 bytes (i32), but 8-aligned
-            tempLoopVal = tempLoopIdx + 8;                    // 8 bytes for f64
-            assert(tempElement % 8 == 0, "tempElement not 8-byte aligned");
-            assert(tempNewPtr % 8 == 0, "tempNewPtr not 8-byte aligned");
-            assert(tempLoopVal % 8 == 0, "tempLoopVal not 8-byte aligned");
-            assert(tempLoopVal + 8 <= totalLocalBytes,
-                   "f64 slice append temps exceed frame");
-        } else {
-            tempElement = tempSlot;            // element value (4 bytes, zero-extended)
-            tempNewCap  = tempSlot + 4;        // new capacity (4 bytes)
-            tempNewPtr  = tempSlot + 8;        // new buffer ptr (8 bytes, 64-bit)
-            tempLoopIdx = tempSlot + 16;       // copy loop index (4 bytes)
-            tempLoopVal = tempSlot + 20;       // temp for loaded value (4 bytes)
-        }
+        // Allocate temp slots — unified layout for both f64 and i32 paths.
+        // isFloat only controls which store/load instructions are used.
+        auto mark = temps.save();
+        size_t tempElement = temps.alloc(8);
+        size_t tempNewCap  = temps.alloc(8);
+        size_t tempNewPtr  = temps.alloc(8);
+        size_t tempLoopIdx = temps.alloc(8);
+        size_t tempLoopVal = temps.alloc(8);
 
         // 1. Evaluate element value, store to temp
         compileExpression(element);
@@ -2977,6 +3010,7 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emit(stencil_move_arg2_to_arg1);    // x1 = 1
         gen.emit(stencil_add_i32);              // x0 = length + 1
         gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);  // store new length
+        temps.restore(mark);
     }
     
     /**

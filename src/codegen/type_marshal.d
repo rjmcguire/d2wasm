@@ -203,7 +203,8 @@ struct TypeReader {
     }
 
     /// Compute the element size in bytes for a D type.
-    static uint elementSizeOf(Type elementType) {
+    /// Non-static: uses this.sliceSize for dynamic array element types.
+    uint elementSizeOf(Type elementType) {
         if (auto basic = cast(BasicType)elementType) {
             switch (basic.kind) {
                 case BasicType.Kind.Bool:
@@ -228,6 +229,10 @@ struct TypeReader {
         }
         if (auto sd = elementType.asStruct()) {
             return cast(uint)sd.aggregateSize_;
+        }
+        if (auto at = cast(ArrayType)elementType) {
+            if (!at.isStaticArray)
+                return sliceSize;  // dynamic array element = slice struct
         }
         return 4;  // default
     }
@@ -358,14 +363,18 @@ unittest {
     assert(nv.length == 3);
     assert(nv.capacity == 5);
 
-    // --- elementSizeOf ---
+    // --- elementSizeOf (instance method, uses target sliceSize) ---
     import ast.nodes : SourceLocation;
     auto loc = SourceLocation("test", 0, 0);
-    assert(TypeReader.elementSizeOf(new BasicType(loc, BasicType.Kind.Bool)) == 1);
-    assert(TypeReader.elementSizeOf(new BasicType(loc, BasicType.Kind.UInt8)) == 1);
-    assert(TypeReader.elementSizeOf(new BasicType(loc, BasicType.Kind.Int16)) == 2);
-    assert(TypeReader.elementSizeOf(new BasicType(loc, BasicType.Kind.Int32)) == 4);
-    assert(TypeReader.elementSizeOf(new BasicType(loc, BasicType.Kind.Float32)) == 4);
-    assert(TypeReader.elementSizeOf(new BasicType(loc, BasicType.Kind.Float64)) == 8);
-    assert(TypeReader.elementSizeOf(new BasicType(loc, BasicType.Kind.Int64)) == 8);
+    assert(wasm.elementSizeOf(new BasicType(loc, BasicType.Kind.Bool)) == 1);
+    assert(wasm.elementSizeOf(new BasicType(loc, BasicType.Kind.UInt8)) == 1);
+    assert(wasm.elementSizeOf(new BasicType(loc, BasicType.Kind.Int16)) == 2);
+    assert(wasm.elementSizeOf(new BasicType(loc, BasicType.Kind.Int32)) == 4);
+    assert(wasm.elementSizeOf(new BasicType(loc, BasicType.Kind.Float32)) == 4);
+    assert(wasm.elementSizeOf(new BasicType(loc, BasicType.Kind.Float64)) == 8);
+    assert(wasm.elementSizeOf(new BasicType(loc, BasicType.Kind.Int64)) == 8);
+    // Dynamic array element = slice struct sized by target
+    auto ubyteType = new BasicType(loc, BasicType.Kind.UInt8);
+    assert(wasm.elementSizeOf(new ArrayType(loc, ubyteType)) == WasmSliceLayout.sizeof);
+    assert(native.elementSizeOf(new ArrayType(loc, ubyteType)) == NativeSliceLayout.sizeof);
 }

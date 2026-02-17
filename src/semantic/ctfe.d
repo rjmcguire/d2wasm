@@ -17,6 +17,7 @@ import codegen.emitter;
 import codegen.wasm.types;
 import codegen.backend;
 import codegen.type_marshal;
+import codegen.target : WasmSliceLayout;
 import diagnostic.log : log;
 
 import std.stdio;
@@ -138,6 +139,8 @@ private uint getElementSize(Type elementType) {
         }
     }
     if (auto sd = elementType.asStruct()) return cast(uint)sd.aggregateSize_;
+    if (auto at = cast(ArrayType)elementType)
+        if (at.arraySize is null) return WasmSliceLayout.sizeof;
     return 4;  // default
 }
 
@@ -1035,7 +1038,7 @@ class CTFEEvaluator {
                 if (!result.success)
                     throw new CTFEError("CTFE execution error: " ~ result.error, callExpr.location);
                 auto slice = reader.readSlice(result.arrayBytes);
-                uint elemSize = TypeReader.elementSizeOf(arrType.elementType);
+                uint elemSize = reader.elementSizeOf(arrType.elementType);
                 ubyte[] rawData = cachedContext.readMemory(slice.dataPtr, slice.length * elemSize);
 
                 // Convert to long[] for backward compat with existing array manifest storage
