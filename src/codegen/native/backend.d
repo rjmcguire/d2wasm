@@ -1315,6 +1315,10 @@ class NativeCompiledFunction : CompiledFunction {
                 // Double literal: load 64-bit IEEE 754 bits into x0, then transfer to d0
                 double val = lit.value.get!double();
                 long bits = *cast(long*)&val;
+                // Verify round-trip: bits back to double should equal val
+                double check = *cast(double*)&bits;
+                assert(check == val || (check != check && val != val),  // NaN != NaN
+                       "double bit pattern round-trip failed");
                 gen.emitLoadImm64(cast(ulong)bits);
                 gen.emitMoveX0ToD0();
             } else {
@@ -1366,6 +1370,8 @@ class NativeCompiledFunction : CompiledFunction {
                 // Evaluate right → d0, save to temp
                 compileExpression(binOp.right);
                 size_t myTemp = (tempSlot + 16 + (tempSlotDepth * 8) + 7) & ~cast(size_t)7;
+                assert(myTemp % 8 == 0, "f64 binary temp not 8-byte aligned");
+                assert(myTemp + 8 <= totalLocalBytes, "f64 binary temp exceeds frame");
                 tempSlotDepth++;
                 gen.emitStoreLocalF64(myTemp);
                 // Evaluate left → d0
@@ -1403,7 +1409,7 @@ class NativeCompiledFunction : CompiledFunction {
             if (leftMightClobber) {
                 // Save right result to temp slot (function calls clobber x0-x7)
                 // Use depth-aware temp slot; +16 reserves first 16 bytes for inline push/pop saves
-                size_t myTempSlot = tempSlot + 16 + (tempSlotDepth * 4);
+                size_t myTempSlot = tempSlot + 16 + (tempSlotDepth * 8);
                 tempSlotDepth++;
                 gen.emitStoreLocal32(myTempSlot);  // store w0 to temp slot (32-bit)
                 // Compile left operand (into x0)
@@ -1923,6 +1929,10 @@ class NativeCompiledFunction : CompiledFunction {
                         case VarKind.slice:
                             // Dynamic array (slice): { ptr: i64, length: i32, capacity: i32 }
                             bool slIsFloat = isF64ElementType(info.elementType);
+                            assert(!slIsFloat || info.elemSize == 8,
+                                   "f64 slice must have elemSize 8");
+                            assert(info.offset % 8 == 0,
+                                   "slice offset not 8-byte aligned");
                             compileExpression(indexExpr.index);
                             // x0 = index
 
@@ -1969,6 +1979,11 @@ class NativeCompiledFunction : CompiledFunction {
                 bool targetIsInt = targetBt.kind != BasicType.Kind.Float64 &&
                                    targetBt.kind != BasicType.Kind.Float32;
                 if (targetIsInt && isF64Expression(castExpr.expression)) {
+                    assert(targetBt.kind == BasicType.Kind.Int32 ||
+                           targetBt.kind == BasicType.Kind.UInt32 ||
+                           targetBt.kind == BasicType.Kind.Int64 ||
+                           targetBt.kind == BasicType.Kind.UInt64,
+                           "f64→int cast: unexpected target type");
                     compileExpression(castExpr.expression);
                     gen.emit(stencil_f64_to_i32);  // FCVTZS w0, d0
                     return;
@@ -2463,9 +2478,10 @@ class NativeCompiledFunction : CompiledFunction {
         auto okLabel = gen.newLabel();
         
         // Use depth-aware temp slot; +16 reserves first 16 bytes for inline push/pop saves
-        size_t myTempSlot = tempSlot + 16 + (tempSlotDepth * 4);
+        // Use 8-byte stride to avoid overlap with f64 temp slots at the same depth
+        size_t myTempSlot = tempSlot + 16 + (tempSlotDepth * 8);
         tempSlotDepth++;
-        
+
         // Save index to temp (we need it after bounds check)
         gen.emitStoreLocal32(myTempSlot);
         
@@ -2753,12 +2769,19 @@ class NativeCompiledFunction : CompiledFunction {
         // For f64 elements, we need 8-byte aligned slots for FP loads/stores
         size_t tempElement, tempNewCap, tempNewPtr, tempLoopIdx, tempLoopVal;
         if (isFloat) {
+            assert(elemSize == 8, "f64 slice append: elemSize must be 8, got " ~
+                   (cast(char)('0' + elemSize)) ~ "");
             // All offsets 8-byte aligned for f64 compatibility
             tempElement = (tempSlot + 7) & ~cast(size_t)7;  // 8 bytes for f64
             tempNewCap  = tempElement + 8;                    // 4 bytes (i32), but 8-aligned
             tempNewPtr  = tempNewCap + 8;                     // 8 bytes (ptr)
             tempLoopIdx = tempNewPtr + 8;                     // 4 bytes (i32), but 8-aligned
             tempLoopVal = tempLoopIdx + 8;                    // 8 bytes for f64
+            assert(tempElement % 8 == 0, "tempElement not 8-byte aligned");
+            assert(tempNewPtr % 8 == 0, "tempNewPtr not 8-byte aligned");
+            assert(tempLoopVal % 8 == 0, "tempLoopVal not 8-byte aligned");
+            assert(tempLoopVal + 8 <= totalLocalBytes,
+                   "f64 slice append temps exceed frame");
         } else {
             tempElement = tempSlot;            // element value (4 bytes, zero-extended)
             tempNewCap  = tempSlot + 4;        // new capacity (4 bytes)
