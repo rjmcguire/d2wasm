@@ -1089,6 +1089,67 @@ class NativeCompiledFunction : CompiledFunction {
                         } else {
                             throw new Exception("Complex call target not supported for slice init");
                         }
+                    } else if (auto identInit = cast(IdentifierExpression)varDecl.initializer) {
+                        // Manifest constant initializer: string[] arr = MANIFEST;
+                        auto sym = symbolTable.lookupSymbol(identInit.name);
+                        if (sym && sym.isConstant) {
+                            if (auto manifest = cast(ManifestConstantDecl)sym.declaration) {
+                                if (!manifest.ctfeComplete)
+                                    symbolTable.ensureManifestEvaluated(manifest);
+                                if (manifest.isNestedArrayType) {
+                                    // Build nested array data in native data section
+                                    uint outerCount = cast(uint)manifest.ctfeNestedElements.length;
+                                    uint innerElemSize = manifest.ctfeInnerElementSize;
+
+                                    // Add each inner array's data to data section
+                                    ubyte*[] innerDataPtrs = new ubyte*[outerCount];
+                                    uint[] innerLens = new uint[outerCount];
+                                    foreach (i; 0 .. outerCount) {
+                                        ubyte[] innerBytes = manifest.ctfeNestedElements[i];
+                                        innerDataPtrs[i] = dataSection.addData(innerBytes);
+                                        innerLens[i] = innerElemSize > 0
+                                            ? cast(uint)innerBytes.length / innerElemSize
+                                            : cast(uint)innerBytes.length;
+                                    }
+
+                                    // Build inner slice structs in data section
+                                    ubyte[] innerStructsData = new ubyte[outerCount * NativeSliceLayout.sizeof];
+                                    foreach (i; 0 .. outerCount) {
+                                        size_t base = i * NativeSliceLayout.sizeof;
+                                        *cast(ulong*)&innerStructsData[base] = cast(ulong)innerDataPtrs[i];
+                                        *cast(uint*)&innerStructsData[base + NativeSliceLayout.LENGTH_OFFSET] = innerLens[i];
+                                        *cast(uint*)&innerStructsData[base + NativeSliceLayout.CAPACITY_OFFSET] = innerLens[i];
+                                    }
+                                    ubyte* innerStructsPtr = dataSection.addData(innerStructsData);
+
+                                    // Initialize local slice: ptr = innerStructsPtr, len = outerCount, cap = outerCount
+                                    gen.emitLoadImm64(cast(ulong)innerStructsPtr);
+                                    gen.emitStorePtr(nli.offset);
+                                    gen.emitImm32(stencil_load_imm32, cast(int)outerCount);
+                                    gen.emitStoreLocal32(nli.offset + NativeSliceLayout.LENGTH_OFFSET);
+                                    gen.emitImm32(stencil_load_imm32, cast(int)outerCount);
+                                    gen.emitStoreLocal32(nli.offset + NativeSliceLayout.CAPACITY_OFFSET);
+                                } else if (manifest.isArrayType) {
+                                    // Flat array manifest: build data in native data section
+                                    ubyte* dataPtr = dataSection.addData(manifest.ctfeArrayBytes);
+                                    uint elemSize = manifest.ctfeElementSize > 0 ? manifest.ctfeElementSize : 4;
+                                    uint elemCount = cast(uint)manifest.ctfeArrayBytes.length / elemSize;
+
+                                    gen.emitLoadImm64(cast(ulong)dataPtr);
+                                    gen.emitStorePtr(nli.offset);
+                                    gen.emitImm32(stencil_load_imm32, cast(int)elemCount);
+                                    gen.emitStoreLocal32(nli.offset + NativeSliceLayout.LENGTH_OFFSET);
+                                    gen.emitImm32(stencil_load_imm32, cast(int)elemCount);
+                                    gen.emitStoreLocal32(nli.offset + NativeSliceLayout.CAPACITY_OFFSET);
+                                } else {
+                                    throw new Exception("Unsupported manifest type for slice init: " ~ manifest.name);
+                                }
+                            } else {
+                                throw new Exception("Non-manifest constant used as slice initializer: " ~ identInit.name);
+                            }
+                        } else {
+                            throw new Exception("Unknown identifier for slice init: " ~ identInit.name);
+                        }
                     } else {
                         throw new Exception("Slice can only be initialized from array literal, string literal, slice, call, or import()");
                     }
@@ -1443,11 +1504,12 @@ class NativeCompiledFunction : CompiledFunction {
                 return;
             }
 
-            // Check if left operand might clobber x1 (function call, nested binary expr, or index expr)
-            // IndexExpression uses x1 internally for address calculation
+            // Check if left operand might clobber x1 (function call, nested binary expr, index expr,
+            // or member expr whose object evaluation uses x1 for address calculation)
             bool leftMightClobber = containsFunctionCall(binOp.left) ||
                                     cast(BinaryExpression)binOp.left !is null ||
-                                    cast(IndexExpression)binOp.left !is null;
+                                    cast(IndexExpression)binOp.left !is null ||
+                                    cast(MemberExpression)binOp.left !is null;
 
             // Compile right operand first (into x0)
             compileExpression(binOp.right);
