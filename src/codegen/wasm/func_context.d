@@ -2229,8 +2229,11 @@ class FuncContext {
                 out_ ~= Op.i32_mul;
                 out_ ~= Op.i32_add;
                 // Aggregate elements: leave address on stack (like struct variables)
-                if (info.elementSize <= 4)
-                    emitLoadForSize(out_, info.elementSize);
+                {
+                    bool isFloat = isF64ElementType(info.elementType);
+                    if (info.elementSize <= 4 || isFloat)
+                        emitLoadForSize(out_, info.elementSize, isFloat);
+                }
                 return;
             } else if (info.isSlice) {
                 // Load ptr from slice struct (offset 0), then add index * elemSize
@@ -2244,8 +2247,11 @@ class FuncContext {
                 out_ ~= Op.i32_mul;
                 out_ ~= Op.i32_add;
                 // Aggregate elements: leave address on stack (like struct variables)
-                if (info.elementSize <= 4)
-                    emitLoadForSize(out_, info.elementSize);
+                {
+                    bool isFloat = isF64ElementType(info.elementType);
+                    if (info.elementSize <= 4 || isFloat)
+                        emitLoadForSize(out_, info.elementSize, isFloat);
+                }
                 return;
             } else {
                 assert(0, "Cannot index " ~ arrayIdent.name ~ " (not an array type)");
@@ -2660,18 +2666,30 @@ class FuncContext {
     void emitSliceAppend(ref Appender!(ubyte[]) out_, string sliceName,
                          VarInfo* sliceInfo, Expression value) {
         int sliceAddr = sliceInfo.frameOffset;
-        
-        // Store value at SP-4 (we need it later)
+        bool isFloat = isF64ElementType(sliceInfo.elementType);
+        // SP scratch layout: value takes valSize bytes, then 3 i32 temporaries
+        int valSize = isFloat ? 8 : 4;
+        int capOff = valSize + 4;   // newCapacity offset from SP
+        int bufOff = valSize + 8;   // newBuffer offset from SP
+        int ctrOff = valSize + 12;  // loop counter offset from SP
+
+        // Store value at SP-valSize (we need it later)
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        leb128s(out_, valSize);
         out_ ~= Op.i32_sub;
         emitExpression(out_, value);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        
+        if (isFloat) {
+            out_ ~= Op.f64_store;
+            out_ ~= cast(ubyte)0x03;  // alignment log2(8)
+            leb128u(out_, 0);
+        } else {
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+        }
+
         // Check if length >= capacity
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
@@ -2681,7 +2699,7 @@ class FuncContext {
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);
-        
+
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
@@ -2690,21 +2708,21 @@ class FuncContext {
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);
-        
+
         out_ ~= Op.i32_ge_u;  // length >= capacity
-        
+
         out_ ~= Op.if_;
         out_ ~= cast(ubyte)0x40;
-        
+
         // Need to grow: newCapacity = max(capacity * 2, 4)
-        // Store newCapacity at SP-8
+        // Store newCapacity at SP-capOff
         // First push the destination address
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
-        leb128s(out_, 8);
+        leb128s(out_, capOff);
         out_ ~= Op.i32_sub;
-        
+
         // Calculate capacity * 2
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
@@ -2717,11 +2735,11 @@ class FuncContext {
         out_ ~= Op.i32_const;
         leb128s(out_, 2);
         out_ ~= Op.i32_mul;
-        
+
         // Compare with 4, take max
         out_ ~= Op.i32_const;
         leb128s(out_, 4);
-        
+
         // if (capacity*2 < 4) use 4 else use capacity*2
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
@@ -2737,18 +2755,18 @@ class FuncContext {
         out_ ~= Op.i32_const;
         leb128s(out_, 4);
         emitUnsignedMaxSelect(out_);  // max(capacity*2, 4)
-        
-        // Now stack has [SP-8, newCapacity], store
+
+        // Now stack has [SP-capOff, newCapacity], store
         out_ ~= Op.i32_store;
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);
-        
+
         // Allocate new buffer via arena
         emitArenaPointer(out_);
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
-        leb128s(out_, 8);
+        leb128s(out_, capOff);
         out_ ~= Op.i32_sub;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2760,44 +2778,44 @@ class FuncContext {
         out_ ~= Op.call;
         leb128u(out_, allocIdx);
 
-        // Store newBuffer at SP-12
+        // Store newBuffer at SP-bufOff
         // Save return value to temp local first (i32.store needs [addr, val] order)
         out_ ~= Op.local_set;
         leb128u(out_, tempLocalA);
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
-        leb128s(out_, 12);
+        leb128s(out_, bufOff);
         out_ ~= Op.i32_sub;
         out_ ~= Op.local_get;
         leb128u(out_, tempLocalA);
-        // Stack: [SP-12, newBuffer]
+        // Stack: [SP-bufOff, newBuffer]
         out_ ~= Op.i32_store;
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);
-        
-        // Copy loop
+
+        // Copy loop: i = 0
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
-        leb128s(out_, 16);
+        leb128s(out_, ctrOff);
         out_ ~= Op.i32_sub;
         out_ ~= Op.i32_const;
         leb128s(out_, 0);
         out_ ~= Op.i32_store;
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);
-        
+
         out_ ~= Op.block;
         out_ ~= cast(ubyte)0x40;
         out_ ~= Op.loop;
         out_ ~= cast(ubyte)0x40;
-        
+
         // if i >= length break
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
-        leb128s(out_, 16);
+        leb128s(out_, ctrOff);
         out_ ~= Op.i32_sub;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2813,12 +2831,12 @@ class FuncContext {
         out_ ~= Op.i32_ge_u;
         out_ ~= Op.br_if;
         leb128u(out_, 1);
-        
+
         // newBuffer[i] = oldPtr[i]
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
-        leb128s(out_, 12);
+        leb128s(out_, bufOff);
         out_ ~= Op.i32_sub;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2826,7 +2844,7 @@ class FuncContext {
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
-        leb128s(out_, 16);
+        leb128s(out_, ctrOff);
         out_ ~= Op.i32_sub;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2847,7 +2865,7 @@ class FuncContext {
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
-        leb128s(out_, 16);
+        leb128s(out_, ctrOff);
         out_ ~= Op.i32_sub;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2856,20 +2874,20 @@ class FuncContext {
         leb128s(out_, sliceInfo.elementSize);
         out_ ~= Op.i32_mul;
         out_ ~= Op.i32_add;
-        emitLoadForSize(out_, sliceInfo.elementSize);
+        emitLoadForSize(out_, sliceInfo.elementSize, isFloat);
 
-        emitStoreForSize(out_, sliceInfo.elementSize);
-        
+        emitStoreForSize(out_, sliceInfo.elementSize, isFloat);
+
         // i++
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
-        leb128s(out_, 16);
+        leb128s(out_, ctrOff);
         out_ ~= Op.i32_sub;
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
-        leb128s(out_, 16);
+        leb128s(out_, ctrOff);
         out_ ~= Op.i32_sub;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2880,12 +2898,12 @@ class FuncContext {
         out_ ~= Op.i32_store;
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);
-        
+
         out_ ~= Op.br;
         leb128u(out_, 0);
         out_ ~= Op.end;
         out_ ~= Op.end;
-        
+
         // Update ptr
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
@@ -2895,7 +2913,7 @@ class FuncContext {
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
-        leb128s(out_, 12);
+        leb128s(out_, bufOff);
         out_ ~= Op.i32_sub;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2903,7 +2921,7 @@ class FuncContext {
         out_ ~= Op.i32_store;
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);
-        
+
         // Update capacity
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
@@ -2913,7 +2931,7 @@ class FuncContext {
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
-        leb128s(out_, 8);
+        leb128s(out_, capOff);
         out_ ~= Op.i32_sub;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2921,9 +2939,9 @@ class FuncContext {
         out_ ~= Op.i32_store;
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);
-        
+
         out_ ~= Op.end;  // end if (need grow)
-        
+
         // Store value at ptr[length]
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
@@ -2949,13 +2967,19 @@ class FuncContext {
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        leb128s(out_, valSize);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        if (isFloat) {
+            out_ ~= Op.f64_load;
+            out_ ~= cast(ubyte)0x03;
+            leb128u(out_, 0);
+        } else {
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+        }
 
-        emitStoreForSize(out_, sliceInfo.elementSize);
+        emitStoreForSize(out_, sliceInfo.elementSize, isFloat);
         
         // Increment length
         out_ ~= Op.local_get;
@@ -2996,7 +3020,18 @@ class FuncContext {
             emitClassToInterfaceCast(out_, expr);
             return;
         }
-        
+
+        // Check for f64→i32 truncation (e.g., cast(int)(doubleExpr))
+        if (auto targetBt = cast(BasicType)expr.targetType) {
+            bool targetIsInt = targetBt.kind != BasicType.Kind.Float64 &&
+                               targetBt.kind != BasicType.Kind.Float32;
+            if (targetIsInt && isF64Expression(expr.expression)) {
+                emitExpression(out_, expr.expression);
+                out_ ~= Op.i32_trunc_f64_s;
+                return;
+            }
+        }
+
         // Emit the expression being cast
         emitExpression(out_, expr.expression);
         // For now, most casts are no-ops at WASM level (everything is i32)
@@ -3364,11 +3399,44 @@ class FuncContext {
         out_ ~= Op.select;      // returns val1 if val1 >= val2, else val2
     }
 
+    /// Check if an element type is a 64-bit floating point.
+    private static bool isF64ElementType(Type t) {
+        if (auto bt = cast(BasicType)t)
+            return bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32;
+        return false;
+    }
+
+    /// Check if an expression produces f64 on the WASM stack.
+    private bool isF64Expression(Expression expr) {
+        if (auto lit = cast(LiteralExpression)expr)
+            return lit.value.type == typeid(double);
+        if (auto idx = cast(IndexExpression)expr) {
+            if (auto ident = cast(IdentifierExpression)idx.array)
+                if (auto info = resolveVar(ident.resolvedLocalId, ident.name))
+                    return isF64ElementType(info.elementType);
+            return false;
+        }
+        if (auto bin = cast(BinaryExpression)expr)
+            return isF64Expression(bin.left);
+        if (auto unary = cast(UnaryExpression)expr)
+            return isF64Expression(unary.operand);
+        if (auto castExpr = cast(CastExpression)expr) {
+            if (auto bt = cast(BasicType)castExpr.targetType)
+                return bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32;
+            return false;
+        }
+        return false;
+    }
+
     /// Emit a load instruction appropriate for the given element size.
-    void emitLoadForSize(ref Appender!(ubyte[]) out_, uint elemSize) {
+    void emitLoadForSize(ref Appender!(ubyte[]) out_, uint elemSize, bool isFloat = false) {
         if (elemSize == 1) {
             out_ ~= Op.i32_load8_u;
             out_ ~= cast(ubyte)0x00;
+            leb128u(out_, 0);
+        } else if (elemSize == 8 && isFloat) {
+            out_ ~= Op.f64_load;
+            out_ ~= cast(ubyte)0x03;  // alignment log2(8)
             leb128u(out_, 0);
         } else {
             out_ ~= Op.i32_load;
@@ -3378,10 +3446,14 @@ class FuncContext {
     }
 
     /// Emit a store instruction appropriate for the given element size.
-    void emitStoreForSize(ref Appender!(ubyte[]) out_, uint elemSize) {
+    void emitStoreForSize(ref Appender!(ubyte[]) out_, uint elemSize, bool isFloat = false) {
         if (elemSize == 1) {
             out_ ~= Op.i32_store8;
             out_ ~= cast(ubyte)0x00;
+            leb128u(out_, 0);
+        } else if (elemSize == 8 && isFloat) {
+            out_ ~= Op.f64_store;
+            out_ ~= cast(ubyte)0x03;  // alignment log2(8)
             leb128u(out_, 0);
         } else {
             out_ ~= Op.i32_store;
@@ -3571,9 +3643,25 @@ class FuncContext {
         emitExpression(out_, expr.left);
         emitExpression(out_, expr.right);
 
-        // Emit operator (assuming i32 for now)
+        // Emit operator — dispatch f64 ops when operands are float
         Op op;
-        final switch (expr.operator) {
+        bool isFloat = isF64Expression(expr.left);
+        if (isFloat) {
+            switch (expr.operator) {
+                case BinaryExpression.Operator.Add: op = Op.f64_add; break;
+                case BinaryExpression.Operator.Subtract: op = Op.f64_sub; break;
+                case BinaryExpression.Operator.Multiply: op = Op.f64_mul; break;
+                case BinaryExpression.Operator.Divide: op = Op.f64_div; break;
+                case BinaryExpression.Operator.Equal: op = Op.f64_eq; break;
+                case BinaryExpression.Operator.NotEqual: op = Op.f64_ne; break;
+                case BinaryExpression.Operator.Less: op = Op.f64_lt; break;
+                case BinaryExpression.Operator.LessEqual: op = Op.f64_le; break;
+                case BinaryExpression.Operator.Greater: op = Op.f64_gt; break;
+                case BinaryExpression.Operator.GreaterEqual: op = Op.f64_ge; break;
+                default:
+                    assert(0, "Float binary operator not supported: " ~ to!string(expr.operator));
+            }
+        } else final switch (expr.operator) {
             case BinaryExpression.Operator.Add: op = Op.i32_add; break;
             case BinaryExpression.Operator.Subtract: op = Op.i32_sub; break;
             case BinaryExpression.Operator.Multiply: op = Op.i32_mul; break;

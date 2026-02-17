@@ -1516,7 +1516,7 @@ class NativeCompiledFunction : CompiledFunction {
             // Handle slice append specially (~=)
             if (assign.operator == AssignmentExpression.Operator.ConcatAssign) {
                 if (info.isSlice) {
-                    compileSliceAppend(info.offset, assign.right);
+                    compileSliceAppend(info.offset, assign.right, info.elemSize);
                     return;
                 } else {
                     throw new Exception("~= only supported on slice types");
@@ -2660,19 +2660,19 @@ class NativeCompiledFunction : CompiledFunction {
      * 4. Store element at ptr[length]
      * 5. Increment length
      */
-    private void compileSliceAppend(size_t sliceOffset, Expression element) {
+    private void compileSliceAppend(size_t sliceOffset, Expression element, uint elemSize) {
         // Temp slots for intermediate values (use pre-allocated temp area)
         // tempSlot is at the end of the frame, with 48 bytes reserved
-        size_t tempElement = tempSlot;            // element value (4 bytes)
+        size_t tempElement = tempSlot;            // element value (4 bytes, zero-extended)
         size_t tempNewCap = tempSlot + 4;         // new capacity (4 bytes)
         size_t tempNewPtr = tempSlot + 8;         // new buffer ptr (8 bytes, 64-bit)
         size_t tempLoopIdx = tempSlot + 16;       // copy loop index (4 bytes)
         size_t tempLoopVal = tempSlot + 20;       // temp for loaded value (4 bytes)
-        
+
         // 1. Evaluate element value, store to temp
         compileExpression(element);
         gen.emitStoreLocal32(tempElement);
-        
+
         // 2. Load length and capacity, compare
         gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);   // x0 = length
         gen.emitMoveX0ToX1();                   // x1 = length
@@ -2688,62 +2688,62 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emit(stencil_move_arg2_to_arg1);    // x1 = capacity
         // Now x0 = length, x1 = capacity, x2 = capacity
         gen.emit(stencil_ge_i32);               // x0 = (length >= capacity) ? 1 : 0
-        
+
         // 3. Branch if no growth needed (x0 == 0)
         auto growLabel = gen.newLabel();
         auto noGrowLabel = gen.newLabel();
         auto doneGrowLabel = gen.newLabel();
-        
+
         gen.emitBranchIfZero(noGrowLabel);      // skip grow if length < capacity
-        
+
         // === GROW PATH ===
         gen.bindLabel(growLabel);
-        
+
         // newCapacity = max(capacity * 2, 4)
         gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.CAPACITY_OFFSET);  // x0 = capacity
         gen.emitMoveX0ToX1();                   // x1 = capacity
         gen.emit(stencil_add_i32);              // x0 = capacity * 2 (capacity + capacity)
         gen.emitStoreLocal32(tempNewCap);       // save capacity * 2
-        
+
         // Compare with 4: if (capacity * 2 < 4) use 4
         gen.emitImm32(stencil_load_imm32, 4);
         gen.emitMoveX0ToX1();                   // x1 = 4
         gen.emitLoadLocal32(tempNewCap);        // x0 = capacity * 2
         gen.emit(stencil_lt_i32);               // x0 = (capacity * 2 < 4) ? 1 : 0
-        
+
         auto useMinCapLabel = gen.newLabel();
         auto calcAllocLabel = gen.newLabel();
-        
+
         gen.emitBranchIfZero(calcAllocLabel);   // if cap*2 >= 4, use it
-        
+
         // Use minimum capacity of 4
         gen.emitImm32(stencil_load_imm32, 4);
         gen.emitStoreLocal32(tempNewCap);
-        
+
         gen.bindLabel(calcAllocLabel);
-        
-        // Allocate new buffer: __ctfe_alloc(newCapacity * 4)
+
+        // Allocate new buffer: __ctfe_alloc(newCapacity * elemSize)
         gen.emitLoadLocal32(tempNewCap);        // x0 = newCapacity
-        gen.emitImm32(stencil_load_imm32, 4);
-        gen.emitMoveX0ToX1();                   // x1 = 4
+        gen.emitImm32(stencil_load_imm32, elemSize);
+        gen.emitMoveX0ToX1();                   // x1 = elemSize
         gen.emitLoadLocal32(tempNewCap);        // x0 = newCapacity
-        gen.emit(stencil_mul_i32);              // x0 = newCapacity * 4 (bytes)
-        
+        gen.emit(stencil_mul_i32);              // x0 = newCapacity * elemSize (bytes)
+
         // Call __ctfe_alloc(size) - size is in x0, will be shifted to x1
         ulong allocSlot = hostFunctions.getFunctionSlotAddress("__ctfe_alloc");
         ulong contextSlot = hostFunctions.getContextSlotAddress();
         gen.emitHostCall(allocSlot, contextSlot);  // x0 = new buffer ptr
         gen.emitStorePtr(tempNewPtr);         // save new ptr (64-bit)
-        
+
         // Copy loop: for i = 0 to length: newPtr[i] = oldPtr[i]
         gen.emitImm32(stencil_load_imm32, 0);
         gen.emitStoreLocal32(tempLoopIdx);      // i = 0
-        
+
         auto copyLoopStart = gen.newLabel();
         auto copyLoopEnd = gen.newLabel();
-        
+
         gen.bindLabel(copyLoopStart);
-        
+
         // Check: if (i >= length) break
         gen.emitLoadLocal32(tempLoopIdx);       // x0 = i
         gen.emitMoveX0ToX1();                   // x1 = i
@@ -2753,82 +2753,90 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emit(stencil_move_arg2_to_arg1);    // x1 = length
         gen.emit(stencil_ge_i32);               // x0 = (i >= length)
         gen.emitBranchIfNonZero(copyLoopEnd);   // break if done
-        
-        // Load from old: oldPtr[i]
+
+        // Load from old: oldPtr[i * elemSize]
         gen.emitLoadPtr(sliceOffset);         // x0 = oldPtr (64-bit)
         gen.emitMoveX0ToX1();                   // x1 = oldPtr
         gen.emitLoadLocal32(tempLoopIdx);       // x0 = i
-        gen.emitImm32(stencil_load_imm32, 4);
-        gen.emitMoveX0ToX2();                   // x2 = 4
+        gen.emitImm32(stencil_load_imm32, elemSize);
+        gen.emitMoveX0ToX2();                   // x2 = elemSize
         gen.emitLoadLocal32(tempLoopIdx);       // x0 = i
-        gen.emit(stencil_move_arg2_to_arg1);    // x1 = 4
-        gen.emit(stencil_mul_i32);              // x0 = i * 4
-        gen.emitMoveX0ToX1();                   // x1 = i * 4
+        gen.emit(stencil_move_arg2_to_arg1);    // x1 = elemSize
+        gen.emit(stencil_mul_i32);              // x0 = i * elemSize
+        gen.emitMoveX0ToX1();                   // x1 = i * elemSize
         gen.emitLoadPtr(sliceOffset);         // x0 = oldPtr
-        gen.emit(stencil_add_i64);              // x0 = oldPtr + i*4 (64-bit ptr)
-        gen.emit(stencil_load_i32);             // x0 = oldPtr[i]
+        gen.emit(stencil_add_i64);              // x0 = oldPtr + i*elemSize (64-bit ptr)
+        if (elemSize == 1)
+            gen.emitLoadByteFromPointer(0);     // x0 = byte at [x0]
+        else
+            gen.emit(stencil_load_i32);         // x0 = i32 at [x0]
         gen.emitStoreLocal32(tempLoopVal);  // save loaded value
-        
-        // Store to new: newPtr[i] = value
+
+        // Store to new: newPtr[i * elemSize] = value
         gen.emitLoadPtr(tempNewPtr);          // x0 = newPtr
         gen.emitMoveX0ToX1();                   // x1 = newPtr
         gen.emitLoadLocal32(tempLoopIdx);       // x0 = i
-        gen.emitImm32(stencil_load_imm32, 4);
-        gen.emitMoveX0ToX2();                   // x2 = 4
+        gen.emitImm32(stencil_load_imm32, elemSize);
+        gen.emitMoveX0ToX2();                   // x2 = elemSize
         gen.emitLoadLocal32(tempLoopIdx);       // x0 = i
-        gen.emit(stencil_move_arg2_to_arg1);    // x1 = 4
-        gen.emit(stencil_mul_i32);              // x0 = i * 4
-        gen.emitMoveX0ToX1();                   // x1 = i * 4
+        gen.emit(stencil_move_arg2_to_arg1);    // x1 = elemSize
+        gen.emit(stencil_mul_i32);              // x0 = i * elemSize
+        gen.emitMoveX0ToX1();                   // x1 = i * elemSize
         gen.emitLoadPtr(tempNewPtr);          // x0 = newPtr
-        gen.emit(stencil_add_i64);              // x0 = newPtr + i*4 (64-bit ptr)
+        gen.emit(stencil_add_i64);              // x0 = newPtr + i*elemSize (64-bit ptr)
         gen.emitMoveX0ToX1();                   // x1 = dest addr
         gen.emitLoadLocal32(tempLoopVal);   // x0 = value to store
         gen.emitMoveX0ToX2();                   // x2 = value
         gen.emit(stencil_move_arg1_to_result);  // x0 = dest addr
         gen.emit(stencil_move_arg2_to_arg1);    // x1 = value
-        gen.emit(stencil_store_i32);            // *dest = value
-        
+        if (elemSize == 1)
+            gen.emitStoreByteToPointer(0);      // store byte at [x0]
+        else
+            gen.emit(stencil_store_i32);        // store i32 at [x0]
+
         // i++ (compound stencil)
         gen.emitIncLocal32(tempLoopIdx);
-        
+
         gen.emitBranch(copyLoopStart);
         gen.bindLabel(copyLoopEnd);
-        
+
         // Update slice ptr = newPtr
         gen.emitLoadPtr(tempNewPtr);
         gen.emitStorePtr(sliceOffset);
-        
+
         // Update slice capacity = newCapacity
         gen.emitLoadLocal32(tempNewCap);
         gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.CAPACITY_OFFSET);
-        
+
         gen.emitBranch(doneGrowLabel);
-        
+
         // === NO GROW PATH ===
         gen.bindLabel(noGrowLabel);
-        
+
         gen.bindLabel(doneGrowLabel);
-        
-        // 4. Store element at ptr[length]
-        // Calculate address: ptr + length * 4
+
+        // 4. Store element at ptr[length * elemSize]
         gen.emitLoadPtr(sliceOffset);         // x0 = ptr (64-bit)
         gen.emitMoveX0ToX1();                   // x1 = ptr
         gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);   // x0 = length
-        gen.emitImm32(stencil_load_imm32, 4);
-        gen.emitMoveX0ToX2();                   // x2 = 4
+        gen.emitImm32(stencil_load_imm32, elemSize);
+        gen.emitMoveX0ToX2();                   // x2 = elemSize
         gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);   // x0 = length
-        gen.emit(stencil_move_arg2_to_arg1);    // x1 = 4
-        gen.emit(stencil_mul_i32);              // x0 = length * 4
-        gen.emitMoveX0ToX1();                   // x1 = length * 4
+        gen.emit(stencil_move_arg2_to_arg1);    // x1 = elemSize
+        gen.emit(stencil_mul_i32);              // x0 = length * elemSize
+        gen.emitMoveX0ToX1();                   // x1 = length * elemSize
         gen.emitLoadPtr(sliceOffset);         // x0 = ptr
-        gen.emit(stencil_add_i64);              // x0 = ptr + length*4 (64-bit ptr)
+        gen.emit(stencil_add_i64);              // x0 = ptr + length*elemSize (64-bit ptr)
         gen.emitMoveX0ToX1();                   // x1 = dest addr
         gen.emitLoadLocal32(tempElement);       // x0 = element value
         gen.emitMoveX0ToX2();                   // x2 = element
         gen.emit(stencil_move_arg1_to_result);  // x0 = dest addr
         gen.emit(stencil_move_arg2_to_arg1);    // x1 = element
-        gen.emit(stencil_store_i32);            // ptr[length] = element
-        
+        if (elemSize == 1)
+            gen.emitStoreByteToPointer(0);      // store byte at ptr[length]
+        else
+            gen.emit(stencil_store_i32);        // store i32 at ptr[length]
+
         // 5. Increment length
         gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);   // x0 = length
         gen.emitMoveX0ToX1();                   // x1 = length
