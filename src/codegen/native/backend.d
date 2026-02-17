@@ -3231,7 +3231,8 @@ class NativeCompiledFunction : CompiledFunction {
         return ExecutionResult.fromArray(resultBytes);
     }
     
-    override ubyte[] readMemory(uint offset, uint length) {
+    override ubyte[] readMemory(ulong offset, uint length) {
+        assert(offset != 0, "readMemory: null pointer dereference");
         auto ptr = cast(ubyte*)cast(size_t)offset;
         return ptr[0 .. length].dup;
     }

@@ -1,0 +1,7 @@
+{
+  "name": "slice_return_byte",
+  "description": "CTFE parity: dynamic ubyte[] slice return and element access",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 60
+}

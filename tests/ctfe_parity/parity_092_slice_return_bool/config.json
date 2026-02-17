@@ -1,0 +1,7 @@
+{
+  "name": "slice_return_bool",
+  "description": "CTFE parity: dynamic bool[] slice return and element access",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 101
+}

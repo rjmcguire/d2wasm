@@ -16,6 +16,7 @@ import semantic.type_checker;
 import codegen.emitter;
 import codegen.wasm.types;
 import codegen.backend;
+import codegen.type_marshal;
 import diagnostic.log : log;
 
 import std.stdio;
@@ -168,6 +169,7 @@ class CTFEEvaluator {
     private Declaration[] allDeclarations;
     private Backend backend;  // Code generation backend (WASM or Native)
     private bool enableStackTrace;
+    private TypeReader reader;  // Target-parameterized type reader
     
     // Persistent CTFE context - accumulates compiled functions
     private bool[string] compiledFunctions;  // functions already in context
@@ -189,6 +191,9 @@ class CTFEEvaluator {
         this.allDeclarations = declarations;
         this.enableStackTrace = enableStackTrace;
         this.backend = createBackend(backendName, symbolTable, enableStackTrace);
+        this.reader = (backendName == "native" || backendName == "native-arm64")
+            ? TypeReader.forNative()
+            : TypeReader.forWasm();
         
         // Register lazy resolver with symbol table
         symbolTable.ctfeResolver = &this.evaluateManifestConstant;
@@ -1012,23 +1017,13 @@ class CTFEEvaluator {
         log(3, "CTFE: Calling ", funcName, " (returns string: ", returnsString, ")");
         
         // For string-returning functions, use hidden result pointer pattern
-        // (strings are slices = 12-byte {ptr, len, cap} struct in WASM)
         if (returnsString) {
             ensureCompiledForFunction(funcDecl);
-            enum sliceStructSize = 12;  // {ptr:i32, len:i32, cap:i32}
-            auto result = cachedContext.callWithLargeReturn(funcDecl.name, [], sliceStructSize);
+            auto result = cachedContext.callWithLargeReturn(funcDecl.name, [], reader.sliceSize);
             if (!result.success)
                 throw new CTFEError("CTFE execution error: " ~ result.error, callExpr.location);
-            ubyte[] sliceBytes = result.arrayBytes;
-            uint dataPtr = (cast(uint)sliceBytes[0]) |
-                           (cast(uint)sliceBytes[1] << 8) |
-                           (cast(uint)sliceBytes[2] << 16) |
-                           (cast(uint)sliceBytes[3] << 24);
-            uint len = (cast(uint)sliceBytes[4]) |
-                       (cast(uint)sliceBytes[5] << 8) |
-                       (cast(uint)sliceBytes[6] << 16) |
-                       (cast(uint)sliceBytes[7] << 24);
-            ubyte[] strBytes = cachedContext.readMemory(dataPtr, len);
+            auto slice = reader.readSlice(result.arrayBytes);
+            ubyte[] strBytes = cachedContext.readMemory(slice.dataPtr, slice.length);
             return CTFEResult.fromString(cast(string)strBytes.idup);
         }
 
@@ -1036,35 +1031,35 @@ class CTFEEvaluator {
         if (auto arrType = cast(ArrayType)funcDecl.returnType) {
             if (arrType.arraySize is null && !returnsString) {
                 ensureCompiledForFunction(funcDecl);
-                enum sliceStructSize = 12;  // {ptr:i32, len:i32, cap:i32}
-                auto result = cachedContext.callWithLargeReturn(funcDecl.name, [], sliceStructSize);
+                auto result = cachedContext.callWithLargeReturn(funcDecl.name, [], reader.sliceSize);
                 if (!result.success)
                     throw new CTFEError("CTFE execution error: " ~ result.error, callExpr.location);
-                ubyte[] sliceBytes = result.arrayBytes;
-                uint dataPtr = (cast(uint)sliceBytes[0]) |
-                               (cast(uint)sliceBytes[1] << 8) |
-                               (cast(uint)sliceBytes[2] << 16) |
-                               (cast(uint)sliceBytes[3] << 24);
-                uint len = (cast(uint)sliceBytes[4]) |
-                           (cast(uint)sliceBytes[5] << 8) |
-                           (cast(uint)sliceBytes[6] << 16) |
-                           (cast(uint)sliceBytes[7] << 24);
-                uint elemSize = getElementSize(arrType.elementType);
-                ubyte[] rawData = cachedContext.readMemory(dataPtr, len * elemSize);
+                auto slice = reader.readSlice(result.arrayBytes);
+                uint elemSize = TypeReader.elementSizeOf(arrType.elementType);
+                ubyte[] rawData = cachedContext.readMemory(slice.dataPtr, slice.length * elemSize);
 
                 // Convert to long[] for backward compat with existing array manifest storage
                 long[] values;
-                values.length = len;
-                foreach (i; 0 .. len) {
+                values.length = slice.length;
+                foreach (i; 0 .. slice.length) {
                     if (elemSize == 1) values[i] = rawData[i];
-                    else if (elemSize == 4) values[i] = *cast(int*)&rawData[i * 4];
-                    else if (elemSize == 8) values[i] = *cast(long*)&rawData[i * 8];
-                    else values[i] = *cast(int*)&rawData[i * elemSize];
+                    else if (elemSize == 4) {
+                        assert(i * 4 + 4 <= rawData.length, "readInt: out of bounds");
+                        values[i] = *cast(int*)&rawData[i * 4];
+                    }
+                    else if (elemSize == 8) {
+                        assert(i * 8 + 8 <= rawData.length, "readLong: out of bounds");
+                        values[i] = *cast(long*)&rawData[i * 8];
+                    }
+                    else {
+                        assert(i * elemSize + 4 <= rawData.length, "readInt: out of bounds");
+                        values[i] = *cast(int*)&rawData[i * elemSize];
+                    }
                 }
                 auto r = CTFEResult.fromArray(values, rawData);
                 r.elementSize = elemSize;
                 r.returnType = funcDecl.returnType;
-                log(3, "CTFE: ", funcName, " returned dynamic array with ", len, " elements (", elemSize, " bytes each)");
+                log(3, "CTFE: ", funcName, " returned dynamic array with ", slice.length, " elements (", elemSize, " bytes each)");
                 return r;
             }
         }

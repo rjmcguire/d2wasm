@@ -1,0 +1,7 @@
+{
+  "name": "enum_string_array",
+  "description": "CTFE parity: enum string[] manifest constant from CTFE function",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 14
+}

@@ -1,0 +1,7 @@
+{
+  "name": "slice_return_string",
+  "description": "CTFE parity: dynamic string[] slice return and element access",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 14
+}

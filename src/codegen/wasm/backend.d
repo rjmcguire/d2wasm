@@ -198,8 +198,8 @@ class WASMCompiledFunction : CompiledFunction {
         }
     }
 
-    override ubyte[] readMemory(uint offset, uint length) {
-        return runtime.readMemory(offset, length);
+    override ubyte[] readMemory(ulong offset, uint length) {
+        return runtime.readMemory(cast(uint)offset, length);
     }
 
     override bool hasFunction(string targetFuncName) {
