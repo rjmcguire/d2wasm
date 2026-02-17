@@ -77,6 +77,129 @@ immutable stencil_neg_i32 = Stencil(
     []
 );
 
+// ----- f64 Floating-Point Arithmetic -----
+// ARM64 uses d0, d1 register file (separate from x0, x1)
+// Arithmetic: d0 op d1 -> d0
+// Comparisons: FCMP d0, d1 -> CSET w0 (result in integer register)
+
+immutable stencil_add_f64 = Stencil(
+    "add_f64",
+    cast(immutable ubyte[])[0x00, 0x28, 0x61, 0x1e],  // FADD d0, d0, d1
+    []
+);
+
+immutable stencil_sub_f64 = Stencil(
+    "sub_f64",
+    cast(immutable ubyte[])[0x00, 0x38, 0x61, 0x1e],  // FSUB d0, d0, d1
+    []
+);
+
+immutable stencil_mul_f64 = Stencil(
+    "mul_f64",
+    cast(immutable ubyte[])[0x00, 0x08, 0x61, 0x1e],  // FMUL d0, d0, d1
+    []
+);
+
+immutable stencil_div_f64 = Stencil(
+    "div_f64",
+    cast(immutable ubyte[])[0x00, 0x18, 0x61, 0x1e],  // FDIV d0, d0, d1
+    []
+);
+
+immutable stencil_neg_f64 = Stencil(
+    "neg_f64",
+    cast(immutable ubyte[])[0x00, 0x40, 0x61, 0x1e],  // FNEG d0, d0
+    []
+);
+
+// ----- f64 Comparisons -----
+// FCMP d0, d1 sets NZCV flags; CSET w0, <cond> produces 0/1 in integer register
+
+immutable stencil_eq_f64 = Stencil(
+    "eq_f64",
+    cast(immutable ubyte[])[
+        0x00, 0x20, 0x61, 0x1e,  // FCMP d0, d1
+        0xe0, 0x17, 0x9f, 0x1a   // CSET w0, eq
+    ],
+    []
+);
+
+immutable stencil_ne_f64 = Stencil(
+    "ne_f64",
+    cast(immutable ubyte[])[
+        0x00, 0x20, 0x61, 0x1e,  // FCMP d0, d1
+        0xe0, 0x07, 0x9f, 0x1a   // CSET w0, ne
+    ],
+    []
+);
+
+immutable stencil_lt_f64 = Stencil(
+    "lt_f64",
+    cast(immutable ubyte[])[
+        0x00, 0x20, 0x61, 0x1e,  // FCMP d0, d1
+        0xe0, 0x57, 0x9f, 0x1a   // CSET w0, mi (inverted=pl=0101, less than ordered)
+    ],
+    []
+);
+
+immutable stencil_le_f64 = Stencil(
+    "le_f64",
+    cast(immutable ubyte[])[
+        0x00, 0x20, 0x61, 0x1e,  // FCMP d0, d1
+        0xe0, 0x87, 0x9f, 0x1a   // CSET w0, ls (inverted=hi=1000, less or same ordered)
+    ],
+    []
+);
+
+immutable stencil_gt_f64 = Stencil(
+    "gt_f64",
+    cast(immutable ubyte[])[
+        0x00, 0x20, 0x61, 0x1e,  // FCMP d0, d1
+        0xe0, 0xd7, 0x9f, 0x1a   // CSET w0, gt
+    ],
+    []
+);
+
+immutable stencil_ge_f64 = Stencil(
+    "ge_f64",
+    cast(immutable ubyte[])[
+        0x00, 0x20, 0x61, 0x1e,  // FCMP d0, d1
+        0xe0, 0xb7, 0x9f, 0x1a   // CSET w0, ge
+    ],
+    []
+);
+
+// ----- f64 Conversion -----
+
+immutable stencil_f64_to_i32 = Stencil(
+    "f64_to_i32",
+    cast(immutable ubyte[])[0x00, 0x00, 0x78, 0x1e],  // FCVTZS w0, d0
+    []
+);
+
+// ----- f64 Register Moves -----
+
+immutable stencil_move_d1_to_d0 = Stencil(
+    "move_d1_to_d0",
+    cast(immutable ubyte[])[0x20, 0x40, 0x60, 0x1e],  // FMOV d0, d1
+    []
+);
+
+// ----- f64 Memory -----
+// These operate on address in x0, value in d0
+
+immutable stencil_load_f64 = Stencil(
+    "load_f64",
+    cast(immutable ubyte[])[0x00, 0x00, 0x40, 0xfd],  // LDR d0, [x0]
+    []
+);
+
+immutable stencil_store_f64 = Stencil(
+    "store_f64",
+    cast(immutable ubyte[])[0x00, 0x00, 0x00, 0xfd],  // STR d0, [x0]
+    []
+);
+
 // ----- Bitwise -----
 // All i32 bitwise ops use 32-bit (w) registers to match int type semantics.
 
@@ -713,7 +836,24 @@ shared static this() {
     stencilTable["div_i32"] = &stencil_div_i32;
     stencilTable["mod_i32"] = &stencil_mod_i32;
     stencilTable["neg_i32"] = &stencil_neg_i32;
-    
+
+    // f64 Floating-Point
+    stencilTable["add_f64"] = &stencil_add_f64;
+    stencilTable["sub_f64"] = &stencil_sub_f64;
+    stencilTable["mul_f64"] = &stencil_mul_f64;
+    stencilTable["div_f64"] = &stencil_div_f64;
+    stencilTable["neg_f64"] = &stencil_neg_f64;
+    stencilTable["eq_f64"] = &stencil_eq_f64;
+    stencilTable["ne_f64"] = &stencil_ne_f64;
+    stencilTable["lt_f64"] = &stencil_lt_f64;
+    stencilTable["le_f64"] = &stencil_le_f64;
+    stencilTable["gt_f64"] = &stencil_gt_f64;
+    stencilTable["ge_f64"] = &stencil_ge_f64;
+    stencilTable["f64_to_i32"] = &stencil_f64_to_i32;
+    stencilTable["move_d1_to_d0"] = &stencil_move_d1_to_d0;
+    stencilTable["load_f64"] = &stencil_load_f64;
+    stencilTable["store_f64"] = &stencil_store_f64;
+
     // Bitwise
     stencilTable["and_i32"] = &stencil_and_i32;
     stencilTable["or_i32"] = &stencil_or_i32;

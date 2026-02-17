@@ -1258,6 +1258,36 @@ class NativeCompiledFunction : CompiledFunction {
         return false;
     }
     
+    /// Check if a Type is f64 (double/float).
+    private static bool isF64ElementType(Type t) {
+        if (auto bt = cast(BasicType)t)
+            return bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32;
+        return false;
+    }
+
+    /// Check if an expression produces an f64 value.
+    private bool isF64Expression(Expression expr) {
+        import std.variant : Variant;
+        if (auto lit = cast(LiteralExpression)expr)
+            return lit.value.type == typeid(double);
+        if (auto idx = cast(IndexExpression)expr) {
+            if (auto ident = cast(IdentifierExpression)idx.array)
+                if (auto info = ident.name in localVars)
+                    return isF64ElementType(info.elementType);
+            return false;
+        }
+        if (auto bin = cast(BinaryExpression)expr)
+            return isF64Expression(bin.left);
+        if (auto unary = cast(UnaryExpression)expr)
+            return isF64Expression(unary.operand);
+        if (auto castExpr = cast(CastExpression)expr) {
+            if (auto bt = cast(BasicType)castExpr.targetType)
+                return bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32;
+            return false;
+        }
+        return false;
+    }
+
     private void compileExpression(Expression expr) {
         import std.variant : Variant;
         
@@ -1281,6 +1311,12 @@ class NativeCompiledFunction : CompiledFunction {
                     "Frame overflow in string literal: nextLocalOffset exceeds tempSlot");
                 compileStringLiteralInit(tempOffset, strVal);
                 gen.emitStackAddress(tempOffset);
+            } else if (lit.value.type == typeid(double)) {
+                // Double literal: load 64-bit IEEE 754 bits into x0, then transfer to d0
+                double val = lit.value.get!double();
+                long bits = *cast(long*)&val;
+                gen.emitLoadImm64(cast(ulong)bits);
+                gen.emitMoveX0ToD0();
             } else {
                 throw new Exception("Literal type not supported: " ~ lit.value.type.toString());
             }
@@ -1325,6 +1361,36 @@ class NativeCompiledFunction : CompiledFunction {
                 return;
             }
 
+            // f64 floating-point path: computation in d0/d1
+            if (isF64Expression(binOp.left)) {
+                // Evaluate right → d0, save to temp
+                compileExpression(binOp.right);
+                size_t myTemp = (tempSlot + 16 + (tempSlotDepth * 8) + 7) & ~cast(size_t)7;
+                tempSlotDepth++;
+                gen.emitStoreLocalF64(myTemp);
+                // Evaluate left → d0
+                compileExpression(binOp.left);
+                // Load right into d1 (does not clobber d0)
+                gen.emitLoadLocalF64ToD1(myTemp);
+                tempSlotDepth--;
+                // Emit f64 operation
+                switch (binOp.operator) {
+                    case BinaryExpression.Operator.Add: gen.emit(stencil_add_f64); break;
+                    case BinaryExpression.Operator.Subtract: gen.emit(stencil_sub_f64); break;
+                    case BinaryExpression.Operator.Multiply: gen.emit(stencil_mul_f64); break;
+                    case BinaryExpression.Operator.Divide: gen.emit(stencil_div_f64); break;
+                    case BinaryExpression.Operator.Equal: gen.emit(stencil_eq_f64); break;
+                    case BinaryExpression.Operator.NotEqual: gen.emit(stencil_ne_f64); break;
+                    case BinaryExpression.Operator.Less: gen.emit(stencil_lt_f64); break;
+                    case BinaryExpression.Operator.LessEqual: gen.emit(stencil_le_f64); break;
+                    case BinaryExpression.Operator.Greater: gen.emit(stencil_gt_f64); break;
+                    case BinaryExpression.Operator.GreaterEqual: gen.emit(stencil_ge_f64); break;
+                    default:
+                        throw new Exception("Float binary operator not supported in native backend");
+                }
+                return;
+            }
+
             // Check if left operand might clobber x1 (function call, nested binary expr, or index expr)
             // IndexExpression uses x1 internally for address calculation
             bool leftMightClobber = containsFunctionCall(binOp.left) ||
@@ -1333,7 +1399,7 @@ class NativeCompiledFunction : CompiledFunction {
 
             // Compile right operand first (into x0)
             compileExpression(binOp.right);
-            
+
             if (leftMightClobber) {
                 // Save right result to temp slot (function calls clobber x0-x7)
                 // Use depth-aware temp slot; +16 reserves first 16 bytes for inline push/pop saves
@@ -1418,18 +1484,23 @@ class NativeCompiledFunction : CompiledFunction {
                     throw new Exception("Operator not yet supported in native backend");
             }
         } else if (auto unaryOp = cast(UnaryExpression)expr) {
-            compileExpression(unaryOp.operand);
-            if (unaryOp.operator == UnaryExpression.Operator.Minus) {
+            if (unaryOp.operator == UnaryExpression.Operator.Minus && isF64Expression(unaryOp.operand)) {
+                compileExpression(unaryOp.operand);
+                gen.emit(stencil_neg_f64);
+            } else if (unaryOp.operator == UnaryExpression.Operator.Minus) {
+                compileExpression(unaryOp.operand);
                 // 0 - x
                 gen.emitMoveX0ToX1();
                 gen.emitImm32(stencil_load_imm32, 0);
                 gen.emit(stencil_sub_i32);
             } else if (unaryOp.operator == UnaryExpression.Operator.LogicalNot) {
+                compileExpression(unaryOp.operand);
                 // x == 0
                 gen.emitMoveX0ToX1();
                 gen.emitImm32(stencil_load_imm32, 0);
                 gen.emit(stencil_eq_i32);
             } else if (unaryOp.operator == UnaryExpression.Operator.BitwiseNot) {
+                compileExpression(unaryOp.operand);
                 // ~x
                 gen.emit(stencil_not_i32);
             }
@@ -1516,7 +1587,7 @@ class NativeCompiledFunction : CompiledFunction {
             // Handle slice append specially (~=)
             if (assign.operator == AssignmentExpression.Operator.ConcatAssign) {
                 if (info.isSlice) {
-                    compileSliceAppend(info.offset, assign.right, info.elemSize);
+                    compileSliceAppend(info.offset, assign.right, info.elemSize, isF64ElementType(info.elementType));
                     return;
                 } else {
                     throw new Exception("~= only supported on slice types");
@@ -1823,8 +1894,9 @@ class NativeCompiledFunction : CompiledFunction {
                         case VarKind.staticArray:
                             // Static array: elements stored inline at offset
                             uint saElemSz = info.staticArrayElemSize;
+                            bool saIsFloat = isF64ElementType(info.elementType);
                             // For constant index, load directly (scalars only)
-                            if (saElemSz <= 4) {
+                            if (saElemSz <= 4 && !saIsFloat) {
                                 if (auto indexLit = cast(LiteralExpression)indexExpr.index) {
                                     if (indexLit.value.type == typeid(long)) {
                                         uint idx = cast(uint)indexLit.value.get!long();
@@ -1841,13 +1913,16 @@ class NativeCompiledFunction : CompiledFunction {
                             gen.emitMoveX0ToX1();  // x1 = byte offset
                             gen.emitStackAddress(info.offset);  // x0 = base address
                             gen.emit(stencil_add_i64);  // x0 = element address (64-bit ptr)
-                            // Aggregate elements: leave address in x0
-                            if (saElemSz <= 4)
+                            // Load value from computed address
+                            if (saIsFloat)
+                                gen.emit(stencil_load_f64);  // LDR d0, [x0]
+                            else if (saElemSz <= 4)
                                 gen.emitLoadFromPointer(0);
                             return;
 
                         case VarKind.slice:
                             // Dynamic array (slice): { ptr: i64, length: i32, capacity: i32 }
+                            bool slIsFloat = isF64ElementType(info.elementType);
                             compileExpression(indexExpr.index);
                             // x0 = index
 
@@ -1869,8 +1944,10 @@ class NativeCompiledFunction : CompiledFunction {
                             // Compute address: ptr + byte offset
                             gen.emit(stencil_add_i64);  // 64-bit ptr arithmetic
 
-                            // Aggregate elements: leave address in x0
-                            if (info.elemSize <= 4) {
+                            // Load value from computed address
+                            if (slIsFloat) {
+                                gen.emit(stencil_load_f64);  // LDR d0, [x0]
+                            } else if (info.elemSize <= 4) {
                                 if (info.elemSize == 1)
                                     gen.emitLoadByteFromPointer(0);
                                 else
@@ -1887,6 +1964,16 @@ class NativeCompiledFunction : CompiledFunction {
             }
             throw new Exception("Array indexing only supported for local variables");
         } else if (auto castExpr = cast(CastExpression)expr) {
+            // Check for f64 → int conversion
+            if (auto targetBt = cast(BasicType)castExpr.targetType) {
+                bool targetIsInt = targetBt.kind != BasicType.Kind.Float64 &&
+                                   targetBt.kind != BasicType.Kind.Float32;
+                if (targetIsInt && isF64Expression(castExpr.expression)) {
+                    compileExpression(castExpr.expression);
+                    gen.emit(stencil_f64_to_i32);  // FCVTZS w0, d0
+                    return;
+                }
+            }
             // Most casts are no-ops at native level (everything is 32/64-bit)
             // Just compile the inner expression
             // Note: class→interface casts would need special handling when classes are supported
@@ -2660,33 +2747,44 @@ class NativeCompiledFunction : CompiledFunction {
      * 4. Store element at ptr[length]
      * 5. Increment length
      */
-    private void compileSliceAppend(size_t sliceOffset, Expression element, uint elemSize) {
+    private void compileSliceAppend(size_t sliceOffset, Expression element, uint elemSize, bool isFloat = false) {
         // Temp slots for intermediate values (use pre-allocated temp area)
-        // tempSlot is at the end of the frame, with 48 bytes reserved
-        size_t tempElement = tempSlot;            // element value (4 bytes, zero-extended)
-        size_t tempNewCap = tempSlot + 4;         // new capacity (4 bytes)
-        size_t tempNewPtr = tempSlot + 8;         // new buffer ptr (8 bytes, 64-bit)
-        size_t tempLoopIdx = tempSlot + 16;       // copy loop index (4 bytes)
-        size_t tempLoopVal = tempSlot + 20;       // temp for loaded value (4 bytes)
+        // tempSlot is at the end of the frame, with 64 bytes reserved
+        // For f64 elements, we need 8-byte aligned slots for FP loads/stores
+        size_t tempElement, tempNewCap, tempNewPtr, tempLoopIdx, tempLoopVal;
+        if (isFloat) {
+            // All offsets 8-byte aligned for f64 compatibility
+            tempElement = (tempSlot + 7) & ~cast(size_t)7;  // 8 bytes for f64
+            tempNewCap  = tempElement + 8;                    // 4 bytes (i32), but 8-aligned
+            tempNewPtr  = tempNewCap + 8;                     // 8 bytes (ptr)
+            tempLoopIdx = tempNewPtr + 8;                     // 4 bytes (i32), but 8-aligned
+            tempLoopVal = tempLoopIdx + 8;                    // 8 bytes for f64
+        } else {
+            tempElement = tempSlot;            // element value (4 bytes, zero-extended)
+            tempNewCap  = tempSlot + 4;        // new capacity (4 bytes)
+            tempNewPtr  = tempSlot + 8;        // new buffer ptr (8 bytes, 64-bit)
+            tempLoopIdx = tempSlot + 16;       // copy loop index (4 bytes)
+            tempLoopVal = tempSlot + 20;       // temp for loaded value (4 bytes)
+        }
 
         // 1. Evaluate element value, store to temp
         compileExpression(element);
-        gen.emitStoreLocal32(tempElement);
+        if (isFloat)
+            gen.emitStoreLocalF64(tempElement);  // d0 → temp (f64)
+        else
+            gen.emitStoreLocal32(tempElement);
 
         // 2. Load length and capacity, compare
         gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);   // x0 = length
         gen.emitMoveX0ToX1();                   // x1 = length
         gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.CAPACITY_OFFSET);  // x0 = capacity
-        // Now x0 = capacity, x1 = length
         // We want: if (length >= capacity) -> x0 = 1
-        // Swap so we can use ge_i32 (x0 >= x1)
         gen.emit(stencil_move_arg1_to_result);  // x0 = length
         gen.emitMoveX0ToX1();                   // x1 = length (save)
         gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.CAPACITY_OFFSET);  // x0 = capacity
         gen.emitMoveX0ToX2();                   // x2 = capacity
         gen.emit(stencil_move_arg1_to_result);  // x0 = length
         gen.emit(stencil_move_arg2_to_arg1);    // x1 = capacity
-        // Now x0 = length, x1 = capacity, x2 = capacity
         gen.emit(stencil_ge_i32);               // x0 = (length >= capacity) ? 1 : 0
 
         // 3. Branch if no growth needed (x0 == 0)
@@ -2754,45 +2852,52 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emit(stencil_ge_i32);               // x0 = (i >= length)
         gen.emitBranchIfNonZero(copyLoopEnd);   // break if done
 
-        // Load from old: oldPtr[i * elemSize]
-        gen.emitLoadPtr(sliceOffset);         // x0 = oldPtr (64-bit)
-        gen.emitMoveX0ToX1();                   // x1 = oldPtr
+        // Compute source address: oldPtr + i * elemSize → x0
         gen.emitLoadLocal32(tempLoopIdx);       // x0 = i
+        gen.emitMoveX0ToX1();                   // x1 = i
         gen.emitImm32(stencil_load_imm32, elemSize);
-        gen.emitMoveX0ToX2();                   // x2 = elemSize
-        gen.emitLoadLocal32(tempLoopIdx);       // x0 = i
-        gen.emit(stencil_move_arg2_to_arg1);    // x1 = elemSize
-        gen.emit(stencil_mul_i32);              // x0 = i * elemSize
+        gen.emit(stencil_mul_i32);              // x0 = i * elemSize (note: x0=elemSize*x1 but MUL is w1*w0)
+        // Fix: need i * elemSize. x0 = elemSize, x1 = i → MUL w0, w1, w0 = i * elemSize ✓
         gen.emitMoveX0ToX1();                   // x1 = i * elemSize
-        gen.emitLoadPtr(sliceOffset);         // x0 = oldPtr
-        gen.emit(stencil_add_i64);              // x0 = oldPtr + i*elemSize (64-bit ptr)
-        if (elemSize == 1)
-            gen.emitLoadByteFromPointer(0);     // x0 = byte at [x0]
-        else
-            gen.emit(stencil_load_i32);         // x0 = i32 at [x0]
-        gen.emitStoreLocal32(tempLoopVal);  // save loaded value
+        gen.emitLoadPtr(sliceOffset);           // x0 = oldPtr
+        gen.emit(stencil_add_i64);              // x0 = oldPtr + i*elemSize
 
-        // Store to new: newPtr[i * elemSize] = value
-        gen.emitLoadPtr(tempNewPtr);          // x0 = newPtr
-        gen.emitMoveX0ToX1();                   // x1 = newPtr
+        // Load element from source
+        if (isFloat) {
+            gen.emit(stencil_load_f64);         // d0 = f64 at [x0]
+            gen.emitStoreLocalF64(tempLoopVal); // save to temp (f64)
+        } else if (elemSize == 1) {
+            gen.emitLoadByteFromPointer(0);     // x0 = byte at [x0]
+            gen.emitStoreLocal32(tempLoopVal);
+        } else {
+            gen.emitLoadFromPointer(0);         // x0 = i32 at [x0]
+            gen.emitStoreLocal32(tempLoopVal);
+        }
+
+        // Compute dest address: newPtr + i * elemSize → x0
         gen.emitLoadLocal32(tempLoopIdx);       // x0 = i
+        gen.emitMoveX0ToX1();                   // x1 = i
         gen.emitImm32(stencil_load_imm32, elemSize);
-        gen.emitMoveX0ToX2();                   // x2 = elemSize
-        gen.emitLoadLocal32(tempLoopIdx);       // x0 = i
-        gen.emit(stencil_move_arg2_to_arg1);    // x1 = elemSize
         gen.emit(stencil_mul_i32);              // x0 = i * elemSize
         gen.emitMoveX0ToX1();                   // x1 = i * elemSize
-        gen.emitLoadPtr(tempNewPtr);          // x0 = newPtr
-        gen.emit(stencil_add_i64);              // x0 = newPtr + i*elemSize (64-bit ptr)
-        gen.emitMoveX0ToX1();                   // x1 = dest addr
-        gen.emitLoadLocal32(tempLoopVal);   // x0 = value to store
-        gen.emitMoveX0ToX2();                   // x2 = value
-        gen.emit(stencil_move_arg1_to_result);  // x0 = dest addr
-        gen.emit(stencil_move_arg2_to_arg1);    // x1 = value
-        if (elemSize == 1)
-            gen.emitStoreByteToPointer(0);      // store byte at [x0]
-        else
-            gen.emit(stencil_store_i32);        // store i32 at [x0]
+        gen.emitLoadPtr(tempNewPtr);            // x0 = newPtr
+        gen.emit(stencil_add_i64);              // x0 = newPtr + i*elemSize
+
+        // Store element to dest
+        if (isFloat) {
+            gen.emitLoadLocalF64(tempLoopVal);  // d0 = saved f64
+            gen.emit(stencil_store_f64);        // STR d0, [x0]
+        } else {
+            gen.emitMoveX0ToX1();               // x1 = dest addr
+            gen.emitLoadLocal32(tempLoopVal);   // x0 = value
+            gen.emitMoveX0ToX2();               // x2 = value
+            gen.emit(stencil_move_arg1_to_result);  // x0 = dest addr
+            gen.emit(stencil_move_arg2_to_arg1);    // x1 = value
+            if (elemSize == 1)
+                gen.emitStoreByteToPointer(0);
+            else
+                gen.emit(stencil_store_i32);
+        }
 
         // i++ (compound stencil)
         gen.emitIncLocal32(tempLoopIdx);
@@ -2816,26 +2921,29 @@ class NativeCompiledFunction : CompiledFunction {
         gen.bindLabel(doneGrowLabel);
 
         // 4. Store element at ptr[length * elemSize]
-        gen.emitLoadPtr(sliceOffset);         // x0 = ptr (64-bit)
-        gen.emitMoveX0ToX1();                   // x1 = ptr
+        // Compute dest address: ptr + length * elemSize → x0
         gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);   // x0 = length
+        gen.emitMoveX0ToX1();                   // x1 = length
         gen.emitImm32(stencil_load_imm32, elemSize);
-        gen.emitMoveX0ToX2();                   // x2 = elemSize
-        gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);   // x0 = length
-        gen.emit(stencil_move_arg2_to_arg1);    // x1 = elemSize
         gen.emit(stencil_mul_i32);              // x0 = length * elemSize
         gen.emitMoveX0ToX1();                   // x1 = length * elemSize
-        gen.emitLoadPtr(sliceOffset);         // x0 = ptr
-        gen.emit(stencil_add_i64);              // x0 = ptr + length*elemSize (64-bit ptr)
-        gen.emitMoveX0ToX1();                   // x1 = dest addr
-        gen.emitLoadLocal32(tempElement);       // x0 = element value
-        gen.emitMoveX0ToX2();                   // x2 = element
-        gen.emit(stencil_move_arg1_to_result);  // x0 = dest addr
-        gen.emit(stencil_move_arg2_to_arg1);    // x1 = element
-        if (elemSize == 1)
-            gen.emitStoreByteToPointer(0);      // store byte at ptr[length]
-        else
-            gen.emit(stencil_store_i32);        // store i32 at ptr[length]
+        gen.emitLoadPtr(sliceOffset);           // x0 = ptr
+        gen.emit(stencil_add_i64);              // x0 = ptr + length*elemSize
+
+        if (isFloat) {
+            gen.emitLoadLocalF64(tempElement);  // d0 = element (f64)
+            gen.emit(stencil_store_f64);        // STR d0, [x0]
+        } else {
+            gen.emitMoveX0ToX1();               // x1 = dest addr
+            gen.emitLoadLocal32(tempElement);   // x0 = element value
+            gen.emitMoveX0ToX2();               // x2 = element
+            gen.emit(stencil_move_arg1_to_result);  // x0 = dest addr
+            gen.emit(stencil_move_arg2_to_arg1);    // x1 = element
+            if (elemSize == 1)
+                gen.emitStoreByteToPointer(0);
+            else
+                gen.emit(stencil_store_i32);
+        }
 
         // 5. Increment length
         gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);   // x0 = length

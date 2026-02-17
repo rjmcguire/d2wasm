@@ -606,6 +606,43 @@ struct NativeCodeGen {
         emitRaw32(0xB94003E0 | (imm12 << 10));
     }
 
+    // ========== f64 Floating-Point Locals ==========
+    // ARM64 FP loads/stores use d-registers (d0, d1) separate from x-registers.
+    // LDR/STR with d-registers use 8-byte scaled imm12.
+
+    /// Store d0 to local at offset (64-bit f64)
+    void emitStoreLocalF64(size_t offset) {
+        // STR d0, [sp, #offset] — imm12 scaled by 8
+        uint imm12 = cast(uint)(offset / 8);
+        emitRaw32(0xFD0003E0 | (imm12 << 10));
+    }
+
+    /// Load from local to d0 (64-bit f64)
+    void emitLoadLocalF64(size_t offset) {
+        // LDR d0, [sp, #offset] — imm12 scaled by 8
+        uint imm12 = cast(uint)(offset / 8);
+        emitRaw32(0xFD4003E0 | (imm12 << 10));
+    }
+
+    /// Load from local to d1 (64-bit f64, for binary right operand)
+    void emitLoadLocalF64ToD1(size_t offset) {
+        // LDR d1, [sp, #offset] — imm12 scaled by 8
+        uint imm12 = cast(uint)(offset / 8);
+        emitRaw32(0xFD4003E1 | (imm12 << 10));
+    }
+
+    /// Move d0 to d1 (save left operand before evaluating right)
+    void emitMoveD0ToD1() {
+        // FMOV d1, d0 = 0x1E604001
+        emitRaw32(0x1E604001);
+    }
+
+    /// Bitwise transfer x0 to d0 (load f64 bits from integer register)
+    void emitMoveX0ToD0() {
+        // FMOV d0, x0 = 0x9E670000
+        emitRaw32(0x9E670000);
+    }
+
     /// Increment 32-bit local in place: [fp + offset]++
     /// Result left in x0
     void emitIncLocal32(size_t offset) {
