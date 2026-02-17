@@ -576,8 +576,9 @@ class ManifestConstantDecl : Declaration {
     bool isStringType;       // True if this is a string constant
     bool isFloatType;        // True if this is a float/double constant
     bool isArrayType;        // True if this is an array constant
-    string[] ctfeStringArrayValue;  // For string[] constants (allMembers)
-    bool isStringArrayType;         // True if this is a string[] constant
+    ubyte[][] ctfeNestedElements;   // For nested array constants (T[][] where T is any element type)
+    uint ctfeInnerElementSize;      // Element size within each inner array
+    bool isNestedArrayType;         // True if this is a nested array constant (T[][])
     
     this(SourceLocation loc, string name, Expression initializer) {
         super(loc, name, true);  // Manifest constants are always "public" in their scope

@@ -2866,6 +2866,57 @@ class BinaryEmitter {
     }
     
     /**
+     * Register a nested array manifest (T[][]) in the data section.
+     * Builds a two-level layout: inner data blobs, inner slice structs, outer slice struct.
+     * Returns the address of the outer slice struct.
+     */
+    package uint registerManifestNestedArray(ManifestConstantDecl manifest) {
+        import codegen.wasm.types : ARRAY_STRUCT_SIZE, ARRAY_PTR_OFFSET, ARRAY_LEN_OFFSET, ARRAY_CAP_OFFSET;
+
+        // Check if already registered
+        if (manifest.name in manifestArrayAddrs) {
+            return manifestArrayAddrs[manifest.name];
+        }
+
+        needsArraySupport = true;
+
+        uint outerCount = cast(uint)manifest.ctfeNestedElements.length;
+        uint innerElemSize = manifest.ctfeInnerElementSize;
+
+        // 1. Add each inner array's raw data to the data section
+        uint[] innerDataOffsets = new uint[outerCount];
+        uint[] innerLengths = new uint[outerCount];
+        foreach (i; 0 .. outerCount) {
+            ubyte[] innerBytes = manifest.ctfeNestedElements[i];
+            innerDataOffsets[i] = addData(innerBytes);
+            innerLengths[i] = innerElemSize > 0
+                ? cast(uint)innerBytes.length / innerElemSize
+                : cast(uint)innerBytes.length;
+        }
+
+        // 2. Build the array of inner slice structs
+        ubyte[] innerStructsData = new ubyte[outerCount * ARRAY_STRUCT_SIZE];
+        foreach (i; 0 .. outerCount) {
+            uint base = i * ARRAY_STRUCT_SIZE;
+            *cast(uint*)&innerStructsData[base + ARRAY_PTR_OFFSET] = innerDataOffsets[i];
+            *cast(uint*)&innerStructsData[base + ARRAY_LEN_OFFSET] = innerLengths[i];
+            *cast(uint*)&innerStructsData[base + ARRAY_CAP_OFFSET] = innerLengths[i];
+        }
+        uint innerStructsOffset = addData(innerStructsData);
+
+        // 3. Build the outer slice struct pointing to the inner structs array
+        ubyte[ARRAY_STRUCT_SIZE] outerStruct;
+        *cast(uint*)&outerStruct[ARRAY_PTR_OFFSET] = innerStructsOffset;
+        *cast(uint*)&outerStruct[ARRAY_LEN_OFFSET] = outerCount;
+        *cast(uint*)&outerStruct[ARRAY_CAP_OFFSET] = outerCount;
+
+        uint outerOffset = addData(outerStruct[]);
+        manifestArrayAddrs[manifest.name] = outerOffset;
+
+        return outerOffset;
+    }
+
+    /**
      * Check if array support is needed (exposes for CTFE)
      */
     bool hasStringSupport() const {

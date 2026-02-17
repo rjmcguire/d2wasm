@@ -59,12 +59,15 @@ struct CTFEResult {
     bool isString;
     bool isArray;
     bool isStruct;
+    bool isNestedArray;
     string stringValue;
     long intValue;
     long[] arrayValues;
     ubyte[] arrayBytes;
     uint elementSize;    // Element size in bytes (for arrays)
     Type returnType;     // Return type (for type inference)
+    ubyte[][] nestedElements;   // For nested array results (T[][])
+    uint innerElementSize;      // Element size within each inner array
 
     static CTFEResult fromString(string s) {
         CTFEResult r;
@@ -86,12 +89,20 @@ struct CTFEResult {
         r.arrayBytes = bytes;
         return r;
     }
-    
+
     static CTFEResult fromStruct(long[] fieldValues, ubyte[] bytes) {
         CTFEResult r;
         r.isStruct = true;
         r.arrayValues = fieldValues;  // Struct field values (as ints)
         r.arrayBytes = bytes;         // Raw bytes
+        return r;
+    }
+
+    static CTFEResult fromNestedArray(ubyte[][] elements, uint innerElemSize) {
+        CTFEResult r;
+        r.isNestedArray = true;
+        r.nestedElements = elements;
+        r.innerElementSize = innerElemSize;
         return r;
     }
 }
@@ -389,9 +400,14 @@ class CTFEEvaluator {
             traits.evaluate();
 
             if (traits.traitName == "allMembers") {
-                manifest.ctfeStringArrayValue = traits.stringArrayResult;
+                // Convert string[] to generic ubyte[][] representation
+                ubyte[][] elements;
+                foreach (s; traits.stringArrayResult)
+                    elements ~= cast(ubyte[])s.dup;
+                manifest.ctfeNestedElements = elements;
+                manifest.ctfeInnerElementSize = 1;  // char/ubyte elements
                 manifest.ctfeComplete = true;
-                manifest.isStringArrayType = true;
+                manifest.isNestedArrayType = true;
                 auto charType = new BasicType(manifest.location, BasicType.Kind.Char);
                 auto stringType = new ArrayType(manifest.location, charType);
                 manifest.inferredType = new ArrayType(manifest.location, stringType);
@@ -534,6 +550,15 @@ class CTFEEvaluator {
                 manifest.isStringType = true;
                 log(3, "CTFE: ", manifest.name, " = \"", result.stringValue, "\" (function call)");
                 return;
+            } else if (result.isNestedArray) {
+                manifest.ctfeNestedElements = result.nestedElements;
+                manifest.ctfeInnerElementSize = result.innerElementSize;
+                manifest.ctfeComplete = true;
+                manifest.isNestedArrayType = true;
+                manifest.inferredType = result.returnType;
+                log(3, "CTFE: ", manifest.name, " = nested array with ", result.nestedElements.length,
+                    " elements (function call)");
+                return;
             } else if (result.isArray) {
                 manifest.ctfeArrayValue = result.arrayValues;
                 manifest.ctfeArrayBytes = result.arrayBytes;
@@ -554,7 +579,7 @@ class CTFEEvaluator {
                         }
                     }
                 }
-                
+
                 log(3, "CTFE: ", manifest.name, " = ", result.arrayValues, " (array from function, ",
                     result.arrayBytes.length, " bytes)");
                 return;
@@ -1014,11 +1039,47 @@ class CTFEEvaluator {
             throw new CTFEError("CTFE: Function '" ~ funcName ~ "' not found", callExpr.location);
         }
 
+        // Check if function returns a nested dynamic array (T[][] where element is dynamic array)
+        if (auto outerArr = cast(ArrayType)funcDecl.returnType) {
+            if (outerArr.arraySize is null) {
+                if (auto innerArr = cast(ArrayType)outerArr.elementType) {
+                    if (innerArr.arraySize is null) {
+                        // Nested array return: T[][]
+                        uint innerElemSize = reader.elementSizeOf(innerArr.elementType);
+                        ensureCompiledForFunction(funcDecl);
+                        auto result = cachedContext.callWithLargeReturn(funcDecl.name, [], reader.sliceSize);
+                        if (!result.success)
+                            throw new CTFEError("CTFE execution error: " ~ result.error, callExpr.location);
+
+                        // Read outer slice header
+                        auto outerSlice = reader.readSlice(result.arrayBytes);
+                        log(3, "CTFE: ", funcName, " returned nested array with ", outerSlice.length, " elements");
+
+                        // Read the array of inner slice structs
+                        ubyte[] innerStructData = cachedContext.readMemory(outerSlice.dataPtr, outerSlice.length * reader.sliceSize);
+
+                        // Extract each inner array's data
+                        ubyte[][] elements;
+                        foreach (i; 0 .. outerSlice.length) {
+                            auto innerBuf = innerStructData[i * reader.sliceSize .. (i + 1) * reader.sliceSize];
+                            auto innerSlice = reader.readSlice(innerBuf);
+                            ubyte[] innerData = cachedContext.readMemory(innerSlice.dataPtr, innerSlice.length * innerElemSize);
+                            elements ~= innerData;
+                        }
+
+                        auto r = CTFEResult.fromNestedArray(elements, innerElemSize);
+                        r.returnType = funcDecl.returnType;
+                        return r;
+                    }
+                }
+            }
+        }
+
         // Check if function returns a string (dynamic ubyte[])
         bool returnsString = isStringType(funcDecl.returnType);
-        
+
         log(3, "CTFE: Calling ", funcName, " (returns string: ", returnsString, ")");
-        
+
         // For string-returning functions, use hidden result pointer pattern
         if (returnsString) {
             ensureCompiledForFunction(funcDecl);

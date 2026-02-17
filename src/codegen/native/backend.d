@@ -1852,6 +1852,34 @@ class NativeCompiledFunction : CompiledFunction {
                 }
             }
 
+            // Member access on indexed slice elements (e.g., arr[i].length where arr is T[][])
+            if (auto indexExpr = cast(IndexExpression)member.object) {
+                if (auto ident = cast(IdentifierExpression)indexExpr.array) {
+                    if (auto info = ident.name in localVars) {
+                        if (info.isSlice) {
+                            if (auto elemArr = cast(ArrayType)info.elementType) {
+                                if (!elemArr.isStaticArray) {
+                                    // Element is a dynamic array — compile index to get element address
+                                    compileExpression(indexExpr);  // x0 = address of inner slice struct
+
+                                    // Load the requested field from the slice struct at x0
+                                    if (member.memberName == "ptr") {
+                                        gen.emit(stencil_load_i64);  // 64-bit pointer at offset 0
+                                        return;
+                                    } else if (member.memberName == "length") {
+                                        gen.emitLoadFromPointer(NativeSliceLayout.LENGTH_OFFSET);
+                                        return;
+                                    } else if (member.memberName == "capacity") {
+                                        gen.emitLoadFromPointer(NativeSliceLayout.CAPACITY_OFFSET);
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Field access: obj.field (for structs)
             auto structDecl = getStructDeclFromExpr(member.object);
             if (structDecl is null) {
@@ -2814,18 +2842,22 @@ class NativeCompiledFunction : CompiledFunction {
      * 5. Increment length
      */
     private void compileSliceAppend(size_t sliceOffset, Expression element, uint elemSize, bool isFloat = false) {
+        bool isAggregate = (elemSize > 4 && !isFloat);
         // Allocate temp slots — unified layout for both f64 and i32 paths.
         // isFloat only controls which store/load instructions are used.
         auto mark = temps.save();
-        size_t tempElement = temps.alloc(8);
+        size_t tempElement = temps.alloc(8);  // scalar value or source address for aggregates
         size_t tempNewCap  = temps.alloc(8);
         size_t tempNewPtr  = temps.alloc(8);
         size_t tempLoopIdx = temps.alloc(8);
         size_t tempLoopVal = temps.alloc(8);
+        size_t tempDestAddr = isAggregate ? temps.alloc(8) : 0;
 
         // 1. Evaluate element value, store to temp
         compileExpression(element);
-        if (isFloat)
+        if (isAggregate)
+            gen.emitStorePtr(tempElement);  // save source address (64-bit)
+        else if (isFloat)
             gen.emitStoreLocalF64(tempElement);  // d0 → temp (f64)
         else
             gen.emitStoreLocal32(tempElement);
@@ -2918,41 +2950,65 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitLoadPtr(sliceOffset);           // x0 = oldPtr
         gen.emit(stencil_add_i64);              // x0 = oldPtr + i*elemSize
 
-        // Load element from source
-        if (isFloat) {
-            gen.emit(stencil_load_f64);         // d0 = f64 at [x0]
-            gen.emitStoreLocalF64(tempLoopVal); // save to temp (f64)
-        } else if (elemSize == 1) {
-            gen.emitLoadByteFromPointer(0);     // x0 = byte at [x0]
-            gen.emitStoreLocal32(tempLoopVal);
-        } else {
-            gen.emitLoadFromPointer(0);         // x0 = i32 at [x0]
-            gen.emitStoreLocal32(tempLoopVal);
-        }
+        if (isAggregate) {
+            // Source address already in x0 = oldPtr + i*elemSize
+            gen.emitStorePtr(tempLoopVal);         // tempLoopVal = source addr
 
-        // Compute dest address: newPtr + i * elemSize → x0
-        gen.emitLoadLocal32(tempLoopIdx);       // x0 = i
-        gen.emitMoveX0ToX1();                   // x1 = i
-        gen.emitImm32(stencil_load_imm32, elemSize);
-        gen.emit(stencil_mul_i32);              // x0 = i * elemSize
-        gen.emitMoveX0ToX1();                   // x1 = i * elemSize
-        gen.emitLoadPtr(tempNewPtr);            // x0 = newPtr
-        gen.emit(stencil_add_i64);              // x0 = newPtr + i*elemSize
+            // Compute dest address: newPtr + i * elemSize → tempDestAddr
+            gen.emitLoadLocal32(tempLoopIdx);       // x0 = i
+            gen.emitMoveX0ToX1();                   // x1 = i
+            gen.emitImm32(stencil_load_imm32, elemSize);
+            gen.emit(stencil_mul_i32);              // x0 = i * elemSize
+            gen.emitMoveX0ToX1();                   // x1 = i * elemSize
+            gen.emitLoadPtr(tempNewPtr);            // x0 = newPtr
+            gen.emit(stencil_add_i64);              // x0 = newPtr + i*elemSize
+            gen.emitStorePtr(tempDestAddr);         // tempDestAddr = dest addr
 
-        // Store element to dest
-        if (isFloat) {
-            gen.emitLoadLocalF64(tempLoopVal);  // d0 = saved f64
-            gen.emit(stencil_store_f64);        // STR d0, [x0]
+            // Word-by-word copy
+            for (uint w = 0; w < elemSize; w += 4) {
+                gen.emitLoadPtr(tempLoopVal);       // x0 = source addr
+                gen.emitLoadFromPointer(w);         // x0 = word at [source + w]
+                gen.emitMoveX0ToX9();               // x9 = word
+                gen.emitLoadPtr(tempDestAddr);      // x0 = dest addr
+                gen.emitStoreToPointerFromX9(w);    // [dest + w] = x9
+            }
         } else {
-            gen.emitMoveX0ToX1();               // x1 = dest addr
-            gen.emitLoadLocal32(tempLoopVal);   // x0 = value
-            gen.emitMoveX0ToX2();               // x2 = value
-            gen.emit(stencil_move_arg1_to_result);  // x0 = dest addr
-            gen.emit(stencil_move_arg2_to_arg1);    // x1 = value
-            if (elemSize == 1)
-                gen.emitStoreByteToPointer(0);
-            else
-                gen.emit(stencil_store_i32);
+            // Load element from source (scalar)
+            if (isFloat) {
+                gen.emit(stencil_load_f64);         // d0 = f64 at [x0]
+                gen.emitStoreLocalF64(tempLoopVal); // save to temp (f64)
+            } else if (elemSize == 1) {
+                gen.emitLoadByteFromPointer(0);     // x0 = byte at [x0]
+                gen.emitStoreLocal32(tempLoopVal);
+            } else {
+                gen.emitLoadFromPointer(0);         // x0 = i32 at [x0]
+                gen.emitStoreLocal32(tempLoopVal);
+            }
+
+            // Compute dest address: newPtr + i * elemSize → x0
+            gen.emitLoadLocal32(tempLoopIdx);       // x0 = i
+            gen.emitMoveX0ToX1();                   // x1 = i
+            gen.emitImm32(stencil_load_imm32, elemSize);
+            gen.emit(stencil_mul_i32);              // x0 = i * elemSize
+            gen.emitMoveX0ToX1();                   // x1 = i * elemSize
+            gen.emitLoadPtr(tempNewPtr);            // x0 = newPtr
+            gen.emit(stencil_add_i64);              // x0 = newPtr + i*elemSize
+
+            // Store element to dest
+            if (isFloat) {
+                gen.emitLoadLocalF64(tempLoopVal);  // d0 = saved f64
+                gen.emit(stencil_store_f64);        // STR d0, [x0]
+            } else {
+                gen.emitMoveX0ToX1();               // x1 = dest addr
+                gen.emitLoadLocal32(tempLoopVal);   // x0 = value
+                gen.emitMoveX0ToX2();               // x2 = value
+                gen.emit(stencil_move_arg1_to_result);  // x0 = dest addr
+                gen.emit(stencil_move_arg2_to_arg1);    // x1 = value
+                if (elemSize == 1)
+                    gen.emitStoreByteToPointer(0);
+                else
+                    gen.emit(stencil_store_i32);
+            }
         }
 
         // i++ (compound stencil)
@@ -2986,7 +3042,19 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitLoadPtr(sliceOffset);           // x0 = ptr
         gen.emit(stencil_add_i64);              // x0 = ptr + length*elemSize
 
-        if (isFloat) {
+        if (isAggregate) {
+            // x0 = dest address (ptr + length*elemSize)
+            gen.emitStorePtr(tempDestAddr);         // save dest addr
+
+            // Word-by-word copy from source (tempElement) to dest (tempDestAddr)
+            for (uint w = 0; w < elemSize; w += 4) {
+                gen.emitLoadPtr(tempElement);       // x0 = source addr
+                gen.emitLoadFromPointer(w);         // x0 = word at [source + w]
+                gen.emitMoveX0ToX9();               // x9 = word
+                gen.emitLoadPtr(tempDestAddr);      // x0 = dest addr
+                gen.emitStoreToPointerFromX9(w);    // [dest + w] = x9
+            }
+        } else if (isFloat) {
             gen.emitLoadLocalF64(tempElement);  // d0 = element (f64)
             gen.emit(stencil_store_f64);        // STR d0, [x0]
         } else {

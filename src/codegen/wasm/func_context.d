@@ -1961,10 +1961,12 @@ class FuncContext {
             auto symbol = emitter.symbolTable.lookupSymbol(ident.name);
             if (symbol && symbol.isConstant) {
                 if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
-                    if (manifest.isArrayType) {
+                    if (manifest.isArrayType || manifest.isNestedArrayType) {
                         if (!manifest.ctfeComplete)
                             emitter.symbolTable.ensureManifestEvaluated(manifest);
-                        uint structAddr = emitter.registerManifestArray(manifest);
+                        uint structAddr = manifest.isNestedArrayType
+                            ? emitter.registerManifestNestedArray(manifest)
+                            : emitter.registerManifestArray(manifest);
                         // Copy 12-byte {ptr, len, cap} struct to frame
                         // ptr field
                         out_ ~= Op.local_get;
@@ -2262,12 +2264,15 @@ class FuncContext {
         auto symbol = emitter.symbolTable.lookupSymbol(arrayIdent.name);
         if (symbol && symbol.kind == SymbolKind.Variable && symbol.isConstant) {
             if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
-                if (manifest.ctfeComplete && manifest.isArrayType) {
-                    uint structAddr = emitter.registerManifestArray(manifest);
-                    
+                if (manifest.ctfeComplete && (manifest.isArrayType || manifest.isNestedArrayType)) {
+                    uint structAddr = manifest.isNestedArrayType
+                        ? emitter.registerManifestNestedArray(manifest)
+                        : emitter.registerManifestArray(manifest);
+
                     // Determine element size based on inferred type
-                    uint elemSize = manifest.ctfeElementSize;
-                    if (elemSize == 0) elemSize = 4;  // default to i32
+                    uint elemSize = manifest.isNestedArrayType
+                        ? cast(uint)WasmSliceLayout.sizeof
+                        : (manifest.ctfeElementSize > 0 ? manifest.ctfeElementSize : 4);
                     
                     // Load ptr from struct (offset 0)
                     out_ ~= Op.i32_const;
@@ -2284,7 +2289,9 @@ class FuncContext {
                     out_ ~= Op.i32_add;
                     
                     // Load the element (use appropriate size)
-                    if (elemSize == 1) {
+                    if (elemSize > 4) {
+                        // Aggregate element — leave address on stack
+                    } else if (elemSize == 1) {
                         out_ ~= Op.i32_load8_u;  // ubyte
                         out_ ~= cast(ubyte)0x00;
                         leb128u(out_, 0);
@@ -3285,9 +3292,11 @@ class FuncContext {
             // Check if it's a manifest constant array (import(), array literal, etc.)
             if (symbol && symbol.kind == SymbolKind.Variable && symbol.isConstant) {
                 if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
-                    if (manifest.ctfeComplete && manifest.isArrayType) {
+                    if (manifest.ctfeComplete && (manifest.isArrayType || manifest.isNestedArrayType)) {
                         // Register the array data and get struct address
-                        uint structAddr = emitter.registerManifestArray(manifest);
+                        uint structAddr = manifest.isNestedArrayType
+                            ? emitter.registerManifestNestedArray(manifest)
+                            : emitter.registerManifestArray(manifest);
                         
                         if (expr.memberName == "length") {
                             // Length is at offset 4 in Array struct
