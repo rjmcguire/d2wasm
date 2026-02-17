@@ -90,7 +90,8 @@ run_test() {
     if [ "$test_type" = "compile_output" ]; then
         local expected_output=$(jq -r '.expected_output' "$config_file")
         if echo "$compile_output" | grep -qF "$expected_output"; then
-            echo -e "${GREEN}PASS${NC} $test_name (output: $expected_output)"
+            local display_output="${expected_output//$'\n'/\\n}"
+            printf "${GREEN}PASS${NC} %s (output: %s)\n" "$test_name" "$display_output"
             return 0
         else
             echo -e "${RED}FAIL${NC} $test_name"

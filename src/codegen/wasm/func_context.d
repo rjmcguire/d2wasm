@@ -1956,6 +1956,64 @@ class FuncContext {
             }
         }
 
+        // Manifest array constant initializer: int[] x = MANIFEST_ARR;
+        if (auto ident = cast(IdentifierExpression)stmt.initializer) {
+            auto symbol = emitter.symbolTable.lookupSymbol(ident.name);
+            if (symbol && symbol.isConstant) {
+                if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
+                    if (manifest.isArrayType) {
+                        if (!manifest.ctfeComplete)
+                            emitter.symbolTable.ensureManifestEvaluated(manifest);
+                        uint structAddr = emitter.registerManifestArray(manifest);
+                        // Copy 12-byte {ptr, len, cap} struct to frame
+                        // ptr field
+                        out_ ~= Op.local_get;
+                        leb128u(out_, fpLocal);
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, info.frameOffset);
+                        out_ ~= Op.i32_add;
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, structAddr);
+                        out_ ~= Op.i32_load;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                        out_ ~= Op.i32_store;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                        // len field
+                        out_ ~= Op.local_get;
+                        leb128u(out_, fpLocal);
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, info.frameOffset + WasmSliceLayout.LENGTH_OFFSET);
+                        out_ ~= Op.i32_add;
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, structAddr + WasmSliceLayout.LENGTH_OFFSET);
+                        out_ ~= Op.i32_load;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                        out_ ~= Op.i32_store;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                        // cap field
+                        out_ ~= Op.local_get;
+                        leb128u(out_, fpLocal);
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, info.frameOffset + WasmSliceLayout.CAPACITY_OFFSET);
+                        out_ ~= Op.i32_add;
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, structAddr + WasmSliceLayout.CAPACITY_OFFSET);
+                        out_ ~= Op.i32_load;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                        out_ ~= Op.i32_store;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                        return;
+                    }
+                }
+            }
+        }
+
         throw new EmitError("Unsupported slice initializer", stmt.initializer.toString());
     }
 

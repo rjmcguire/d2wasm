@@ -2847,13 +2847,17 @@ class BinaryEmitter {
         
         // Add the raw bytes to data section
         uint dataOffset = addData(manifest.ctfeArrayBytes);
-        uint len = cast(uint)manifest.ctfeArrayBytes.length;
-        
+        uint byteLen = cast(uint)manifest.ctfeArrayBytes.length;
+        // Element count, not byte count (for strings elementSize=1 so they're equal)
+        uint elementCount = manifest.ctfeElementSize > 0
+            ? byteLen / manifest.ctfeElementSize
+            : byteLen;
+
         // Create the Array struct: { ptr, len, cap }
         ubyte[ARRAY_STRUCT_SIZE] structData;
         *cast(uint*)&structData[ARRAY_PTR_OFFSET] = dataOffset;
-        *cast(uint*)&structData[ARRAY_LEN_OFFSET] = len;
-        *cast(uint*)&structData[ARRAY_CAP_OFFSET] = len;
+        *cast(uint*)&structData[ARRAY_LEN_OFFSET] = elementCount;
+        *cast(uint*)&structData[ARRAY_CAP_OFFSET] = elementCount;
         
         uint structOffset = addData(structData[]);
         manifestArrayAddrs[manifest.name] = structOffset;

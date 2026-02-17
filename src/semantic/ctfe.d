@@ -61,20 +61,22 @@ struct CTFEResult {
     long intValue;
     long[] arrayValues;
     ubyte[] arrayBytes;
-    
+    uint elementSize;    // Element size in bytes (for arrays)
+    Type returnType;     // Return type (for type inference)
+
     static CTFEResult fromString(string s) {
         CTFEResult r;
         r.isString = true;
         r.stringValue = s;
         return r;
     }
-    
+
     static CTFEResult fromInt(long v) {
         CTFEResult r;
         r.intValue = v;
         return r;
     }
-    
+
     static CTFEResult fromArray(long[] values, ubyte[] bytes) {
         CTFEResult r;
         r.isArray = true;
@@ -108,6 +110,34 @@ private bool isStringType(Type t) {
         }
     }
     return false;
+}
+
+/// Get the size in bytes of an element type.
+private uint getElementSize(Type elementType) {
+    if (auto basic = cast(BasicType)elementType) {
+        switch (basic.kind) {
+            case BasicType.Kind.Bool:
+            case BasicType.Kind.Int8:
+            case BasicType.Kind.UInt8:
+            case BasicType.Kind.Char:
+                return 1;
+            case BasicType.Kind.Int16:
+            case BasicType.Kind.UInt16:
+                return 2;
+            case BasicType.Kind.Int32:
+            case BasicType.Kind.UInt32:
+            case BasicType.Kind.Float32:
+                return 4;
+            case BasicType.Kind.Int64:
+            case BasicType.Kind.UInt64:
+            case BasicType.Kind.Float64:
+                return 8;
+            default:
+                return 4;
+        }
+    }
+    if (auto sd = elementType.asStruct()) return cast(uint)sd.aggregateSize_;
+    return 4;  // default
 }
 
 /// Deduce the type of an expression for IFTI in CTFE context.
@@ -499,12 +529,14 @@ class CTFEEvaluator {
             } else if (result.isArray) {
                 manifest.ctfeArrayValue = result.arrayValues;
                 manifest.ctfeArrayBytes = result.arrayBytes;
-                manifest.ctfeElementSize = 4;  // Assume int elements for now
+                manifest.ctfeElementSize = result.elementSize > 0 ? result.elementSize : 4;
                 manifest.ctfeComplete = true;
                 manifest.isArrayType = true;
-                
-                // Set the inferred type based on the function's return type
-                if (auto funcIdent = cast(IdentifierExpression)callExpr.function_) {
+
+                // Set the inferred type from result or function declaration
+                if (result.returnType !is null) {
+                    manifest.inferredType = result.returnType;
+                } else if (auto funcIdent = cast(IdentifierExpression)callExpr.function_) {
                     foreach (decl; allDeclarations) {
                         if (auto fd = cast(FunctionDecl)decl) {
                             if (fd.name == funcIdent.name) {
@@ -999,7 +1031,44 @@ class CTFEEvaluator {
             ubyte[] strBytes = cachedContext.readMemory(dataPtr, len);
             return CTFEResult.fromString(cast(string)strBytes.idup);
         }
-        
+
+        // General dynamic array return (int[], double[], bool[], etc.)
+        if (auto arrType = cast(ArrayType)funcDecl.returnType) {
+            if (arrType.arraySize is null && !returnsString) {
+                ensureCompiledForFunction(funcDecl);
+                enum sliceStructSize = 12;  // {ptr:i32, len:i32, cap:i32}
+                auto result = cachedContext.callWithLargeReturn(funcDecl.name, [], sliceStructSize);
+                if (!result.success)
+                    throw new CTFEError("CTFE execution error: " ~ result.error, callExpr.location);
+                ubyte[] sliceBytes = result.arrayBytes;
+                uint dataPtr = (cast(uint)sliceBytes[0]) |
+                               (cast(uint)sliceBytes[1] << 8) |
+                               (cast(uint)sliceBytes[2] << 16) |
+                               (cast(uint)sliceBytes[3] << 24);
+                uint len = (cast(uint)sliceBytes[4]) |
+                           (cast(uint)sliceBytes[5] << 8) |
+                           (cast(uint)sliceBytes[6] << 16) |
+                           (cast(uint)sliceBytes[7] << 24);
+                uint elemSize = getElementSize(arrType.elementType);
+                ubyte[] rawData = cachedContext.readMemory(dataPtr, len * elemSize);
+
+                // Convert to long[] for backward compat with existing array manifest storage
+                long[] values;
+                values.length = len;
+                foreach (i; 0 .. len) {
+                    if (elemSize == 1) values[i] = rawData[i];
+                    else if (elemSize == 4) values[i] = *cast(int*)&rawData[i * 4];
+                    else if (elemSize == 8) values[i] = *cast(long*)&rawData[i * 8];
+                    else values[i] = *cast(int*)&rawData[i * elemSize];
+                }
+                auto r = CTFEResult.fromArray(values, rawData);
+                r.elementSize = elemSize;
+                r.returnType = funcDecl.returnType;
+                log(3, "CTFE: ", funcName, " returned dynamic array with ", len, " elements (", elemSize, " bytes each)");
+                return r;
+            }
+        }
+
         // Check if function returns a static array
         if (auto arrType = cast(ArrayType)funcDecl.returnType) {
             if (arrType.arraySize !is null) {
@@ -1007,7 +1076,7 @@ class CTFEEvaluator {
                 return evaluateStaticArrayReturningFunction(funcDecl, callExpr.arguments);
             }
         }
-        
+
         // Check if function returns a struct (uses hidden result pointer)
         if (auto structDecl = funcDecl.returnType.asStruct()) {
             log(3, "CTFE: Function returns struct, evaluating with hidden param");
