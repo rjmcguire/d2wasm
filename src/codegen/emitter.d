@@ -1390,26 +1390,8 @@ class BinaryEmitter {
      * Used for interface dispatch where we need the type signature.
      */
     package uint getOrCreateMethodType(FunctionDecl method) {
-        import std.algorithm : map;
-        import std.array : array;
-        
-        FuncSig sig;
-        sig.params = [ValType.i32];  // 'this' pointer
-        sig.params ~= method.parameters.map!(p => dTypeToValType(p.type)).array;
-        
-        if (!isVoidType(method.returnType)) {
-            sig.results = [dTypeToValType(method.returnType)];
-        }
-        
-        if (auto existing = sig in typeIndex) {
-            return *existing;
-        }
-        
-        // Create new type
-        uint tIdx = cast(uint)types.length;
-        types ~= sig;
-        typeIndex[sig] = tIdx;
-        return tIdx;
+        auto layout = buildLayout(method, true, false);
+        return registerSignature(layout);
     }
     
     //==========================================================================

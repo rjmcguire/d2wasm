@@ -61,7 +61,14 @@ run_test_with_backend() {
     fi
     
     local test_type=$(jq -r '.type' "$config_file")
-    
+
+    # Check if this backend should be skipped
+    local skip_backends=$(jq -r '.skip_backends // [] | .[]' "$config_file" 2>/dev/null)
+    if echo "$skip_backends" | grep -qw "$backend"; then
+        echo -e "${YELLOW}SKIP${NC} $test_name [$backend] (skip_backends)"
+        return 0
+    fi
+
     # Only handle CTFE-relevant test types
     case "$test_type" in
         compile_output|wasm_exec|compile_error) ;;

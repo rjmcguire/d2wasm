@@ -1341,6 +1341,11 @@ class FuncContext {
                 emitStructReturnCall(out_, ident.name, callExpr.arguments, info.frameOffset);
                 return;
             }
+            // Method call returning struct: Point p = s.origin()
+            if (auto memberExpr = cast(MemberExpression)callExpr.function_) {
+                emitStructReturnMethodCall(out_, memberExpr, callExpr.arguments, info.frameOffset);
+                return;
+            }
             // Fallback: assume struct construction (e.g. complex expression as target)
             emitStructFieldsInit(out_, structDecl, callExpr.arguments,
                                 EmitAddrMode.fromFP, info.frameOffset);
@@ -5160,6 +5165,27 @@ class FuncContext {
             emitVarAddress(out_, objInfo);
         }
 
+        // Push hidden result pointer if method returns a large type (struct, array)
+        bool methodHasLargeReturn = emitter.isLargeReturnType(method.returnType);
+        uint methodResultTempSize = 0;
+        if (methodHasLargeReturn) {
+            methodResultTempSize = computeLargeReturnSize(method.returnType);
+            assert(methodResultTempSize > 0, "emitMethodCall: large return size is 0 for method '" ~ method.name ~ "'");
+
+            // Allocate temp on shadow stack for result
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.spGlobal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, methodResultTempSize);
+            out_ ~= Op.i32_sub;
+            out_ ~= Op.global_set;
+            leb128u(out_, emitter.spGlobal);
+
+            // Push result pointer as hidden argument
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.spGlobal);
+        }
+
         // Push hidden arena pointer if callee method needs it
         if (method.needsArena) {
             emitArenaPointer(out_);
@@ -5226,8 +5252,14 @@ class FuncContext {
                 leb128u(out_, 0);         // table index (always 0)
             }
         }
+
+        // For large-return methods, leave result address on WASM stack
+        if (methodHasLargeReturn) {
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.spGlobal);
+        }
     }
-    
+
     /**
      * Emit interface method call using fat pointer dispatch.
      * Fat pointer layout: { obj_ptr: i32, itable_ptr: i32 }
@@ -5363,6 +5395,8 @@ class FuncContext {
      */
     void emitStructReturnCall(ref Appender!(ubyte[]) out_, string funcName,
                               Expression[] args, int resultFrameOffset) {
+        assert(frameSize > 0, "emitStructReturnCall requires a shadow stack frame (frameSize > 0)");
+        assert(funcName.length > 0, "emitStructReturnCall: empty function name");
         // Push hidden result pointer as first argument: FP + resultFrameOffset
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
@@ -5450,6 +5484,121 @@ class FuncContext {
             out_ ~= Op.global_set;
             leb128u(out_, emitter.spGlobal);
         }
+    }
+
+    /**
+     * Emit a method call that returns an aggregate via hidden result pointer,
+     * writing directly into the caller's frame at resultFrameOffset.
+     * Used for: Point p = s.origin();
+     */
+    void emitStructReturnMethodCall(ref Appender!(ubyte[]) out_, MemberExpression memberExpr,
+                                     Expression[] args, int resultFrameOffset) {
+        assert(frameSize > 0, "emitStructReturnMethodCall requires a shadow stack frame (frameSize > 0)");
+
+        // Resolve object and method (same logic as emitMethodCall)
+        auto objIdent = cast(IdentifierExpression)memberExpr.object;
+        if (!objIdent)
+            throw new EmitError("Struct-returning method call on non-identifier object not yet supported");
+
+        auto objInfo = resolveVar(objIdent.resolvedLocalId, objIdent.name);
+        if (!objInfo)
+            throw new EmitError("Unknown variable for struct-returning method call: " ~ objIdent.name);
+
+        StructDecl structDecl = null;
+        ClassDecl classDecl = null;
+        if (objInfo.isStruct) structDecl = objInfo.structDecl;
+        else if (objInfo.isClass) classDecl = objInfo.classDecl;
+        if (!structDecl && !classDecl)
+            throw new EmitError("Cannot determine type for struct-returning method call on " ~ objIdent.name);
+
+        // Find the method
+        FunctionDecl method = null;
+        if (structDecl) {
+            foreach (member; structDecl.members)
+                if (auto fd = cast(FunctionDecl)member)
+                    if (fd.name == memberExpr.memberName && fd.isMethod) { method = fd; break; }
+        } else if (classDecl) {
+            ClassDecl current = classDecl;
+            while (current && !method) {
+                foreach (member; current.members)
+                    if (auto fd = cast(FunctionDecl)member)
+                        if (fd.name == memberExpr.memberName && fd.isMethod) { method = fd; break; }
+                current = current.baseClassDecl;
+            }
+        }
+        if (!method)
+            throw new EmitError("No method '" ~ memberExpr.memberName ~ "' for struct-returning call");
+
+        assert(emitter.isLargeReturnType(method.returnType),
+            "emitStructReturnMethodCall called for non-large-return method '" ~ method.name ~ "'");
+        assert(method.mangledName !is null && method.mangledName.length > 0,
+            "emitStructReturnMethodCall: method '" ~ method.name ~ "' has no mangled name");
+
+        // --- Push arguments in canonical order: [this, result_ptr, arena?, user_args] ---
+
+        // 1. this pointer
+        emitVarAddress(out_, objInfo);
+
+        // 2. result_ptr: FP + resultFrameOffset (write directly into caller's local)
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        if (resultFrameOffset != 0) {
+            out_ ~= Op.i32_const;
+            leb128s(out_, resultFrameOffset);
+            out_ ~= Op.i32_add;
+        }
+
+        // 3. arena pointer if needed
+        if (method.needsArena)
+            emitArenaPointer(out_);
+
+        // 4. user arguments
+        foreach (arg; args)
+            emitExpression(out_, arg);
+
+        // --- Dispatch: direct call or virtual ---
+        if (structDecl) {
+            uint funcIdx = emitter.getFuncIndex(method.mangledName);
+            out_ ~= Op.call;
+            leb128u(out_, funcIdx);
+        } else if (classDecl) {
+            assert(classDecl.virtualMethods !is null,
+                "emitStructReturnMethodCall: class '" ~ classDecl.name ~ "' has no virtualMethods");
+            int methodSlot = -1;
+            foreach (i, vm; classDecl.virtualMethods)
+                if (vm.name == method.name) { methodSlot = cast(int)i; break; }
+
+            if (methodSlot < 0) {
+                uint funcIdx = emitter.getFuncIndex(method.mangledName);
+                out_ ~= Op.call;
+                leb128u(out_, funcIdx);
+            } else {
+                // Virtual dispatch: load vtable_ptr, mask, add slot, call_indirect
+                emitVarAddress(out_, objInfo);
+                out_ ~= Op.i32_load;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+
+                out_ ~= Op.i32_const;
+                leb128s(out_, cast(int)WasmVtablePacking.TABLE_BASE_MASK);
+                out_ ~= Op.i32_and;
+
+                if (methodSlot > 0) {
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, methodSlot);
+                    out_ ~= Op.i32_add;
+                }
+
+                uint funcIdx = emitter.getFuncIndex(method.mangledName);
+                assert(funcIdx >= emitter.imports.length,
+                    "emitStructReturnMethodCall: method funcIdx is an import, not a user function");
+                uint typeIdx = emitter.functions[funcIdx - cast(uint)emitter.imports.length].typeIndex;
+                out_ ~= Op.call_indirect;
+                leb128u(out_, typeIdx);
+                leb128u(out_, 0);
+            }
+        }
+        // No need to push result address — callee wrote directly into our frame
     }
 
     /**
