@@ -1,0 +1,7 @@
+{
+  "name": "class_basic_fields",
+  "description": "Basic class with fields and methods (no inheritance)",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 45
+}

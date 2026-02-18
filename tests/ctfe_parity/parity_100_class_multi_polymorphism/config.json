@@ -1,0 +1,7 @@
+{
+  "name": "class_multi_polymorphism",
+  "description": "Multiple derived classes dispatched through same base class parameter",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 37
+}

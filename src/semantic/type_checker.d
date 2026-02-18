@@ -1281,8 +1281,31 @@ class TypeChecker {
             }
         }
         
+        // Implicit this.method() — bare identifier call inside a method body.
+        // If the identifier isn't a known free function or type, check if it's
+        // a method on the current struct/class (including inherited methods).
+        if (auto identExpr = cast(IdentifierExpression)expr.function_) {
+            auto symbol = symbolTable.lookupSymbol(identExpr.name);
+            if (symbol is null || (symbol.kind != SymbolKind.Function && symbol.kind != SymbolKind.Type
+                    && symbol.kind != SymbolKind.Template)) {
+                FunctionDecl method = null;
+                if (currentClassDecl)
+                    method = getClassMethod(currentClassDecl, identExpr.name);
+                else if (currentStructDecl)
+                    method = getStructMethod(currentStructDecl, identExpr.name);
+
+                if (method) {
+                    // Rewrite: score(args) → this.score(args)
+                    auto thisExpr = new IdentifierExpression(identExpr.location, "this");
+                    auto memberExpr = new MemberExpression(identExpr.location, thisExpr, identExpr.name);
+                    expr.function_ = memberExpr;
+                    return checkCallExpression(expr);
+                }
+            }
+        }
+
         Type funcType = checkExpression(expr.function_);
-        
+
         auto functionType = cast(FunctionType)funcType;
         if (!functionType) {
             throw new TypeError(

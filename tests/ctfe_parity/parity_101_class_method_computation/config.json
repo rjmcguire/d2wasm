@@ -1,0 +1,7 @@
+{
+  "name": "class_method_computation",
+  "description": "Class methods with implicit field access, local variables, and multi-arg calls",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 66
+}

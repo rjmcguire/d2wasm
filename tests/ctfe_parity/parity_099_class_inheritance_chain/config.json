@@ -1,0 +1,7 @@
+{
+  "name": "class_inheritance_chain",
+  "description": "Three-level class inheritance with virtual dispatch through base class parameter",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 43
+}
