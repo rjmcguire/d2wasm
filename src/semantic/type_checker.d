@@ -1053,11 +1053,24 @@ class TypeChecker {
             }
         }
 
+        // emplace(ptr, args...) — compiler intrinsic
+        if (auto identExpr = cast(IdentifierExpression)expr.function_) {
+            if (identExpr.name == "emplace") {
+                return checkEmplaceCall(expr);
+            }
+        }
+
         // Handle struct method calls (obj.method()) or UFCS (obj.func() -> func(obj))
         if (auto memberExpr = cast(MemberExpression)expr.function_) {
             Type objectType = checkExpression(memberExpr.object);
             bool foundMethod = false;
-            
+
+            // Auto-deref: pointer-to-struct method calls (ptr.method())
+            if (auto ptrType = cast(PointerType)objectType) {
+                objectType = ptrType.pointeeType;
+                memberExpr.isAutoDereference = true;
+            }
+
             if (auto userType = cast(UserType)objectType) {
                 // Resolve the UserType's declaration if not already linked
                 if (!userType.declaration) {
@@ -1738,7 +1751,64 @@ class TypeChecker {
         
         return userType;
     }
-    
+
+    Type checkEmplaceCall(CallExpression expr) {
+        if (expr.arguments.length < 1)
+            throw new TypeError("emplace requires at least a pointer argument", expr.location);
+
+        // First arg must be T* (pointer to struct)
+        Type ptrArgType = checkExpression(expr.arguments[0]);
+        auto ptrType = cast(PointerType)ptrArgType;
+        if (!ptrType)
+            throw new TypeError(
+                format("emplace first argument must be a pointer, got '%s'", ptrArgType.toString()),
+                expr.arguments[0].location);
+
+        auto userType = cast(UserType)ptrType.pointeeType;
+        if (!userType) {
+            userType = cast(UserType)(resolveAliasType(ptrType.pointeeType));
+        }
+        if (!userType)
+            throw new TypeError(
+                format("emplace pointer must point to a struct type, got '%s*'", ptrType.pointeeType.toString()),
+                expr.arguments[0].location);
+
+        userType.ensureResolved(symbolTable);
+        auto structDecl = cast(StructDecl)userType.declaration;
+        if (!structDecl)
+            throw new TypeError(
+                format("emplace pointer must point to a struct type, '%s' is not a struct", userType.name),
+                expr.arguments[0].location);
+
+        // Remaining args are field initializers
+        Expression[] fieldArgs = expr.arguments[1 .. $];
+        if (fieldArgs.length > structDecl.fields.length)
+            throw new TypeError(
+                format("emplace: struct '%s' has %d fields, got %d initializers",
+                       structDecl.name, structDecl.fields.length, fieldArgs.length),
+                expr.location);
+
+        // Type-check each field argument
+        for (size_t i = 0; i < fieldArgs.length; i++) {
+            Type argType = checkExpression(fieldArgs[i]);
+            Type fieldType = structDecl.fields[i].type;
+            if (fieldType) {
+                auto compat = checkTypeCompatibility(argType, fieldType);
+                if (!compat.isCompatible)
+                    throw new TypeError(
+                        format("emplace: cannot initialize field '%s' of type '%s' with value of type '%s'",
+                               structDecl.fields[i].name, fieldType.toString(), argType.toString()),
+                        fieldArgs[i].location);
+            }
+        }
+
+        // Store resolution for codegen
+        expr.resolvedEmplaceStruct = structDecl;
+
+        // Return type: same pointer type (for chaining)
+        return ptrType;
+    }
+
     /**
      * Check unary expression types
      */
@@ -2028,7 +2098,13 @@ class TypeChecker {
         
         // Check the object expression
         Type objectType = checkExpression(expr.object);
-        
+
+        // Auto-deref: if objectType is PointerType, unwrap to pointee type
+        if (auto ptrType = cast(PointerType)objectType) {
+            objectType = ptrType.pointeeType;
+            expr.isAutoDereference = true;
+        }
+
         // Handle struct field access
         if (auto userType = cast(UserType)objectType) {
             // Resolve the UserType's declaration if not already linked

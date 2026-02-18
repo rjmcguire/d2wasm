@@ -150,6 +150,7 @@ class CallExpression : Expression {
     Expression[] arguments;
     bool isUFCS = false;  // Set by type checker for UFCS calls (obj.func() -> func(obj))
     FunctionDecl resolvedInstantiation;  // Set by IFTI during type checking
+    StructDecl resolvedEmplaceStruct;  // Set by type checker for emplace() calls
     
     this(SourceLocation loc, Expression function_, Expression[] arguments) {
         super(loc);
@@ -275,7 +276,8 @@ class SliceExpression : Expression {
 class MemberExpression : Expression {
     Expression object;
     string memberName;
-    
+    bool isAutoDereference;  // true when object is a pointer type (auto-deref for p.field)
+
     this(SourceLocation loc, Expression object, string memberName) {
         super(loc);
         this.object = object;

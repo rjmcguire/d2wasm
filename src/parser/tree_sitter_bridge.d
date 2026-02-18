@@ -1753,6 +1753,24 @@ class TreeSitterBridge {
                 }
             }
             
+            // Check for pointer type suffix: baseType '*'
+            // Tree-sitter's _type_suffix "*" is anonymous — may not appear as a named child.
+            // Detect by checking if the type node text ends with '*'.
+            {
+                string typeText = TreeSitterParser.getNodeText(node, sourceText);
+                if (typeText.length > 1 && typeText[$ - 1] == '*') {
+                    // Parse the base type (first non-ctor child)
+                    for (uint i = 0; i < childCount; i++) {
+                        TSNode child = TreeSitterParser.getChild(node, i);
+                        string childType = TreeSitterParser.getNodeType(child);
+                        if (childType != "type_ctor" && childType != "*") {
+                            Type baseType = parseType(child);
+                            return new PointerType(loc, baseType);
+                        }
+                    }
+                }
+            }
+
             // Look for the actual type inside the type node, skipping type_ctor
             for (uint i = 0; i < childCount; i++) {
                 TSNode child = TreeSitterParser.getChild(node, i);
@@ -1947,6 +1965,11 @@ class TreeSitterBridge {
             case "return_statement":
                 return parseReturnStatement(node, loc);
             case "expression_statement":
+                // Detect pointer declarations misparse: tree-sitter parses "Type* name = expr;"
+                // as expression_statement(assignment_expression(mul_expression(Type, name), =, expr))
+                // because it can't distinguish pointer types from multiplication at parse time.
+                if (auto ptrDecl = tryParsePointerDeclaration(node, loc))
+                    return ptrDecl;
                 return parseExpressionStatement(node, loc);
             case "variable_declaration":
                 return parseVariableDeclarationStatement(node, loc);
@@ -2270,6 +2293,121 @@ class TreeSitterBridge {
         return new ReturnStatement(loc, value);
     }
     
+    /**
+     * Detect pointer variable declarations misparsed as expression statements.
+     * Tree-sitter parses "Type* name = expr;" as:
+     *   expression_statement → expression_list → assignment_expression
+     *     left: mul_expression(identifier(Type), *, identifier(name))
+     *     op: =
+     *     right: expr
+     * And "Type* name;" as:
+     *   expression_statement → mul_expression(identifier(Type), *, identifier(name))
+     * Returns VariableDeclarationStatement if detected, null otherwise.
+     */
+    VariableDeclarationStatement tryParsePointerDeclaration(TSNode node, SourceLocation loc) {
+        // Find the expression node (same logic as parseExpressionStatement)
+        TSNode exprNode = TreeSitterParser.getChildByFieldName(node, "expression");
+        if (!TreeSitterParser.isValid(exprNode)) {
+            uint childCount = TreeSitterParser.getChildCount(node);
+            for (uint i = 0; i < childCount; i++) {
+                TSNode child = TreeSitterParser.getChild(node, i);
+                string nt = TreeSitterParser.getNodeType(child);
+                if (nt == "expression_list" || nt == "expression" || nt.endsWith("expression")) {
+                    exprNode = child;
+                    break;
+                }
+            }
+        }
+        if (!TreeSitterParser.isValid(exprNode))
+            return null;
+
+        // Unwrap expression_list
+        string exprNodeType = TreeSitterParser.getNodeType(exprNode);
+        if (exprNodeType == "expression_list") {
+            uint childCount = TreeSitterParser.getChildCount(exprNode);
+            for (uint i = 0; i < childCount; i++) {
+                TSNode child = TreeSitterParser.getChild(exprNode, i);
+                string ct = TreeSitterParser.getNodeType(child);
+                if (ct != "," && ct != "(" && ct != ")") {
+                    exprNode = child;
+                    exprNodeType = ct;
+                    break;
+                }
+            }
+        }
+
+        TSNode mulNode;
+        Expression initializer = null;
+
+        if (exprNodeType == "assignment_expression") {
+            // Pattern: Type* name = expr;
+            uint assignChildren = TreeSitterParser.getChildCount(exprNode);
+            if (assignChildren < 3)
+                return null;
+
+            TSNode leftNode = TreeSitterParser.getChild(exprNode, 0);
+            TSNode opNode = TreeSitterParser.getChild(exprNode, 1);
+            TSNode rightNode = TreeSitterParser.getChild(exprNode, 2);
+
+            if (TreeSitterParser.getNodeText(opNode, sourceText) != "=")
+                return null;
+
+            string leftType = TreeSitterParser.getNodeType(leftNode);
+
+            // Tree-sitter may wrap mul_expression inside a binary_expression
+            if (leftType == "binary_expression") {
+                uint binaryChildren = TreeSitterParser.getChildCount(leftNode);
+                if (binaryChildren == 1) {
+                    TSNode inner = TreeSitterParser.getChild(leftNode, 0);
+                    if (TreeSitterParser.getNodeType(inner) == "mul_expression") {
+                        leftNode = inner;
+                        leftType = "mul_expression";
+                    }
+                }
+            }
+            if (leftType != "mul_expression")
+                return null;
+
+            mulNode = leftNode;
+            initializer = parseExpression(rightNode);
+        } else if (exprNodeType == "mul_expression" || exprNodeType == "binary_expression") {
+            // Pattern: Type* name; (no initializer)
+            mulNode = exprNode;
+        } else {
+            return null;
+        }
+
+        // mul_expression must have exactly 3 children: typeExpr * nameIdent
+        uint mulChildren = TreeSitterParser.getChildCount(mulNode);
+        if (mulChildren != 3)
+            return null;
+
+        TSNode typeNode = TreeSitterParser.getChild(mulNode, 0);
+        TSNode starNode = TreeSitterParser.getChild(mulNode, 1);
+        TSNode nameNode = TreeSitterParser.getChild(mulNode, 2);
+
+        if (TreeSitterParser.getNodeText(starNode, sourceText) != "*")
+            return null;
+        if (TreeSitterParser.getNodeType(nameNode) != "identifier")
+            return null;
+
+        // Parse the base type from the left side of the mul_expression
+        string typeNodeType = TreeSitterParser.getNodeType(typeNode);
+        Type baseType;
+        if (typeNodeType == "identifier") {
+            baseType = new UserType(loc, TreeSitterParser.getNodeText(typeNode, sourceText));
+        } else if (typeNodeType == "template_instance") {
+            baseType = parseTemplateInstanceType(typeNode, loc);
+        } else {
+            // Not a recognized type pattern — fall back to normal expression parsing
+            return null;
+        }
+
+        string varName = TreeSitterParser.getNodeText(nameNode, sourceText);
+        auto ptrType = new PointerType(loc, baseType);
+        return new VariableDeclarationStatement(loc, varName, ptrType, initializer);
+    }
+
     /**
      * Parse expression statement
      */

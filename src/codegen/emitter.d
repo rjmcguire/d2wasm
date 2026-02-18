@@ -1353,7 +1353,12 @@ class BinaryEmitter {
         if (auto arrayType = cast(ArrayType)t) {
             return ValType.i32;  // Pointer to slice struct
         }
-        
+
+        // Explicit pointer types (T*) are i32 in WASM's 32-bit address space
+        if (cast(PointerType)t) {
+            return ValType.i32;
+        }
+
         auto basic = cast(BasicType)t;
         if (!basic) {
             throw new EmitError("Non-basic types not yet supported", t.toString());

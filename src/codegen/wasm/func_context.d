@@ -3635,6 +3635,12 @@ class FuncContext {
     }
     
     void emitMember(ref Appender!(ubyte[]) out_, MemberExpression expr) {
+        // Auto-deref: ptr.field where ptr is a pointer to struct
+        if (expr.isAutoDereference) {
+            emitPointerMemberAccess(out_, expr);
+            return;
+        }
+
         // Check if this is a Type.sizeof or Type.alignof
         if (auto ident = cast(IdentifierExpression)expr.object) {
             auto symbol = emitter.symbolTable.lookupSymbol(ident.name);
@@ -4385,11 +4391,182 @@ class FuncContext {
                 break;
                 
             case UnaryExpression.Operator.AddressOf:
+                emitAddressOf(out_, expr);
+                break;
+
             case UnaryExpression.Operator.Dereference:
-                throw new EmitError("Pointer operations not yet supported");
+                emitDereference(out_, expr);
+                break;
         }
     }
     
+    void emitAddressOf(ref Appender!(ubyte[]) out_, UnaryExpression expr) {
+        // &var — emit the memory address of the operand
+        if (auto ident = cast(IdentifierExpression)expr.operand) {
+            if (auto info = resolveVar(ident.resolvedLocalId, ident.name)) {
+                if (info.addrMode == AddrMode.shadowStack) {
+                    // Struct/slice/staticArray on shadow stack: FP + offset IS the address
+                    emitVarAddress(out_, info);
+                    return;
+                } else if (info.addrMode == AddrMode.paramPointer) {
+                    // Struct/slice param: the local holds the pointer already
+                    out_ ~= Op.local_get;
+                    leb128u(out_, info.wasmLocalIdx);
+                    return;
+                }
+            }
+        }
+        throw new EmitError("Cannot take address of this expression", expr.toString());
+    }
+
+    void emitDereference(ref Appender!(ubyte[]) out_, UnaryExpression expr) {
+        // *ptr — dereference a pointer
+        // Resolve the pointer's type to determine the pointee
+        PointerType ptrType = resolvePointerType(expr.operand);
+        emitExpression(out_, expr.operand);
+        if (ptrType && !ptrType.pointeeType.isBasicType()) {
+            // Struct/aggregate pointer: the pointer value IS the struct address — no load needed
+            return;
+        }
+        // Scalar deref: load value from address
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;  // align = 4
+        leb128u(out_, 0);          // offset = 0
+    }
+
+    /// Resolve the PointerType of an expression by checking variable info or expr.type.
+    private PointerType resolvePointerType(Expression expr) {
+        // Try expr.type first (set by type checker for some expressions)
+        if (auto pt = cast(PointerType)expr.type)
+            return pt;
+        // Try resolving from variable info
+        if (auto ident = cast(IdentifierExpression)expr) {
+            if (auto info = resolveVar(ident.resolvedLocalId, ident.name)) {
+                return cast(PointerType)info.type;
+            }
+        }
+        return null;
+    }
+
+    /// Resolve the struct declaration pointed to by a pointer expression's object.
+    private StructDecl resolvePointeeStruct(Expression objectExpr) {
+        // Try variable info
+        if (auto ident = cast(IdentifierExpression)objectExpr) {
+            if (auto info = resolveVar(ident.resolvedLocalId, ident.name)) {
+                if (auto ptrType = cast(PointerType)info.type) {
+                    if (auto userType = cast(UserType)ptrType.pointeeType) {
+                        userType.ensureResolved(emitter.symbolTable);
+                        return cast(StructDecl)userType.declaration;
+                    }
+                }
+            }
+        }
+        // Try expr.type (from type checker)
+        if (auto ptrType = cast(PointerType)objectExpr.type) {
+            if (auto userType = cast(UserType)ptrType.pointeeType) {
+                userType.ensureResolved(emitter.symbolTable);
+                return cast(StructDecl)userType.declaration;
+            }
+        }
+        return null;
+    }
+
+    /// Emit ptr.field — auto-deref pointer to struct, access field
+    void emitPointerMemberAccess(ref Appender!(ubyte[]) out_, MemberExpression expr) {
+        auto structDecl = resolvePointeeStruct(expr.object);
+        if (!structDecl)
+            throw new EmitError("Cannot resolve struct type for pointer dereference", expr.toString());
+
+        auto field = structDecl.getField(expr.memberName);
+        if (!field)
+            throw new EmitError(format("Struct '%s' has no field '%s'", structDecl.name, expr.memberName));
+
+        // Emit pointer value (the struct base address)
+        emitExpression(out_, expr.object);
+        if (field.offset > 0) {
+            out_ ~= Op.i32_const;
+            leb128s(out_, cast(int)field.offset);
+            out_ ~= Op.i32_add;
+        }
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;  // align = 4
+        leb128u(out_, 0);          // offset = 0
+    }
+
+    /// Emit ptr.field = value — auto-deref pointer to struct, assign field
+    void emitPointerMemberAssignment(ref Appender!(ubyte[]) out_, MemberExpression member, Expression value) {
+        auto structDecl = resolvePointeeStruct(member.object);
+        if (!structDecl)
+            throw new EmitError("Cannot resolve struct type for pointer assignment", member.toString());
+
+        auto field = structDecl.getField(member.memberName);
+        if (!field)
+            throw new EmitError(format("Struct '%s' has no field '%s'", structDecl.name, member.memberName));
+
+        // Store: [ptr + offset, value] → i32.store
+        emitExpression(out_, member.object);
+        if (field.offset > 0) {
+            out_ ~= Op.i32_const;
+            leb128s(out_, cast(int)field.offset);
+            out_ ~= Op.i32_add;
+        }
+        emitExpression(out_, value);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+
+        // Re-emit value for expression result
+        emitExpression(out_, value);
+    }
+
+    /// Emit emplace(ptr, field1, field2, ...) — inline field stores at pointer address
+    void emitEmplaceCall(ref Appender!(ubyte[]) out_, CallExpression expr) {
+        auto structDecl = expr.resolvedEmplaceStruct;
+        Expression[] fieldArgs = expr.arguments[1 .. $];
+
+        // Emit pointer value and save to tempLocalA
+        emitExpression(out_, expr.arguments[0]);
+        out_ ~= Op.local_set;
+        leb128u(out_, tempLocalA);
+
+        // Initialize each field at ptr + field.offset
+        for (size_t i = 0; i < fieldArgs.length; i++) {
+            auto field = structDecl.fields[i];
+            out_ ~= Op.local_get;
+            leb128u(out_, tempLocalA);
+            if (field.offset > 0) {
+                out_ ~= Op.i32_const;
+                leb128s(out_, cast(int)field.offset);
+                out_ ~= Op.i32_add;
+            }
+            emitExpression(out_, fieldArgs[i]);
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;  // align = 4
+            leb128u(out_, 0);          // offset = 0
+        }
+
+        // Zero-init remaining fields
+        for (size_t i = fieldArgs.length; i < structDecl.fields.length; i++) {
+            auto field = structDecl.fields[i];
+            out_ ~= Op.local_get;
+            leb128u(out_, tempLocalA);
+            if (field.offset > 0) {
+                out_ ~= Op.i32_const;
+                leb128s(out_, cast(int)field.offset);
+                out_ ~= Op.i32_add;
+            }
+            out_ ~= Op.i32_const;
+            leb128s(out_, 0);
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+        }
+
+        // Return the pointer (same as input)
+        out_ ~= Op.local_get;
+        leb128u(out_, tempLocalA);
+    }
+
     void emitIncDec(ref Appender!(ubyte[]) out_, UnaryExpression expr, bool inc) {
         auto ident = cast(IdentifierExpression)expr.operand;
         if (!ident) {
@@ -4499,6 +4676,12 @@ class FuncContext {
             }
         }
         
+        // emplace(ptr, args...) — compiler intrinsic: construct struct at pointer
+        if (ident.name == "emplace" && expr.resolvedEmplaceStruct !is null) {
+            emitEmplaceCall(out_, expr);
+            return;
+        }
+
         // Special handling for __writeln: lower to typed CTFE print calls
         if (ident.name == "__writeln") {
             emitWritelnCall(out_, expr.arguments);
@@ -5121,6 +5304,10 @@ class FuncContext {
         if (objInfo) {
             if (objInfo.isStruct) structDecl = objInfo.structDecl;
             else if (objInfo.isClass) classDecl = objInfo.classDecl;
+            // Auto-deref: pointer-to-struct variable
+            else if (memberExpr.isAutoDereference) {
+                structDecl = resolvePointeeStruct(memberExpr.object);
+            }
         }
 
         if (!structDecl && !classDecl) {
@@ -5171,6 +5358,10 @@ class FuncContext {
         // Emit 'this' pointer as first argument (address of the instance)
         if (objInfo && (objInfo.isStruct || objInfo.isClass)) {
             emitVarAddress(out_, objInfo);
+        } else if (memberExpr.isAutoDereference && objInfo) {
+            // Pointer variable: its value IS the struct address
+            out_ ~= Op.local_get;
+            leb128u(out_, objInfo.wasmLocalIdx);
         }
 
         // Push hidden result pointer if method returns a large type (struct, array)
@@ -5791,6 +5982,19 @@ class FuncContext {
             return;
         }
 
+        // Check for pointer dereference assignment (*ptr = value)
+        if (auto derefExpr = cast(UnaryExpression)expr.left) {
+            if (derefExpr.operator == UnaryExpression.Operator.Dereference) {
+                // *ptr = value → [ptr_addr, value, i32.store]
+                emitExpression(out_, derefExpr.operand);  // ptr address
+                emitExpression(out_, expr.right);          // value
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;  // align = 4
+                leb128u(out_, 0);          // offset = 0
+                return;
+            }
+        }
+
         auto ident = cast(IdentifierExpression)expr.left;
         if (!ident) {
             throw new EmitError("Complex assignment targets not yet supported");
@@ -5940,6 +6144,12 @@ class FuncContext {
      * Emit assignment to a struct field (p.x = value)
      */
     void emitMemberAssignment(ref Appender!(ubyte[]) out_, MemberExpression member, Expression value) {
+        // Auto-deref: ptr.field = value
+        if (member.isAutoDereference) {
+            emitPointerMemberAssignment(out_, member, value);
+            return;
+        }
+
         // Handle index expression objects (points[i].x = value)
         if (auto indexExpr = cast(IndexExpression)member.object) {
             // Emit element address (aggregate mode leaves address on stack)

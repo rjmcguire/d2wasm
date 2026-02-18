@@ -580,6 +580,9 @@ class SymbolTable {
         writeNewlineSymbol.isCTFEOnly = true;
         globalScope.addSymbol(writeNewlineSymbol);
         
+        // emplace — compiler intrinsic: emplace(T* ptr, args...) → T*
+        addBuiltinFunction("emplace", loc, false, true);
+
         // Compiler intrinsics — raw opcodes, no function call overhead
         addIntrinsicFunction("__intrinsic_shl", loc, i32Type, [i32Type, i32Type]);
         addIntrinsicFunction("__intrinsic_shr_s", loc, i32Type, [i32Type, i32Type]);
