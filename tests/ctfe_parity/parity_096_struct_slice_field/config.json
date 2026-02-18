@@ -1,0 +1,7 @@
+{
+  "name": "struct_slice_field",
+  "description": "Struct with dynamic slice field: push, top, length via methods",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 33
+}

@@ -7,7 +7,7 @@
 module codegen.native.backend;
 
 import codegen.backend : Backend, CompiledFunction, ExecutionResult;
-import codegen.target : NativeSliceLayout;
+import codegen.target : sliceInfo, SliceInfo;
 import codegen.native.arm64_codegen : NativeCodeGen, CallFrameData, ErrorLocData,
     createCTFEHostFunctions;
 import codegen.native.arm64.stencil_table;
@@ -39,6 +39,8 @@ class NativeBackend : Backend {
     this(SymbolTable st, bool enableStackTrace = true) {
         this.symbolTable = st;
         this.enableStackTrace = enableStackTrace;
+        // Native backend uses 8-byte pointers (ARM64)
+        sliceInfo = SliceInfo(8);
     }
     
     override CompiledFunction compile(FunctionDecl func) {
@@ -102,10 +104,10 @@ class NativeBackend : Backend {
 }
 
 /// Compute element size for a type in native target context.
-/// Dynamic array elements are slice structs (NativeSliceLayout.sizeof).
+/// Dynamic array elements are slice structs (sliceInfo.totalSize).
 private uint nativeElementSize(Type elemType) {
     if (auto at = cast(ArrayType)elemType)
-        if (!at.isStaticArray) return NativeSliceLayout.sizeof;
+        if (!at.isStaticArray) return sliceInfo.totalSize;
     auto s = elemType.size();
     return s == 0 ? 4 : cast(uint)s;
 }
@@ -396,7 +398,7 @@ class NativeCompiledFunction : CompiledFunction {
             } else {
                 // Dynamic array (slice) return — same mechanism, different size
                 hasHiddenResultPtr = true;
-                returnArrayBytes = NativeSliceLayout.sizeof;  // 16
+                returnArrayBytes = sliceInfo.totalSize;  // 16
                 resultPtrOffset = nextLocalOffset;
                 nextLocalOffset += 8;  // 64-bit pointer
             }
@@ -465,7 +467,7 @@ class NativeCompiledFunction : CompiledFunction {
                     // Dynamic array (slice) param
                     nli.kind = VarKind.slice;
                     nli.sliceElemSize = nativeElementSize(arrayType.elementType);
-                    paramSize = NativeSliceLayout.sizeof;
+                    paramSize = sliceInfo.totalSize;
                 }
             }
             localVars[param.name] = nli;
@@ -582,7 +584,7 @@ class NativeCompiledFunction : CompiledFunction {
                         case 3: gen.emitMoveX3ToX9(); break;
                         default: break;
                     }
-                    for (size_t off = 0; off < NativeSliceLayout.sizeof; off += 4) {
+                    for (size_t off = 0; off < sliceInfo.totalSize; off += 4) {
                         gen.emitLoadFromX9Offset(off);
                         gen.emitStoreLocal32(offset + off);
                     }
@@ -644,18 +646,18 @@ class NativeCompiledFunction : CompiledFunction {
             uint elemCount = cast(uint)arrLit.elements.length;
             uint dataSize = elemCount * 4;
             // 8-byte alignment padding + slice struct
-            bytes += ((dataSize + 7) & ~7) + NativeSliceLayout.sizeof;
+            bytes += ((dataSize + 7) & ~7) + sliceInfo.totalSize;
             foreach (elem; arrLit.elements)
                 bytes += countExpressionBytes(elem);
         } else if (auto sliceExpr = cast(SliceExpression)expr) {
             // Temp slice struct with 8-byte alignment
-            bytes += 8 + NativeSliceLayout.sizeof;
+            bytes += 8 + sliceInfo.totalSize;
             bytes += countExpressionBytes(sliceExpr.array);
             bytes += countExpressionBytes(sliceExpr.start);
             bytes += countExpressionBytes(sliceExpr.end);
         } else if (auto lit = cast(LiteralExpression)expr) {
             if (lit.value.type == typeid(string))
-                bytes += 8 + NativeSliceLayout.sizeof;
+                bytes += 8 + sliceInfo.totalSize;
         } else if (auto binOp = cast(BinaryExpression)expr) {
             bytes += countExpressionBytes(binOp.left);
             bytes += countExpressionBytes(binOp.right);
@@ -706,7 +708,7 @@ class NativeCompiledFunction : CompiledFunction {
             } else if (auto arrType = cast(ArrayType)varDecl.type) {
                 if (arrType.arraySize is null) {
                     // Slice struct + worst-case 8-byte alignment padding
-                    bytes = NativeSliceLayout.sizeof + 8;
+                    bytes = sliceInfo.totalSize + 8;
                     // Add data size if initialized with literal
                     if (auto arrLit = cast(ArrayLiteralExpression)varDecl.initializer) {
                         size_t elemSz = arrType.elementType.size();
@@ -815,9 +817,9 @@ class NativeCompiledFunction : CompiledFunction {
                 }
             } else if (auto arrType = cast(ArrayType)varDecl.type) {
                 if (arrType.arraySize is null) {
-                    // Dynamic array (slice) = NativeSliceLayout.sizeof bytes on native (64-bit ptr)
+                    // Dynamic array (slice) = sliceInfo.totalSize bytes on native (64-bit ptr)
                     isSlice = true;
-                    varSize = NativeSliceLayout.sizeof;
+                    varSize = sliceInfo.totalSize;
                     // Add data size if initialized with literal
                     if (auto arrLit = cast(ArrayLiteralExpression)varDecl.initializer) {
                         varSize += arrLit.elements.length * 4;
@@ -1033,7 +1035,7 @@ class NativeCompiledFunction : CompiledFunction {
                         gen.emitMoveX0ToX1();
                         gen.emitMoveX9ToX0();
                         gen.emit(stencil_sub_i32);  // x0 = end - start
-                        gen.emitStoreLocal32(nli.offset + NativeSliceLayout.LENGTH_OFFSET);
+                        gen.emitStoreLocal32(nli.offset + sliceInfo.lengthOffset);
 
                         // Capacity = length
                         compileExpression(sliceExpr.end);
@@ -1042,7 +1044,7 @@ class NativeCompiledFunction : CompiledFunction {
                         gen.emitMoveX0ToX1();
                         gen.emitMoveX9ToX0();
                         gen.emit(stencil_sub_i32);
-                        gen.emitStoreLocal32(nli.offset + NativeSliceLayout.CAPACITY_OFFSET);
+                        gen.emitStoreLocal32(nli.offset + sliceInfo.capacityOffset);
                     } else if (auto callExpr = cast(CallExpression)varDecl.initializer) {
                         // Function call returning slice — hidden result pointer pattern
                         if (auto funcIdent = cast(IdentifierExpression)callExpr.function_) {
@@ -1113,12 +1115,12 @@ class NativeCompiledFunction : CompiledFunction {
                                     }
 
                                     // Build inner slice structs in data section
-                                    ubyte[] innerStructsData = new ubyte[outerCount * NativeSliceLayout.sizeof];
+                                    ubyte[] innerStructsData = new ubyte[outerCount * sliceInfo.totalSize];
                                     foreach (i; 0 .. outerCount) {
-                                        size_t base = i * NativeSliceLayout.sizeof;
+                                        size_t base = i * sliceInfo.totalSize;
                                         *cast(ulong*)&innerStructsData[base] = cast(ulong)innerDataPtrs[i];
-                                        *cast(uint*)&innerStructsData[base + NativeSliceLayout.LENGTH_OFFSET] = innerLens[i];
-                                        *cast(uint*)&innerStructsData[base + NativeSliceLayout.CAPACITY_OFFSET] = innerLens[i];
+                                        *cast(uint*)&innerStructsData[base + sliceInfo.lengthOffset] = innerLens[i];
+                                        *cast(uint*)&innerStructsData[base + sliceInfo.capacityOffset] = innerLens[i];
                                     }
                                     ubyte* innerStructsPtr = dataSection.addData(innerStructsData);
 
@@ -1126,9 +1128,9 @@ class NativeCompiledFunction : CompiledFunction {
                                     gen.emitLoadImm64(cast(ulong)innerStructsPtr);
                                     gen.emitStorePtr(nli.offset);
                                     gen.emitImm32(stencil_load_imm32, cast(int)outerCount);
-                                    gen.emitStoreLocal32(nli.offset + NativeSliceLayout.LENGTH_OFFSET);
+                                    gen.emitStoreLocal32(nli.offset + sliceInfo.lengthOffset);
                                     gen.emitImm32(stencil_load_imm32, cast(int)outerCount);
-                                    gen.emitStoreLocal32(nli.offset + NativeSliceLayout.CAPACITY_OFFSET);
+                                    gen.emitStoreLocal32(nli.offset + sliceInfo.capacityOffset);
                                 } else if (manifest.isArrayType) {
                                     // Flat array manifest: build data in native data section
                                     ubyte* dataPtr = dataSection.addData(manifest.ctfeArrayBytes);
@@ -1138,9 +1140,9 @@ class NativeCompiledFunction : CompiledFunction {
                                     gen.emitLoadImm64(cast(ulong)dataPtr);
                                     gen.emitStorePtr(nli.offset);
                                     gen.emitImm32(stencil_load_imm32, cast(int)elemCount);
-                                    gen.emitStoreLocal32(nli.offset + NativeSliceLayout.LENGTH_OFFSET);
+                                    gen.emitStoreLocal32(nli.offset + sliceInfo.lengthOffset);
                                     gen.emitImm32(stencil_load_imm32, cast(int)elemCount);
-                                    gen.emitStoreLocal32(nli.offset + NativeSliceLayout.CAPACITY_OFFSET);
+                                    gen.emitStoreLocal32(nli.offset + sliceInfo.capacityOffset);
                                 } else {
                                     throw new Exception("Unsupported manifest type for slice init: " ~ manifest.name);
                                 }
@@ -1415,7 +1417,7 @@ class NativeCompiledFunction : CompiledFunction {
                 // Allocate a temp slice on the local stack, populate it, return pointer
                 string strVal = lit.value.get!string();
                 size_t tempOffset = (nextLocalOffset + 7) & ~7;  // 8-byte align
-                nextLocalOffset = tempOffset + NativeSliceLayout.sizeof;
+                nextLocalOffset = tempOffset + sliceInfo.totalSize;
                 assert(nextLocalOffset <= temps.tempBase(),
                     "Frame overflow in string literal: nextLocalOffset exceeds temp zone");
                 compileStringLiteralInit(tempOffset, strVal);
@@ -1635,7 +1637,19 @@ class NativeCompiledFunction : CompiledFunction {
                 // In a method: check for implicit field access (field without 'this.')
                 auto field = currentMethodStruct.getField(ident.name);
                 if (field) {
-                    // Load this pointer, then load field
+                    // Slice field: emit address (this_ptr + field.offset) — consumed by .length, [i], ~= etc.
+                    if (auto arrType = cast(ArrayType)field.type) {
+                        if (!arrType.isStaticArray) {
+                            gen.emitLoadPtr(currentThisOffset);  // x0 = this ptr (64-bit)
+                            if (field.offset > 0) {
+                                gen.emitMoveX0ToX1();
+                                gen.emitImm32(stencil_load_imm32, cast(int)field.offset);
+                                gen.emit(stencil_add_i64);  // x0 = this + field.offset
+                            }
+                            return;  // address of slice struct on stack
+                        }
+                    }
+                    // Scalar/struct field: load value
                     gen.emitLoadPtr(currentThisOffset);  // x0 = this ptr (64-bit)
                     gen.emitLoadFromPointer(field.offset);  // x0 = this.field
                     return;
@@ -1665,8 +1679,26 @@ class NativeCompiledFunction : CompiledFunction {
                 }
             }
 
-            // Check for member expression assignment (c.value = 10)
+            // Check for member expression assignment (c.value = 10, s.data ~= v)
             if (auto member = cast(MemberExpression)assign.left) {
+                // Handle slice field append: s.data ~= value
+                if (assign.operator == AssignmentExpression.Operator.ConcatAssign) {
+                    if (auto objIdent = cast(IdentifierExpression)member.object) {
+                        if (auto structInfo = objIdent.name in localVars) {
+                            if (structInfo.isStruct) {
+                                auto sField = structInfo.structDecl.getField(member.memberName);
+                                if (sField) {
+                                    if (auto arrType = cast(ArrayType)sField.type) {
+                                        if (!arrType.isStaticArray) {
+                                            compileSliceFieldAppendLocal(structInfo.offset, sField.offset, assign.right, arrType);
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 compileMemberAssignment(member, assign);
                 return;
             }
@@ -1679,14 +1711,25 @@ class NativeCompiledFunction : CompiledFunction {
             auto info = targetIdent.name in localVars;
             if (info is null) {
                 // In a method: check for implicit field assignment
-                if (currentMethodStruct !is null && assign.operator == AssignmentExpression.Operator.Assign) {
+                if (currentMethodStruct !is null) {
                     auto field = currentMethodStruct.getField(targetIdent.name);
                     if (field) {
-                        compileExpression(assign.right);  // x0 = value
-                        gen.emitMoveX0ToX9();             // x9 = value
-                        gen.emitLoadPtr(currentThisOffset);  // x0 = this ptr
-                        gen.emitStoreToPointerFromX9(field.offset);  // this.field = x9
-                        return;
+                        // ConcatAssign on implicit slice field: data ~= value
+                        if (assign.operator == AssignmentExpression.Operator.ConcatAssign) {
+                            if (auto arrType = cast(ArrayType)field.type) {
+                                if (!arrType.isStaticArray) {
+                                    compileSliceFieldAppend(field.offset, assign.right, arrType);
+                                    return;
+                                }
+                            }
+                        }
+                        if (assign.operator == AssignmentExpression.Operator.Assign) {
+                            compileExpression(assign.right);  // x0 = value
+                            gen.emitMoveX0ToX9();             // x9 = value
+                            gen.emitLoadPtr(currentThisOffset);  // x0 = this ptr
+                            gen.emitStoreToPointerFromX9(field.offset);  // this.field = x9
+                            return;
+                        }
                     }
                 }
                 auto symbol = symbolTable.lookupSymbol(targetIdent.name);
@@ -1907,7 +1950,7 @@ class NativeCompiledFunction : CompiledFunction {
                 if (auto ident = cast(IdentifierExpression)member.object) {
                     if (auto varInfo = ident.name in localVars) {
                         if (varInfo.isSlice) {
-                            gen.emitLoadLocal32(varInfo.offset + NativeSliceLayout.LENGTH_OFFSET);
+                            gen.emitLoadLocal32(varInfo.offset + sliceInfo.lengthOffset);
                             return;
                         }
                     }
@@ -1929,12 +1972,71 @@ class NativeCompiledFunction : CompiledFunction {
                                         gen.emit(stencil_load_i64);  // 64-bit pointer at offset 0
                                         return;
                                     } else if (member.memberName == "length") {
-                                        gen.emitLoadFromPointer(NativeSliceLayout.LENGTH_OFFSET);
+                                        gen.emitLoadFromPointer(sliceInfo.lengthOffset);
                                         return;
                                     } else if (member.memberName == "capacity") {
-                                        gen.emitLoadFromPointer(NativeSliceLayout.CAPACITY_OFFSET);
+                                        gen.emitLoadFromPointer(sliceInfo.capacityOffset);
                                         return;
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Chained member on slice field: s.data.length, s.data.ptr, s.data.capacity
+            if (auto innerMember = cast(MemberExpression)member.object) {
+                auto innerStructDecl = getStructDeclFromExpr(innerMember.object);
+                if (innerStructDecl) {
+                    auto innerField = innerStructDecl.getField(innerMember.memberName);
+                    if (innerField) {
+                        if (auto arrType = cast(ArrayType)innerField.type) {
+                            if (!arrType.isStaticArray) {
+                                // Compile inner member to get slice address
+                                compileExpression(innerMember);  // x0 = address of slice struct
+                                if (member.memberName == "length") {
+                                    gen.emitLoadFromPointer(sliceInfo.lengthOffset);
+                                } else if (member.memberName == "ptr") {
+                                    gen.emit(stencil_load_i64);  // 64-bit pointer at offset 0
+                                } else if (member.memberName == "capacity") {
+                                    gen.emitLoadFromPointer(sliceInfo.capacityOffset);
+                                } else {
+                                    throw new Exception("Slice field has no member '" ~ member.memberName ~ "'");
+                                }
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Implicit field access in method: data.length, data.ptr, data.capacity
+            if (currentMethodStruct !is null) {
+                if (auto ident = cast(IdentifierExpression)member.object) {
+                    if ((ident.name in localVars) is null) {
+                        auto field = currentMethodStruct.getField(ident.name);
+                        if (field) {
+                            if (auto arrType = cast(ArrayType)field.type) {
+                                if (!arrType.isStaticArray) {
+                                    // Emit address of slice struct via this pointer
+                                    gen.emitLoadPtr(currentThisOffset);
+                                    if (field.offset > 0) {
+                                        gen.emitMoveX0ToX1();
+                                        gen.emitImm32(stencil_load_imm32, cast(int)field.offset);
+                                        gen.emit(stencil_add_i64);
+                                    }
+                                    // Now x0 = address of slice struct
+                                    if (member.memberName == "length") {
+                                        gen.emitLoadFromPointer(sliceInfo.lengthOffset);
+                                    } else if (member.memberName == "ptr") {
+                                        gen.emit(stencil_load_i64);
+                                    } else if (member.memberName == "capacity") {
+                                        gen.emitLoadFromPointer(sliceInfo.capacityOffset);
+                                    } else {
+                                        throw new Exception("Slice field has no member '" ~ member.memberName ~ "'");
+                                    }
+                                    return;
                                 }
                             }
                         }
@@ -1990,7 +2092,7 @@ class NativeCompiledFunction : CompiledFunction {
             // Allocate space for data + slice struct
             uint elemCount = cast(uint)arrLit.elements.length;
             uint dataSize = elemCount * 4;  // 4 bytes per int element
-            enum sliceSize = NativeSliceLayout.sizeof;  // ptr, length, capacity
+            const sliceSize = sliceInfo.totalSize;  // ptr, length, capacity
             
             size_t dataOffset = nextLocalOffset;
             nextLocalOffset += dataSize;
@@ -2015,11 +2117,11 @@ class NativeCompiledFunction : CompiledFunction {
 
             // length = elemCount
             gen.emitImm32(stencil_load_imm32, cast(int)elemCount);
-            gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);  // store length
+            gen.emitStoreLocal32(sliceOffset + sliceInfo.lengthOffset);  // store length
 
             // capacity = elemCount
             gen.emitImm32(stencil_load_imm32, cast(int)elemCount);
-            gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.CAPACITY_OFFSET);  // store capacity
+            gen.emitStoreLocal32(sliceOffset + sliceInfo.capacityOffset);  // store capacity
 
             // Leave pointer to slice struct in x0
             gen.emitLoadStackPointer();
@@ -2107,6 +2209,96 @@ class NativeCompiledFunction : CompiledFunction {
                     }
                 }
             }
+            // Handle member expression as array source: s.data[i]
+            if (auto memberExpr = cast(MemberExpression)indexExpr.array) {
+                auto mStructDecl = getStructDeclFromExpr(memberExpr.object);
+                if (mStructDecl) {
+                    auto mField = mStructDecl.getField(memberExpr.memberName);
+                    if (mField) {
+                        if (auto arrType = cast(ArrayType)mField.type) {
+                            if (!arrType.isStaticArray) {
+                                import codegen.type_marshal : TypeReader;
+                                uint elemSize = TypeReader.forNative().elementSizeOf(arrType.elementType);
+                                auto mark = temps.save();
+                                size_t ptrTemp = temps.alloc(8);
+                                // Get slice address, load ptr, save to temp
+                                compileExpression(memberExpr);  // x0 = address of slice struct
+                                gen.emit(stencil_load_i64);  // x0 = slice.ptr (64-bit)
+                                gen.emitStorePtr(ptrTemp);
+                                // Compute index * elemSize
+                                compileExpression(indexExpr.index);  // x0 = index
+                                gen.emitMoveX0ToX1();
+                                gen.emitImm32(stencil_load_imm32, elemSize);
+                                gen.emit(stencil_mul_i32);  // x0 = index * elemSize
+                                gen.emitMoveX0ToX1();  // x1 = byte offset
+                                // Load ptr from temp
+                                gen.emitLoadPtr(ptrTemp);  // x0 = ptr
+                                gen.emit(stencil_add_i64);  // x0 = ptr + byte_offset
+                                // Load value for scalar elements
+                                bool isFloat = isF64ElementType(arrType.elementType);
+                                if (isFloat)
+                                    gen.emit(stencil_load_f64);
+                                else if (elemSize <= 4) {
+                                    if (elemSize == 1)
+                                        gen.emitLoadByteFromPointer(0);
+                                    else
+                                        gen.emitLoadFromPointer(0);
+                                }
+                                temps.restore(mark);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            // Implicit field access in method: data[i] where data is a slice field
+            if (currentMethodStruct !is null) {
+                if (auto ident2 = cast(IdentifierExpression)indexExpr.array) {
+                    if ((ident2.name in localVars) is null) {
+                        auto iField = currentMethodStruct.getField(ident2.name);
+                        if (iField) {
+                            if (auto arrType = cast(ArrayType)iField.type) {
+                                if (!arrType.isStaticArray) {
+                                    import codegen.type_marshal : TypeReader;
+                                    uint elemSize = TypeReader.forNative().elementSizeOf(arrType.elementType);
+                                    auto mark = temps.save();
+                                    size_t ptrTemp = temps.alloc(8);
+                                    // Load slice.ptr from this_ptr + field.offset, save to temp
+                                    gen.emitLoadPtr(currentThisOffset);  // x0 = this ptr
+                                    if (iField.offset > 0) {
+                                        gen.emitMoveX0ToX1();
+                                        gen.emitImm32(stencil_load_imm32, cast(int)iField.offset);
+                                        gen.emit(stencil_add_i64);
+                                    }
+                                    gen.emit(stencil_load_i64);  // x0 = slice.ptr
+                                    gen.emitStorePtr(ptrTemp);
+                                    // Compute index * elemSize
+                                    compileExpression(indexExpr.index);  // x0 = index
+                                    gen.emitMoveX0ToX1();
+                                    gen.emitImm32(stencil_load_imm32, elemSize);
+                                    gen.emit(stencil_mul_i32);  // x0 = index * elemSize
+                                    gen.emitMoveX0ToX1();  // x1 = byte offset
+                                    // Load ptr from temp
+                                    gen.emitLoadPtr(ptrTemp);  // x0 = ptr
+                                    gen.emit(stencil_add_i64);  // x0 = ptr + byte_offset
+                                    // Load value for scalar elements
+                                    bool isFloat = isF64ElementType(arrType.elementType);
+                                    if (isFloat)
+                                        gen.emit(stencil_load_f64);
+                                    else if (elemSize <= 4) {
+                                        if (elemSize == 1)
+                                            gen.emitLoadByteFromPointer(0);
+                                        else
+                                            gen.emitLoadFromPointer(0);
+                                    }
+                                    temps.restore(mark);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             throw new Exception("Array indexing only supported for local variables");
         } else if (auto castExpr = cast(CastExpression)expr) {
             // Check for f64 → int conversion
@@ -2141,7 +2333,7 @@ class NativeCompiledFunction : CompiledFunction {
 
             uint elemSize = info.elemSize;
             size_t tempOffset = (nextLocalOffset + 7) & ~7;  // 8-byte align for 64-bit ptr store
-            nextLocalOffset = tempOffset + NativeSliceLayout.sizeof;
+            nextLocalOffset = tempOffset + sliceInfo.totalSize;
             assert(nextLocalOffset <= temps.tempBase(),
                 "Frame overflow in slice expression: nextLocalOffset exceeds temp zone");
 
@@ -2175,7 +2367,7 @@ class NativeCompiledFunction : CompiledFunction {
             gen.emitMoveX1ToX0();  // x0 = end
             gen.emitMoveX9ToX1();  // x1 = start
             gen.emit(stencil_sub_i32);  // x0 = end - start
-            gen.emitStoreLocal32(tempOffset + NativeSliceLayout.LENGTH_OFFSET);
+            gen.emitStoreLocal32(tempOffset + sliceInfo.lengthOffset);
 
             // capacity = length (reload)
             compileExpression(sliceExpr.end);
@@ -2185,7 +2377,7 @@ class NativeCompiledFunction : CompiledFunction {
             gen.emitMoveX1ToX0();
             gen.emitMoveX9ToX1();
             gen.emit(stencil_sub_i32);
-            gen.emitStoreLocal32(tempOffset + NativeSliceLayout.CAPACITY_OFFSET);
+            gen.emitStoreLocal32(tempOffset + sliceInfo.capacityOffset);
 
             // Return address of temp slice struct
             gen.emitStackAddress(tempOffset);
@@ -2242,6 +2434,96 @@ class NativeCompiledFunction : CompiledFunction {
      * Emit index assignment: arr[i] = value
      */
     private void emitIndexAssignment(IndexExpression indexExpr, Expression value) {
+        // Handle member expression as array source: s.data[i] = value
+        if (auto memberExpr = cast(MemberExpression)indexExpr.array) {
+            auto mStructDecl = getStructDeclFromExpr(memberExpr.object);
+            if (mStructDecl) {
+                auto mField = mStructDecl.getField(memberExpr.memberName);
+                if (mField) {
+                    if (auto arrType = cast(ArrayType)mField.type) {
+                        if (!arrType.isStaticArray) {
+                            import codegen.type_marshal : TypeReader;
+                            uint elemSize = TypeReader.forNative().elementSizeOf(arrType.elementType);
+                            auto mark = temps.save();
+                            size_t ptrTemp = temps.alloc(8);
+                            size_t valTemp = temps.alloc(8);
+                            // Evaluate value first, save to temp
+                            compileExpression(value);  // x0 = value
+                            gen.emitStoreLocal32(valTemp);
+                            // Get slice ptr, save to temp
+                            compileExpression(memberExpr);  // x0 = address of slice struct
+                            gen.emit(stencil_load_i64);  // x0 = slice.ptr
+                            gen.emitStorePtr(ptrTemp);
+                            // Compute target address: ptr + index * elemSize
+                            compileExpression(indexExpr.index);  // x0 = index
+                            gen.emitMoveX0ToX1();
+                            gen.emitImm32(stencil_load_imm32, elemSize);
+                            gen.emit(stencil_mul_i32);  // x0 = index * elemSize
+                            gen.emitMoveX0ToX1();  // x1 = byte offset
+                            gen.emitLoadPtr(ptrTemp);  // x0 = ptr
+                            gen.emit(stencil_add_i64);  // x0 = target address
+                            // Store value
+                            gen.emitMoveX0ToX1();  // x1 = target addr (save)
+                            gen.emitLoadLocal32(valTemp);  // x0 = value
+                            gen.emitMoveX0ToX9();  // x9 = value
+                            gen.emitMoveX1ToX0();  // x0 = target addr
+                            gen.emitStoreToPointerFromX9(0);
+                            temps.restore(mark);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Handle implicit field access in method: data[i] = value
+        if (currentMethodStruct !is null) {
+            if (auto ident2 = cast(IdentifierExpression)indexExpr.array) {
+                if ((ident2.name in localVars) is null) {
+                    auto iField = currentMethodStruct.getField(ident2.name);
+                    if (iField) {
+                        if (auto arrType = cast(ArrayType)iField.type) {
+                            if (!arrType.isStaticArray) {
+                                import codegen.type_marshal : TypeReader;
+                                uint elemSize = TypeReader.forNative().elementSizeOf(arrType.elementType);
+                                auto mark = temps.save();
+                                size_t ptrTemp = temps.alloc(8);
+                                size_t valTemp = temps.alloc(8);
+                                // Evaluate value, save to temp
+                                compileExpression(value);
+                                gen.emitStoreLocal32(valTemp);
+                                // Load slice.ptr from this + field.offset
+                                gen.emitLoadPtr(currentThisOffset);
+                                if (iField.offset > 0) {
+                                    gen.emitMoveX0ToX1();
+                                    gen.emitImm32(stencil_load_imm32, cast(int)iField.offset);
+                                    gen.emit(stencil_add_i64);
+                                }
+                                gen.emit(stencil_load_i64);  // x0 = slice.ptr
+                                gen.emitStorePtr(ptrTemp);
+                                // Compute target address
+                                compileExpression(indexExpr.index);
+                                gen.emitMoveX0ToX1();
+                                gen.emitImm32(stencil_load_imm32, elemSize);
+                                gen.emit(stencil_mul_i32);
+                                gen.emitMoveX0ToX1();
+                                gen.emitLoadPtr(ptrTemp);
+                                gen.emit(stencil_add_i64);
+                                // Store value
+                                gen.emitMoveX0ToX1();
+                                gen.emitLoadLocal32(valTemp);
+                                gen.emitMoveX0ToX9();
+                                gen.emitMoveX1ToX0();
+                                gen.emitStoreToPointerFromX9(0);
+                                temps.restore(mark);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         auto ident = cast(IdentifierExpression)indexExpr.array;
         if (ident is null)
             throw new Exception("Index assignment only supported for local variables in native backend");
@@ -2630,7 +2912,7 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitStoreLocal32(myTempSlot);
 
         // Load length from slice (offset 8 = after 64-bit ptr)
-        gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);  // x0 = length
+        gen.emitLoadLocal32(sliceOffset + sliceInfo.lengthOffset);  // x0 = length
         gen.emitMoveX0ToX1();  // x1 = length
 
         // Reload index
@@ -2782,7 +3064,7 @@ class NativeCompiledFunction : CompiledFunction {
     
     /**
      * Compile slice initialization from array literal directly to a stack location.
-     * Native slice layout: { ptr: i64, length: i32, capacity: i32 } = NativeSliceLayout.sizeof bytes
+     * Native slice layout: { ptr: i64, length: i32, capacity: i32 } = sliceInfo.totalSize bytes
      * (Unlike WASM which uses 32-bit pointers, native ARM64 needs 64-bit)
      */
     private void compileSliceInit(size_t sliceOffset, ArrayLiteralExpression arrLit) {
@@ -2808,11 +3090,11 @@ class NativeCompiledFunction : CompiledFunction {
         
         // length = elemCount (32-bit at offset 8)
         gen.emitImm32(stencil_load_imm32, cast(int)elemCount);
-        gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);  // store length
+        gen.emitStoreLocal32(sliceOffset + sliceInfo.lengthOffset);  // store length
         
         // capacity = elemCount (32-bit at offset 12)
         gen.emitImm32(stencil_load_imm32, cast(int)elemCount);
-        gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.CAPACITY_OFFSET);  // store capacity
+        gen.emitStoreLocal32(sliceOffset + sliceInfo.capacityOffset);  // store capacity
     }
     
     /**
@@ -2853,7 +3135,7 @@ class NativeCompiledFunction : CompiledFunction {
         }
         
         // Initialize slice struct at sliceOffset
-        // Native slice layout: { ptr: i64, length: i32, capacity: i32 } = NativeSliceLayout.sizeof bytes
+        // Native slice layout: { ptr: i64, length: i32, capacity: i32 } = sliceInfo.totalSize bytes
         
         // ptr = dataPtr (64-bit host pointer)
         gen.emitLoadImm64(cast(ulong)dataPtr);
@@ -2861,11 +3143,11 @@ class NativeCompiledFunction : CompiledFunction {
         
         // length = len (32-bit at offset 8)
         gen.emitImm32(stencil_load_imm32, cast(int)len);
-        gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);  // store length
+        gen.emitStoreLocal32(sliceOffset + sliceInfo.lengthOffset);  // store length
         
         // capacity = len (32-bit at offset 12)
         gen.emitImm32(stencil_load_imm32, cast(int)len);
-        gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.CAPACITY_OFFSET);  // store capacity
+        gen.emitStoreLocal32(sliceOffset + sliceInfo.capacityOffset);  // store capacity
     }
 
     /// Initialize a slice from a string literal by storing bytes in the data section.
@@ -2884,17 +3166,17 @@ class NativeCompiledFunction : CompiledFunction {
 
         // length (32-bit at offset 8)
         gen.emitImm32(stencil_load_imm32, cast(int)len);
-        gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);
+        gen.emitStoreLocal32(sliceOffset + sliceInfo.lengthOffset);
 
         // capacity (32-bit at offset 12)
         gen.emitImm32(stencil_load_imm32, cast(int)len);
-        gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.CAPACITY_OFFSET);
+        gen.emitStoreLocal32(sliceOffset + sliceInfo.capacityOffset);
     }
 
     /**
      * Compile slice append: arr ~= element
      * 
-     * Native slice layout: { ptr: i64, length: i32, capacity: i32 } = NativeSliceLayout.sizeof bytes
+     * Native slice layout: { ptr: i64, length: i32, capacity: i32 } = sliceInfo.totalSize bytes
      * 
      * Algorithm (mirrors WASM emitter):
      * 1. Evaluate element, store to temp
@@ -2925,13 +3207,13 @@ class NativeCompiledFunction : CompiledFunction {
             gen.emitStoreLocal32(tempElement);
 
         // 2. Load length and capacity, compare
-        gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);   // x0 = length
+        gen.emitLoadLocal32(sliceOffset + sliceInfo.lengthOffset);   // x0 = length
         gen.emitMoveX0ToX1();                   // x1 = length
-        gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.CAPACITY_OFFSET);  // x0 = capacity
+        gen.emitLoadLocal32(sliceOffset + sliceInfo.capacityOffset);  // x0 = capacity
         // We want: if (length >= capacity) -> x0 = 1
         gen.emit(stencil_move_arg1_to_result);  // x0 = length
         gen.emitMoveX0ToX1();                   // x1 = length (save)
-        gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.CAPACITY_OFFSET);  // x0 = capacity
+        gen.emitLoadLocal32(sliceOffset + sliceInfo.capacityOffset);  // x0 = capacity
         gen.emitMoveX0ToX2();                   // x2 = capacity
         gen.emit(stencil_move_arg1_to_result);  // x0 = length
         gen.emit(stencil_move_arg2_to_arg1);    // x1 = capacity
@@ -2948,7 +3230,7 @@ class NativeCompiledFunction : CompiledFunction {
         gen.bindLabel(growLabel);
 
         // newCapacity = max(capacity * 2, 4)
-        gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.CAPACITY_OFFSET);  // x0 = capacity
+        gen.emitLoadLocal32(sliceOffset + sliceInfo.capacityOffset);  // x0 = capacity
         gen.emitMoveX0ToX1();                   // x1 = capacity
         gen.emit(stencil_add_i32);              // x0 = capacity * 2 (capacity + capacity)
         gen.emitStoreLocal32(tempNewCap);       // save capacity * 2
@@ -2995,7 +3277,7 @@ class NativeCompiledFunction : CompiledFunction {
         // Check: if (i >= length) break
         gen.emitLoadLocal32(tempLoopIdx);       // x0 = i
         gen.emitMoveX0ToX1();                   // x1 = i
-        gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);   // x0 = length
+        gen.emitLoadLocal32(sliceOffset + sliceInfo.lengthOffset);   // x0 = length
         gen.emitMoveX0ToX2();                   // x2 = length
         gen.emit(stencil_move_arg1_to_result);  // x0 = i
         gen.emit(stencil_move_arg2_to_arg1);    // x1 = length
@@ -3085,7 +3367,7 @@ class NativeCompiledFunction : CompiledFunction {
 
         // Update slice capacity = newCapacity
         gen.emitLoadLocal32(tempNewCap);
-        gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.CAPACITY_OFFSET);
+        gen.emitStoreLocal32(sliceOffset + sliceInfo.capacityOffset);
 
         gen.emitBranch(doneGrowLabel);
 
@@ -3096,7 +3378,7 @@ class NativeCompiledFunction : CompiledFunction {
 
         // 4. Store element at ptr[length * elemSize]
         // Compute dest address: ptr + length * elemSize → x0
-        gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);   // x0 = length
+        gen.emitLoadLocal32(sliceOffset + sliceInfo.lengthOffset);   // x0 = length
         gen.emitMoveX0ToX1();                   // x1 = length
         gen.emitImm32(stencil_load_imm32, elemSize);
         gen.emit(stencil_mul_i32);              // x0 = length * elemSize
@@ -3132,17 +3414,149 @@ class NativeCompiledFunction : CompiledFunction {
         }
 
         // 5. Increment length
-        gen.emitLoadLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);   // x0 = length
+        gen.emitLoadLocal32(sliceOffset + sliceInfo.lengthOffset);   // x0 = length
         gen.emitMoveX0ToX1();                   // x1 = length
         gen.emitImm32(stencil_load_imm32, 1);
         gen.emitMoveX0ToX2();                   // x2 = 1
         gen.emit(stencil_move_arg1_to_result);  // x0 = length
         gen.emit(stencil_move_arg2_to_arg1);    // x1 = 1
         gen.emit(stencil_add_i32);              // x0 = length + 1
-        gen.emitStoreLocal32(sliceOffset + NativeSliceLayout.LENGTH_OFFSET);  // store new length
+        gen.emitStoreLocal32(sliceOffset + sliceInfo.lengthOffset);  // store new length
         temps.restore(mark);
     }
-    
+
+    /**
+     * Compile slice append for a struct field slice (implicit this.field).
+     * Strategy: copy slice struct to a local temp, run compileSliceAppend on that,
+     * then copy the modified slice back to the struct field.
+     *
+     * For the copy-back, we use a temp to save the field address (pointer-based),
+     * then use emitStoreToPointer/emitStoreToPointerFromX9 for 32-bit fields,
+     * and a pair of 32-bit stores for the 64-bit ptr field.
+     */
+    private void compileSliceFieldAppend(size_t fieldOffset, Expression element, ArrayType arrType) {
+        import codegen.type_marshal : TypeReader;
+        uint elemSize = TypeReader.forNative().elementSizeOf(arrType.elementType);
+        const totalSize = sliceInfo.totalSize;
+
+        // Allocate temp on frame for the slice copy
+        size_t tempSlice = (nextLocalOffset + 7) & ~7;  // 8-byte aligned
+        nextLocalOffset = tempSlice + totalSize;
+        size_t tempFieldAddr = (nextLocalOffset + 7) & ~7;
+        nextLocalOffset = tempFieldAddr + 8;
+
+        // Helper: compute and save this_ptr + fieldOffset to tempFieldAddr
+        void emitSaveFieldAddr() {
+            gen.emitLoadPtr(currentThisOffset);
+            if (fieldOffset > 0) {
+                gen.emitMoveX0ToX1();
+                gen.emitImm32(stencil_load_imm32, cast(int)fieldOffset);
+                gen.emit(stencil_add_i64);
+            }
+            gen.emitStorePtr(tempFieldAddr);
+        }
+
+        // Copy slice from this_ptr + fieldOffset to tempSlice
+        emitSaveFieldAddr();
+        // ptr (8 bytes): load from [fieldAddr]
+        gen.emitLoadPtr(tempFieldAddr);
+        gen.emit(stencil_load_i64);
+        gen.emitStorePtr(tempSlice);
+        // length: load from [fieldAddr + lengthOffset]
+        gen.emitLoadPtr(tempFieldAddr);
+        gen.emitLoadFromPointer(sliceInfo.lengthOffset);
+        gen.emitStoreLocal32(tempSlice + sliceInfo.lengthOffset);
+        // capacity: load from [fieldAddr + capacityOffset]
+        gen.emitLoadPtr(tempFieldAddr);
+        gen.emitLoadFromPointer(sliceInfo.capacityOffset);
+        gen.emitStoreLocal32(tempSlice + sliceInfo.capacityOffset);
+
+        // Run the standard append on the temp copy
+        compileSliceAppend(tempSlice, element, elemSize, isF64ElementType(arrType.elementType));
+
+        // Copy modified slice back to this_ptr + fieldOffset
+        emitSaveFieldAddr();
+        // ptr: store 64-bit using two 32-bit stores (low word at +0, high word at +4)
+        gen.emitLoadLocal32(tempSlice);  // x0 = low 32 bits of ptr
+        gen.emitMoveX0ToX1();
+        gen.emitLoadPtr(tempFieldAddr);
+        gen.emitStoreToPointer(0);  // STR w1, [x0, #0]
+        gen.emitLoadLocal32(tempSlice + 4);  // x0 = high 32 bits of ptr
+        gen.emitMoveX0ToX1();
+        gen.emitLoadPtr(tempFieldAddr);
+        gen.emitStoreToPointer(4);  // STR w1, [x0, #4]
+        // length
+        gen.emitLoadLocal32(tempSlice + sliceInfo.lengthOffset);
+        gen.emitMoveX0ToX1();
+        gen.emitLoadPtr(tempFieldAddr);
+        gen.emitStoreToPointer(sliceInfo.lengthOffset);
+        // capacity
+        gen.emitLoadLocal32(tempSlice + sliceInfo.capacityOffset);
+        gen.emitMoveX0ToX1();
+        gen.emitLoadPtr(tempFieldAddr);
+        gen.emitStoreToPointer(sliceInfo.capacityOffset);
+    }
+
+    /**
+     * Compile slice append for a local struct's field slice: localStruct.field ~= value
+     * Strategy: same copy-to-temp approach, using known frame offsets for the struct.
+     */
+    private void compileSliceFieldAppendLocal(size_t structOffset, size_t fieldOffset, Expression element, ArrayType arrType) {
+        import codegen.type_marshal : TypeReader;
+        uint elemSize = TypeReader.forNative().elementSizeOf(arrType.elementType);
+        const totalSize = sliceInfo.totalSize;
+        size_t sliceAddr = structOffset + fieldOffset;
+
+        // Allocate temp on frame
+        size_t tempSlice = (nextLocalOffset + 7) & ~7;
+        nextLocalOffset = tempSlice + totalSize;
+
+        // Copy slice from structOffset + fieldOffset to tempSlice
+        // For local structs, we can use stack-relative addressing
+        // ptr (8 bytes)
+        gen.emitStackAddress(sliceAddr);  // x0 = address of slice in struct
+        gen.emit(stencil_load_i64);  // x0 = slice.ptr
+        gen.emitStorePtr(tempSlice);
+        // length
+        gen.emitStackAddress(sliceAddr);
+        gen.emitLoadFromPointer(sliceInfo.lengthOffset);
+        gen.emitStoreLocal32(tempSlice + sliceInfo.lengthOffset);
+        // capacity
+        gen.emitStackAddress(sliceAddr);
+        gen.emitLoadFromPointer(sliceInfo.capacityOffset);
+        gen.emitStoreLocal32(tempSlice + sliceInfo.capacityOffset);
+
+        // Run append on temp
+        compileSliceAppend(tempSlice, element, elemSize, isF64ElementType(arrType.elementType));
+
+        // Copy back: use stack-address approach (safe even if sliceAddr is not 8-byte aligned)
+        auto mark = temps.save();
+        size_t addrTemp = temps.alloc(8);
+        // Save slice field address
+        gen.emitStackAddress(sliceAddr);
+        gen.emitStorePtr(addrTemp);
+        // ptr: copy low and high 32 bits separately
+        gen.emitLoadLocal32(tempSlice);  // low 32 bits of ptr
+        gen.emitMoveX0ToX1();
+        gen.emitLoadPtr(addrTemp);
+        gen.emitStoreToPointer(0);
+        gen.emitLoadLocal32(tempSlice + 4);  // high 32 bits of ptr
+        gen.emitMoveX0ToX1();
+        gen.emitLoadPtr(addrTemp);
+        gen.emitStoreToPointer(4);
+        // length
+        gen.emitLoadLocal32(tempSlice + sliceInfo.lengthOffset);
+        gen.emitMoveX0ToX1();
+        gen.emitLoadPtr(addrTemp);
+        gen.emitStoreToPointer(sliceInfo.lengthOffset);
+        // capacity
+        gen.emitLoadLocal32(tempSlice + sliceInfo.capacityOffset);
+        gen.emitMoveX0ToX1();
+        gen.emitLoadPtr(addrTemp);
+        gen.emitStoreToPointer(sliceInfo.capacityOffset);
+        temps.restore(mark);
+    }
+
     /**
      * Compile __writeln(args...) by lowering to typed host function calls.
      * Milestone 89: Native __writeln support.

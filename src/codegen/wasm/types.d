@@ -54,19 +54,6 @@ enum ExportKind : ubyte {
 }
 
 //==============================================================================
-// D Array/Slice Representation
-//==============================================================================
-// D strings are (ptr, length, capacity) - a 12-byte struct (ptr, length, capacity) in WASM32
-// ptr is first, so dereferencing the struct pointer gives the char data
-
-enum : uint {
-    ARRAY_PTR_OFFSET = 0,    // Offset of ptr field in array struct
-    ARRAY_LEN_OFFSET = 4,    // Offset of length field
-    ARRAY_CAP_OFFSET = 8,    // Offset of capacity field
-    ARRAY_STRUCT_SIZE = 12,  // Total size of array struct
-}
-
-//==============================================================================
 // Memory Layout
 //==============================================================================
 // Page 0 (0-65535):

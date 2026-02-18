@@ -1,22 +1,22 @@
 module tests.test_type_marshal;
 
 import codegen.type_marshal;
-import codegen.target;
+import codegen.target : SliceInfo;
 import std.math : isClose;
 
 unittest {
     // --- Factory methods produce correct layout constants ---
     auto wasm = TypeReader.forWasm();
     assert(wasm.ptrSize == 4);
-    assert(wasm.sliceLenOffset == WasmSliceLayout.LENGTH_OFFSET);
-    assert(wasm.sliceCapOffset == WasmSliceLayout.CAPACITY_OFFSET);
-    assert(wasm.sliceSize == WasmSliceLayout.sizeof);
+    assert(wasm.sliceLenOffset == 4);
+    assert(wasm.sliceCapOffset == 8);
+    assert(wasm.sliceSize == 12);
 
     auto native = TypeReader.forNative();
     assert(native.ptrSize == 8);
-    assert(native.sliceLenOffset == NativeSliceLayout.LENGTH_OFFSET);
-    assert(native.sliceCapOffset == NativeSliceLayout.CAPACITY_OFFSET);
-    assert(native.sliceSize == NativeSliceLayout.sizeof);
+    assert(native.sliceLenOffset == 8);
+    assert(native.sliceCapOffset == 12);
+    assert(native.sliceSize == 16);
 }
 
 unittest {

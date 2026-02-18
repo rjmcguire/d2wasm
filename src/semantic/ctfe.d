@@ -17,7 +17,7 @@ import codegen.emitter;
 import codegen.wasm.types;
 import codegen.backend;
 import codegen.type_marshal;
-import codegen.target : WasmSliceLayout;
+import codegen.target : sliceInfo;
 import diagnostic.log : log;
 
 import std.stdio;
@@ -151,7 +151,7 @@ private uint getElementSize(Type elementType) {
     }
     if (auto sd = elementType.asStruct()) return cast(uint)sd.aggregateSize_;
     if (auto at = cast(ArrayType)elementType)
-        if (at.arraySize is null) return WasmSliceLayout.sizeof;
+        if (at.arraySize is null) return sliceInfo.totalSize;
     return 4;  // default
 }
 
@@ -629,40 +629,39 @@ class CTFEEvaluator {
      */
     string evaluateStringConcat(BinaryExpression expr) {
         import semantic.ctfe_runtime : CTFERuntime, CTFERuntimeError;
-        import codegen.wasm.types : ARRAY_PTR_OFFSET, ARRAY_LEN_OFFSET;
-        
+
         log(3, "CTFE: Evaluating array concat via WASM");
-        
+
         // First, ensure any manifest constants referenced are already evaluated
         ensureDependenciesEvaluated(expr);
-        
+
         // Emit a WASM module that evaluates this expression
         auto emitter = new BinaryEmitter(symbolTable, enableStackTrace);
         ubyte[] wasmBytes = emitter.emitArrayExpressionModule(expr);
-        
+
         if (wasmBytes is null) {
             throw new CTFEError("CTFE: Failed to compile array expression: " ~ emitter.error(), expr.location);
         }
-        
+
         // Debug: show the generated WASM size
         log(3, "CTFE: Generated ", wasmBytes.length, " bytes of WASM");
-        
+
         // Execute in wasm3
         auto runtime = new CTFERuntime();
         scope(exit) destroy(runtime);
-        
+
         try {
             runtime.loadModule(wasmBytes);
-            
+
             // Call __eval() to get the result string pointer
             auto result = runtime.callI32("__eval");
             uint structPtr = result.asInt();
-            
+
             log(3, "CTFE: __eval returned struct at ", structPtr);
-            
+
             // Read the String struct from memory
-            uint dataPtr = runtime.readU32(structPtr + ARRAY_PTR_OFFSET);
-            uint len = runtime.readU32(structPtr + ARRAY_LEN_OFFSET);
+            uint dataPtr = runtime.readU32(structPtr + sliceInfo.ptrOffset);
+            uint len = runtime.readU32(structPtr + sliceInfo.lengthOffset);
             
             log(3, "CTFE: String data at ", dataPtr, ", len=", len);
             

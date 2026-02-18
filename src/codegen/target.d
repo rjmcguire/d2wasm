@@ -124,33 +124,46 @@ static assert(WasmVtablePacking.TABLE_BASE_MASK == 0xFFFF);
 // ============================================================================
 
 /**
- * Slice memory layout for a given target.
- * Use SliceLayout!Target.sizeof to get the correct size.
+ * Runtime-computed slice layout info.
+ * Slice = {pointer, uint length, uint capacity}.
+ * Total size = ptrSize + 4 + 4, offsets derived from ptrSize.
  */
+struct SliceInfo {
+    uint ptrSize;       /// 4 for WASM32, 8 for ARM64
+
+    @property uint totalSize() const { return ptrSize + 8; }
+    @property uint ptrOffset() const { return 0; }
+    @property uint lengthOffset() const { return ptrSize; }
+    @property uint capacityOffset() const { return ptrSize + 4; }
+}
+
+/// Default slice info (WASM32 — 4-byte pointers)
+__gshared SliceInfo sliceInfo = SliceInfo(4);
+
+/// Legacy template — kept only for backward compatibility in tests.
+/// Prefer sliceInfo for all new code.
 struct SliceLayout(T) {
     typeof(T.ptr) ptr;
     uint length;
     uint capacity;
-    
-    /// Offset of the length field (uint for codegen compatibility)
+
     enum uint LENGTH_OFFSET = cast(uint)(typeof(T.ptr).sizeof);
-    
-    /// Offset of the capacity field (uint for codegen compatibility)
     enum uint CAPACITY_OFFSET = cast(uint)(typeof(T.ptr).sizeof + uint.sizeof);
 }
 
-/// Slice layout for the default target (WASM32)
 alias WasmSliceLayout = SliceLayout!WASM32Target;
-
-/// Slice layout for native ARM64 CTFE
 alias NativeSliceLayout = SliceLayout!ARM64Target;
 
 static assert(WasmSliceLayout.sizeof == 12, "WASM32 slice should be 12 bytes");
 static assert(NativeSliceLayout.sizeof == 16, "ARM64 slice should be 16 bytes");
-static assert(WasmSliceLayout.LENGTH_OFFSET == 4);
-static assert(WasmSliceLayout.CAPACITY_OFFSET == 8);
-static assert(NativeSliceLayout.LENGTH_OFFSET == 8);
-static assert(NativeSliceLayout.CAPACITY_OFFSET == 12);
+
+// Verify SliceInfo matches the template-derived values
+static assert(SliceInfo(4).totalSize == WasmSliceLayout.sizeof);
+static assert(SliceInfo(4).lengthOffset == WasmSliceLayout.LENGTH_OFFSET);
+static assert(SliceInfo(4).capacityOffset == WasmSliceLayout.CAPACITY_OFFSET);
+static assert(SliceInfo(8).totalSize == NativeSliceLayout.sizeof);
+static assert(SliceInfo(8).lengthOffset == NativeSliceLayout.LENGTH_OFFSET);
+static assert(SliceInfo(8).capacityOffset == NativeSliceLayout.CAPACITY_OFFSET);
 
 /**
  * Interface fat pointer layout: {obj_ptr, itable_ptr}
@@ -178,17 +191,21 @@ unittest {
     // Verify WASM32 target sizes
     static assert(PTR_SIZE == 4);
     static assert(PTR_BITS == 32);
-    
+
     // Verify type sizes are as expected
     static assert(typeof(WASM32Target.ptr).sizeof == 4);
     static assert(typeof(ARM64Target.ptr).sizeof == 8);
-    
-    // Verify slice layouts
-    static assert(WasmSliceLayout.sizeof == 12);
-    static assert(WasmSliceLayout.LENGTH_OFFSET == 4);
-    static assert(WasmSliceLayout.CAPACITY_OFFSET == 8);
-    
-    static assert(NativeSliceLayout.sizeof == 16);
-    static assert(NativeSliceLayout.LENGTH_OFFSET == 8);
-    static assert(NativeSliceLayout.CAPACITY_OFFSET == 12);
+
+    // Verify SliceInfo computed properties
+    enum wasm = SliceInfo(4);
+    static assert(wasm.totalSize == 12);
+    static assert(wasm.ptrOffset == 0);
+    static assert(wasm.lengthOffset == 4);
+    static assert(wasm.capacityOffset == 8);
+
+    enum native = SliceInfo(8);
+    static assert(native.totalSize == 16);
+    static assert(native.ptrOffset == 0);
+    static assert(native.lengthOffset == 8);
+    static assert(native.capacityOffset == 12);
 }

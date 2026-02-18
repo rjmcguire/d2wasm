@@ -19,7 +19,7 @@ module codegen.emitter;
 import codegen.wasm.types;
 import codegen.wasm.func_context : FuncContext;
 import codegen.wasm.sections;
-import codegen.target : WasmVtablePacking;
+import codegen.target : WasmVtablePacking, sliceInfo;
 import ast.nodes;
 import ast.statements;
 import ast.expressions;
@@ -712,6 +712,15 @@ class BinaryEmitter {
      * Methods are registered with mangled names: StructName_methodName
      */
     private void collectStructMethods(StructDecl structDecl) {
+        // If struct has slice fields, methods may need array support (append, etc.)
+        foreach (field; structDecl.fields) {
+            if (auto at = cast(ArrayType) field.type) {
+                if (!at.isStaticArray) {
+                    needsArraySupport = true;
+                    break;
+                }
+            }
+        }
         foreach (member; structDecl.members) {
             if (auto funcDecl = cast(FunctionDecl)member) {
                 if (funcDecl.isMethod) {
@@ -725,6 +734,9 @@ class BinaryEmitter {
      * Collect a struct method, adding hidden 'this' parameter.
      */
     private void collectMethod(StructDecl structDecl, FunctionDecl method) {
+        // Scan method body for local slice types and CTFE calls
+        scanForSliceTypes(method);
+
         // Build signature with hidden 'this' pointer as first parameter
         FuncSig sig;
         
@@ -2349,7 +2361,7 @@ class BinaryEmitter {
             leb128u(body_, 0);  // s1
             body_ ~= Op.i32_load;
             leb128u(body_, 2);  // align
-            leb128u(body_, ARRAY_PTR_OFFSET);
+            leb128u(body_, sliceInfo.ptrOffset);
             body_ ~= Op.local_set;
             leb128u(body_, 2);  // s1_ptr
             
@@ -2357,7 +2369,7 @@ class BinaryEmitter {
             leb128u(body_, 0);  // s1
             body_ ~= Op.i32_load;
             leb128u(body_, 2);  // align
-            leb128u(body_, ARRAY_LEN_OFFSET);
+            leb128u(body_, sliceInfo.lengthOffset);
             body_ ~= Op.local_set;
             leb128u(body_, 3);  // s1_len
             
@@ -2366,7 +2378,7 @@ class BinaryEmitter {
             leb128u(body_, 1);  // s2
             body_ ~= Op.i32_load;
             leb128u(body_, 2);  // align
-            leb128u(body_, ARRAY_PTR_OFFSET);
+            leb128u(body_, sliceInfo.ptrOffset);
             body_ ~= Op.local_set;
             leb128u(body_, 4);  // s2_ptr
             
@@ -2374,7 +2386,7 @@ class BinaryEmitter {
             leb128u(body_, 1);  // s2
             body_ ~= Op.i32_load;
             leb128u(body_, 2);  // align
-            leb128u(body_, ARRAY_LEN_OFFSET);
+            leb128u(body_, sliceInfo.lengthOffset);
             body_ ~= Op.local_set;
             leb128u(body_, 5);  // s2_len
             
@@ -2401,7 +2413,7 @@ class BinaryEmitter {
             body_ ~= Op.global_get;
             leb128u(body_, arenaBaseGlobal);
             body_ ~= Op.i32_const;
-            leb128s(body_, ARRAY_STRUCT_SIZE);
+            leb128s(body_, sliceInfo.totalSize);
             body_ ~= Op.call;
             leb128u(body_, arenaAllocFuncIndex);
             body_ ~= Op.local_set;
@@ -2441,7 +2453,7 @@ class BinaryEmitter {
             leb128u(body_, 7);  // buffer
             body_ ~= Op.i32_store;
             leb128u(body_, 2);  // align
-            leb128u(body_, ARRAY_PTR_OFFSET);
+            leb128u(body_, sliceInfo.ptrOffset);
             
             // result.len = new_len
             body_ ~= Op.local_get;
@@ -2450,7 +2462,7 @@ class BinaryEmitter {
             leb128u(body_, 6);  // new_len
             body_ ~= Op.i32_store;
             leb128u(body_, 2);  // align
-            leb128u(body_, ARRAY_LEN_OFFSET);
+            leb128u(body_, sliceInfo.lengthOffset);
             
             // result.cap = new_len
             body_ ~= Op.local_get;
@@ -2459,7 +2471,7 @@ class BinaryEmitter {
             leb128u(body_, 6);  // new_len
             body_ ~= Op.i32_store;
             leb128u(body_, 2);  // align
-            leb128u(body_, ARRAY_CAP_OFFSET);
+            leb128u(body_, sliceInfo.capacityOffset);
             
             // return result
             body_ ~= Op.local_get;
@@ -2818,13 +2830,13 @@ class BinaryEmitter {
         uint len = cast(uint)s.length;
         
         // Create the Array struct: { ptr, len, cap }
-        ubyte[ARRAY_STRUCT_SIZE] structData;
+        ubyte[] structData = new ubyte[sliceInfo.totalSize];
         // Little-endian i32 values
-        *cast(uint*)&structData[ARRAY_PTR_OFFSET] = dataOffset;
-        *cast(uint*)&structData[ARRAY_LEN_OFFSET] = len;
-        *cast(uint*)&structData[ARRAY_CAP_OFFSET] = len;
-        
-        uint structOffset = addData(structData[]);
+        *cast(uint*)&structData[sliceInfo.ptrOffset] = dataOffset;
+        *cast(uint*)&structData[sliceInfo.lengthOffset] = len;
+        *cast(uint*)&structData[sliceInfo.capacityOffset] = len;
+
+        uint structOffset = addData(structData);
         
         arrayLiterals[s] = ArrayLiteralInfo(structOffset, dataOffset, len);
         
@@ -2836,8 +2848,6 @@ class BinaryEmitter {
      * and return the struct address in the data section.
      */
     package uint registerManifestArray(ManifestConstantDecl manifest) {
-        import codegen.wasm.types : ARRAY_STRUCT_SIZE, ARRAY_PTR_OFFSET, ARRAY_LEN_OFFSET, ARRAY_CAP_OFFSET;
-        
         // Check if already registered
         if (manifest.name in manifestArrayAddrs) {
             return manifestArrayAddrs[manifest.name];
@@ -2854,12 +2864,12 @@ class BinaryEmitter {
             : byteLen;
 
         // Create the Array struct: { ptr, len, cap }
-        ubyte[ARRAY_STRUCT_SIZE] structData;
-        *cast(uint*)&structData[ARRAY_PTR_OFFSET] = dataOffset;
-        *cast(uint*)&structData[ARRAY_LEN_OFFSET] = elementCount;
-        *cast(uint*)&structData[ARRAY_CAP_OFFSET] = elementCount;
-        
-        uint structOffset = addData(structData[]);
+        ubyte[] structData = new ubyte[sliceInfo.totalSize];
+        *cast(uint*)&structData[sliceInfo.ptrOffset] = dataOffset;
+        *cast(uint*)&structData[sliceInfo.lengthOffset] = elementCount;
+        *cast(uint*)&structData[sliceInfo.capacityOffset] = elementCount;
+
+        uint structOffset = addData(structData);
         manifestArrayAddrs[manifest.name] = structOffset;
         
         return structOffset;
@@ -2871,8 +2881,6 @@ class BinaryEmitter {
      * Returns the address of the outer slice struct.
      */
     package uint registerManifestNestedArray(ManifestConstantDecl manifest) {
-        import codegen.wasm.types : ARRAY_STRUCT_SIZE, ARRAY_PTR_OFFSET, ARRAY_LEN_OFFSET, ARRAY_CAP_OFFSET;
-
         // Check if already registered
         if (manifest.name in manifestArrayAddrs) {
             return manifestArrayAddrs[manifest.name];
@@ -2895,22 +2903,22 @@ class BinaryEmitter {
         }
 
         // 2. Build the array of inner slice structs
-        ubyte[] innerStructsData = new ubyte[outerCount * ARRAY_STRUCT_SIZE];
+        ubyte[] innerStructsData = new ubyte[outerCount * sliceInfo.totalSize];
         foreach (i; 0 .. outerCount) {
-            uint base = i * ARRAY_STRUCT_SIZE;
-            *cast(uint*)&innerStructsData[base + ARRAY_PTR_OFFSET] = innerDataOffsets[i];
-            *cast(uint*)&innerStructsData[base + ARRAY_LEN_OFFSET] = innerLengths[i];
-            *cast(uint*)&innerStructsData[base + ARRAY_CAP_OFFSET] = innerLengths[i];
+            uint base = i * sliceInfo.totalSize;
+            *cast(uint*)&innerStructsData[base + sliceInfo.ptrOffset] = innerDataOffsets[i];
+            *cast(uint*)&innerStructsData[base + sliceInfo.lengthOffset] = innerLengths[i];
+            *cast(uint*)&innerStructsData[base + sliceInfo.capacityOffset] = innerLengths[i];
         }
         uint innerStructsOffset = addData(innerStructsData);
 
         // 3. Build the outer slice struct pointing to the inner structs array
-        ubyte[ARRAY_STRUCT_SIZE] outerStruct;
-        *cast(uint*)&outerStruct[ARRAY_PTR_OFFSET] = innerStructsOffset;
-        *cast(uint*)&outerStruct[ARRAY_LEN_OFFSET] = outerCount;
-        *cast(uint*)&outerStruct[ARRAY_CAP_OFFSET] = outerCount;
+        ubyte[] outerStruct = new ubyte[sliceInfo.totalSize];
+        *cast(uint*)&outerStruct[sliceInfo.ptrOffset] = innerStructsOffset;
+        *cast(uint*)&outerStruct[sliceInfo.lengthOffset] = outerCount;
+        *cast(uint*)&outerStruct[sliceInfo.capacityOffset] = outerCount;
 
-        uint outerOffset = addData(outerStruct[]);
+        uint outerOffset = addData(outerStruct);
         manifestArrayAddrs[manifest.name] = outerOffset;
 
         return outerOffset;

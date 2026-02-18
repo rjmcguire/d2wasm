@@ -231,7 +231,11 @@ class SymbolTable {
     // Template constraint evaluation - callback set by CTFEEvaluator
     // Throws TypeError if constraint not satisfied, or on evaluation error.
     void delegate(Expression, SourceLocation, string, string[]) constraintEvaluator;
-    
+
+    /// Target pointer size in bytes (4 for WASM32, 8 for ARM64).
+    /// Set by main.d before type checking. Used by computeFieldLayout for slice fields.
+    uint targetPtrSize = 4;
+
     this() {
         globalScope = new Scope(null, "global");
         currentScope = globalScope;
@@ -855,8 +859,22 @@ class SymbolCollector {
                     }
                 }
 
-                size_t fieldSize = varDecl.type ? varDecl.type.size() : 4;
-                size_t fieldAlign = varDecl.type ? varDecl.type.alignment() : 4;
+                size_t fieldSize, fieldAlign;
+                if (auto at = cast(ArrayType)varDecl.type) {
+                    if (!at.isStaticArray) {
+                        // Dynamic array (slice): {ptr, len, cap} — size from SliceInfo
+                        import codegen.target : SliceInfo;
+                        auto si = SliceInfo(symbolTable.targetPtrSize);
+                        fieldSize = si.totalSize;
+                        fieldAlign = si.ptrSize;
+                    } else {
+                        fieldSize = at.size();
+                        fieldAlign = at.alignment();
+                    }
+                } else {
+                    fieldSize = varDecl.type ? varDecl.type.size() : 4;
+                    fieldAlign = varDecl.type ? varDecl.type.alignment() : 4;
+                }
 
                 // Align current offset to field's alignment requirement
                 if (fieldAlign > 0) {

@@ -275,6 +275,9 @@ int compileFile(CompilerOptions options) {
         log(1, "Building symbol table...");
         
         auto symbolTable = new SymbolTable();
+        // Output target is always WASM32 (ptrSize=4).
+        // options.backend controls the CTFE backend, not the output format.
+        symbolTable.targetPtrSize = 4;
         symbolTable.addBuiltinSymbols();
         
         // Extract module declaration if present
@@ -332,7 +335,13 @@ int compileFile(CompilerOptions options) {
         // 7. Code generation (binary WASM emission)
         if (!options.dryRun) {
             log(1, "Generating binary WASM...");
-            
+
+            // Set target slice layout before codegen
+            {
+                import codegen.target : sliceInfo, SliceInfo;
+                sliceInfo = SliceInfo(symbolTable.targetPtrSize);
+            }
+
             auto emitter = new BinaryEmitter(symbolTable, options.stackTrace);
             
             // Load cache if enabled

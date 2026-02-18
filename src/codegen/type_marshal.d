@@ -9,7 +9,7 @@
  */
 module codegen.type_marshal;
 
-import codegen.target;
+import codegen.target : sliceInfo;
 import ast.nodes : Type, BasicType, ArrayType, StructDecl;
 import std.format : format;
 
@@ -53,17 +53,15 @@ struct TypeReader {
     uint sliceSize;      // 12 for WASM32, 16 for ARM64
 
     static TypeReader forWasm() {
-        return TypeReader(4, 0,
-            WasmSliceLayout.LENGTH_OFFSET,
-            WasmSliceLayout.CAPACITY_OFFSET,
-            WasmSliceLayout.sizeof);
+        import codegen.target : SliceInfo;
+        enum w = SliceInfo(4);
+        return TypeReader(4, 0, w.lengthOffset, w.capacityOffset, w.totalSize);
     }
 
     static TypeReader forNative() {
-        return TypeReader(8, 0,
-            NativeSliceLayout.LENGTH_OFFSET,
-            NativeSliceLayout.CAPACITY_OFFSET,
-            NativeSliceLayout.sizeof);
+        import codegen.target : SliceInfo;
+        enum n = SliceInfo(8);
+        return TypeReader(8, 0, n.lengthOffset, n.capacityOffset, n.totalSize);
     }
 
     /// Read a signed integer of the given byte size from a buffer (little-endian).
@@ -375,6 +373,6 @@ unittest {
     assert(wasm.elementSizeOf(new BasicType(loc, BasicType.Kind.Int64)) == 8);
     // Dynamic array element = slice struct sized by target
     auto ubyteType = new BasicType(loc, BasicType.Kind.UInt8);
-    assert(wasm.elementSizeOf(new ArrayType(loc, ubyteType)) == WasmSliceLayout.sizeof);
-    assert(native.elementSizeOf(new ArrayType(loc, ubyteType)) == NativeSliceLayout.sizeof);
+    assert(wasm.elementSizeOf(new ArrayType(loc, ubyteType)) == 12);
+    assert(native.elementSizeOf(new ArrayType(loc, ubyteType)) == 16);
 }

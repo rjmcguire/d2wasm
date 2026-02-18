@@ -11,7 +11,7 @@ module codegen.wasm.func_context;
 
 import codegen.wasm.types;
 import codegen.emitter : BinaryEmitter, FuncInfo, EmitError;
-import codegen.target : WasmSliceLayout, WasmFatPointerLayout, WasmVtablePacking;
+import codegen.target : WasmFatPointerLayout, WasmVtablePacking, sliceLayout = sliceInfo;
 import ast.nodes;
 import ast.statements;
 import ast.expressions;
@@ -23,10 +23,10 @@ import std.conv : to;
 import std.format : format;
 
 /// Compute element size for a type in WASM target context.
-/// Dynamic array elements are slice structs (WasmSliceLayout.sizeof).
+/// Dynamic array elements are slice structs (sliceLayout.totalSize).
 private uint wasmElementSize(Type elemType) {
     if (auto at = cast(ArrayType)elemType)
-        if (!at.isStaticArray) return WasmSliceLayout.sizeof;
+        if (!at.isStaticArray) return sliceLayout.totalSize;
     auto s = elemType.size();
     return s == 0 ? 4 : cast(uint)s;
 }
@@ -228,7 +228,7 @@ class FuncContext {
                     if (elemSize == 0) elemSize = 4;
                     returnValueSize = elemCount * cast(uint)elemSize;
                 } else {
-                    returnValueSize = WasmSliceLayout.sizeof;  // Slice struct
+                    returnValueSize = sliceLayout.totalSize;  // Slice struct
                 }
             } else if (auto sd = f.decl.returnType.asStruct()) {
                 returnValueSize = cast(uint)sd.structSize;
@@ -456,7 +456,7 @@ class FuncContext {
                     return;
                 }
                 
-                // Dynamic array/slice - allocate WasmSliceLayout.sizeof bytes for slice struct (ptr, length, capacity)
+                // Dynamic array/slice - allocate sliceLayout.totalSize bytes for slice struct (ptr, length, capacity)
                 frameSize = (frameSize + 3) & ~3;  // Align to 4 bytes
                 
                 // Enable array support for __alloc, etc.
@@ -470,8 +470,8 @@ class FuncContext {
                 vi.elementType = arrayType.elementType;
                 vi.elementSize = wasmElementSize(arrayType.elementType);
 
-                // Slice struct is WasmSliceLayout.sizeof bytes (ptr: i32, length: i32, capacity: i32)
-                frameSize += WasmSliceLayout.sizeof;
+                // Slice struct is sliceLayout.totalSize bytes (ptr: i32, length: i32, capacity: i32)
+                frameSize += sliceLayout.totalSize;
 
                 // If initialized with array literal, also allocate space for data
                 if (auto arrayLit = cast(ArrayLiteralExpression)varDecl.initializer) {
@@ -561,6 +561,23 @@ class FuncContext {
             localTypes ~= ValType.i32;
             tempLocalB = cast(uint)localTypes.length;
             localTypes ~= ValType.i32;
+        }
+
+        // Methods on structs with slice fields need temp locals for emitSliceFieldAppend
+        // even when frameSize == 0 (no struct/slice locals of their own).
+        // Without this, tempLocalA defaults to 0 which aliases the 'this' parameter.
+        if (frameSize == 0 && func.structParent !is null) {
+            foreach (field; func.structParent.fields) {
+                if (auto at = cast(ArrayType)field.type) {
+                    if (!at.isStaticArray) {
+                        tempLocalA = cast(uint)localTypes.length;
+                        localTypes ~= ValType.i32;
+                        tempLocalB = cast(uint)localTypes.length;
+                        localTypes ~= ValType.i32;
+                        break;
+                    }
+                }
+            }
         }
     }
     
@@ -1323,23 +1340,26 @@ class FuncContext {
         auto structDecl = info.structDecl;
         
         if (!stmt.initializer) {
-            // Zero-initialize the struct
+            // Zero-initialize the struct (handle multi-word fields like slices)
             foreach (field; structDecl.fields) {
-                // Address: FP + frameOffset + fieldOffset
-                out_ ~= Op.local_get;
-                leb128u(out_, fpLocal);
-                out_ ~= Op.i32_const;
-                leb128s(out_, info.frameOffset + cast(int)field.offset);
-                out_ ~= Op.i32_add;
-                
-                // Value: 0
-                out_ ~= Op.i32_const;
-                leb128s(out_, 0);
-                
-                // Store
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;  // alignment log2(4)
-                leb128u(out_, 0);          // offset
+                uint fieldBytes = cast(uint)field.size;
+                for (uint off = 0; off < fieldBytes; off += 4) {
+                    // Address: FP + frameOffset + fieldOffset + off
+                    out_ ~= Op.local_get;
+                    leb128u(out_, fpLocal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, info.frameOffset + cast(int)field.offset + cast(int)off);
+                    out_ ~= Op.i32_add;
+
+                    // Value: 0
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, 0);
+
+                    // Store
+                    out_ ~= Op.i32_store;
+                    out_ ~= cast(ubyte)0x02;  // alignment log2(4)
+                    leb128u(out_, 0);          // offset
+                }
             }
             return;
         }
@@ -1545,7 +1565,7 @@ class FuncContext {
             out_ ~= Op.local_get;
             leb128u(out_, fpLocal);
             out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset + WasmSliceLayout.LENGTH_OFFSET);
+            leb128s(out_, info.frameOffset + sliceLayout.lengthOffset);
             out_ ~= Op.i32_add;
             out_ ~= Op.i32_const;
             leb128s(out_, 0);
@@ -1590,7 +1610,7 @@ class FuncContext {
                     out_ ~= Op.local_get;
                     leb128u(out_, fpLocal);
                     out_ ~= Op.i32_const;
-                    leb128s(out_, info.frameOffset + WasmSliceLayout.LENGTH_OFFSET);
+                    leb128s(out_, info.frameOffset + sliceLayout.lengthOffset);
                     out_ ~= Op.i32_add;
                     
                     out_ ~= Op.i32_const;
@@ -1636,7 +1656,7 @@ class FuncContext {
                     out_ ~= Op.local_get;
                     leb128u(out_, fpLocal);
                     out_ ~= Op.i32_const;
-                    leb128s(out_, info.frameOffset + WasmSliceLayout.LENGTH_OFFSET);
+                    leb128s(out_, info.frameOffset + sliceLayout.lengthOffset);
                     out_ ~= Op.i32_add;
                     
                     string ifaceName = castExpr.targetInterfaceDecl.name;
@@ -1661,7 +1681,7 @@ class FuncContext {
     
     /**
      * Emit slice local variable declaration
-     * Slice struct layout: { ptr: i32, length: i32, capacity: i32 } = WasmSliceLayout.sizeof bytes
+     * Slice struct layout: { ptr: i32, length: i32, capacity: i32 } = sliceLayout.totalSize bytes
      */
     void emitSliceVarDecl(ref Appender!(ubyte[]) out_, VariableDeclarationStatement stmt) {
         auto infoPtr = resolveVar(stmt.uniqueLocalId, stmt.name);
@@ -1729,7 +1749,7 @@ class FuncContext {
             out_ ~= Op.local_get;
             leb128u(out_, fpLocal);
             out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset + WasmSliceLayout.LENGTH_OFFSET);  // slice.length offset = 4
+            leb128s(out_, info.frameOffset + sliceLayout.lengthOffset);  // slice.length offset = 4
             out_ ~= Op.i32_add;
             
             out_ ~= Op.i32_const;
@@ -1743,7 +1763,7 @@ class FuncContext {
             out_ ~= Op.local_get;
             leb128u(out_, fpLocal);
             out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset + WasmSliceLayout.CAPACITY_OFFSET);  // slice.capacity offset = 8
+            leb128s(out_, info.frameOffset + sliceLayout.capacityOffset);  // slice.capacity offset = 8
             out_ ~= Op.i32_add;
             
             out_ ~= Op.i32_const;
@@ -1784,7 +1804,7 @@ class FuncContext {
                 out_ ~= Op.local_get;
                 leb128u(out_, fpLocal);
                 out_ ~= Op.i32_const;
-                leb128s(out_, info.frameOffset + WasmSliceLayout.LENGTH_OFFSET);  // slice.length offset = 4
+                leb128s(out_, info.frameOffset + sliceLayout.lengthOffset);  // slice.length offset = 4
                 out_ ~= Op.i32_add;
                 
                 out_ ~= Op.i32_const;
@@ -1798,7 +1818,7 @@ class FuncContext {
                 out_ ~= Op.local_get;
                 leb128u(out_, fpLocal);
                 out_ ~= Op.i32_const;
-                leb128s(out_, info.frameOffset + WasmSliceLayout.CAPACITY_OFFSET);  // slice.capacity offset = 8
+                leb128s(out_, info.frameOffset + sliceLayout.capacityOffset);  // slice.capacity offset = 8
                 out_ ~= Op.i32_add;
                 
                 out_ ~= Op.i32_const;
@@ -1849,7 +1869,7 @@ class FuncContext {
             out_ ~= Op.local_get;
             leb128u(out_, fpLocal);
             out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset + WasmSliceLayout.LENGTH_OFFSET);
+            leb128s(out_, info.frameOffset + sliceLayout.lengthOffset);
             out_ ~= Op.i32_add;
             out_ ~= Op.i32_const;
             leb128s(out_, len);
@@ -1860,7 +1880,7 @@ class FuncContext {
             out_ ~= Op.local_get;
             leb128u(out_, fpLocal);
             out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset + WasmSliceLayout.CAPACITY_OFFSET);
+            leb128s(out_, info.frameOffset + sliceLayout.capacityOffset);
             out_ ~= Op.i32_add;
             out_ ~= Op.i32_const;
             leb128s(out_, len);
@@ -1919,7 +1939,7 @@ class FuncContext {
             out_ ~= Op.local_get;
             leb128u(out_, fpLocal);
             out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset + WasmSliceLayout.LENGTH_OFFSET);
+            leb128s(out_, info.frameOffset + sliceLayout.lengthOffset);
             out_ ~= Op.i32_add;
             
             emitExpression(out_, sliceExpr.end);
@@ -1934,7 +1954,7 @@ class FuncContext {
             out_ ~= Op.local_get;
             leb128u(out_, fpLocal);
             out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset + WasmSliceLayout.CAPACITY_OFFSET);
+            leb128s(out_, info.frameOffset + sliceLayout.capacityOffset);
             out_ ~= Op.i32_add;
             
             emitExpression(out_, sliceExpr.end);
@@ -1986,10 +2006,10 @@ class FuncContext {
                         out_ ~= Op.local_get;
                         leb128u(out_, fpLocal);
                         out_ ~= Op.i32_const;
-                        leb128s(out_, info.frameOffset + WasmSliceLayout.LENGTH_OFFSET);
+                        leb128s(out_, info.frameOffset + sliceLayout.lengthOffset);
                         out_ ~= Op.i32_add;
                         out_ ~= Op.i32_const;
-                        leb128s(out_, structAddr + WasmSliceLayout.LENGTH_OFFSET);
+                        leb128s(out_, structAddr + sliceLayout.lengthOffset);
                         out_ ~= Op.i32_load;
                         out_ ~= cast(ubyte)0x02;
                         leb128u(out_, 0);
@@ -2000,10 +2020,10 @@ class FuncContext {
                         out_ ~= Op.local_get;
                         leb128u(out_, fpLocal);
                         out_ ~= Op.i32_const;
-                        leb128s(out_, info.frameOffset + WasmSliceLayout.CAPACITY_OFFSET);
+                        leb128s(out_, info.frameOffset + sliceLayout.capacityOffset);
                         out_ ~= Op.i32_add;
                         out_ ~= Op.i32_const;
-                        leb128s(out_, structAddr + WasmSliceLayout.CAPACITY_OFFSET);
+                        leb128s(out_, structAddr + sliceLayout.capacityOffset);
                         out_ ~= Op.i32_load;
                         out_ ~= cast(ubyte)0x02;
                         leb128u(out_, 0);
@@ -2032,7 +2052,7 @@ class FuncContext {
         if (!srcInfo || (!srcInfo.isSlice && !srcInfo.isStaticArray))
             throw new EmitError("Can only slice array-like variables");
         uint elemSize = srcInfo.elementSize;
-        enum sliceSize = WasmSliceLayout.sizeof;  // 12
+        const sliceSize = sliceLayout.totalSize;  // 12
 
         // Allocate temp: SP -= 12
         out_ ~= Op.global_get;
@@ -2068,7 +2088,7 @@ class FuncContext {
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
-        leb128s(out_, WasmSliceLayout.LENGTH_OFFSET);
+        leb128s(out_, sliceLayout.lengthOffset);
         out_ ~= Op.i32_add;
         emitExpression(out_, sliceExpr.end);
         emitExpression(out_, sliceExpr.start);
@@ -2081,7 +2101,7 @@ class FuncContext {
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
         out_ ~= Op.i32_const;
-        leb128s(out_, WasmSliceLayout.CAPACITY_OFFSET);
+        leb128s(out_, sliceLayout.capacityOffset);
         out_ ~= Op.i32_add;
         emitExpression(out_, sliceExpr.end);
         emitExpression(out_, sliceExpr.start);
@@ -2214,6 +2234,35 @@ class FuncContext {
      * Emit intrinsic opIndex for arrays - direct memory access
      */
     void emitIntrinsicOpIndex(ref Appender!(ubyte[]) out_, IndexExpression expr) {
+        // Handle member expression as array source (e.g., s.data[i])
+        if (auto memberExpr = cast(MemberExpression)expr.array) {
+            // emitMember leaves slice address on stack for slice fields
+            auto memberType = getMemberExpressionType(memberExpr);
+            if (auto arrType = cast(ArrayType)memberType) {
+                if (!arrType.isStaticArray) {
+                    // Emit address of the slice struct
+                    emitMember(out_, memberExpr);
+                    // Load ptr from slice struct (offset 0)
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                    // Add index * elemSize
+                    uint elemSize = wasmElementSize(arrType.elementType);
+                    emitExpression(out_, expr.index);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, elemSize);
+                    out_ ~= Op.i32_mul;
+                    out_ ~= Op.i32_add;
+                    // Load value for scalar elements
+                    bool isFloat = isF64ElementType(arrType.elementType);
+                    if (elemSize <= 4 || isFloat)
+                        emitLoadForSize(out_, elemSize, isFloat);
+                    return;
+                }
+            }
+            throw new EmitError("Cannot index member expression of non-slice type", memberExpr.toString());
+        }
+
         // Get the array identifier
         auto arrayIdent = cast(IdentifierExpression)expr.array;
         if (!arrayIdent) {
@@ -2259,7 +2308,45 @@ class FuncContext {
                 assert(0, "Cannot index " ~ arrayIdent.name ~ " (not an array type)");
             }
         }
-        
+
+        // Implicit field access in method: fieldName[i] where field is a slice
+        if (auto thisInfo = resolveVar(THIS_LOCAL_ID, "this")) {
+            AggregateDecl parent = func.structParent ? cast(AggregateDecl)func.structParent
+                                                     : cast(AggregateDecl)func.classParent;
+            if (parent) {
+                auto field = parent.getField(arrayIdent.name);
+                if (field) {
+                    if (auto arrType = cast(ArrayType)field.type) {
+                        if (!arrType.isStaticArray) {
+                            uint elemSize = wasmElementSize(arrType.elementType);
+                            // Load ptr from this_ptr + field.offset
+                            out_ ~= Op.local_get;
+                            leb128u(out_, thisInfo.wasmLocalIdx);
+                            if (field.offset > 0) {
+                                out_ ~= Op.i32_const;
+                                leb128s(out_, cast(int)field.offset);
+                                out_ ~= Op.i32_add;
+                            }
+                            out_ ~= Op.i32_load;  // load slice.ptr
+                            out_ ~= cast(ubyte)0x02;
+                            leb128u(out_, 0);
+                            // Add index * elemSize
+                            emitExpression(out_, expr.index);
+                            out_ ~= Op.i32_const;
+                            leb128s(out_, elemSize);
+                            out_ ~= Op.i32_mul;
+                            out_ ~= Op.i32_add;
+                            // Load value for scalar elements
+                            bool isFloat = isF64ElementType(arrType.elementType);
+                            if (elemSize <= 4 || isFloat)
+                                emitLoadForSize(out_, elemSize, isFloat);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
         // Check if it's a manifest constant array (import(), etc.)
         auto symbol = emitter.symbolTable.lookupSymbol(arrayIdent.name);
         if (symbol && symbol.kind == SymbolKind.Variable && symbol.isConstant) {
@@ -2271,7 +2358,7 @@ class FuncContext {
 
                     // Determine element size based on inferred type
                     uint elemSize = manifest.isNestedArrayType
-                        ? cast(uint)WasmSliceLayout.sizeof
+                        ? cast(uint)sliceLayout.totalSize
                         : (manifest.ctfeElementSize > 0 ? manifest.ctfeElementSize : 4);
                     
                     // Load ptr from struct (offset 0)
@@ -2312,6 +2399,33 @@ class FuncContext {
      * Emit index assignment for arrays - arr[i] = value
      */
     void emitIndexAssignment(ref Appender!(ubyte[]) out_, IndexExpression indexExpr, Expression value) {
+        // Handle member expression as array source (e.g., s.data[i] = value)
+        if (auto memberExpr = cast(MemberExpression)indexExpr.array) {
+            auto memberType = getMemberExpressionType(memberExpr);
+            if (auto arrType = cast(ArrayType)memberType) {
+                if (!arrType.isStaticArray) {
+                    uint elemSize = wasmElementSize(arrType.elementType);
+                    // Emit address of slice struct, load ptr
+                    emitMember(out_, memberExpr);
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                    // Add index * elemSize
+                    emitExpression(out_, indexExpr.index);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, elemSize);
+                    out_ ~= Op.i32_mul;
+                    out_ ~= Op.i32_add;
+                    // Store value
+                    emitExpression(out_, value);
+                    emitStoreForSize(out_, elemSize);
+                    emitExpression(out_, value);
+                    return;
+                }
+            }
+            throw new EmitError("Cannot index-assign member expression of non-slice type");
+        }
+
         // Get the array identifier
         auto arrayIdent = cast(IdentifierExpression)indexExpr.array;
         if (!arrayIdent) {
@@ -2383,6 +2497,44 @@ class FuncContext {
             }
         }
 
+        // Implicit field access in method: fieldName[i] = value
+        if (auto thisInfo = resolveVar(THIS_LOCAL_ID, "this")) {
+            AggregateDecl parent = func.structParent ? cast(AggregateDecl)func.structParent
+                                                     : cast(AggregateDecl)func.classParent;
+            if (parent) {
+                auto field = parent.getField(arrayIdent.name);
+                if (field) {
+                    if (auto arrType = cast(ArrayType)field.type) {
+                        if (!arrType.isStaticArray) {
+                            uint elemSize = wasmElementSize(arrType.elementType);
+                            // Load ptr from this_ptr + field.offset
+                            out_ ~= Op.local_get;
+                            leb128u(out_, thisInfo.wasmLocalIdx);
+                            if (field.offset > 0) {
+                                out_ ~= Op.i32_const;
+                                leb128s(out_, cast(int)field.offset);
+                                out_ ~= Op.i32_add;
+                            }
+                            out_ ~= Op.i32_load;  // load slice.ptr
+                            out_ ~= cast(ubyte)0x02;
+                            leb128u(out_, 0);
+                            // Add index * elemSize
+                            emitExpression(out_, indexExpr.index);
+                            out_ ~= Op.i32_const;
+                            leb128s(out_, elemSize);
+                            out_ ~= Op.i32_mul;
+                            out_ ~= Op.i32_add;
+                            // Store value
+                            emitExpression(out_, value);
+                            emitStoreForSize(out_, elemSize);
+                            emitExpression(out_, value);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
         throw new EmitError("Unsupported array index assignment on " ~ arrayIdent.name);
     }
     
@@ -2443,7 +2595,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + WasmSliceLayout.CAPACITY_OFFSET);  // capacity offset
+        leb128s(out_, sliceAddr + sliceLayout.capacityOffset);  // capacity offset
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2527,7 +2679,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);  // length offset
+        leb128s(out_, sliceAddr + sliceLayout.lengthOffset);  // length offset
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2649,7 +2801,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + WasmSliceLayout.CAPACITY_OFFSET);  // capacity offset
+        leb128s(out_, sliceAddr + sliceLayout.capacityOffset);  // capacity offset
         out_ ~= Op.i32_add;
         
         emitExpression(out_, args[0]);  // newCapacity
@@ -2733,7 +2885,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);  // length
+        leb128s(out_, sliceAddr + sliceLayout.lengthOffset);  // length
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2742,7 +2894,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + WasmSliceLayout.CAPACITY_OFFSET);  // capacity
+        leb128s(out_, sliceAddr + sliceLayout.capacityOffset);  // capacity
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2766,7 +2918,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + WasmSliceLayout.CAPACITY_OFFSET);
+        leb128s(out_, sliceAddr + sliceLayout.capacityOffset);
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2783,7 +2935,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + WasmSliceLayout.CAPACITY_OFFSET);
+        leb128s(out_, sliceAddr + sliceLayout.capacityOffset);
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -2862,7 +3014,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);
+        leb128s(out_, sliceAddr + sliceLayout.lengthOffset);
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -3040,7 +3192,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + WasmSliceLayout.CAPACITY_OFFSET);
+        leb128s(out_, sliceAddr + sliceLayout.capacityOffset);
         out_ ~= Op.i32_add;
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
@@ -3070,7 +3222,7 @@ class FuncContext {
             out_ ~= Op.local_get;
             leb128u(out_, fpLocal);
             out_ ~= Op.i32_const;
-            leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);
+            leb128s(out_, sliceAddr + sliceLayout.lengthOffset);
             out_ ~= Op.i32_add;
             out_ ~= Op.i32_load;
             out_ ~= cast(ubyte)0x02;
@@ -3119,7 +3271,7 @@ class FuncContext {
             out_ ~= Op.local_get;
             leb128u(out_, fpLocal);
             out_ ~= Op.i32_const;
-            leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);
+            leb128s(out_, sliceAddr + sliceLayout.lengthOffset);
             out_ ~= Op.i32_add;
             out_ ~= Op.i32_load;
             out_ ~= cast(ubyte)0x02;
@@ -3151,12 +3303,12 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);
+        leb128s(out_, sliceAddr + sliceLayout.lengthOffset);
         out_ ~= Op.i32_add;
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);
+        leb128s(out_, sliceAddr + sliceLayout.lengthOffset);
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -3172,13 +3324,293 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);
+        leb128s(out_, sliceAddr + sliceLayout.lengthOffset);
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
         leb128u(out_, 0);
     }
     
+    /**
+     * Emit slice append for a struct field slice: structVar.field ~= value.
+     * Computes the absolute address of the slice field and delegates to the
+     * standard append pattern using tempLocalB as the slice base address.
+     *
+     * Only handles scalar (int-sized) elements for now.
+     */
+    void emitSliceFieldAppend(ref Appender!(ubyte[]) out_, VarInfo* structInfo,
+                               int fieldOffset, ArrayType arrType, Expression value) {
+        uint elementSize = wasmElementSize(arrType.elementType);
+        // SP scratch layout: value (4 bytes), capOff, bufOff, ctrOff
+        int valSize = 4;
+        int capOff = valSize + 4;
+        int bufOff = valSize + 8;
+        int ctrOff = valSize + 12;
+
+        // Helper: emit the slice field absolute address onto the stack
+        void emitFieldAddr() {
+            emitVarAddress(out_, structInfo);
+            if (fieldOffset > 0) {
+                out_ ~= Op.i32_const;
+                leb128s(out_, fieldOffset);
+                out_ ~= Op.i32_add;
+            }
+        }
+
+        // Helper: load a 32-bit field from the slice struct at the given sub-offset
+        void loadSliceField(uint subOffset) {
+            emitFieldAddr();
+            if (subOffset > 0) {
+                out_ ~= Op.i32_const;
+                leb128s(out_, subOffset);
+                out_ ~= Op.i32_add;
+            }
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+        }
+
+        // Helper: store a 32-bit value to a slice struct sub-field
+        // Stack before call: [value]
+        void storeSliceField(uint subOffset) {
+            out_ ~= Op.local_set;
+            leb128u(out_, tempLocalA);  // save value
+            emitFieldAddr();
+            if (subOffset > 0) {
+                out_ ~= Op.i32_const;
+                leb128s(out_, subOffset);
+                out_ ~= Op.i32_add;
+            }
+            out_ ~= Op.local_get;
+            leb128u(out_, tempLocalA);
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+        }
+
+        // Store value at SP scratch area
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, valSize);
+        out_ ~= Op.i32_sub;
+        emitExpression(out_, value);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+
+        // Check if length >= capacity
+        loadSliceField(sliceLayout.lengthOffset);
+        loadSliceField(sliceLayout.capacityOffset);
+        out_ ~= Op.i32_ge_u;
+
+        out_ ~= Op.if_;
+        out_ ~= cast(ubyte)0x40;
+
+        // newCapacity = max(capacity * 2, 4)
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, capOff);
+        out_ ~= Op.i32_sub;
+
+        loadSliceField(sliceLayout.capacityOffset);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 2);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        loadSliceField(sliceLayout.capacityOffset);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 2);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        emitUnsignedMaxSelect(out_);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+
+        // Allocate new buffer via arena
+        emitArenaPointer(out_);
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, capOff);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_const;
+        leb128s(out_, elementSize);
+        out_ ~= Op.i32_mul;
+        uint allocIdx = emitter.getFuncIndex("__arena_alloc");
+        out_ ~= Op.call;
+        leb128u(out_, allocIdx);
+
+        // Store newBuffer at SP-bufOff
+        out_ ~= Op.local_set;
+        leb128u(out_, tempLocalA);
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, bufOff);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.local_get;
+        leb128u(out_, tempLocalA);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+
+        // Copy loop: i = 0
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, ctrOff);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_const;
+        leb128s(out_, 0);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+
+        out_ ~= Op.block;
+        out_ ~= cast(ubyte)0x40;
+        out_ ~= Op.loop;
+        out_ ~= cast(ubyte)0x40;
+
+        // if i >= length break
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, ctrOff);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        loadSliceField(sliceLayout.lengthOffset);
+        out_ ~= Op.i32_ge_u;
+        out_ ~= Op.br_if;
+        leb128u(out_, 1);
+
+        // newBuffer[i] = oldPtr[i] (scalar copy)
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, bufOff);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, ctrOff);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_const;
+        leb128s(out_, elementSize);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_add;
+
+        // Load from old ptr[i]
+        loadSliceField(0);  // slice.ptr
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, ctrOff);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_const;
+        leb128s(out_, elementSize);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_add;
+        emitLoadForSize(out_, elementSize, false);
+        emitStoreForSize(out_, elementSize, false);
+
+        // i++
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, ctrOff);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, ctrOff);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 1);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+
+        out_ ~= Op.br;
+        leb128u(out_, 0);
+        out_ ~= Op.end;
+        out_ ~= Op.end;
+
+        // Update slice.ptr = newBuffer
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, bufOff);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        storeSliceField(0);  // slice.ptr
+
+        // Update slice.capacity = newCapacity
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, capOff);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        storeSliceField(sliceLayout.capacityOffset);
+
+        out_ ~= Op.end;  // end if (need grow)
+
+        // Store value at ptr[length]: dest = ptr + length * elemSize
+        loadSliceField(0);  // ptr
+        loadSliceField(sliceLayout.lengthOffset);  // length
+        out_ ~= Op.i32_const;
+        leb128s(out_, elementSize);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_add;
+        // Load value from SP scratch
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.spGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, valSize);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        emitStoreForSize(out_, elementSize, false);
+
+        // Increment length
+        loadSliceField(sliceLayout.lengthOffset);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 1);
+        out_ ~= Op.i32_add;
+        storeSliceField(sliceLayout.lengthOffset);
+
+        // Result: new length
+        loadSliceField(sliceLayout.lengthOffset);
+    }
+
     void emitCast(ref Appender!(ubyte[]) out_, CastExpression expr) {
         // Check for class→interface cast (annotated by type checker)
         if (expr.sourceClassDecl && expr.targetInterfaceDecl) {
@@ -3356,6 +3788,19 @@ class FuncContext {
                                               : cast(AggregateDecl)info.classDecl;
                     auto field = aggr.getField(expr.memberName);
                     if (field) {
+                        // Slice field: emit address (struct_base + field.offset)
+                        // Consumed by chained .length/.ptr/[i]/~= on the outer expression
+                        if (auto arrType = cast(ArrayType)field.type) {
+                            if (!arrType.isStaticArray) {
+                                emitVarAddress(out_, info);
+                                if (field.offset > 0) {
+                                    out_ ~= Op.i32_const;
+                                    leb128s(out_, cast(int)field.offset);
+                                    out_ ~= Op.i32_add;
+                                }
+                                return;  // address of slice struct on stack
+                            }
+                        }
                         emitVarAddress(out_, info);
                         if (field.offset > 0) {
                             out_ ~= Op.i32_const;
@@ -3370,8 +3815,8 @@ class FuncContext {
                 } else if (info.isSlice) {
                     int fieldOffset;
                     if (expr.memberName == "ptr") fieldOffset = 0;
-                    else if (expr.memberName == "length") fieldOffset = 4;
-                    else if (expr.memberName == "capacity") fieldOffset = 8;
+                    else if (expr.memberName == "length") fieldOffset = cast(int)sliceLayout.lengthOffset;
+                    else if (expr.memberName == "capacity") fieldOffset = cast(int)sliceLayout.capacityOffset;
                     else throw new EmitError("Slice has no field '" ~ expr.memberName ~ "'");
 
                     emitVarAddress(out_, info);
@@ -3386,7 +3831,37 @@ class FuncContext {
                     return;
                 }
             }
-        }        
+
+            // Implicit field access in method: field.length, field.ptr etc.
+            if (auto thisInfo = resolveVar(THIS_LOCAL_ID, "this")) {
+                AggregateDecl parent = func.structParent ? cast(AggregateDecl)func.structParent
+                                                         : cast(AggregateDecl)func.classParent;
+                if (parent) {
+                    auto field = parent.getField(ident.name);
+                    if (field) {
+                        if (auto arrType = cast(ArrayType)field.type) {
+                            if (!arrType.isStaticArray) {
+                                // Slice field: handle .length/.ptr/.capacity
+                                uint subOffset;
+                                if (expr.memberName == "length") subOffset = sliceLayout.lengthOffset;
+                                else if (expr.memberName == "ptr") subOffset = 0;
+                                else if (expr.memberName == "capacity") subOffset = sliceLayout.capacityOffset;
+                                else throw new EmitError("Slice field has no member '" ~ expr.memberName ~ "'");
+                                out_ ~= Op.local_get;
+                                leb128u(out_, thisInfo.wasmLocalIdx);
+                                out_ ~= Op.i32_const;
+                                leb128s(out_, cast(int)(field.offset + subOffset));
+                                out_ ~= Op.i32_add;
+                                out_ ~= Op.i32_load;
+                                out_ ~= cast(ubyte)0x02;
+                                leb128u(out_, 0);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // Handle member access through index expression (points[i].x)
         if (auto indexExpr = cast(IndexExpression)expr.object) {
             // emitIntrinsicOpIndex leaves element address on stack for aggregates
@@ -3445,6 +3920,29 @@ class FuncContext {
                         out_ ~= Op.i32_const;
                         leb128s(out_, cast(int)field.offset);
                         out_ ~= Op.i32_add;
+                    }
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                    return;
+                }
+            }
+            // Inner member is a slice — handle .length/.ptr/.capacity
+            if (auto arrType = cast(ArrayType)innerType) {
+                if (!arrType.isStaticArray) {
+                    // Address of the slice struct is on the stack
+                    if (expr.memberName == "length") {
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, sliceLayout.lengthOffset);
+                        out_ ~= Op.i32_add;
+                    } else if (expr.memberName == "ptr") {
+                        // ptr is at offset 0, no add needed
+                    } else if (expr.memberName == "capacity") {
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, sliceLayout.capacityOffset);
+                        out_ ~= Op.i32_add;
+                    } else {
+                        throw new EmitError("Slice field has no member '" ~ expr.memberName ~ "'");
                     }
                     out_ ~= Op.i32_load;
                     out_ ~= cast(ubyte)0x02;
@@ -3699,6 +4197,19 @@ class FuncContext {
             if (parent) {
                 auto field = parent.getField(expr.name);
                 if (field) {
+                    // Slice field: emit address (this_ptr + field.offset) — consumed by .length, [i], ~= etc.
+                    if (auto arrType = cast(ArrayType)field.type) {
+                        if (!arrType.isStaticArray) {
+                            out_ ~= Op.local_get;
+                            leb128u(out_, thisInfo.wasmLocalIdx);
+                            if (field.offset > 0) {
+                                out_ ~= Op.i32_const;
+                                leb128s(out_, cast(int)field.offset);
+                                out_ ~= Op.i32_add;
+                            }
+                            return;  // address of slice struct on stack
+                        }
+                    }
                     out_ ~= Op.local_get;
                     leb128u(out_, thisInfo.wasmLocalIdx);
                     if (field.offset > 0) {
@@ -4175,7 +4686,7 @@ class FuncContext {
 
                     if (argInfo.isSlice) {
                         // Slice - copy 12-byte slice struct to temp, pass temp address
-                        enum sliceSize = WasmSliceLayout.sizeof;
+                        const sliceSize = sliceLayout.totalSize;
 
                         out_ ~= Op.global_get;
                         leb128u(out_, emitter.spGlobal);
@@ -4257,7 +4768,7 @@ class FuncContext {
                 }
                 uint sourceElemSize = srcInfo.elementSize;
 
-                enum sliceSize = WasmSliceLayout.sizeof;
+                const sliceSize = sliceLayout.totalSize;
 
                 // Allocate temp: SP = SP - 12
                 out_ ~= Op.global_get;
@@ -4298,7 +4809,7 @@ class FuncContext {
                 out_ ~= Op.global_get;
                 leb128u(out_, emitter.spGlobal);
                 out_ ~= Op.i32_const;
-                leb128s(out_, WasmSliceLayout.LENGTH_OFFSET);
+                leb128s(out_, sliceLayout.lengthOffset);
                 out_ ~= Op.i32_add;
 
                 emitExpression(out_, sliceArg.end);
@@ -4313,7 +4824,7 @@ class FuncContext {
                 out_ ~= Op.global_get;
                 leb128u(out_, emitter.spGlobal);
                 out_ ~= Op.i32_const;
-                leb128s(out_, WasmSliceLayout.CAPACITY_OFFSET);
+                leb128s(out_, sliceLayout.capacityOffset);
                 out_ ~= Op.i32_add;
 
                 emitExpression(out_, sliceArg.end);
@@ -4885,7 +5396,7 @@ class FuncContext {
                 if (elemSize == 0) elemSize = 4;
                 return elemCount * cast(uint)elemSize;
             }
-            return WasmSliceLayout.sizeof;
+            return sliceLayout.totalSize;
         }
         if (auto sd = returnType.asStruct())
             return cast(uint)sd.structSize;
@@ -5112,14 +5623,50 @@ class FuncContext {
         if (expr.operator == AssignmentExpression.Operator.ConcatAssign) {
             auto ident = cast(IdentifierExpression)expr.left;
             if (ident) {
-                if (auto sliceInfo = resolveVar(ident.resolvedLocalId, ident.name)) {
-                    if (sliceInfo.isSlice) {
-                        emitSliceAppend(out_, ident.name, sliceInfo, expr.right);
+                if (auto si = resolveVar(ident.resolvedLocalId, ident.name)) {
+                    if (si.isSlice) {
+                        emitSliceAppend(out_, ident.name, si, expr.right);
                         return;
                     }
                 }
+                // Implicit field access in method: field ~= value
+                if (auto thisInfo = resolveVar(THIS_LOCAL_ID, "this")) {
+                    AggregateDecl parent = func.structParent ? cast(AggregateDecl)func.structParent
+                                                             : cast(AggregateDecl)func.classParent;
+                    if (parent) {
+                        auto field = parent.getField(ident.name);
+                        if (field) {
+                            if (auto arrType = cast(ArrayType)field.type) {
+                                if (!arrType.isStaticArray) {
+                                    emitSliceFieldAppend(out_, thisInfo, cast(int)field.offset,
+                                        arrType, expr.right);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
             }
-            throw new EmitError("Concat-assign (~=) only supported on slice locals");
+            // Explicit member expression: s.data ~= value
+            if (auto memberExpr = cast(MemberExpression)expr.left) {
+                if (auto identObj = cast(IdentifierExpression)memberExpr.object) {
+                    if (auto structInfo = resolveVar(identObj.resolvedLocalId, identObj.name)) {
+                        if (structInfo.isStruct) {
+                            auto field = structInfo.structDecl.getField(memberExpr.memberName);
+                            if (field) {
+                                if (auto arrType = cast(ArrayType)field.type) {
+                                    if (!arrType.isStaticArray) {
+                                        emitSliceFieldAppend(out_, structInfo, cast(int)field.offset,
+                                            arrType, expr.right);
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            throw new EmitError("Concat-assign (~=) only supported on slice locals/fields");
         }
 
         // Check for struct field assignment (p.x = value)
@@ -5346,7 +5893,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + WasmSliceLayout.CAPACITY_OFFSET);
+        leb128s(out_, sliceAddr + sliceLayout.capacityOffset);
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -5432,7 +5979,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);
+        leb128s(out_, sliceAddr + sliceLayout.lengthOffset);
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -5542,7 +6089,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + WasmSliceLayout.CAPACITY_OFFSET);
+        leb128s(out_, sliceAddr + sliceLayout.capacityOffset);
         out_ ~= Op.i32_add;
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
@@ -5562,7 +6109,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);
+        leb128s(out_, sliceAddr + sliceLayout.lengthOffset);
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -5591,7 +6138,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);
+        leb128s(out_, sliceAddr + sliceLayout.lengthOffset);
         out_ ~= Op.i32_add;
         out_ ~= Op.i32_load;
         out_ ~= cast(ubyte)0x02;
@@ -5684,7 +6231,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + WasmSliceLayout.LENGTH_OFFSET);
+        leb128s(out_, sliceAddr + sliceLayout.lengthOffset);
         out_ ~= Op.i32_add;
         out_ ~= Op.global_get;
         leb128u(out_, emitter.spGlobal);
