@@ -3,6 +3,5 @@
   "description": "Virtual dispatch on class method returning a struct (requires hidden result_ptr in call_indirect signature)",
   "type": "wasm_exec",
   "entry": "main",
-  "expected_result": 31,
-  "skip_backends": ["native"]
+  "expected_result": 31
 }

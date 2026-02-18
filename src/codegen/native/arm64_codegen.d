@@ -236,7 +236,14 @@ struct NativeCodeGen {
         //           BLR Rn where Rn=x9 (bits 5-9 = 01001)
         emitRaw32(0xD63F0120);
     }
-    
+
+    /// ADD x9, x9, x0, LSL #3  — x9 += x0 * 8
+    /// Used for vtable dispatch: x9 = base + tableIndex * 8
+    void emitAddX9X0LSL3() {
+        // sf=1 op=0 S=0 01011 shift=00 Rm=00000(x0) imm6=000011 Rn=01001(x9) Rd=01001(x9)
+        emitRaw32(0x8B000D29);
+    }
+
     /// Emit a complete indirect call through a function pointer slot
     /// slotAddress = address of the function pointer in memory
     /// Arguments should already be set up in x0-x3

@@ -107,6 +107,11 @@ class DependencyAnalyzer {
         // in type position like `Sized!(3) s;` which aren't TemplateInstantiationExpressions)
         collectStructDepsFromStatements(func.body_);
 
+        // Collect all virtual methods from class-typed parameters and local variables.
+        // Virtual dispatch requires ALL methods of a class to be compiled, not just
+        // the ones directly called (overrides may be invoked at runtime).
+        collectClassMethodDeps(func, result);
+
         foreach (call; calls) {
             // Try to resolve the call to a FunctionDecl
             auto calledFunc = resolveFunction(call);
@@ -329,6 +334,58 @@ class DependencyAnalyzer {
     }
 
     /**
+     * Collect all virtual methods from class-typed variables/parameters in a function.
+     * This ensures overridden methods are compiled for virtual dispatch.
+     */
+    private void collectClassMethodDeps(FunctionDecl func, ref FunctionDecl[] result) {
+        // Collect from parameters
+        foreach (param; func.parameters) {
+            if (auto cd = param.type.asClass()) {
+                collectAllClassMethods(cd, result);
+            }
+        }
+        // Collect from local variable declarations in the body
+        collectClassMethodDepsFromStatements(func.body_, result);
+    }
+
+    private void collectClassMethodDepsFromStatements(Statement stmt, ref FunctionDecl[] result) {
+        if (stmt is null) return;
+        if (auto compound = cast(CompoundStatement)stmt) {
+            foreach (s; compound.statements)
+                collectClassMethodDepsFromStatements(s, result);
+        } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
+            if (auto ut = cast(UserType)varDecl.type) {
+                if (auto cd = ut.asClass()) {
+                    collectAllClassMethods(cd, result);
+                }
+            }
+        } else if (auto ifStmt = cast(IfStatement)stmt) {
+            collectClassMethodDepsFromStatements(ifStmt.thenStatement, result);
+            collectClassMethodDepsFromStatements(ifStmt.elseStatement, result);
+        } else if (auto whileStmt = cast(WhileStatement)stmt) {
+            collectClassMethodDepsFromStatements(whileStmt.body_, result);
+        } else if (auto forStmt = cast(ForStatement)stmt) {
+            collectClassMethodDepsFromStatements(forStmt.init, result);
+            collectClassMethodDepsFromStatements(forStmt.body_, result);
+        }
+    }
+
+    /// Add all methods from a class (and its bases) as dependencies.
+    private void collectAllClassMethods(ClassDecl classDecl, ref FunctionDecl[] result) {
+        ClassDecl current = classDecl;
+        while (current !is null) {
+            foreach (member; current.members) {
+                if (auto fd = cast(FunctionDecl)member) {
+                    if (fd.isMethod && fd.body_ !is null) {
+                        collectDependencies(fd, result);
+                    }
+                }
+            }
+            current = current.baseClassDecl;
+        }
+    }
+
+    /**
      * Resolve a CallExpression to its FunctionDecl, if it's a D function.
      * Returns null for builtins, intrinsics, or unresolved calls.
      */
@@ -370,7 +427,7 @@ class DependencyAnalyzer {
         if (auto member = cast(MemberExpression)call.function_) {
             string methodName = member.memberName;
 
-            // Search struct declarations for a matching method
+            // Search struct and class declarations for a matching method
             foreach (decl; allDeclarations) {
                 if (auto sd = cast(StructDecl)decl) {
                     foreach (m; sd.members) {
@@ -379,6 +436,27 @@ class DependencyAnalyzer {
                                 return fd;
                             }
                         }
+                    }
+                }
+                if (auto cd = cast(ClassDecl)decl) {
+                    foreach (m; cd.members) {
+                        if (auto fd = cast(FunctionDecl)m) {
+                            if (fd.name == methodName && fd.isMethod) {
+                                return fd;
+                            }
+                        }
+                    }
+                    // Also search base classes
+                    auto base = cd.baseClassDecl;
+                    while (base !is null) {
+                        foreach (m; base.members) {
+                            if (auto fd = cast(FunctionDecl)m) {
+                                if (fd.name == methodName && fd.isMethod) {
+                                    return fd;
+                                }
+                            }
+                        }
+                        base = base.baseClassDecl;
                     }
                 }
             }

@@ -130,6 +130,7 @@ class NativeCompiledFunction : CompiledFunction {
     enum VarKind {
         scalar,
         struct_,
+        class_,
         slice,
         staticArray,
     }
@@ -139,12 +140,14 @@ class NativeCompiledFunction : CompiledFunction {
         VarKind kind;
         size_t offset;            // Stack offset (size_t for 64-bit targets)
         StructDecl structDecl;    // Non-null when kind == struct_
+        ClassDecl classDecl;      // Non-null when kind == class_
         Type elementType;         // Element type for staticArray/slice
         uint staticArraySize;     // Element count when kind == staticArray
         uint staticArrayElemSize; // Element byte size when kind == staticArray
         uint sliceElemSize;       // Element byte size when kind == slice
 
         bool isStruct() const { return kind == VarKind.struct_; }
+        bool isClass() const { return kind == VarKind.class_; }
         bool isSlice() const { return kind == VarKind.slice; }
         bool isStaticArray() const { return kind == VarKind.staticArray; }
 
@@ -207,8 +210,22 @@ class NativeCompiledFunction : CompiledFunction {
     private size_t currentFunctionReturnArrayBytes;  // >0 for static array returns
 
     // Method tracking (hidden 'this' parameter)
-    private StructDecl currentMethodStruct;  // non-null when compiling a method
+    private StructDecl currentMethodStruct;  // non-null when compiling a struct method
+    private ClassDecl currentMethodClass;    // non-null when compiling a class method
     private size_t currentThisOffset;        // stack offset of 'this' pointer
+
+    /// Returns the current method's parent aggregate (struct or class), or null.
+    private AggregateDecl currentMethodAggregate() {
+        if (currentMethodStruct) return cast(AggregateDecl)currentMethodStruct;
+        if (currentMethodClass) return cast(AggregateDecl)currentMethodClass;
+        return null;
+    }
+
+    // Vtable infrastructure for class virtual dispatch
+    private uint nextNativeTableBase = 0;       // sequential counter for vtable base indices
+    private size_t vtableStartOffset = size_t.max; // data section offset where vtable array starts
+    private uint[string] classTableBases;       // className → nativeTableBase
+    private string[] vtableMethodNames;          // flat: vtableMethodNames[tableBase + slot] = mangledName
 
     // Arena tracking (hidden __arena parameter)
     private bool currentFunctionHasArena;
@@ -334,6 +351,9 @@ class NativeCompiledFunction : CompiledFunction {
             throw new Exception("Failed to finalize native code");
         }
 
+        // Patch vtable entries now that function addresses are resolved
+        patchVtableEntries();
+
     }
 
     /// Get the mangled name for a function.
@@ -391,7 +411,8 @@ class NativeCompiledFunction : CompiledFunction {
         foreach (p; func.parameters)
             if (auto ut = cast(UserType)p.type) ut.ensureResolved(symbolTable);
 
-        bool isMethod = func.isMethod && func.parent !is null && cast(StructDecl)func.parent !is null;
+        bool isMethod = func.isMethod && func.parent !is null &&
+            (cast(StructDecl)func.parent !is null || cast(ClassDecl)func.parent !is null);
         auto layout = computeParamLayout(func, ParamLayoutContext(
             isMethod,
             func.returnType !is null && func.returnType.isLargeReturn(),
@@ -430,16 +451,26 @@ class NativeCompiledFunction : CompiledFunction {
             currentFunctionResultPtrOffset = 0;
         }
 
-        // Hidden 'this' pointer (struct methods only)
+        // Hidden 'this' pointer (struct/class methods)
         currentMethodStruct = null;
+        currentMethodClass = null;
         if (layout.hasThis()) {
-            auto sd = cast(StructDecl)func.parent;
-            currentMethodStruct = sd;
             currentThisOffset = nextLocalOffset;
             NativeLocalInfo thisInfo;
             thisInfo.offset = nextLocalOffset;
-            thisInfo.kind = VarKind.struct_;
-            thisInfo.structDecl = sd;
+
+            if (auto sd = cast(StructDecl)func.parent) {
+                currentMethodStruct = sd;
+                thisInfo.kind = VarKind.struct_;
+                thisInfo.structDecl = sd;
+            } else if (auto cd = cast(ClassDecl)func.parent) {
+                currentMethodClass = cd;
+                thisInfo.kind = VarKind.class_;
+                thisInfo.classDecl = cd;
+            } else {
+                assert(0, "Method '" ~ func.name ~ "' has 'this' but parent is neither struct nor class");
+            }
+
             localVars["this"] = thisInfo;
             nextLocalOffset += 8;  // 64-bit pointer
         }
@@ -464,6 +495,12 @@ class NativeCompiledFunction : CompiledFunction {
                 nli.kind = VarKind.struct_;
                 nli.structDecl = structDecl;
                 paramSize = structDecl.structSize;
+            } else if (auto classDecl = param.type.asClass()) {
+                assert(classDecl.classSize > 0,
+                    "ClassDecl '" ~ classDecl.name ~ "' has zero size - layout not computed");
+                nli.kind = VarKind.class_;
+                nli.classDecl = classDecl;
+                paramSize = classDecl.classSize;
             } else if (auto arrayType = cast(ArrayType)param.type) {
                 if (arrayType.arraySize !is null) {
                     nli.kind = VarKind.staticArray;
@@ -515,7 +552,7 @@ class NativeCompiledFunction : CompiledFunction {
             regIdx++;
         }
 
-        if (currentMethodStruct !is null) {
+        if (currentMethodStruct !is null || currentMethodClass !is null) {
             moveRegToX0(regIdx);
             gen.emitStorePtr(currentThisOffset);
             regIdx++;
@@ -551,6 +588,22 @@ class NativeCompiledFunction : CompiledFunction {
                     }
                     size_t structSize = nli.structDecl.structSize;
                     for (uint fieldOff = 0; fieldOff < structSize; fieldOff += 4) {
+                        gen.emitLoadFromX9Offset(fieldOff);
+                        gen.emitStoreLocal32(offset + fieldOff);
+                    }
+                    break;
+
+                case VarKind.class_:
+                    // Register contains pointer to class object - copy data to our stack
+                    switch (paramReg) {
+                        case 0: gen.emitMoveX0ToX9(); break;
+                        case 1: gen.emitMoveX1ToX9(); break;
+                        case 2: gen.emitMoveX2ToX9(); break;
+                        case 3: gen.emitMoveX3ToX9(); break;
+                        default: break;
+                    }
+                    size_t classSize = nli.classDecl.classSize;
+                    for (uint fieldOff = 0; fieldOff < classSize; fieldOff += 4) {
                         gen.emitLoadFromX9Offset(fieldOff);
                         gen.emitStoreLocal32(offset + fieldOff);
                     }
@@ -699,6 +752,8 @@ class NativeCompiledFunction : CompiledFunction {
                 if (auto sd = userType.asStruct()) {
                     // Zero-size structs (methods-only, no data fields) are valid
                     bytes = sd.structSize > 0 ? cast(uint)sd.structSize : 0;
+                } else if (auto cd = userType.asClass()) {
+                    bytes = cd.classSize > 0 ? cast(uint)cd.classSize : 0;
                 } else {
                     bytes = 4;
                 }
@@ -801,16 +856,20 @@ class NativeCompiledFunction : CompiledFunction {
         } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
             // Check if this is a struct type or slice type
             StructDecl structType = null;
+            ClassDecl classType = null;
             bool isSlice = false;
             uint staticArrayLength = 0;
             size_t varSize = 4;  // default to 4 bytes for int
-            
+
             if (auto userType = cast(UserType)varDecl.type) {
                 userType.ensureResolved(symbolTable);
                 if (auto sd = userType.asStruct()) {
                     // Zero-size structs (methods-only, no data fields) are valid
                     structType = sd;
                     varSize = sd.structSize > 0 ? sd.structSize : 0;
+                } else if (auto cd = userType.asClass()) {
+                    classType = cd;
+                    varSize = cd.classSize > 0 ? cd.classSize : 0;
                 }
             } else if (auto arrType = cast(ArrayType)varDecl.type) {
                 if (arrType.arraySize is null) {
@@ -853,6 +912,9 @@ class NativeCompiledFunction : CompiledFunction {
                 } else {
                     nli.sliceElemSize = 4;
                 }
+            } else if (classType) {
+                nli.kind = VarKind.class_;
+                nli.classDecl = classType;
             } else if (staticArrayLength > 0) {
                 nli.kind = VarKind.staticArray;
                 nli.staticArraySize = staticArrayLength;
@@ -870,7 +932,7 @@ class NativeCompiledFunction : CompiledFunction {
             // Zero-initialize variables without explicit initializer
             // (D guarantees .init = 0 for int types, null for slices)
             if (!varDecl.initializer && varSize > 0) {
-                if (nli.isStaticArray || nli.isStruct || nli.isSlice) {
+                if (nli.isStaticArray || nli.isStruct || nli.isSlice || nli.isClass) {
                     gen.emitImm32(stencil_load_imm32, 0);
                     for (size_t off = 0; off < varSize; off += 4) {
                         gen.emitStoreLocal32(nli.offset + off);
@@ -879,6 +941,14 @@ class NativeCompiledFunction : CompiledFunction {
                     gen.emitImm32(stencil_load_imm32, 0);
                     gen.emitStoreLocal32(nli.offset);
                 }
+            }
+
+            // Class vtable pointer initialization: store table base index at offset 0
+            if (nli.isClass && classType) {
+                ensureNativeVtable(classType);
+                uint tableBase = classTableBases[classType.name];
+                gen.emitImm32(stencil_load_imm32, cast(int)tableBase);
+                gen.emitStoreLocal32(nli.offset);  // vtable ptr at offset 0
             }
 
             // Compile initializer if present
@@ -983,6 +1053,48 @@ class NativeCompiledFunction : CompiledFunction {
                                 }
                                 gen.emitCall(*funcLabelPtr);
                                 // Result is now written to nextLocalOffset
+                            }
+                        } else if (auto memberFunc = cast(MemberExpression)call.function_) {
+                            // Method call returning struct: Point p = s.origin()
+                            // Dispatch to struct-returning method call (virtual or direct)
+                            emitStructReturnMethodCallNative(memberFunc, call.arguments, nextLocalOffset);
+                        }
+                    }
+                } else if (nli.isClass) {
+                    // Class construction: ClassName(arg1, arg2, ...)
+                    // Vtable pointer at offset 0 is already set above.
+                    // Fields are initialized from constructor arguments.
+                    if (auto call = cast(CallExpression)varDecl.initializer) {
+                        if (auto funcIdent = cast(IdentifierExpression)call.function_) {
+                            auto symbol = symbolTable.lookupSymbol(funcIdent.name);
+                            if (symbol && symbol.kind == SymbolKind.Type) {
+                                if (auto cd = symbol.type.asClass()) {
+                                    assert(cd is classType,
+                                        "Class init type mismatch: expected " ~
+                                        classType.name ~ " but got " ~ cd.name);
+                                    // Initialize fields directly at our variable's location
+                                    for (size_t i = 0; i < cd.fields.length && i < call.arguments.length; i++) {
+                                        auto field = cd.fields[i];
+                                        size_t fieldOffset = nextLocalOffset + field.offset;
+                                        uint valueSize = cast(uint)field.type.size();
+
+                                        // Aggregate types are passed by address — copy data
+                                        if (field.type.isAggregate() && valueSize > 0) {
+                                            compileExpression(call.arguments[i]);
+                                            for (uint off = 0; off < valueSize; off += 4) {
+                                                gen.emitLoadFromPointer(off);
+                                                gen.emitStoreLocal32(fieldOffset + off);
+                                                if (off + 4 < valueSize) {
+                                                    compileExpression(call.arguments[i]);
+                                                }
+                                            }
+                                            continue;
+                                        }
+
+                                        compileExpression(call.arguments[i]);
+                                        gen.emitStoreLocal32(fieldOffset);
+                                    }
+                                }
                             }
                         }
                     }
@@ -1623,6 +1735,7 @@ class NativeCompiledFunction : CompiledFunction {
             if (auto info = ident.name in localVars) {
                 final switch (info.kind) {
                     case VarKind.struct_:
+                    case VarKind.class_:
                     case VarKind.staticArray:
                     case VarKind.slice:
                         // Aggregate types: emit address (pointer) instead of loading value
@@ -1661,9 +1774,9 @@ class NativeCompiledFunction : CompiledFunction {
                     }
                 }
 
-                if (currentMethodStruct !is null) {
+                if (auto currentAgg = currentMethodAggregate()) {
                     // In a method: check for implicit field access (field without 'this.')
-                    auto field = currentMethodStruct.getField(ident.name);
+                    auto field = currentAgg.getField(ident.name);
                     if (field) {
                         // Slice field: emit address (this_ptr + field.offset) — consumed by .length, [i], ~= etc.
                         if (auto arrType = cast(ArrayType)field.type) {
@@ -1714,8 +1827,11 @@ class NativeCompiledFunction : CompiledFunction {
                 if (assign.operator == AssignmentExpression.Operator.ConcatAssign) {
                     if (auto objIdent = cast(IdentifierExpression)member.object) {
                         if (auto structInfo = objIdent.name in localVars) {
-                            if (structInfo.isStruct) {
-                                auto sField = structInfo.structDecl.getField(member.memberName);
+                            AggregateDecl aggDecl = structInfo.isStruct ?
+                                cast(AggregateDecl)structInfo.structDecl :
+                                (structInfo.isClass ? cast(AggregateDecl)structInfo.classDecl : null);
+                            if (aggDecl) {
+                                auto sField = aggDecl.getField(member.memberName);
                                 if (sField) {
                                     if (auto arrType = cast(ArrayType)sField.type) {
                                         if (!arrType.isStaticArray) {
@@ -1740,8 +1856,8 @@ class NativeCompiledFunction : CompiledFunction {
             auto info = targetIdent.name in localVars;
             if (info is null) {
                 // In a method: check for implicit field assignment
-                if (currentMethodStruct !is null) {
-                    auto field = currentMethodStruct.getField(targetIdent.name);
+                if (auto currentAgg = currentMethodAggregate()) {
+                    auto field = currentAgg.getField(targetIdent.name);
                     if (field) {
                         // ConcatAssign on implicit slice field: data ~= value
                         if (assign.operator == AssignmentExpression.Operator.ConcatAssign) {
@@ -2016,9 +2132,9 @@ class NativeCompiledFunction : CompiledFunction {
 
             // Chained member on slice field: s.data.length, s.data.ptr, s.data.capacity
             if (auto innerMember = cast(MemberExpression)member.object) {
-                auto innerStructDecl = getStructDeclFromExpr(innerMember.object);
-                if (innerStructDecl) {
-                    auto innerField = innerStructDecl.getField(innerMember.memberName);
+                AggregateDecl innerAggDecl = getAggregateDeclFromExpr(innerMember.object);
+                if (innerAggDecl) {
+                    auto innerField = innerAggDecl.getField(innerMember.memberName);
                     if (innerField) {
                         if (auto arrType = cast(ArrayType)innerField.type) {
                             if (!arrType.isStaticArray) {
@@ -2041,10 +2157,10 @@ class NativeCompiledFunction : CompiledFunction {
             }
 
             // Implicit field access in method: data.length, data.ptr, data.capacity
-            if (currentMethodStruct !is null) {
+            if (auto currentAgg = currentMethodAggregate()) {
                 if (auto ident = cast(IdentifierExpression)member.object) {
                     if ((ident.name in localVars) is null) {
-                        auto field = currentMethodStruct.getField(ident.name);
+                        auto field = currentAgg.getField(ident.name);
                         if (field) {
                             if (auto arrType = cast(ArrayType)field.type) {
                                 if (!arrType.isStaticArray) {
@@ -2073,15 +2189,15 @@ class NativeCompiledFunction : CompiledFunction {
                 }
             }
 
-            // Field access: obj.field (for structs)
-            auto structDecl = getStructDeclFromExpr(member.object);
-            if (structDecl is null) {
-                throw new Exception("Cannot determine struct type for member access");
+            // Field access: obj.field (for structs and classes)
+            AggregateDecl aggregateDecl = getAggregateDeclFromExpr(member.object);
+            if (aggregateDecl is null) {
+                throw new Exception("Cannot determine struct/class type for member access: " ~ member.memberName);
             }
 
-            auto field = structDecl.getField(member.memberName);
+            auto field = aggregateDecl.getField(member.memberName);
             if (field is null) {
-                throw new Exception("Unknown field: " ~ member.memberName);
+                throw new Exception("Unknown field '" ~ member.memberName ~ "' on " ~ aggregateDecl.name);
             }
 
             // For local struct variables, compute address and load field
@@ -2233,6 +2349,8 @@ class NativeCompiledFunction : CompiledFunction {
 
                         case VarKind.struct_:
                             assert(0, "Cannot index struct variable: " ~ ident.name);
+                        case VarKind.class_:
+                            assert(0, "Cannot index class variable: " ~ ident.name);
                         case VarKind.scalar:
                             assert(0, "Cannot index scalar variable: " ~ ident.name);
                     }
@@ -2240,9 +2358,9 @@ class NativeCompiledFunction : CompiledFunction {
             }
             // Handle member expression as array source: s.data[i]
             if (auto memberExpr = cast(MemberExpression)indexExpr.array) {
-                auto mStructDecl = getStructDeclFromExpr(memberExpr.object);
-                if (mStructDecl) {
-                    auto mField = mStructDecl.getField(memberExpr.memberName);
+                AggregateDecl mAggDecl = getAggregateDeclFromExpr(memberExpr.object);
+                if (mAggDecl) {
+                    auto mField = mAggDecl.getField(memberExpr.memberName);
                     if (mField) {
                         if (auto arrType = cast(ArrayType)mField.type) {
                             if (!arrType.isStaticArray) {
@@ -2281,10 +2399,10 @@ class NativeCompiledFunction : CompiledFunction {
                 }
             }
             // Implicit field access in method: data[i] where data is a slice field
-            if (currentMethodStruct !is null) {
+            if (auto currentAgg = currentMethodAggregate()) {
                 if (auto ident2 = cast(IdentifierExpression)indexExpr.array) {
                     if ((ident2.name in localVars) is null) {
-                        auto iField = currentMethodStruct.getField(ident2.name);
+                        auto iField = currentAgg.getField(ident2.name);
                         if (iField) {
                             if (auto arrType = cast(ArrayType)iField.type) {
                                 if (!arrType.isStaticArray) {
@@ -2465,9 +2583,9 @@ class NativeCompiledFunction : CompiledFunction {
     private void emitIndexAssignment(IndexExpression indexExpr, Expression value) {
         // Handle member expression as array source: s.data[i] = value
         if (auto memberExpr = cast(MemberExpression)indexExpr.array) {
-            auto mStructDecl = getStructDeclFromExpr(memberExpr.object);
-            if (mStructDecl) {
-                auto mField = mStructDecl.getField(memberExpr.memberName);
+            AggregateDecl mAggDecl = getAggregateDeclFromExpr(memberExpr.object);
+            if (mAggDecl) {
+                auto mField = mAggDecl.getField(memberExpr.memberName);
                 if (mField) {
                     if (auto arrType = cast(ArrayType)mField.type) {
                         if (!arrType.isStaticArray) {
@@ -2506,10 +2624,10 @@ class NativeCompiledFunction : CompiledFunction {
         }
 
         // Handle implicit field access in method: data[i] = value
-        if (currentMethodStruct !is null) {
+        if (auto currentAgg = currentMethodAggregate()) {
             if (auto ident2 = cast(IdentifierExpression)indexExpr.array) {
                 if ((ident2.name in localVars) is null) {
-                    auto iField = currentMethodStruct.getField(ident2.name);
+                    auto iField = currentAgg.getField(ident2.name);
                     if (iField) {
                         if (auto arrType = cast(ArrayType)iField.type) {
                             if (!arrType.isStaticArray) {
@@ -2653,6 +2771,8 @@ class NativeCompiledFunction : CompiledFunction {
 
             case VarKind.struct_:
                 assert(0, "Cannot index-assign struct variable: " ~ ident.name);
+            case VarKind.class_:
+                assert(0, "Cannot index-assign class variable: " ~ ident.name);
             case VarKind.scalar:
                 assert(0, "Cannot index-assign scalar variable: " ~ ident.name);
         }
@@ -2709,14 +2829,20 @@ class NativeCompiledFunction : CompiledFunction {
         if (!objIdent)
             throw new Exception("Method call on non-identifier object not yet supported in native backend");
 
-        // Look up the object to find its struct type
+        // Look up the object to find its type
         auto info = objIdent.name in localVars;
         if (info is null)
             throw new Exception("Unknown variable for method call in native backend: " ~ objIdent.name);
 
+        // Class method call — virtual dispatch
+        if (info.isClass) {
+            emitClassMethodCall(info.classDecl, *info, memberExpr.memberName, args);
+            return;
+        }
+
         StructDecl structDecl = info.structDecl;
         if (structDecl is null)
-            throw new Exception("Method call on non-struct variable: " ~ objIdent.name);
+            throw new Exception("Method call on non-struct/class variable: " ~ objIdent.name);
 
         // Find the method in the struct's members
         FunctionDecl method = null;
@@ -2759,6 +2885,251 @@ class NativeCompiledFunction : CompiledFunction {
         // Emit the call
         gen.emitCall(*labelPtr);
         // Result is in x0
+    }
+
+    /**
+     * Emit a class method call with virtual dispatch.
+     * Looks up the method in the class hierarchy, finds its vtable slot,
+     * and emits an indirect call through the vtable.
+     */
+    private void emitClassMethodCall(ClassDecl classDecl, NativeLocalInfo info, string methodName, Expression[] args) {
+        assert(classDecl !is null, "emitClassMethodCall: classDecl is null");
+        computeVirtualMethodsIfNeeded(classDecl);
+
+        // Find method in class hierarchy (walk base classes)
+        FunctionDecl method = findMethodInClass(classDecl, methodName);
+        if (method is null)
+            throw new Exception("Class '" ~ classDecl.name ~ "' has no method '" ~ methodName ~ "'");
+
+        // Find vtable slot index
+        int slotIdx = findVtableSlot(classDecl, method);
+        assert(slotIdx >= 0, "Method '" ~ methodName ~ "' not found in vtable for class '" ~ classDecl.name ~ "'");
+
+        bool methodNeedsArena = method.needsArena;
+        int arenaShift = methodNeedsArena ? 1 : 0;
+
+        auto mark = temps.save();
+        size_t funcPtrTemp = temps.alloc(8);
+
+        // Step 1: Compute function pointer via vtable and save to temp.
+        // Must happen BEFORE emitMethodArgs, because vtable lookup clobbers x0/x1.
+        assert(vtableStartOffset != size_t.max, "vtable not allocated for class " ~ classDecl.name);
+
+        // Load vtable_base_index from object[0] (i32 at offset 0)
+        gen.emitLoadLocal32(info.offset);  // w0 = vtable base index
+
+        // Add slotIdx to get absolute slot: x0 = vtable_base + slotIdx
+        if (slotIdx > 0) {
+            gen.emitMoveX0ToX1();
+            gen.emitImm32(stencil_load_imm32, slotIdx);
+            gen.emit(stencil_add_i32);
+        }
+
+        // x9 = data section base + vtableStartOffset
+        gen.emitLoadImm64ToX9(cast(ulong)(cast(size_t)dataSection.base + vtableStartOffset));
+        // x9 = x9 + x0 * 8 (index into function pointer array)
+        gen.emitAddX9X0LSL3();
+        // x9 = *x9 (load function pointer from vtable slot)
+        gen.emitLoadFromX9();
+        // Save function pointer to temp
+        gen.emitMoveX9ToX0();
+        gen.emitStorePtr(funcPtrTemp);
+
+        // Step 2: Load user arguments into registers
+        emitMethodArgs(args, arenaShift);
+
+        // Step 3: Load arena into x1 if method needs it
+        if (methodNeedsArena) {
+            gen.emitLoadPtr(currentFunctionArenaOffset);
+            gen.emitMoveX0ToX1();
+        }
+
+        // Step 4: Restore function pointer into x9
+        gen.emitLoadPtr(funcPtrTemp);
+        gen.emitMoveX0ToX9();
+
+        // Step 5: Load 'this' pointer into x0
+        gen.emitStackAddress(info.offset);
+
+        // Step 6: Indirect call via x9
+        gen.emitCallIndirectX9();
+        temps.restore(mark);
+        // Result is in x0
+    }
+
+    /// Find a method by name in a class hierarchy (walks base classes).
+    private FunctionDecl findMethodInClass(ClassDecl classDecl, string methodName) {
+        // Search this class first, then walk up base classes
+        ClassDecl current = classDecl;
+        while (current !is null) {
+            foreach (member; current.members) {
+                if (auto funcDecl = cast(FunctionDecl)member) {
+                    if (funcDecl.name == methodName && funcDecl.isMethod) {
+                        return funcDecl;
+                    }
+                }
+            }
+            current = current.baseClassDecl;
+        }
+        return null;
+    }
+
+    /// Find the vtable slot index for a method in a class.
+    private int findVtableSlot(ClassDecl classDecl, FunctionDecl method) {
+        computeVirtualMethodsIfNeeded(classDecl);
+        string mangledName = getMangledName(method);
+        foreach (i, vm; classDecl.virtualMethods) {
+            if (getMangledName(vm) == mangledName)
+                return cast(int)i;
+        }
+        return -1;
+    }
+
+    /**
+     * Emit a struct-returning method call for native backend.
+     * Handles both struct (direct call) and class (virtual dispatch) receivers.
+     * The result is written directly to resultOffset on the caller's stack frame.
+     *
+     * ARM64 calling convention for struct-returning methods:
+     *   x0 = result_ptr (where callee writes struct data)
+     *   x1 = this_ptr (address of the object)
+     *   [x2 = arena if needed]
+     *   x2+/x3+ = user args
+     */
+    private void emitStructReturnMethodCallNative(MemberExpression memberFunc,
+            Expression[] args, size_t resultOffset) {
+        auto objIdent = cast(IdentifierExpression)memberFunc.object;
+        assert(objIdent !is null,
+            "Struct-returning method call on non-identifier not yet supported in native backend");
+
+        auto info = objIdent.name in localVars;
+        assert(info !is null, "Unknown variable '" ~ objIdent.name ~ "' for struct-returning method call");
+
+        if (info.isClass) {
+            // Virtual dispatch with hidden result pointer
+            ClassDecl classDecl = info.classDecl;
+            assert(classDecl !is null, "Class info without classDecl for " ~ objIdent.name);
+            computeVirtualMethodsIfNeeded(classDecl);
+
+            FunctionDecl method = findMethodInClass(classDecl, memberFunc.memberName);
+            assert(method !is null,
+                "Class '" ~ classDecl.name ~ "' has no method '" ~ memberFunc.memberName ~ "'");
+
+            int slotIdx = findVtableSlot(classDecl, method);
+            assert(slotIdx >= 0,
+                "Method '" ~ memberFunc.memberName ~ "' not in vtable for class '" ~ classDecl.name ~ "'");
+
+            bool methodNeedsArena = method.needsArena;
+            int arenaShift = methodNeedsArena ? 1 : 0;
+
+            auto mark = temps.save();
+            size_t funcPtrTemp = temps.alloc(8);
+
+            // Step 1: Compute function pointer via vtable and save to temp
+            assert(vtableStartOffset != size_t.max, "vtable not allocated");
+            gen.emitLoadLocal32(info.offset);  // w0 = vtable base index
+            if (slotIdx > 0) {
+                gen.emitMoveX0ToX1();
+                gen.emitImm32(stencil_load_imm32, slotIdx);
+                gen.emit(stencil_add_i32);
+            }
+            gen.emitLoadImm64ToX9(cast(ulong)(cast(size_t)dataSection.base + vtableStartOffset));
+            gen.emitAddX9X0LSL3();
+            gen.emitLoadFromX9();
+            gen.emitMoveX9ToX0();
+            gen.emitStorePtr(funcPtrTemp);
+
+            // Step 2: Load user arguments (shifted by this + result_ptr + arena)
+            // For struct-returning methods: x0=result_ptr, x1=this, [x2=arena], x2+/x3+=args
+            // But emitMethodArgs uses x1+arenaShift for args which would work for regular methods.
+            // For struct return, args start at x(2+arenaShift):
+            for (long i = cast(long)args.length - 1; i >= 0; i--) {
+                compileExpression(args[i]);
+                // Args go into x(2+arenaShift), x(3+arenaShift), ...
+                switch (cast(int)i + 2 + arenaShift) {
+                    case 2: gen.emitMoveX0ToX2(); break;
+                    case 3: gen.emitMoveX0ToX3(); break;
+                    default: assert(0, "Too many args for struct-returning virtual method");
+                }
+            }
+
+            // Step 3: Load arena into x2 if needed
+            if (methodNeedsArena) {
+                gen.emitLoadPtr(currentFunctionArenaOffset);
+                gen.emitMoveX0ToX2();
+            }
+
+            // Step 4: Load 'this' into x1
+            gen.emitStackAddress(info.offset);
+            gen.emitMoveX0ToX1();
+
+            // Step 5: Load result pointer into x0
+            gen.emitStackAddress(resultOffset);
+
+            // Step 6: Restore function pointer and call
+            // Save x0 (result_ptr), load func ptr, save to x9, restore x0
+            gen.emitMoveX0ToX9();  // x9 = result_ptr temporarily
+            gen.emitLoadPtr(funcPtrTemp);
+            // Now x0 = func_ptr, x9 = result_ptr — need to swap
+            // Use stack to swap: save func_ptr, restore result_ptr to x0, restore func_ptr to x9
+            gen.emitStorePtr(funcPtrTemp);  // funcPtrTemp = func_ptr again
+            gen.emitMoveX9ToX0();           // x0 = result_ptr
+            gen.emitLoadPtr(funcPtrTemp);
+            gen.emitMoveX0ToX9();           // x9 = func_ptr
+            gen.emitStackAddress(resultOffset);  // x0 = result_ptr (reload cleanly)
+
+            gen.emitCallIndirectX9();
+            temps.restore(mark);
+        } else if (info.isStruct) {
+            // Direct struct method call with hidden result pointer
+            StructDecl structDecl = info.structDecl;
+            assert(structDecl !is null, "Struct info without structDecl for " ~ objIdent.name);
+
+            FunctionDecl method = null;
+            foreach (member; structDecl.members) {
+                if (auto funcDecl = cast(FunctionDecl)member) {
+                    if (funcDecl.name == memberFunc.memberName && funcDecl.isMethod) {
+                        method = funcDecl;
+                        break;
+                    }
+                }
+            }
+            assert(method !is null,
+                "Struct '" ~ structDecl.name ~ "' has no method '" ~ memberFunc.memberName ~ "'");
+
+            string mangledName = getMangledName(method);
+            auto labelPtr = mangledName in functionLabels;
+            assert(labelPtr !is null, "Method not compiled: " ~ mangledName);
+
+            bool methodNeedsArena = method.needsArena;
+            int arenaShift = methodNeedsArena ? 1 : 0;
+
+            // Args start at x(2+arenaShift) for struct-returning methods
+            for (long i = cast(long)args.length - 1; i >= 0; i--) {
+                compileExpression(args[i]);
+                switch (cast(int)i + 2 + arenaShift) {
+                    case 2: gen.emitMoveX0ToX2(); break;
+                    case 3: gen.emitMoveX0ToX3(); break;
+                    default: assert(0, "Too many args for struct-returning method");
+                }
+            }
+
+            if (methodNeedsArena) {
+                gen.emitLoadPtr(currentFunctionArenaOffset);
+                gen.emitMoveX0ToX2();
+            }
+
+            // x1 = this pointer
+            gen.emitStackAddress(info.offset);
+            gen.emitMoveX0ToX1();
+
+            // x0 = result pointer
+            gen.emitStackAddress(resultOffset);
+
+            gen.emitCall(*labelPtr);
+        } else {
+            throw new Exception("Struct-returning method call on non-struct/class variable: " ~ objIdent.name);
+        }
     }
 
     /// Emit method call arguments into registers.
@@ -3714,13 +4085,13 @@ class NativeCompiledFunction : CompiledFunction {
      * Compile struct field assignment: obj.field = value
      */
     private void compileMemberAssignment(MemberExpression member, AssignmentExpression assign) {
-        auto structDecl = getStructDeclFromExpr(member.object);
-        if (structDecl is null)
-            throw new NativeCompileError("Cannot determine struct type for member assignment", assign.location);
+        AggregateDecl aggregateDecl = getAggregateDeclFromExpr(member.object);
+        if (aggregateDecl is null)
+            throw new NativeCompileError("Cannot determine struct/class type for member assignment", assign.location);
 
-        auto field = structDecl.getField(member.memberName);
+        auto field = aggregateDecl.getField(member.memberName);
         if (field is null)
-            throw new NativeCompileError("Unknown field: " ~ member.memberName, assign.location);
+            throw new NativeCompileError("Unknown field '" ~ member.memberName ~ "' on " ~ aggregateDecl.name, assign.location);
 
         // Local struct variable: direct store at known offset
         if (auto ident = cast(IdentifierExpression)member.object) {
@@ -3737,6 +4108,89 @@ class NativeCompiledFunction : CompiledFunction {
         compileExpression(member.object);
         gen.emitStoreToPointerFromX9(field.offset);
     }
+
+    // ---- Vtable infrastructure for class virtual dispatch ----
+
+    /// Ensure virtualMethods is populated for the class and its base chain.
+    private void computeVirtualMethodsIfNeeded(ClassDecl classDecl) {
+        if (classDecl.virtualMethods.length > 0) return;
+
+        if (classDecl.baseClassDecl) {
+            computeVirtualMethodsIfNeeded(classDecl.baseClassDecl);
+            classDecl.virtualMethods = classDecl.baseClassDecl.virtualMethods.dup;
+        } else {
+            classDecl.virtualMethods = [];
+        }
+
+        foreach (member; classDecl.members) {
+            if (auto funcDecl = cast(FunctionDecl)member) {
+                if (funcDecl.isMethod && !funcDecl.isConstructor && !funcDecl.isDestructor) {
+                    import std.algorithm : countUntil;
+                    auto overrideIdx = classDecl.virtualMethods.countUntil!(
+                        m => m.name == funcDecl.name
+                    );
+                    if (overrideIdx >= 0) {
+                        classDecl.virtualMethods[overrideIdx] = funcDecl;
+                    } else {
+                        classDecl.virtualMethods ~= funcDecl;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Ensure a class has a native vtable allocated. Idempotent.
+    private void ensureNativeVtable(ClassDecl classDecl) {
+        assert(classDecl !is null, "ensureNativeVtable: null ClassDecl");
+        if (classDecl.name in classTableBases) return; // already set up
+
+        // Ensure base class has vtable first
+        if (classDecl.baseClassDecl)
+            ensureNativeVtable(classDecl.baseClassDecl);
+
+        computeVirtualMethodsIfNeeded(classDecl);
+
+        uint tableBase = nextNativeTableBase;
+        uint slotCount = cast(uint)classDecl.virtualMethods.length;
+        classTableBases[classDecl.name] = tableBase;
+        nextNativeTableBase += slotCount;
+
+        // Pre-allocate 8-byte slots in data section (filled with zeros)
+        if (vtableStartOffset == size_t.max && slotCount > 0)
+            vtableStartOffset = dataSection.bytesUsed;
+
+        // Extend vtableMethodNames to cover new slots
+        while (vtableMethodNames.length < tableBase + slotCount)
+            vtableMethodNames ~= null;
+
+        foreach (i, method; classDecl.virtualMethods) {
+            import codegen.mangle : computeMangledName;
+            string mangledName = method.mangledName;
+            if (mangledName is null || mangledName.length == 0)
+                mangledName = computeMangledName(symbolTable.modulePath, method);
+            vtableMethodNames[tableBase + i] = mangledName;
+
+            // Allocate 8 bytes in data section (will be patched after finalize)
+            ubyte[8] zero = 0;
+            dataSection.addData(zero[]);
+        }
+    }
+
+    /// After gen.finalize(), patch vtable entries with actual function addresses.
+    private void patchVtableEntries() {
+        if (vtableStartOffset == size_t.max) return; // no vtables
+
+        foreach (slotIdx, mangledName; vtableMethodNames) {
+            if (mangledName is null || mangledName.length == 0) continue;
+            if (auto labelPtr = mangledName in functionLabels) {
+                ulong funcAddr = cast(ulong)(cast(size_t)gen.base + (*labelPtr).offset);
+                size_t slotOffset = vtableStartOffset + slotIdx * 8;
+                *cast(ulong*)(dataSection.base + slotOffset) = funcAddr;
+            }
+        }
+    }
+
+    // ---- End vtable infrastructure ----
 
     /**
      * Get the StructDecl from an expression (for member access type resolution)
@@ -3785,6 +4239,44 @@ class NativeCompiledFunction : CompiledFunction {
                 }
             }
         }
+        return null;
+    }
+
+    /// Get ClassDecl from an expression (parallel to getStructDeclFromExpr).
+    private ClassDecl getClassDeclFromExpr(Expression expr) {
+        if (auto ident = cast(IdentifierExpression)expr) {
+            if (auto info = ident.name in localVars) {
+                if (info.isClass) return info.classDecl;
+            }
+            auto symbol = symbolTable.lookupSymbol(ident.name);
+            if (symbol) {
+                return symbol.type.asClass();
+            }
+        }
+        if (auto member = cast(MemberExpression)expr) {
+            // Check if the base is a class/struct with a class-typed field
+            auto baseClassDecl = getClassDeclFromExpr(member.object);
+            if (baseClassDecl !is null) {
+                auto field = baseClassDecl.getField(member.memberName);
+                if (field !is null)
+                    return field.type.asClass();
+            }
+            auto baseStructDecl = getStructDeclFromExpr(member.object);
+            if (baseStructDecl !is null) {
+                auto field = baseStructDecl.getField(member.memberName);
+                if (field !is null)
+                    return field.type.asClass();
+            }
+        }
+        return null;
+    }
+
+    /// Get the aggregate declaration (struct or class) from an expression.
+    private AggregateDecl getAggregateDeclFromExpr(Expression expr) {
+        if (auto sd = getStructDeclFromExpr(expr))
+            return cast(AggregateDecl)sd;
+        if (auto cd = getClassDeclFromExpr(expr))
+            return cast(AggregateDecl)cd;
         return null;
     }
 
