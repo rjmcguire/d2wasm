@@ -20,6 +20,7 @@ import codegen.wasm.types;
 import codegen.wasm.func_context : FuncContext;
 import codegen.wasm.sections;
 import codegen.target : WasmVtablePacking, sliceInfo;
+import codegen.param_layout;
 import ast.nodes;
 import ast.statements;
 import ast.expressions;
@@ -70,6 +71,7 @@ struct FuncInfo {
     bool isImport;
     StructDecl structParent;  // Non-null for struct methods
     ClassDecl classParent;    // Non-null for class methods
+    ParamLayout paramLayout;  // Canonical parameter layout
 }
 
 //==============================================================================
@@ -731,36 +733,52 @@ class BinaryEmitter {
     }
     
     /**
+     * Build a ParamLayout for a function declaration with the given context.
+     */
+    private ParamLayout buildLayout(FunctionDecl decl, bool isMethod, bool isExportedMain) {
+        // Ensure all parameter types are resolved before layout computation
+        // (UserType.asInterface() etc. need declaration set)
+        foreach (p; decl.parameters) {
+            if (auto ut = cast(UserType)p.type)
+                ut.ensureResolved(symbolTable);
+        }
+        return computeParamLayout(decl, ParamLayoutContext(
+            isMethod,
+            isLargeReturnType(decl.returnType),
+            decl.needsArena,
+            isExportedMain,
+            &dTypeToValType,
+            isVoidType(decl.returnType),
+            isVoidType(decl.returnType) ? ValType.i32 : dTypeToValType(decl.returnType),
+        ));
+    }
+
+    /**
+     * Register a function from its ParamLayout: build FuncSig, get type index.
+     */
+    private uint registerSignature(ref ParamLayout layout) {
+        FuncSig sig;
+        sig.params = layout.wasmParams;
+        sig.results = layout.wasmResults;
+
+        if (auto existing = sig in typeIndex) {
+            return *existing;
+        }
+        auto tIdx = cast(uint)types.length;
+        types ~= sig;
+        typeIndex[sig] = tIdx;
+        return tIdx;
+    }
+
+    /**
      * Collect a struct method, adding hidden 'this' parameter.
      */
     private void collectMethod(StructDecl structDecl, FunctionDecl method) {
         // Scan method body for local slice types and CTFE calls
         scanForSliceTypes(method);
 
-        // Build signature with hidden 'this' pointer as first parameter
-        FuncSig sig;
-        
-        // 'this' is an i32 (pointer to struct)
-        sig.params = [ValType.i32];
-        if (method.needsArena)
-            sig.params ~= ValType.i32;  // hidden __arena pointer
-
-        // Add the declared parameters
-        sig.params ~= method.parameters.map!(p => dTypeToValType(p.type)).array;
-
-        if (!isVoidType(method.returnType)) {
-            sig.results = [dTypeToValType(method.returnType)];
-        }
-
-        // Get or create type index
-        uint tIdx;
-        if (auto existing = sig in typeIndex) {
-            tIdx = *existing;
-        } else {
-            tIdx = cast(uint)types.length;
-            types ~= sig;
-            typeIndex[sig] = tIdx;
-        }
+        auto layout = buildLayout(method, true, false);
+        uint tIdx = registerSignature(layout);
 
         // Generate D ABI mangled name
         import codegen.mangle : computeMangledName;
@@ -772,7 +790,8 @@ class BinaryEmitter {
         info.decl = method;
         info.typeIndex = tIdx;
         info.isImport = false;
-        info.structParent = structDecl;  // Track parent struct for codegen
+        info.structParent = structDecl;
+        info.paramLayout = layout;
 
         funcIndex[method.mangledName] = cast(uint)functions.length;
         functions ~= info;
@@ -855,27 +874,9 @@ class BinaryEmitter {
      * Collect a class method, adding hidden 'this' parameter.
      */
     private void collectClassMethod(ClassDecl classDecl, FunctionDecl method) {
-        // Build signature with hidden 'this' pointer as first parameter
-        FuncSig sig;
-        sig.params = [ValType.i32];  // 'this' pointer
-        if (method.needsArena)
-            sig.params ~= ValType.i32;  // hidden __arena pointer
-        sig.params ~= method.parameters.map!(p => dTypeToValType(p.type)).array;
+        auto layout = buildLayout(method, true, false);
+        uint tIdx = registerSignature(layout);
 
-        if (!isVoidType(method.returnType)) {
-            sig.results = [dTypeToValType(method.returnType)];
-        }
-        
-        // Get or create type index
-        uint tIdx;
-        if (auto existing = sig in typeIndex) {
-            tIdx = *existing;
-        } else {
-            tIdx = cast(uint)types.length;
-            types ~= sig;
-            typeIndex[sig] = tIdx;
-        }
-        
         // Generate D ABI mangled name
         import codegen.mangle : computeMangledName;
         method.mangledName = computeMangledName(symbolTable.modulePath, method);
@@ -886,6 +887,7 @@ class BinaryEmitter {
         info.typeIndex = tIdx;
         info.isImport = false;
         info.classParent = classDecl;
+        info.paramLayout = layout;
 
         funcIndex[method.mangledName] = cast(uint)functions.length;
         functions ~= info;
@@ -1026,50 +1028,10 @@ class BinaryEmitter {
         // Collect methods from inner struct declarations in the function body
         collectInnerStructs(decl.body_);
         
-        // Build signature
-        FuncSig sig;
-        
-        // Check for large return type (struct or static array)
-        bool largeReturn = isLargeReturnType(decl.returnType);
-        
-        // Exported free functions (like "main") don't get arena param in their
-        // signature — they're called by the host which doesn't know about arena.
-        // They use the global arena fallback instead.
-        bool addArenaParam = decl.needsArena && decl.name != "main";
+        // Build signature via ParamLayout
+        auto layout = buildLayout(decl, false, decl.name == "main");
+        uint tIdx = registerSignature(layout);
 
-        if (largeReturn) {
-            // Add hidden __result pointer as first parameter
-            sig.params = [ValType.i32];
-            if (addArenaParam)
-                sig.params ~= ValType.i32;  // hidden __arena pointer
-            sig.params ~= paramsToValTypes(decl.parameters);
-            // No result - caller reads from __result address
-        } else {
-            if (addArenaParam)
-                sig.params = [ValType.i32];  // hidden __arena pointer
-            else
-                sig.params = null;
-            sig.params ~= paramsToValTypes(decl.parameters);
-
-            auto retType = dTypeToValType(decl.returnType);
-            if (retType != ValType.i32 || !isVoidType(decl.returnType)) {
-                // Non-void return
-                if (!isVoidType(decl.returnType)) {
-                    sig.results = [retType];
-                }
-            }
-        }
-        
-        // Get or create type index
-        uint tIdx;
-        if (auto existing = sig in typeIndex) {
-            tIdx = *existing;
-        } else {
-            tIdx = cast(uint)types.length;
-            types ~= sig;
-            typeIndex[sig] = tIdx;
-        }
-        
         // Set mangled name — free functions keep their original name for exports
         if (!decl.mangledName)
             decl.mangledName = decl.name;
@@ -1080,6 +1042,7 @@ class BinaryEmitter {
         info.typeIndex = tIdx;
         info.decl = decl;
         info.exported = true;  // Export all for now
+        info.paramLayout = layout;
 
         funcIndex[decl.mangledName] = cast(uint)functions.length;
         functions ~= info;

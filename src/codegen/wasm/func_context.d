@@ -170,171 +170,138 @@ class FuncContext {
     uint frameColumn;
     
     this(FuncInfo f, BinaryEmitter e) {
+        import codegen.param_layout : ParamRole;
+
         this.func = f;
         this.emitter = e;
-        
-        uint localOffset = 0;
-        
-        // For methods, add hidden 'this' pointer as first parameter
-        if (f.structParent !is null) {
-            localTypes ~= ValType.i32;  // 'this' is a pointer (i32)
-            thisLocalIndex = 0;
-            localOffset = 1;
-            
-            // Register 'this' as a struct param so this.x works
-            VarInfo vi;
-            vi.kind = VarKind.struct_;
-            vi.addrMode = AddrMode.paramPointer;
-            vi.wasmLocalIdx = 0;
-            vi.structDecl = f.structParent;
-            varsByLocalId[THIS_LOCAL_ID] = vi;
-            varsByName["this"] = vi;
-        }
 
-        // Same for class methods
-        if (f.classParent !is null) {
-            localTypes ~= ValType.i32;  // 'this' is a pointer (i32)
-            thisLocalIndex = 0;
-            localOffset = 1;
+        // --- Register all parameters from canonical ParamLayout ---
+        foreach (ref entry; f.paramLayout.entries) {
+            uint wasmIdx = cast(uint)localTypes.length;
 
-            // Register 'this' as a class param so this.x works
-            VarInfo vi;
-            vi.kind = VarKind.class_;
-            vi.addrMode = AddrMode.paramPointer;
-            vi.wasmLocalIdx = 0;
-            vi.classDecl = f.classParent;
-            varsByLocalId[THIS_LOCAL_ID] = vi;
-            varsByName["this"] = vi;
-        }
-        
-        // Resolve return type if needed
-        if (auto ut = cast(UserType)f.decl.returnType)
-            ut.ensureResolved(e.symbolTable);
+            final switch (entry.role) {
+                case ParamRole.this_:
+                    localTypes ~= ValType.i32;
+                    thisLocalIndex = wasmIdx;
 
-        // Check for large return type (struct or static array)
-        hasLargeReturn = f.decl.returnType.isLargeReturn();
-        if (hasLargeReturn) {
-            // Hidden result pointer is the next parameter
-            resultPtrLocalIdx = cast(uint)localTypes.length;
-            localTypes ~= ValType.i32;  // Result pointer is i32
-            localOffset++;
-
-            // Calculate return value size
-            if (auto arrType = cast(ArrayType)f.decl.returnType) {
-                if (arrType.arraySize !is null) {
-                    // Static array: elemSize * count
-                    uint elemCount = evaluateStaticArraySize(arrType.arraySize);
-                    size_t elemSize = arrType.elementType.size();
-                    if (elemSize == 0) elemSize = 4;
-                    returnValueSize = elemCount * cast(uint)elemSize;
-                } else {
-                    returnValueSize = sliceLayout.totalSize;  // Slice struct
-                }
-            } else if (auto sd = f.decl.returnType.asStruct()) {
-                returnValueSize = cast(uint)sd.structSize;
-            } else {
-                returnValueSize = cast(uint)f.decl.returnType.size();
-            }
-        }
-        
-        // Register hidden arena parameter if function allocates.
-        // Exported free functions (like "main") don't get the param — they use the global fallback.
-        hasArenaParam = f.decl.needsArena && !(f.decl.name == "main" && f.structParent is null && f.classParent is null);
-        if (hasArenaParam) {
-            arenaLocalIdx = cast(uint)localTypes.length;
-            localTypes ~= ValType.i32;  // Arena pointer is i32
-            localOffset++;
-        }
-
-        // Parameters are the next locals
-        // Use running wasmLocalIdx because interface params take 2 WASM locals
-        uint wasmLocalIdx = localOffset;
-        foreach (i, p; f.decl.parameters) {
-            bool isInterfaceParam = false;
-            InterfaceDecl ifaceDecl = null;
-            
-            // Check if this is an interface parameter (needs 2 locals)
-            if (auto userType = cast(UserType)p.type) {
-                userType.ensureResolved(e.symbolTable);
-                ifaceDecl = userType.asInterface();
-                isInterfaceParam = (ifaceDecl !is null);
-            }
-            
-            if (isInterfaceParam) {
-                // Interface: fat pointer = 2 i32 locals (obj_ptr, itable_ptr)
-                localTypes ~= ValType.i32;
-                localTypes ~= ValType.i32;
-
-                VarInfo vi;
-                vi.kind = VarKind.interface_;
-                vi.addrMode = AddrMode.paramPointer;
-                vi.wasmLocalIdx = wasmLocalIdx;
-                vi.itableLocalIdx = wasmLocalIdx + 1;
-                vi.type = p.type;
-                vi.ifaceDecl = ifaceDecl;
-                if (p.uniqueLocalId != uint.max)
-                    varsByLocalId[p.uniqueLocalId] = vi;
-                varsByName[p.name] = vi;
-
-                wasmLocalIdx += 2;
-            } else {
-                auto vt = e.dTypeToValType(p.type);
-                localTypes ~= vt;
-
-                VarInfo vi;
-                vi.wasmLocalIdx = wasmLocalIdx;
-                vi.type = p.type;
-
-                if (auto structDecl = p.type.asStruct()) {
-                    vi.kind = VarKind.struct_;
-                    vi.addrMode = AddrMode.paramPointer;
-                    vi.structDecl = structDecl;
-                } else if (auto classDecl = p.type.asClass()) {
-                    vi.kind = VarKind.class_;
-                    vi.addrMode = AddrMode.paramPointer;
-                    vi.classDecl = classDecl;
-                } else if (auto arrayType = cast(ArrayType)p.type) {
-                    if (arrayType.arraySize !is null) {
-                        // Static array param — passed as i32 pointer
-                        vi.kind = VarKind.staticArray;
-                        vi.addrMode = AddrMode.paramPointer;
-                        vi.elementType = arrayType.elementType;
-                        vi.elementCount = evaluateStaticArraySize(arrayType.arraySize);
-                        vi.elementSize = wasmElementSize(arrayType.elementType);
-                    } else {
-                        // Dynamic array (slice)
-                        vi.kind = VarKind.slice;
-                        vi.addrMode = AddrMode.paramPointer;
-                        vi.elementType = arrayType.elementType;
-                        vi.elementSize = wasmElementSize(arrayType.elementType);
+                    VarInfo vi;
+                    if (f.structParent !is null) {
+                        vi.kind = VarKind.struct_;
+                        vi.structDecl = f.structParent;
+                    } else if (f.classParent !is null) {
+                        vi.kind = VarKind.class_;
+                        vi.classDecl = f.classParent;
                     }
-                } else {
-                    // Scalar parameter
-                    vi.kind = VarKind.scalar;
-                    vi.addrMode = AddrMode.wasmLocal;
-                }
+                    vi.addrMode = AddrMode.paramPointer;
+                    vi.wasmLocalIdx = wasmIdx;
+                    varsByLocalId[THIS_LOCAL_ID] = vi;
+                    varsByName["this"] = vi;
+                    break;
 
-                if (p.uniqueLocalId != uint.max)
-                    varsByLocalId[p.uniqueLocalId] = vi;
-                varsByName[p.name] = vi;
+                case ParamRole.resultPtr:
+                    resultPtrLocalIdx = wasmIdx;
+                    localTypes ~= ValType.i32;
+                    hasLargeReturn = true;
 
-                wasmLocalIdx += 1;
+                    // Resolve return type and calculate return value size
+                    if (auto ut = cast(UserType)f.decl.returnType)
+                        ut.ensureResolved(e.symbolTable);
+
+                    if (auto arrType = cast(ArrayType)f.decl.returnType) {
+                        if (arrType.arraySize !is null) {
+                            uint elemCount = evaluateStaticArraySize(arrType.arraySize);
+                            size_t elemSize = arrType.elementType.size();
+                            if (elemSize == 0) elemSize = 4;
+                            returnValueSize = elemCount * cast(uint)elemSize;
+                        } else {
+                            returnValueSize = sliceLayout.totalSize;
+                        }
+                    } else if (auto sd = f.decl.returnType.asStruct()) {
+                        returnValueSize = cast(uint)sd.structSize;
+                    } else {
+                        returnValueSize = cast(uint)f.decl.returnType.size();
+                    }
+                    break;
+
+                case ParamRole.arena:
+                    arenaLocalIdx = wasmIdx;
+                    localTypes ~= ValType.i32;
+                    hasArenaParam = true;
+                    break;
+
+                case ParamRole.user:
+                    auto p = f.decl.parameters[entry.userIndex];
+
+                    if (entry.isInterfaceParam) {
+                        // Interface: fat pointer = 2 i32 locals (obj_ptr, itable_ptr)
+                        localTypes ~= ValType.i32;
+                        localTypes ~= ValType.i32;
+
+                        VarInfo uvi;
+                        uvi.kind = VarKind.interface_;
+                        uvi.addrMode = AddrMode.paramPointer;
+                        uvi.wasmLocalIdx = wasmIdx;
+                        uvi.itableLocalIdx = wasmIdx + 1;
+                        uvi.type = p.type;
+                        if (auto userType = cast(UserType)p.type)
+                            uvi.ifaceDecl = userType.asInterface();
+                        if (entry.uniqueLocalId != uint.max)
+                            varsByLocalId[entry.uniqueLocalId] = uvi;
+                        varsByName[entry.name] = uvi;
+                    } else {
+                        localTypes ~= entry.wasmType;
+
+                        VarInfo uvi;
+                        uvi.wasmLocalIdx = wasmIdx;
+                        uvi.type = p.type;
+
+                        if (auto structDecl = p.type.asStruct()) {
+                            uvi.kind = VarKind.struct_;
+                            uvi.addrMode = AddrMode.paramPointer;
+                            uvi.structDecl = structDecl;
+                        } else if (auto classDecl = p.type.asClass()) {
+                            uvi.kind = VarKind.class_;
+                            uvi.addrMode = AddrMode.paramPointer;
+                            uvi.classDecl = classDecl;
+                        } else if (auto arrayType = cast(ArrayType)p.type) {
+                            if (arrayType.arraySize !is null) {
+                                uvi.kind = VarKind.staticArray;
+                                uvi.addrMode = AddrMode.paramPointer;
+                                uvi.elementType = arrayType.elementType;
+                                uvi.elementCount = evaluateStaticArraySize(arrayType.arraySize);
+                                uvi.elementSize = wasmElementSize(arrayType.elementType);
+                            } else {
+                                uvi.kind = VarKind.slice;
+                                uvi.addrMode = AddrMode.paramPointer;
+                                uvi.elementType = arrayType.elementType;
+                                uvi.elementSize = wasmElementSize(arrayType.elementType);
+                            }
+                        } else {
+                            uvi.kind = VarKind.scalar;
+                            uvi.addrMode = AddrMode.wasmLocal;
+                        }
+
+                        if (entry.uniqueLocalId != uint.max)
+                            varsByLocalId[entry.uniqueLocalId] = uvi;
+                        varsByName[entry.name] = uvi;
+                    }
+                    break;
             }
         }
-        paramCount = wasmLocalIdx;
-        
+        paramCount = f.paramLayout.wasmLocalCount;
+
         // Pre-allocate temp local for struct return copy (must be after paramCount)
         if (hasLargeReturn) {
             returnTempLocalIdx = cast(uint)localTypes.length;
             localTypes ~= ValType.i32;
         }
-        
+
         // Register call stack frame info if stack trace is enabled
         if (e.enableStackTrace) {
             enableStackTrace = true;
             string fileName = f.decl.location.filename;
             if (fileName.length == 0) fileName = "<unknown>";
-            
+
             auto frameInfo = e.registerCallStackFrame(
                 f.name,
                 fileName,
@@ -550,34 +517,20 @@ class FuncContext {
      * Finalize locals after collection - add saved SP and FP locals if needed
      */
     void finalizeLocals() {
+        // Always allocate temp locals — they're used for aggregate copy, slice field
+        // append, struct return copy, etc. Previously only allocated when frameSize > 0,
+        // which caused tempLocalA to default to 0 (aliasing the 'this' parameter in methods).
+        tempLocalA = cast(uint)localTypes.length;
+        localTypes ~= ValType.i32;
+        tempLocalB = cast(uint)localTypes.length;
+        localTypes ~= ValType.i32;
+
         if (frameSize > 0) {
             // Need locals for saved SP (epilogue restore) and FP (stable frame access)
             savedSpLocal = cast(uint)localTypes.length;
             localTypes ~= ValType.i32;
             fpLocal = cast(uint)localTypes.length;
             localTypes ~= ValType.i32;
-            // Temp locals for aggregate copy (index assignment of structs, etc.)
-            tempLocalA = cast(uint)localTypes.length;
-            localTypes ~= ValType.i32;
-            tempLocalB = cast(uint)localTypes.length;
-            localTypes ~= ValType.i32;
-        }
-
-        // Methods on structs with slice fields need temp locals for emitSliceFieldAppend
-        // even when frameSize == 0 (no struct/slice locals of their own).
-        // Without this, tempLocalA defaults to 0 which aliases the 'this' parameter.
-        if (frameSize == 0 && func.structParent !is null) {
-            foreach (field; func.structParent.fields) {
-                if (auto at = cast(ArrayType)field.type) {
-                    if (!at.isStaticArray) {
-                        tempLocalA = cast(uint)localTypes.length;
-                        localTypes ~= ValType.i32;
-                        tempLocalB = cast(uint)localTypes.length;
-                        localTypes ~= ValType.i32;
-                        break;
-                    }
-                }
-            }
         }
     }
     

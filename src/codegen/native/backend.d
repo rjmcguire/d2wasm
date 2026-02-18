@@ -349,6 +349,16 @@ class NativeCompiledFunction : CompiledFunction {
         return func.name;
     }
 
+    private void moveRegToX0(int regIdx) {
+        switch (regIdx) {
+            case 0: break;  // already in x0
+            case 1: gen.emitMoveX1ToX0(); break;
+            case 2: gen.emitMoveX2ToX0(); break;
+            case 3: gen.emitMoveX3ToX0(); break;
+            default: assert(0, "moveRegToX0: register index > 3 not supported");
+        }
+    }
+
     private void compileFunction(FunctionDecl func) {
         import std.stdio : writeln;
 
@@ -371,100 +381,99 @@ class NativeCompiledFunction : CompiledFunction {
         // Reset local tracking for this function
         localVars.clear();
         nextLocalOffset = 0;
-        
-        // Check if function returns a struct (uses hidden result pointer)
-        bool hasHiddenResultPtr = false;
-        size_t resultPtrOffset = 0;
-        StructDecl returnStructDecl = null;
-        size_t returnArrayBytes = 0;
-        if (auto userType = cast(UserType)func.returnType) {
-            userType.ensureResolved(symbolTable);
-            if (auto sd = userType.asStruct()) {
-                hasHiddenResultPtr = true;
-                returnStructDecl = sd;
-                resultPtrOffset = nextLocalOffset;
-                nextLocalOffset += 8;  // 64-bit pointer
-            }
-        } else if (auto arrayType = cast(ArrayType)func.returnType) {
-            if (arrayType.arraySize !is null) {
-                hasHiddenResultPtr = true;
-                // Evaluate static array size
-                if (auto sizeLit = cast(LiteralExpression)arrayType.arraySize) {
-                    uint elemCount = cast(uint)sizeLit.value.get!long();
-                    returnArrayBytes = elemCount * 4;  // assume int elements
-                }
-                resultPtrOffset = nextLocalOffset;
-                nextLocalOffset += 8;  // 64-bit pointer
-            } else {
-                // Dynamic array (slice) return — same mechanism, different size
-                hasHiddenResultPtr = true;
-                returnArrayBytes = sliceInfo.totalSize;  // 16
-                resultPtrOffset = nextLocalOffset;
-                nextLocalOffset += 8;  // 64-bit pointer
-            }
-        }
-        currentFunctionHasHiddenResult = hasHiddenResultPtr;
-        currentFunctionResultPtrOffset = resultPtrOffset;
-        currentFunctionReturnStructDecl = returnStructDecl;
-        currentFunctionReturnArrayBytes = returnArrayBytes;
-        if (hasHiddenResultPtr) {
-            assert(resultPtrOffset % 8 == 0,
+
+        // Compute canonical parameter layout for hidden param detection
+        import codegen.param_layout : computeParamLayout, ParamLayoutContext;
+        import codegen.wasm.types : ValType;
+
+        // Resolve return type and param types for accurate layout
+        if (auto ut = cast(UserType)func.returnType) ut.ensureResolved(symbolTable);
+        foreach (p; func.parameters)
+            if (auto ut = cast(UserType)p.type) ut.ensureResolved(symbolTable);
+
+        bool isMethod = func.isMethod && func.parent !is null && cast(StructDecl)func.parent !is null;
+        auto layout = computeParamLayout(func, ParamLayoutContext(
+            isMethod,
+            func.returnType !is null && func.returnType.isLargeReturn(),
+            func.needsArena,
+            false,  // native backend (CTFE JIT) never suppresses arena for main
+            null,       // native doesn't use WASM type mapping
+            true,       // isVoidReturn — wasmResults unused by native
+            ValType.i32, // dummy
+            8,          // ARM64 pointer size
+        ));
+
+        // --- Allocate stack slots for hidden params (native ABI order: result_ptr, this, arena) ---
+
+        // Hidden result pointer
+        currentFunctionHasHiddenResult = layout.hasResultPtr();
+        currentFunctionReturnStructDecl = null;
+        currentFunctionReturnArrayBytes = 0;
+        if (layout.hasResultPtr()) {
+            currentFunctionResultPtrOffset = nextLocalOffset;
+            nextLocalOffset += 8;  // 64-bit pointer
+            assert(currentFunctionResultPtrOffset % 8 == 0,
                 "Hidden result pointer offset must be 8-byte aligned for STR x0");
-        }
-        
-        // For methods, register hidden 'this' parameter
-        currentMethodStruct = null;
-        if (func.isMethod && func.parent !is null) {
-            if (auto sd = cast(StructDecl)func.parent) {
-                currentMethodStruct = sd;
-                // 'this' is a pointer (8 bytes) passed as a register arg
-                currentThisOffset = nextLocalOffset;
-                NativeLocalInfo thisInfo;
-                thisInfo.offset = nextLocalOffset;
-                thisInfo.kind = VarKind.struct_;
-                thisInfo.structDecl = sd;
-                localVars["this"] = thisInfo;
-                nextLocalOffset += 8;  // 64-bit pointer
+
+            // Compute return value size info (needed for return statement codegen)
+            if (auto sd = func.returnType.asStruct()) {
+                currentFunctionReturnStructDecl = sd;
+            } else if (auto arrType = cast(ArrayType)func.returnType) {
+                if (arrType.arraySize !is null) {
+                    if (auto sizeLit = cast(LiteralExpression)arrType.arraySize)
+                        currentFunctionReturnArrayBytes = cast(uint)sizeLit.value.get!long() * 4;
+                } else {
+                    currentFunctionReturnArrayBytes = sliceInfo.totalSize;
+                }
             }
+        } else {
+            currentFunctionResultPtrOffset = 0;
         }
 
-        // Register hidden arena parameter if function allocates
-        currentFunctionHasArena = false;
+        // Hidden 'this' pointer (struct methods only)
+        currentMethodStruct = null;
+        if (layout.hasThis()) {
+            auto sd = cast(StructDecl)func.parent;
+            currentMethodStruct = sd;
+            currentThisOffset = nextLocalOffset;
+            NativeLocalInfo thisInfo;
+            thisInfo.offset = nextLocalOffset;
+            thisInfo.kind = VarKind.struct_;
+            thisInfo.structDecl = sd;
+            localVars["this"] = thisInfo;
+            nextLocalOffset += 8;  // 64-bit pointer
+        }
+
+        // Hidden arena pointer
+        currentFunctionHasArena = layout.hasArena();
         currentFunctionArenaOffset = 0;
-        if (func.needsArena) {
-            currentFunctionHasArena = true;
+        if (layout.hasArena()) {
             currentFunctionArenaOffset = nextLocalOffset;
             nextLocalOffset += 8;
         }
 
-        // Reserve space for parameters (x0/x1/x2... depending on hidden ptr)
+        // --- Allocate stack slots for user parameters ---
         foreach (param; func.parameters) {
             NativeLocalInfo nli;
             nli.offset = nextLocalOffset;
 
-            size_t paramSize = 4;  // default for scalar (int, bool, etc.)
-            if (auto userType = cast(UserType)param.type) {
-                userType.ensureResolved(symbolTable);
-                if (auto structDecl = userType.asStruct()) {
-                    assert(structDecl.structSize > 0,
-                        "StructDecl '" ~ structDecl.name ~ "' has zero size - layout not computed");
-                    nli.kind = VarKind.struct_;
-                    nli.structDecl = structDecl;
-                    paramSize = structDecl.structSize;
-                }
+            size_t paramSize = 4;  // default for scalar
+            if (auto structDecl = param.type.asStruct()) {
+                assert(structDecl.structSize > 0,
+                    "StructDecl '" ~ structDecl.name ~ "' has zero size - layout not computed");
+                nli.kind = VarKind.struct_;
+                nli.structDecl = structDecl;
+                paramSize = structDecl.structSize;
             } else if (auto arrayType = cast(ArrayType)param.type) {
                 if (arrayType.arraySize !is null) {
-                    // Static array param — register holds pointer to caller's data
                     nli.kind = VarKind.staticArray;
-                    // Evaluate array size
                     auto sizeLit = cast(LiteralExpression)arrayType.arraySize;
                     assert(sizeLit !is null, "Static array param size is not a LiteralExpression");
                     uint elemCount = cast(uint)sizeLit.value.get!long();
                     nli.staticArraySize = elemCount;
-                    nli.staticArrayElemSize = 4;  // assume int elements for now
+                    nli.staticArrayElemSize = 4;
                     paramSize = elemCount * 4;
                 } else {
-                    // Dynamic array (slice) param
                     nli.kind = VarKind.slice;
                     nli.sliceElemSize = nativeElementSize(arrayType.elementType);
                     paramSize = sliceInfo.totalSize;
@@ -496,45 +505,33 @@ class NativeCompiledFunction : CompiledFunction {
             gen.emitPrologue();
         }
         
-        // If function has hidden result pointer, spill it first (from x0)
+        // Spill hidden params from registers to stack (native ABI order: result_ptr, this, arena)
+        // Running register index tracks which ARM64 register each param arrives in.
+        int regIdx = 0;
+
         if (currentFunctionHasHiddenResult) {
-            gen.emitStorePtr(currentFunctionResultPtrOffset);  // Save x0 (64-bit ptr)
+            moveRegToX0(regIdx);
+            gen.emitStorePtr(currentFunctionResultPtrOffset);
+            regIdx++;
         }
-        
-        // Spill 'this' pointer from register to stack
+
         if (currentMethodStruct !is null) {
-            int thisReg = currentFunctionHasHiddenResult ? 1 : 0;
-            // Move this register to x0 for storing (if not already there)
-            switch (thisReg) {
-                case 0: break;  // already in x0
-                case 1: gen.emitMoveX1ToX0(); break;
-                default: assert(0, "this register > 1 not supported");
-            }
-            gen.emitStorePtr(currentThisOffset);  // Save 64-bit pointer
+            moveRegToX0(regIdx);
+            gen.emitStorePtr(currentThisOffset);
+            regIdx++;
         }
 
-        // Spill hidden arena pointer from register to stack
         if (currentFunctionHasArena) {
-            int arenaReg = (currentFunctionHasHiddenResult ? 1 : 0)
-                         + (currentMethodStruct !is null ? 1 : 0);
-            switch (arenaReg) {
-                case 0: break;  // already in x0
-                case 1: gen.emitMoveX1ToX0(); break;
-                case 2: gen.emitMoveX2ToX0(); break;
-                default: assert(0, "arena register > 2 not supported");
-            }
+            moveRegToX0(regIdx);
             gen.emitStorePtr(currentFunctionArenaOffset);
+            regIdx++;
         }
 
-        // Spill parameters from registers to stack
-        // ARM64 calling convention: first 8 args in x0-x7
-        // Hidden params shift user params: result_ptr, this, arena, then user params
-        int regOffset = (currentFunctionHasHiddenResult ? 1 : 0)
-                      + (currentMethodStruct !is null ? 1 : 0)
-                      + (currentFunctionHasArena ? 1 : 0);
+        // Spill user parameters from registers to stack
+        assert(regIdx == layout.regOffset(), "regIdx mismatch with layout.regOffset()");
         foreach (i, param; func.parameters) {
-            int regIdx = cast(int)i + regOffset;
-            if (regIdx >= 4) {
+            int paramReg = cast(int)i + regIdx;
+            if (paramReg >= 4) {
                 throw new Exception("Native backend: more than 4 parameters not yet supported");
             }
             // Store parameter register to its stack slot
@@ -545,7 +542,7 @@ class NativeCompiledFunction : CompiledFunction {
             final switch (nli.kind) {
                 case VarKind.struct_:
                     // Register contains pointer to struct - copy struct data to our stack
-                    switch (regIdx) {
+                    switch (paramReg) {
                         case 0: gen.emitMoveX0ToX9(); break;
                         case 1: gen.emitMoveX1ToX9(); break;
                         case 2: gen.emitMoveX2ToX9(); break;
@@ -561,7 +558,7 @@ class NativeCompiledFunction : CompiledFunction {
 
                 case VarKind.staticArray:
                     // Register contains pointer to caller's array - copy data to our stack
-                    switch (regIdx) {
+                    switch (paramReg) {
                         case 0: gen.emitMoveX0ToX9(); break;
                         case 1: gen.emitMoveX1ToX9(); break;
                         case 2: gen.emitMoveX2ToX9(); break;
@@ -577,7 +574,7 @@ class NativeCompiledFunction : CompiledFunction {
 
                 case VarKind.slice:
                     // Register contains pointer to caller's slice struct - copy to our stack
-                    switch (regIdx) {
+                    switch (paramReg) {
                         case 0: gen.emitMoveX0ToX9(); break;
                         case 1: gen.emitMoveX1ToX9(); break;
                         case 2: gen.emitMoveX2ToX9(); break;
@@ -592,7 +589,7 @@ class NativeCompiledFunction : CompiledFunction {
 
                 case VarKind.scalar:
                     // Simple scalar - store the register value
-                    switch (regIdx) {
+                    switch (paramReg) {
                         case 0: gen.emitStoreLocal32(offset); break;        // x0
                         case 1: gen.emitStoreLocal32FromX1(offset); break;  // x1
                         case 2: gen.emitStoreLocal32FromX2(offset); break;  // x2
@@ -1620,6 +1617,8 @@ class NativeCompiledFunction : CompiledFunction {
                 gen.emit(stencil_not_i32);
             }
         } else if (auto ident = cast(IdentifierExpression)expr) {
+            import std.stdio : writeln;
+            writeln("Native Backend: compileExpression ident=", ident.name);
             // Load variable from stack
             if (auto info = ident.name in localVars) {
                 final switch (info.kind) {
@@ -1633,40 +1632,70 @@ class NativeCompiledFunction : CompiledFunction {
                         gen.emitLoadLocal32(info.offset);
                         break;
                 }
-            } else if (currentMethodStruct !is null) {
-                // In a method: check for implicit field access (field without 'this.')
-                auto field = currentMethodStruct.getField(ident.name);
-                if (field) {
-                    // Slice field: emit address (this_ptr + field.offset) — consumed by .length, [i], ~= etc.
-                    if (auto arrType = cast(ArrayType)field.type) {
-                        if (!arrType.isStaticArray) {
-                            gen.emitLoadPtr(currentThisOffset);  // x0 = this ptr (64-bit)
-                            if (field.offset > 0) {
-                                gen.emitMoveX0ToX1();
-                                gen.emitImm32(stencil_load_imm32, cast(int)field.offset);
-                                gen.emit(stencil_add_i64);  // x0 = this + field.offset
-                            }
-                            return;  // address of slice struct on stack
-                        }
-                    }
-                    // Scalar/struct field: load value
-                    gen.emitLoadPtr(currentThisOffset);  // x0 = this ptr (64-bit)
-                    gen.emitLoadFromPointer(field.offset);  // x0 = this.field
-                    return;
-                }
-                auto symbol = symbolTable.lookupSymbol(ident.name);
-                if (symbol && cast(VariableDecl)symbol.declaration)
-                    throw new NativeCompileError(
-                        "Cannot access module-level variable '" ~ ident.name ~ "' during CTFE",
-                        ident.location);
-                throw new NativeCompileError("Unknown variable in native backend: " ~ ident.name, ident.location);
             } else {
+                // Check if it's a manifest constant
                 auto symbol = symbolTable.lookupSymbol(ident.name);
-                if (symbol && cast(VariableDecl)symbol.declaration)
-                    throw new NativeCompileError(
-                        "Cannot access module-level variable '" ~ ident.name ~ "' during CTFE",
-                        ident.location);
-                throw new NativeCompileError("Unknown variable in native backend: " ~ ident.name, ident.location);
+                import std.stdio : writeln;
+                writeln("Native Backend: lookupSymbol(", ident.name, ") = ", symbol ? symbol.name : "null");
+                if (symbol && symbol.isConstant) {
+                    if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
+                        if (!manifest.ctfeComplete)
+                            symbolTable.resolveManifestValue(manifest);
+                        
+                        if (manifest.isStringType) {
+                            // String literal: allocate temp slice and return pointer
+                            size_t tempOffset = (nextLocalOffset + 7) & ~7;
+                            nextLocalOffset = tempOffset + sliceInfo.totalSize;
+                            compileStringLiteralInit(tempOffset, manifest.ctfeStringValue);
+                            gen.emitStackAddress(tempOffset);
+                        } else if (manifest.isFloatType) {
+                            double val = manifest.ctfeFloatValue;
+                            long bits = *cast(long*)&val;
+                            gen.emitLoadImm64(cast(ulong)bits);
+                            gen.emitMoveX0ToD0();
+                        } else {
+                            long val = symbolTable.resolveManifestValue(manifest);
+                            gen.emitImm32(stencil_load_imm32, cast(int)val);
+                        }
+                        return;
+                    }
+                }
+
+                if (currentMethodStruct !is null) {
+                    // In a method: check for implicit field access (field without 'this.')
+                    auto field = currentMethodStruct.getField(ident.name);
+                    if (field) {
+                        // Slice field: emit address (this_ptr + field.offset) — consumed by .length, [i], ~= etc.
+                        if (auto arrType = cast(ArrayType)field.type) {
+                            if (!arrType.isStaticArray) {
+                                gen.emitLoadPtr(currentThisOffset);  // x0 = this ptr (64-bit)
+                                if (field.offset > 0) {
+                                    gen.emitMoveX0ToX1();
+                                    gen.emitImm32(stencil_load_imm32, cast(int)field.offset);
+                                    gen.emit(stencil_add_i64);  // x0 = this + field.offset
+                                }
+                                return;  // address of slice struct on stack
+                            }
+                        }
+                        // Scalar/struct field: load value
+                        gen.emitLoadPtr(currentThisOffset);  // x0 = this ptr (64-bit)
+                        gen.emitLoadFromPointer(field.offset);  // x0 = this.field
+                        return;
+                    }
+                    if (symbol && cast(VariableDecl)symbol.declaration)
+                        throw new NativeCompileError(
+                            "Cannot access module-level variable '" ~ ident.name ~ "' during CTFE",
+                            ident.location);
+                    import std.stdio : writeln;
+                    writeln("Native Backend: Final fallback for ", ident.name, " symbol=", symbol ? "exists" : "null");
+                    throw new NativeCompileError("Unknown variable in native backend: " ~ ident.name, ident.location);
+                } else {
+                    if (symbol && cast(VariableDecl)symbol.declaration)
+                        throw new NativeCompileError(
+                            "Cannot access module-level variable '" ~ ident.name ~ "' during CTFE",
+                            ident.location);
+                    throw new NativeCompileError("Unknown variable in native backend: " ~ ident.name, ident.location);
+                }
             }
         } else if (auto assign = cast(AssignmentExpression)expr) {
             // Check for index assignment (arr[i] = value)
