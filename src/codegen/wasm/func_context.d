@@ -1994,7 +1994,15 @@ class FuncContext {
             }
         }
 
-        throw new EmitError("Unsupported slice initializer", stmt.initializer.toString());
+        // General expression initializer (e.g. concat result): copy from pointer
+        emitVarAddress(out_, infoPtr);           // dest = FP + frameOffset
+        emitExpression(out_, stmt.initializer);  // src pointer
+        out_ ~= Op.i32_const;
+        leb128s(out_, sliceLayout.totalSize);    // 12 bytes
+        out_ ~= cast(ubyte) 0xFC;  // memory.copy prefix
+        out_ ~= cast(ubyte) 0x0A;  // memory.copy opcode
+        leb128u(out_, 0);  // dest memory index
+        leb128u(out_, 0);  // src memory index
     }
 
     /**
@@ -5832,8 +5840,48 @@ class FuncContext {
                 leb128u(out_, wasmIdx);
                 return;
             }
-            // Shadow stack / param pointer assignments handled via other paths
-            // (struct/class/slice assignments go through member/index assignment)
+            // Shadow-stack or param-pointer aggregate reassignment: s = expr
+            // RHS expression pushes an i32 pointer to the source data.
+            // Use memory.copy to bulk-copy to the destination.
+            // Future: check for opAssign on structs/classes and dispatch instead.
+            if (info.addrMode == AddrMode.shadowStack || info.addrMode == AddrMode.paramPointer) {
+                uint size = 0;
+                final switch (info.kind) {
+                    case VarKind.struct_:
+                        size = cast(uint) info.structDecl.structSize;
+                        break;
+                    case VarKind.class_:
+                        size = cast(uint) info.classDecl.classSize;
+                        break;
+                    case VarKind.slice:
+                        size = sliceLayout.totalSize;
+                        break;
+                    case VarKind.staticArray:
+                        size = info.elementCount * info.elementSize;
+                        break;
+                    case VarKind.interface_:
+                        size = 8;
+                        break;
+                    case VarKind.scalar:
+                        size = 0; // shouldn't reach here; scalars are wasmLocal
+                        break;
+                }
+                if (size > 0) {
+                    // [dest, src, len] memory.copy
+                    emitVarAddress(out_, info);       // dest
+                    emitExpression(out_, expr.right);  // src pointer
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, size);
+                    out_ ~= cast(ubyte) 0xFC;  // memory.copy prefix
+                    out_ ~= cast(ubyte) 0x0A;  // memory.copy opcode
+                    leb128u(out_, 0);  // dest memory index
+                    leb128u(out_, 0);  // src memory index
+                    // Assignment expression must leave a value on the stack.
+                    // Push dest address (matches scalar path's local_tee semantics).
+                    emitVarAddress(out_, info);
+                    return;
+                }
+            }
         }
 
         // Check for scalar global variable
