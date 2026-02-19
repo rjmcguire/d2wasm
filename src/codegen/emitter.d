@@ -316,12 +316,12 @@ class BinaryEmitter {
             phase = EmitPhase.collecting;
             collect(decls);
             
-            // If string operations are needed, add built-ins
+            // If array/heap operations are needed, add built-ins
             if (needsArraySupport) {
                 addArrayBuiltins();
                 addArenaBuiltins();
-                finalizeHeapPtr();  // Set heap_ptr to after data section
-                finalizeArenaBase();  // Set arena_base to after heap
+                finalizeHeapPtr();
+                finalizeArenaBase();
             }
             
             // Always add shadow stack for struct locals
@@ -1095,7 +1095,10 @@ class BinaryEmitter {
             if (cast(ArrayType)varDecl.type) {
                 needsArraySupport = true;
             }
-            if (varDecl.initializer) scanExpressionForCTFECalls(varDecl.initializer);
+            if (varDecl.initializer) {
+                scanExpressionForCTFECalls(varDecl.initializer);
+                scanExpressionForNewExpr(varDecl.initializer);
+            }
         } else if (auto ifStmt = cast(IfStatement)stmt) {
             scanStatementForSliceTypes(ifStmt.thenStatement);
             if (ifStmt.elseStatement) {
@@ -1108,8 +1111,12 @@ class BinaryEmitter {
             if (forStmt.body_) scanStatementForSliceTypes(forStmt.body_);
         } else if (auto exprStmt = cast(ExpressionStatement)stmt) {
             scanExpressionForCTFECalls(exprStmt.expression);
+            scanExpressionForNewExpr(exprStmt.expression);
         } else if (auto returnStmt = cast(ReturnStatement)stmt) {
-            if (returnStmt.value) scanExpressionForCTFECalls(returnStmt.value);
+            if (returnStmt.value) {
+                scanExpressionForCTFECalls(returnStmt.value);
+                scanExpressionForNewExpr(returnStmt.value);
+            }
         } else if (auto structStmt = cast(StructDeclarationStatement)stmt) {
             // Scan inner struct methods for slice types too
             foreach (member; structStmt.structDecl.members) {
@@ -1127,6 +1134,22 @@ class BinaryEmitter {
             }
         } else {
             assert(0, "scanStatementForSliceTypes: unhandled statement type: " ~ typeid(stmt).name);
+        }
+    }
+
+    /// Scan an expression tree for NewExpression to enable __alloc
+    private void scanExpressionForNewExpr(Expression expr) {
+        if (needsArraySupport) return;  // Already enabled
+        if (cast(NewExpression)expr) {
+            needsArraySupport = true;
+        } else if (auto call = cast(CallExpression)expr) {
+            foreach (arg; call.arguments)
+                scanExpressionForNewExpr(arg);
+        } else if (auto binExpr = cast(BinaryExpression)expr) {
+            scanExpressionForNewExpr(binExpr.left);
+            scanExpressionForNewExpr(binExpr.right);
+        } else if (auto unaryExpr = cast(UnaryExpression)expr) {
+            scanExpressionForNewExpr(unaryExpr.operand);
         }
     }
 
@@ -2165,8 +2188,9 @@ class BinaryEmitter {
     }
     
     private ubyte[] emitFunctionBody(FuncInfo f) {
-        // Handle built-in functions
+        // Handle built-in functions — deterministic, always count as cached
         if (f.decl is null) {
+            cacheHits[f.name] = true;
             return emitBuiltinBody(f);
         }
         

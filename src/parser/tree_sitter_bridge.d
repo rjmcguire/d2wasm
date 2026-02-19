@@ -2790,6 +2790,13 @@ class TreeSitterBridge {
             return parseTemplateInstantiationCall(node, functionNode, loc);
         }
 
+        // new Type(args) — tree-sitter parses as call_expression(new_expression(new, Type), arguments)
+        if (funcNodeType == "new_expression") {
+            auto newExpr = cast(NewExpression)parseExpression(functionNode);
+            newExpr.arguments = parseCallArguments(node);
+            return newExpr;
+        }
+
         Expression function_;
 
         // Handle "type" node which tree-sitter uses for qualified identifiers like "module.func"

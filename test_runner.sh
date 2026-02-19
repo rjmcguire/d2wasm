@@ -216,7 +216,7 @@ run_test() {
                 # Try to build it
                 if [ -f "$harness.d" ]; then
                     echo "Building import test harness..."
-                    if ! dub build --single "$harness.d" --compiler=dmd 2>/dev/null; then
+                    if ! dub build --skip-registry=standard --single "$harness.d" --compiler=dmd 2>/dev/null; then
                         echo -e "${YELLOW}SKIP${NC} $test_name (harness build failed)"
                         return 0
                     fi
@@ -350,7 +350,7 @@ check_deps
 
 if [ ! -x "$COMPILER" ]; then
     echo "Building compiler..."
-    (cd "$SCRIPT_DIR" && dub build)
+    (cd "$SCRIPT_DIR" && dub build --skip-registry=standard)
 fi
 
 # Run unit tests (for unittest-type milestones)
@@ -362,9 +362,12 @@ else
     echo -e "${GREEN}Unit tests passed${NC}"
     UNITTEST_PASSED=1
 fi
+
+echo 1234
 # Rebuild (dub test leaves unittest-enabled binary)
-(cd "$SCRIPT_DIR" && dub build --force >/dev/null 2>&1)
+(cd "$SCRIPT_DIR" && dub build --skip-registry=standard)
 echo
+echo 1234
 
 echo "Running milestone tests..."
 echo
