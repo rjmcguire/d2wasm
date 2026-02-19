@@ -711,3 +711,27 @@ private bool isUnsignedKind(BasicType.Kind k) {
 private bool isSignedKind(BasicType.Kind k) {
     return k >= BasicType.Kind.Int8 && k <= BasicType.Kind.Int64;
 }
+
+/**
+ * New expression: new Type(args)
+ * Heap-allocates a struct and initializes its fields.
+ * Requires @gc(heap) on the enclosing function.
+ */
+class NewExpression : Expression {
+    Type allocatedType;         // The type after 'new' (e.g., Point)
+    Expression[] arguments;     // Constructor/field arguments
+    StructDecl resolvedStruct;  // Set by type checker
+
+    this(SourceLocation loc, Type type, Expression[] args) {
+        super(loc);
+        this.allocatedType = type;
+        this.arguments = args;
+    }
+
+    override string toString() const {
+        return "new " ~ (allocatedType !is null ? allocatedType.toString() : "?");
+    }
+
+    override bool isConstant() const { return false; }
+    override bool hasLValue() const { return false; }
+}

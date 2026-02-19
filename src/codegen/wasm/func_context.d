@@ -2178,6 +2178,8 @@ class FuncContext {
             leb128s(out_, isExpr.boolResult ? 1 : 0);
         } else if (auto tmplInst = cast(TemplateInstantiationExpression)expr) {
             emitTemplateCall(out_, tmplInst);
+        } else if (auto newExpr = cast(NewExpression)expr) {
+            emitNewExpression(out_, newExpr);
         } else {
             throw new EmitError("Unsupported expression type", expr.toString());
         }
@@ -4519,16 +4521,8 @@ class FuncContext {
         emitExpression(out_, value);
     }
 
-    /// Emit emplace(ptr, field1, field2, ...) — inline field stores at pointer address
-    void emitEmplaceCall(ref Appender!(ubyte[]) out_, CallExpression expr) {
-        auto structDecl = expr.resolvedEmplaceStruct;
-        Expression[] fieldArgs = expr.arguments[1 .. $];
-
-        // Emit pointer value and save to tempLocalA
-        emitExpression(out_, expr.arguments[0]);
-        out_ ~= Op.local_set;
-        leb128u(out_, tempLocalA);
-
+    /// Emit field stores at address in tempLocalA. Shared by emplace and new.
+    private void emitStructFieldStores(ref Appender!(ubyte[]) out_, StructDecl structDecl, Expression[] fieldArgs) {
         // Initialize each field at ptr + field.offset
         for (size_t i = 0; i < fieldArgs.length; i++) {
             auto field = structDecl.fields[i];
@@ -4561,8 +4555,44 @@ class FuncContext {
             out_ ~= cast(ubyte)0x02;
             leb128u(out_, 0);
         }
+    }
+
+    /// Emit emplace(ptr, field1, field2, ...) — inline field stores at pointer address
+    void emitEmplaceCall(ref Appender!(ubyte[]) out_, CallExpression expr) {
+        auto structDecl = expr.resolvedEmplaceStruct;
+        Expression[] fieldArgs = expr.arguments[1 .. $];
+
+        // Emit pointer value and save to tempLocalA
+        emitExpression(out_, expr.arguments[0]);
+        out_ ~= Op.local_set;
+        leb128u(out_, tempLocalA);
+
+        emitStructFieldStores(out_, structDecl, fieldArgs);
 
         // Return the pointer (same as input)
+        out_ ~= Op.local_get;
+        leb128u(out_, tempLocalA);
+    }
+
+    /// Emit new Type(args) — allocate + initialize
+    void emitNewExpression(ref Appender!(ubyte[]) out_, NewExpression expr) {
+        auto structDecl = expr.resolvedStruct;
+        int structSize = cast(int)structDecl.structSize;
+
+        // __alloc(sizeof)
+        out_ ~= Op.i32_const;
+        leb128s(out_, structSize);
+        out_ ~= Op.call;
+        leb128u(out_, emitter.funcIndex["__alloc"]);
+
+        // Save returned pointer to tempLocalA
+        out_ ~= Op.local_set;
+        leb128u(out_, tempLocalA);
+
+        // Store fields
+        emitStructFieldStores(out_, structDecl, expr.arguments);
+
+        // Return pointer
         out_ ~= Op.local_get;
         leb128u(out_, tempLocalA);
     }

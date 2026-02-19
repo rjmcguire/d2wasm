@@ -253,6 +253,7 @@ class TreeSitterBridge {
     /// Extract a specific @attribute (e.g., @safe, @nogc, @property)
     private void extractAtAttribute(TSNode node, ref DeclAttrs dattrs) {
         uint childCount = TreeSitterParser.getChildCount(node);
+        log(3, "extractAtAttribute: ", childCount, " children, text=", TreeSitterParser.getNodeText(node, sourceText));
         for (uint i = 0; i < childCount; i++) {
             TSNode child = TreeSitterParser.getChild(node, i);
             string nodeType = TreeSitterParser.getNodeType(child);
@@ -266,6 +267,32 @@ class TreeSitterBridge {
                     case "system":   dattrs.isSystem = true;    break;
                     case "property": dattrs.isProperty_ = true; break;
                     case "disable":  dattrs.isDisable = true;   break;
+                    case "gc":
+                        // @gc(strategy) — extract strategy name from arguments
+                        log(3, "extractAtAttribute: found @gc, scanning for arguments from j=", i+1, " to ", childCount);
+                        for (uint j = i + 1; j < childCount; j++) {
+                            TSNode argNode = TreeSitterParser.getChild(node, j);
+                            string argNodeType = TreeSitterParser.getNodeType(argNode);
+                            log(3, "extractAtAttribute: j=", j, " type=", argNodeType,
+                                " text=", TreeSitterParser.getNodeText(argNode, sourceText));
+                            if (argNodeType == "arguments") {
+                                uint argCount = TreeSitterParser.getChildCount(argNode);
+                                log(3, "extractAtAttribute: arguments has ", argCount, " children");
+                                for (uint k = 0; k < argCount; k++) {
+                                    TSNode arg = TreeSitterParser.getChild(argNode, k);
+                                    string at = TreeSitterParser.getNodeType(arg);
+                                    log(3, "extractAtAttribute:   arg ", k, ": type=", at,
+                                        " text=", TreeSitterParser.getNodeText(arg, sourceText));
+                                    if (at != "(" && at != ")" && at != ",") {
+                                        dattrs.gcStrategy = TreeSitterParser.getNodeText(arg, sourceText);
+                                        log(3, "extractAtAttribute: set gcStrategy=", dattrs.gcStrategy);
+                                        break;
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        break;
                     default: break; // Unknown @attributes silently ignored
                 }
             }
@@ -369,9 +396,17 @@ class TreeSitterBridge {
         DeclAttrs dattrs;
         extractAttributes(node, vis, dattrs);
 
+        log(3, "parseFunctionDeclaration: ", name, " gcStrategy=", dattrs.gcStrategy);
+        for (uint di = 0; di < childCount; di++) {
+            TSNode dc = TreeSitterParser.getChild(node, di);
+            log(3, "  func child ", di, ": ", TreeSitterParser.getNodeType(dc),
+                " = ", TreeSitterParser.getNodeText(dc, sourceText));
+        }
+
         auto funcDecl = new FunctionDecl(loc, name, returnType, parameters, body_);
         funcDecl.visibility = vis;
         funcDecl.attrs = dattrs;
+        funcDecl.gcStrategy = dattrs.gcStrategy;
 
         // If this is a template function, wrap in TemplateDecl
         if (templateParams.length > 0) {
@@ -2493,6 +2528,8 @@ class TreeSitterBridge {
                 return parseUnaryExpression(node, loc);
             case "call_expression":
                 return parseCallExpression(node, loc);
+            case "new_expression":
+                return parseNewExpression(node, loc);
             case "import_expression":
                 return parseImportExpression(node, loc);
             case "traits_expression":
@@ -2824,6 +2861,33 @@ class TreeSitterBridge {
             }
         }
         return arguments;
+    }
+
+    /// Parse new expression: new Type(args)
+    private Expression parseNewExpression(TSNode node, SourceLocation loc) {
+        Type allocType;
+        Expression[] args;
+
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+
+            if (childType == "new" || childType == "(")
+                continue;
+            else if (childType == "type" || childType == "identifier"
+                     || childType == "template_instance") {
+                allocType = parseType(child);
+            } else if (childType == "arguments") {
+                // Reuse call argument parsing
+                args = parseCallArguments(node);
+            }
+        }
+
+        if (allocType is null)
+            throw new ParseError("new expression missing type", loc);
+
+        return new NewExpression(loc, allocType, args);
     }
 
     /// Parse a template instantiation call: max!int(3, 5) or foo!(int, 5)(args)

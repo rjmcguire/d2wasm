@@ -59,6 +59,7 @@ class TypeChecker {
     private Type currentFunctionReturnType;
     private StructDecl currentStructDecl;  // Non-null when inside a struct method
     private ClassDecl currentClassDecl;    // Non-null when inside a class method
+    private FunctionDecl currentFunctionDecl;  // Current function being type-checked
 
     // Template instantiation driver — shared across all type-checking in this compilation
     TemplateInstantiator templateInstantiator;
@@ -138,10 +139,14 @@ class TypeChecker {
             resolveUserType(param.type);
         }
 
-        // Set current return type for return statement checking
+        // Set current return type and function decl for checking
         Type oldReturnType = currentFunctionReturnType;
         currentFunctionReturnType = decl.returnType;
         scope(exit) currentFunctionReturnType = oldReturnType;
+
+        FunctionDecl oldFuncDecl = currentFunctionDecl;
+        currentFunctionDecl = decl;
+        scope(exit) currentFunctionDecl = oldFuncDecl;
         
         // Set current struct/class if this is a method
         StructDecl oldStructDecl = currentStructDecl;
@@ -776,6 +781,8 @@ class TypeChecker {
             return checkIsExpression(isExpr);
         } else if (auto tmplInst = cast(TemplateInstantiationExpression)expr) {
             return checkTemplateInstantiation(tmplInst);
+        } else if (auto newExpr = cast(NewExpression)expr) {
+            return checkNewExpression(newExpr);
         }
 
         throw new TypeError("Unknown expression type", expr.location);
@@ -1371,9 +1378,25 @@ class TypeChecker {
             }
         }
         
+        // Transitive @gc enforcement: calling a @gc function requires @gc on caller
+        if (auto identExpr = cast(IdentifierExpression)expr.function_) {
+            auto sym = symbolTable.lookupSymbol(identExpr.name);
+            if (sym && sym.declaration) {
+                if (auto calleeFunc = cast(FunctionDecl)sym.declaration) {
+                    if (calleeFunc.gcStrategy !is null) {
+                        if (currentFunctionDecl is null || currentFunctionDecl.gcStrategy is null)
+                            throw new TypeError(
+                                format("calling @gc(%s) function '%s' requires @gc on the caller",
+                                       calleeFunc.gcStrategy, calleeFunc.name),
+                                expr.location);
+                    }
+                }
+            }
+        }
+
         return functionType.returnType;
     }
-    
+
     /**
      * Type check template instantiation call: max!int(3, 5)
      */
@@ -1807,6 +1830,57 @@ class TypeChecker {
 
         // Return type: same pointer type (for chaining)
         return ptrType;
+    }
+
+    Type checkNewExpression(NewExpression expr) {
+        // Enforce @gc(heap) on enclosing function
+        if (currentFunctionDecl is null || currentFunctionDecl.gcStrategy is null)
+            throw new TypeError("'new' requires @gc on the enclosing function", expr.location);
+
+        // Resolve the allocated type
+        Type allocType = resolveAliasType(expr.allocatedType);
+        resolveUserType(allocType);
+
+        // V1: must be a struct
+        auto userType = cast(UserType)allocType;
+        if (!userType)
+            throw new TypeError(
+                format("'new' requires a struct type, got '%s'", allocType.toString()),
+                expr.location);
+
+        userType.ensureResolved(symbolTable);
+        auto structDecl = cast(StructDecl)userType.declaration;
+        if (!structDecl)
+            throw new TypeError(
+                format("'new' requires a struct type, '%s' is not a struct", userType.name),
+                expr.location);
+
+        // Validate field arguments (same pattern as emplace)
+        if (expr.arguments.length > structDecl.fields.length)
+            throw new TypeError(
+                format("'new %s': struct has %d fields, got %d arguments",
+                       structDecl.name, structDecl.fields.length, expr.arguments.length),
+                expr.location);
+
+        for (size_t i = 0; i < expr.arguments.length; i++) {
+            Type argType = checkExpression(expr.arguments[i]);
+            Type fieldType = structDecl.fields[i].type;
+            if (fieldType) {
+                auto compat = checkTypeCompatibility(argType, fieldType);
+                if (!compat.isCompatible)
+                    throw new TypeError(
+                        format("'new %s': cannot initialize field '%s' of type '%s' with '%s'",
+                               structDecl.name, structDecl.fields[i].name,
+                               fieldType.toString(), argType.toString()),
+                        expr.arguments[i].location);
+            }
+        }
+
+        // Store resolution for codegen
+        expr.resolvedStruct = structDecl;
+
+        // Return PointerType
+        return new PointerType(expr.location, allocType);
     }
 
     /**

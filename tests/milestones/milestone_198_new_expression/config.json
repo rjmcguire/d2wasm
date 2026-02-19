@@ -1,0 +1,8 @@
+{
+  "name": "new_expression",
+  "description": "Heap allocation with new, gated behind @gc(heap) attribute",
+  "type": "wasm_exec",
+  "entry": "main",
+  "args": [],
+  "capability": "new expression, @gc(heap) attribute, __alloc bump allocator"
+}

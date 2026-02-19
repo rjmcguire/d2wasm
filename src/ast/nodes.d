@@ -96,9 +96,14 @@ struct DeclAttrs {
         uint, "",             14, // padding to fill 32 bits
     ));
 
+    // Non-bitfield attributes
+    string gcStrategy;  // @gc(strategy) — null if not present
+
     /// Merge another DeclAttrs into this one (OR all flags)
     void merge(DeclAttrs other) {
         (cast(uint*)&this)[0] |= (cast(const uint*)&other)[0];
+        if (other.gcStrategy !is null)
+            gcStrategy = other.gcStrategy;
     }
 }
 
@@ -262,6 +267,7 @@ class FunctionDecl : Declaration {
 
     Declaration parent;  // enclosing struct/class, null for free functions
     string mangledName;  // D ABI mangled name, set during emitter collection
+    string gcStrategy;   // @gc(heap) etc. — null if not set
 
     TemplateParamType[] templateParams;  // empty for non-template functions
     @property bool isTemplate() const { return templateParams.length > 0; }
