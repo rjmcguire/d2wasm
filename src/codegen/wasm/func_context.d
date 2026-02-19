@@ -4450,15 +4450,16 @@ class FuncContext {
         return null;
     }
 
-    /// Resolve the struct declaration pointed to by a pointer expression's object.
-    private StructDecl resolvePointeeStruct(Expression objectExpr) {
+    /// Resolve the aggregate (struct or class) pointed to by a pointer expression.
+    private AggregateDecl resolvePointeeAggregate(Expression objectExpr) {
         // Try variable info
         if (auto ident = cast(IdentifierExpression)objectExpr) {
             if (auto info = resolveVar(ident.resolvedLocalId, ident.name)) {
                 if (auto ptrType = cast(PointerType)info.type) {
                     if (auto userType = cast(UserType)ptrType.pointeeType) {
                         userType.ensureResolved(emitter.symbolTable);
-                        return cast(StructDecl)userType.declaration;
+                        if (auto sd = cast(StructDecl)userType.declaration) return sd;
+                        if (auto cd = cast(ClassDecl)userType.declaration) return cd;
                     }
                 }
             }
@@ -4467,21 +4468,22 @@ class FuncContext {
         if (auto ptrType = cast(PointerType)objectExpr.type) {
             if (auto userType = cast(UserType)ptrType.pointeeType) {
                 userType.ensureResolved(emitter.symbolTable);
-                return cast(StructDecl)userType.declaration;
+                if (auto sd = cast(StructDecl)userType.declaration) return sd;
+                if (auto cd = cast(ClassDecl)userType.declaration) return cd;
             }
         }
         return null;
     }
 
-    /// Emit ptr.field — auto-deref pointer to struct, access field
+    /// Emit ptr.field — auto-deref pointer to struct/class, access field
     void emitPointerMemberAccess(ref Appender!(ubyte[]) out_, MemberExpression expr) {
-        auto structDecl = resolvePointeeStruct(expr.object);
-        if (!structDecl)
-            throw new EmitError("Cannot resolve struct type for pointer dereference", expr.toString());
+        auto aggDecl = resolvePointeeAggregate(expr.object);
+        if (!aggDecl)
+            throw new EmitError("Cannot resolve type for pointer dereference", expr.toString());
 
-        auto field = structDecl.getField(expr.memberName);
+        auto field = aggDecl.getField(expr.memberName);
         if (!field)
-            throw new EmitError(format("Struct '%s' has no field '%s'", structDecl.name, expr.memberName));
+            throw new EmitError(format("'%s' has no field '%s'", aggDecl.name, expr.memberName));
 
         // Emit pointer value (the struct base address)
         emitExpression(out_, expr.object);
@@ -4495,15 +4497,15 @@ class FuncContext {
         leb128u(out_, 0);          // offset = 0
     }
 
-    /// Emit ptr.field = value — auto-deref pointer to struct, assign field
+    /// Emit ptr.field = value — auto-deref pointer to struct/class, assign field
     void emitPointerMemberAssignment(ref Appender!(ubyte[]) out_, MemberExpression member, Expression value) {
-        auto structDecl = resolvePointeeStruct(member.object);
-        if (!structDecl)
-            throw new EmitError("Cannot resolve struct type for pointer assignment", member.toString());
+        auto aggDecl = resolvePointeeAggregate(member.object);
+        if (!aggDecl)
+            throw new EmitError("Cannot resolve type for pointer assignment", member.toString());
 
-        auto field = structDecl.getField(member.memberName);
+        auto field = aggDecl.getField(member.memberName);
         if (!field)
-            throw new EmitError(format("Struct '%s' has no field '%s'", structDecl.name, member.memberName));
+            throw new EmitError(format("'%s' has no field '%s'", aggDecl.name, member.memberName));
 
         // Store: [ptr + offset, value] → i32.store
         emitExpression(out_, member.object);
@@ -4521,11 +4523,11 @@ class FuncContext {
         emitExpression(out_, value);
     }
 
-    /// Emit field stores at address in tempLocalA. Shared by emplace and new.
-    private void emitStructFieldStores(ref Appender!(ubyte[]) out_, StructDecl structDecl, Expression[] fieldArgs) {
+    /// Emit field stores at address in tempLocalA. Shared by emplace and new (structs and classes).
+    private void emitFieldStores(ref Appender!(ubyte[]) out_, AggregateDecl aggDecl, Expression[] fieldArgs) {
         // Initialize each field at ptr + field.offset
         for (size_t i = 0; i < fieldArgs.length; i++) {
-            auto field = structDecl.fields[i];
+            auto field = aggDecl.fields[i];
             out_ ~= Op.local_get;
             leb128u(out_, tempLocalA);
             if (field.offset > 0) {
@@ -4540,8 +4542,8 @@ class FuncContext {
         }
 
         // Zero-init remaining fields
-        for (size_t i = fieldArgs.length; i < structDecl.fields.length; i++) {
-            auto field = structDecl.fields[i];
+        for (size_t i = fieldArgs.length; i < aggDecl.fields.length; i++) {
+            auto field = aggDecl.fields[i];
             out_ ~= Op.local_get;
             leb128u(out_, tempLocalA);
             if (field.offset > 0) {
@@ -4559,7 +4561,6 @@ class FuncContext {
 
     /// Emit emplace(ptr, field1, field2, ...) — inline field stores at pointer address
     void emitEmplaceCall(ref Appender!(ubyte[]) out_, CallExpression expr) {
-        auto structDecl = expr.resolvedEmplaceStruct;
         Expression[] fieldArgs = expr.arguments[1 .. $];
 
         // Emit pointer value and save to tempLocalA
@@ -4567,15 +4568,27 @@ class FuncContext {
         out_ ~= Op.local_set;
         leb128u(out_, tempLocalA);
 
-        emitStructFieldStores(out_, structDecl, fieldArgs);
+        if (expr.resolvedEmplaceClass) {
+            // Class emplace: store vtable pointer + fields
+            emitVtableStore(out_, expr.resolvedEmplaceClass);
+            emitFieldStores(out_, expr.resolvedEmplaceClass, fieldArgs);
+        } else {
+            // Struct emplace: fields only
+            emitFieldStores(out_, expr.resolvedEmplaceStruct, fieldArgs);
+        }
 
         // Return the pointer (same as input)
         out_ ~= Op.local_get;
         leb128u(out_, tempLocalA);
     }
 
-    /// Emit new Type(args) — allocate + initialize
+    /// Emit new Type(args) — allocate + initialize (structs and classes)
     void emitNewExpression(ref Appender!(ubyte[]) out_, NewExpression expr) {
+        if (expr.resolvedClass) {
+            emitNewClass(out_, expr);
+            return;
+        }
+
         auto structDecl = expr.resolvedStruct;
         int structSize = cast(int)structDecl.structSize;
 
@@ -4583,16 +4596,64 @@ class FuncContext {
         out_ ~= Op.i32_const;
         leb128s(out_, structSize);
         out_ ~= Op.call;
-        leb128u(out_, emitter.funcIndex["__alloc"]);
+        leb128u(out_, emitter.getFuncIndex("__alloc"));
 
         // Save returned pointer to tempLocalA
         out_ ~= Op.local_set;
         leb128u(out_, tempLocalA);
 
         // Store fields
-        emitStructFieldStores(out_, structDecl, expr.arguments);
+        emitFieldStores(out_, structDecl, expr.arguments);
 
         // Return pointer
+        out_ ~= Op.local_get;
+        leb128u(out_, tempLocalA);
+    }
+
+    /// Store packed vtable pointer at tempLocalA + 0
+    private void emitVtableStore(ref Appender!(ubyte[]) out_, ClassDecl classDecl) {
+        uint packed = WasmVtablePacking.pack(classDecl.typeId, classDecl.tableBase);
+        out_ ~= Op.local_get;
+        leb128u(out_, tempLocalA);
+        out_ ~= Op.i32_const;
+        leb128s(out_, cast(int)packed);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+    }
+
+    /// Emit new Class(args) — allocate + vtable + field init or constructor call
+    void emitNewClass(ref Appender!(ubyte[]) out_, NewExpression expr) {
+        auto classDecl = expr.resolvedClass;
+        int classSize = cast(int)classDecl.classSize;
+
+        // 1. __alloc(classSize)
+        out_ ~= Op.i32_const;
+        leb128s(out_, classSize);
+        out_ ~= Op.call;
+        leb128u(out_, emitter.getFuncIndex("__alloc"));
+        out_ ~= Op.local_set;
+        leb128u(out_, tempLocalA);
+
+        // 2. Store vtable pointer at offset 0
+        emitVtableStore(out_, classDecl);
+
+        // 3. Initialize fields (or call constructor)
+        if (classDecl.constructor !is null) {
+            // Direct constructor call: this=tempLocalA, args...
+            out_ ~= Op.local_get;
+            leb128u(out_, tempLocalA);
+            foreach (arg; expr.arguments)
+                emitExpression(out_, arg);
+            uint funcIdx = emitter.getFuncIndex(classDecl.constructor.mangledName);
+            out_ ~= Op.call;
+            leb128u(out_, funcIdx);
+        } else {
+            // Field-by-field init using shared helper
+            emitFieldStores(out_, classDecl, expr.arguments);
+        }
+
+        // 4. Return pointer
         out_ ~= Op.local_get;
         leb128u(out_, tempLocalA);
     }
@@ -4707,7 +4768,7 @@ class FuncContext {
         }
         
         // emplace(ptr, args...) — compiler intrinsic: construct struct at pointer
-        if (ident.name == "emplace" && expr.resolvedEmplaceStruct !is null) {
+        if (ident.name == "emplace" && (expr.resolvedEmplaceStruct !is null || expr.resolvedEmplaceClass !is null)) {
             emitEmplaceCall(out_, expr);
             return;
         }
@@ -5334,9 +5395,11 @@ class FuncContext {
         if (objInfo) {
             if (objInfo.isStruct) structDecl = objInfo.structDecl;
             else if (objInfo.isClass) classDecl = objInfo.classDecl;
-            // Auto-deref: pointer-to-struct variable
+            // Auto-deref: pointer-to-struct/class variable
             else if (memberExpr.isAutoDereference) {
-                structDecl = resolvePointeeStruct(memberExpr.object);
+                auto aggDecl = resolvePointeeAggregate(memberExpr.object);
+                if (auto sd = cast(StructDecl)aggDecl) structDecl = sd;
+                else if (auto cd = cast(ClassDecl)aggDecl) classDecl = cd;
             }
         }
 
@@ -5455,6 +5518,13 @@ class FuncContext {
                 // Load vtable_ptr from object (at offset 0)
                 if (objInfo && objInfo.isClass) {
                     emitVarAddress(out_, objInfo);
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                } else if (objInfo && memberExpr.isAutoDereference) {
+                    // Pointer-to-class: pointer value IS the object address
+                    out_ ~= Op.local_get;
+                    leb128u(out_, objInfo.wasmLocalIdx);
                     out_ ~= Op.i32_load;
                     out_ ~= cast(ubyte)0x02;
                     leb128u(out_, 0);

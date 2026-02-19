@@ -1798,35 +1798,42 @@ class TypeChecker {
 
         userType.ensureResolved(symbolTable);
         auto structDecl = cast(StructDecl)userType.declaration;
-        if (!structDecl)
+        auto classDecl = cast(ClassDecl)userType.declaration;
+        if (!structDecl && !classDecl)
             throw new TypeError(
-                format("emplace pointer must point to a struct type, '%s' is not a struct", userType.name),
+                format("emplace pointer must point to a struct or class type, '%s' is neither", userType.name),
                 expr.arguments[0].location);
+
+        AggregateDecl aggDecl = structDecl ? cast(AggregateDecl)structDecl : cast(AggregateDecl)classDecl;
+        string typeName = structDecl ? structDecl.name : classDecl.name;
 
         // Remaining args are field initializers
         Expression[] fieldArgs = expr.arguments[1 .. $];
-        if (fieldArgs.length > structDecl.fields.length)
+        if (fieldArgs.length > aggDecl.fields.length)
             throw new TypeError(
-                format("emplace: struct '%s' has %d fields, got %d initializers",
-                       structDecl.name, structDecl.fields.length, fieldArgs.length),
+                format("emplace: '%s' has %d fields, got %d initializers",
+                       typeName, aggDecl.fields.length, fieldArgs.length),
                 expr.location);
 
         // Type-check each field argument
         for (size_t i = 0; i < fieldArgs.length; i++) {
             Type argType = checkExpression(fieldArgs[i]);
-            Type fieldType = structDecl.fields[i].type;
+            Type fieldType = aggDecl.fields[i].type;
             if (fieldType) {
                 auto compat = checkTypeCompatibility(argType, fieldType);
                 if (!compat.isCompatible)
                     throw new TypeError(
                         format("emplace: cannot initialize field '%s' of type '%s' with value of type '%s'",
-                               structDecl.fields[i].name, fieldType.toString(), argType.toString()),
+                               aggDecl.fields[i].name, fieldType.toString(), argType.toString()),
                         fieldArgs[i].location);
             }
         }
 
         // Store resolution for codegen
-        expr.resolvedEmplaceStruct = structDecl;
+        if (structDecl)
+            expr.resolvedEmplaceStruct = structDecl;
+        else
+            expr.resolvedEmplaceClass = classDecl;
 
         // Return type: same pointer type (for chaining)
         return ptrType;
@@ -1841,43 +1848,89 @@ class TypeChecker {
         Type allocType = resolveAliasType(expr.allocatedType);
         resolveUserType(allocType);
 
-        // V1: must be a struct
+        // Must be a struct or class
         auto userType = cast(UserType)allocType;
         if (!userType)
             throw new TypeError(
-                format("'new' requires a struct type, got '%s'", allocType.toString()),
+                format("'new' requires a struct or class type, got '%s'", allocType.toString()),
                 expr.location);
 
         userType.ensureResolved(symbolTable);
         auto structDecl = cast(StructDecl)userType.declaration;
-        if (!structDecl)
+        auto classDecl = cast(ClassDecl)userType.declaration;
+
+        if (!structDecl && !classDecl)
             throw new TypeError(
-                format("'new' requires a struct type, '%s' is not a struct", userType.name),
+                format("'new' requires a struct or class type, '%s' is neither", userType.name),
                 expr.location);
 
-        // Validate field arguments (same pattern as emplace)
-        if (expr.arguments.length > structDecl.fields.length)
-            throw new TypeError(
-                format("'new %s': struct has %d fields, got %d arguments",
-                       structDecl.name, structDecl.fields.length, expr.arguments.length),
-                expr.location);
+        if (structDecl) {
+            // Struct: validate args against fields
+            if (expr.arguments.length > structDecl.fields.length)
+                throw new TypeError(
+                    format("'new %s': struct has %d fields, got %d arguments",
+                           structDecl.name, structDecl.fields.length, expr.arguments.length),
+                    expr.location);
 
-        for (size_t i = 0; i < expr.arguments.length; i++) {
-            Type argType = checkExpression(expr.arguments[i]);
-            Type fieldType = structDecl.fields[i].type;
-            if (fieldType) {
-                auto compat = checkTypeCompatibility(argType, fieldType);
-                if (!compat.isCompatible)
-                    throw new TypeError(
-                        format("'new %s': cannot initialize field '%s' of type '%s' with '%s'",
-                               structDecl.name, structDecl.fields[i].name,
-                               fieldType.toString(), argType.toString()),
-                        expr.arguments[i].location);
+            for (size_t i = 0; i < expr.arguments.length; i++) {
+                Type argType = checkExpression(expr.arguments[i]);
+                Type fieldType = structDecl.fields[i].type;
+                if (fieldType) {
+                    auto compat = checkTypeCompatibility(argType, fieldType);
+                    if (!compat.isCompatible)
+                        throw new TypeError(
+                            format("'new %s': cannot initialize field '%s' of type '%s' with '%s'",
+                                   structDecl.name, structDecl.fields[i].name,
+                                   fieldType.toString(), argType.toString()),
+                            expr.arguments[i].location);
+                }
             }
+            expr.resolvedStruct = structDecl;
+        } else {
+            // Class: validate args against constructor params or fields
+            if (classDecl.constructor !is null) {
+                auto ctorParams = classDecl.constructor.parameters;
+                if (expr.arguments.length > ctorParams.length)
+                    throw new TypeError(
+                        format("'new %s': constructor has %d parameters, got %d arguments",
+                               classDecl.name, ctorParams.length, expr.arguments.length),
+                        expr.location);
+                for (size_t i = 0; i < expr.arguments.length; i++) {
+                    Type argType = checkExpression(expr.arguments[i]);
+                    Type paramType = ctorParams[i].type;
+                    if (paramType) {
+                        auto compat = checkTypeCompatibility(argType, paramType);
+                        if (!compat.isCompatible)
+                            throw new TypeError(
+                                format("'new %s': cannot pass '%s' as parameter '%s' of type '%s'",
+                                       classDecl.name, argType.toString(),
+                                       ctorParams[i].name, paramType.toString()),
+                                expr.arguments[i].location);
+                    }
+                }
+            } else {
+                // No constructor — validate args against fields
+                if (expr.arguments.length > classDecl.fields.length)
+                    throw new TypeError(
+                        format("'new %s': class has %d fields, got %d arguments",
+                               classDecl.name, classDecl.fields.length, expr.arguments.length),
+                        expr.location);
+                for (size_t i = 0; i < expr.arguments.length; i++) {
+                    Type argType = checkExpression(expr.arguments[i]);
+                    Type fieldType = classDecl.fields[i].type;
+                    if (fieldType) {
+                        auto compat = checkTypeCompatibility(argType, fieldType);
+                        if (!compat.isCompatible)
+                            throw new TypeError(
+                                format("'new %s': cannot initialize field '%s' of type '%s' with '%s'",
+                                       classDecl.name, classDecl.fields[i].name,
+                                       fieldType.toString(), argType.toString()),
+                                expr.arguments[i].location);
+                    }
+                }
+            }
+            expr.resolvedClass = classDecl;
         }
-
-        // Store resolution for codegen
-        expr.resolvedStruct = structDecl;
 
         // Return PointerType
         return new PointerType(expr.location, allocType);

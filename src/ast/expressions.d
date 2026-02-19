@@ -151,6 +151,7 @@ class CallExpression : Expression {
     bool isUFCS = false;  // Set by type checker for UFCS calls (obj.func() -> func(obj))
     FunctionDecl resolvedInstantiation;  // Set by IFTI during type checking
     StructDecl resolvedEmplaceStruct;  // Set by type checker for emplace() calls
+    ClassDecl resolvedEmplaceClass;   // Set by type checker for class emplace() calls
     
     this(SourceLocation loc, Expression function_, Expression[] arguments) {
         super(loc);
@@ -721,6 +722,7 @@ class NewExpression : Expression {
     Type allocatedType;         // The type after 'new' (e.g., Point)
     Expression[] arguments;     // Constructor/field arguments
     StructDecl resolvedStruct;  // Set by type checker
+    ClassDecl resolvedClass;    // Set by type checker (for class new)
 
     this(SourceLocation loc, Type type, Expression[] args) {
         super(loc);

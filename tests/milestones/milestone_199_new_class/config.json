@@ -1,0 +1,8 @@
+{
+  "name": "new_class",
+  "description": "Heap allocation of class instances with new, vtable init, constructor support",
+  "type": "wasm_exec",
+  "entry": "main",
+  "args": [],
+  "capability": "new expression for classes, vtable pointer init, constructor calls"
+}
