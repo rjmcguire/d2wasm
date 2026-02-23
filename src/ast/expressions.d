@@ -718,6 +718,42 @@ private bool isSignedKind(BasicType.Kind k) {
  * Heap-allocates a struct and initializes its fields.
  * Requires @gc(heap) on the enclosing function.
  */
+/**
+ * Function literal / delegate / lambda expression.
+ * Represents: function(int x) => x * 2, delegate(int x) { return x; }, (x) => x + 1, etc.
+ */
+class FunctionLiteralExpression : Expression {
+    bool isDelegateKeyword;     // 'delegate' keyword (vs 'function' or bare lambda)
+    Type returnType;            // explicit return type, or null (inferred)
+    Parameter[] parameters;
+    Statement body_;            // block body (may be synthesized from arrow)
+    Expression arrowBody;       // => expr (null if block body)
+    string singleParamName;     // for `x => expr` form
+
+    // Set during semantic analysis:
+    FunctionDecl liftedFunction;
+    string[] capturedNames;
+    Type[] capturedTypes;
+    uint[] capturedOffsets;     // byte offsets in env struct
+    bool isNonCapturing;
+
+    this(SourceLocation loc, bool isDelegateKeyword, Type returnType,
+         Parameter[] parameters, Statement body_, Expression arrowBody,
+         string singleParamName) {
+        super(loc);
+        this.isDelegateKeyword = isDelegateKeyword;
+        this.returnType = returnType;
+        this.parameters = parameters;
+        this.body_ = body_;
+        this.arrowBody = arrowBody;
+        this.singleParamName = singleParamName;
+    }
+
+    override string toString() const { return "<function_literal>"; }
+    override bool isConstant() const { return false; }
+    override bool hasLValue() const { return false; }
+}
+
 class NewExpression : Expression {
     Type allocatedType;         // The type after 'new' (e.g., Point)
     Expression[] arguments;     // Constructor/field arguments

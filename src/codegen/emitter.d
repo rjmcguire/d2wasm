@@ -156,10 +156,13 @@ class BinaryEmitter {
         uint heapPtrGlobal;  // Index of $heap_ptr global
         bool needsShadowStack = false;  // Set when any function has struct locals
         
-        // Function table for call_indirect (virtual dispatch)
+        // Function table for call_indirect (virtual dispatch + delegates)
         uint[] tableFunctions;        // function indices to put in table
         uint nextTypeId = 0;          // next available type ID for classes
         ClassDecl[] classesWithVtables;  // classes that need vtable entries
+
+        // Lambda/delegate support
+        uint[string] lambdaTableIndex;  // mangledName → table slot index
         
         // TypeInfo table: typeId -> offset in data section
         uint[] typeInfoOffsets;
@@ -344,6 +347,9 @@ class BinaryEmitter {
             
             // Build function table for virtual dispatch (must be after stabilization)
             buildVtables();
+
+            // Collect lifted lambda functions and add them to the function table
+            collectLiftedLambdas();
             
             phase = EmitPhase.init;
             emitHeader();
@@ -1425,6 +1431,18 @@ class BinaryEmitter {
         auto layout = buildLayout(method, true, false);
         return registerSignature(layout);
     }
+
+    /**
+     * Get or create a type index for a delegate call signature.
+     * The signature includes the hidden __env parameter (i32) as first param,
+     * followed by the user-visible parameter types, matching the lifted lambda's signature.
+     */
+    package uint getOrCreateDelegateCallType(FunctionDecl liftedFunc) {
+        // The lifted function already has __env as its first param,
+        // so just build its layout as a non-method, non-main function.
+        auto layout = buildLayout(liftedFunc, false, false);
+        return registerSignature(layout);
+    }
     
     //==========================================================================
     // Array Support Built-ins
@@ -1997,6 +2015,116 @@ class BinaryEmitter {
         return null;
     }
     
+    /**
+     * Collect lifted lambda functions from all function bodies.
+     * Walks all collected functions, scans their bodies for FunctionLiteralExpression,
+     * collects the lifted FunctionDecl, and adds it to the function table.
+     */
+    private void collectLiftedLambdas() {
+        import ast.expressions : FunctionLiteralExpression;
+        import codegen.mangle : computeMangledName;
+
+        // Walk all functions that have bodies and scan for lambda expressions
+        FunctionLiteralExpression[] lambdas;
+        foreach (ref f; functions) {
+            if (f.decl !is null && f.decl.body_ !is null) {
+                scanForLambdas(f.decl.body_, lambdas);
+            }
+        }
+
+        // Collect each lambda as a top-level function and register in table
+        foreach (funcLit; lambdas) {
+            auto lifted = funcLit.liftedFunction;
+            if (lifted is null) continue;
+            if (lifted.mangledName in funcIndex) continue;  // already collected
+
+            // Assign mangled name
+            lifted.mangledName = computeMangledName(symbolTable.modulePath, lifted);
+
+            // Scan for slice types in the lifted body
+            scanForSliceTypes(lifted);
+
+            // Build WASM signature — the lifted function has __env as first param
+            auto layout = buildLayout(lifted, false, false);
+            uint tIdx = registerSignature(layout);
+
+            FuncInfo info;
+            info.name = lifted.mangledName;
+            info.decl = lifted;
+            info.typeIndex = tIdx;
+            info.isImport = false;
+            info.paramLayout = layout;
+
+            funcIndex[lifted.mangledName] = cast(uint)functions.length;
+            functions ~= info;
+
+            // Add to function table for call_indirect
+            uint absIdx = cast(uint)imports.length + funcIndex[lifted.mangledName];
+            lambdaTableIndex[lifted.mangledName] = cast(uint)tableFunctions.length;
+            tableFunctions ~= absIdx;
+        }
+    }
+
+    /// Recursively scan a statement tree for FunctionLiteralExpression nodes.
+    private void scanForLambdas(Statement stmt, ref FunctionLiteralExpression[] result) {
+        import ast.expressions : FunctionLiteralExpression;
+        if (stmt is null) return;
+
+        if (auto compound = cast(CompoundStatement)stmt) {
+            foreach (s; compound.statements)
+                scanForLambdas(s, result);
+        } else if (auto ifStmt = cast(IfStatement)stmt) {
+            scanForLambdas(ifStmt.thenStatement, result);
+            scanForLambdas(ifStmt.elseStatement, result);
+        } else if (auto whileStmt = cast(WhileStatement)stmt) {
+            scanForLambdas(whileStmt.body_, result);
+        } else if (auto forStmt = cast(ForStatement)stmt) {
+            scanForLambdas(forStmt.init, result);
+            scanForLambdas(forStmt.body_, result);
+        } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
+            scanExprForLambdas(varDecl.initializer, result);
+        } else if (auto retStmt = cast(ReturnStatement)stmt) {
+            scanExprForLambdas(retStmt.value, result);
+        } else if (auto exprStmt = cast(ExpressionStatement)stmt) {
+            scanExprForLambdas(exprStmt.expression, result);
+        }
+        // Other statement types: no expressions containing lambdas
+    }
+
+    /// Recursively scan an expression for FunctionLiteralExpression nodes.
+    private void scanExprForLambdas(Expression expr, ref FunctionLiteralExpression[] result) {
+        import ast.expressions;
+        if (expr is null) return;
+
+        if (auto funcLit = cast(FunctionLiteralExpression)expr) {
+            result ~= funcLit;
+            return;
+        }
+        // Recurse into sub-expressions
+        if (auto binExpr = cast(BinaryExpression)expr) {
+            scanExprForLambdas(binExpr.left, result);
+            scanExprForLambdas(binExpr.right, result);
+        } else if (auto callExpr = cast(CallExpression)expr) {
+            scanExprForLambdas(callExpr.function_, result);
+            foreach (arg; callExpr.arguments)
+                scanExprForLambdas(arg, result);
+        } else if (auto assignExpr = cast(AssignmentExpression)expr) {
+            scanExprForLambdas(assignExpr.left, result);
+            scanExprForLambdas(assignExpr.right, result);
+        } else if (auto castExpr = cast(CastExpression)expr) {
+            scanExprForLambdas(castExpr.expression, result);
+        } else if (auto unaryExpr = cast(UnaryExpression)expr) {
+            scanExprForLambdas(unaryExpr.operand, result);
+        }
+    }
+
+    /// Get the table index for a lifted lambda (for call_indirect).
+    package uint getLambdaTableIndex(string mangledName) {
+        if (auto idx = mangledName in lambdaTableIndex)
+            return *idx;
+        throw new Exception("Lambda not found in function table: " ~ mangledName);
+    }
+
     /// Generate a canonical string key for a function signature (for sorting)
     private static string funcSigKey(FuncSig sig) {
         import std.conv : to;

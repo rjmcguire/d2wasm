@@ -1,0 +1,6 @@
+{
+  "name": "function_literal",
+  "description": "Non-capturing function literal with call_indirect",
+  "type": "wasm_exec",
+  "expected_value": 42
+}

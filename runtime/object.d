@@ -1,6 +1,8 @@
 // runtime/object.d — auto-imported before user code
 
-bool stringEqual(string a, string b) {
+bool stringEqual(string a_, string b_) {
+    ubyte[] a = cast(ubyte[])a_;
+    ubyte[] b = cast(ubyte[])b_;
     if (a.length != b.length) return false;
     int i = 0;
     while (i < a.length) {
@@ -10,7 +12,8 @@ bool stringEqual(string a, string b) {
     return true;
 }
 
-int indexOf(string s, char c) {
+int indexOf(string s_, char c) {
+    ubyte[] s = cast(ubyte[])s_;
     int i = 0;
     while (i < s.length) {
         if (s[i] == cast(int)c) return i;
@@ -19,7 +22,9 @@ int indexOf(string s, char c) {
     return -1;
 }
 
-int stringIndexOf(string haystack, string needle) {
+int stringIndexOf(string haystack_, string needle_) {
+    ubyte[] haystack = cast(ubyte[])haystack_;
+    ubyte[] needle = cast(ubyte[])needle_;
     if (needle.length == 0) return 0;
     if (haystack.length < needle.length) return -1;
     int limit = haystack.length - needle.length + 1;

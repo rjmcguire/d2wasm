@@ -759,27 +759,29 @@ class PointerType : Type {
 class FunctionType : Type {
     Type returnType;
     Type[] parameterTypes;
-    
-    this(SourceLocation loc, Type returnType, Type[] parameterTypes) {
+    bool isDelegate;  // true for delegate types, false for function pointer types
+
+    this(SourceLocation loc, Type returnType, Type[] parameterTypes, bool isDelegate = false) {
         super(loc);
         this.returnType = returnType;
         this.parameterTypes = parameterTypes;
+        this.isDelegate = isDelegate;
     }
-    
+
     override bool isBasicType() const { return false; }
     override bool isPointer() const { return false; }
     override bool isArray() const { return false; }
     override bool isFunction() const { return true; }
-    override size_t size() const { return 8; }  // Function pointer size
-    
-    
+    override size_t size() const { return isDelegate ? 8 : 4; }
+
     override string toString() const {
         string params = "";
         foreach (i, param; parameterTypes) {
             if (i > 0) params ~= ", ";
             params ~= param.toString();
         }
-        return format("%s function(%s)", returnType.toString(), params);
+        string keyword = isDelegate ? "delegate" : "function";
+        return format("%s %s(%s)", returnType.toString(), keyword, params);
     }
 }
 

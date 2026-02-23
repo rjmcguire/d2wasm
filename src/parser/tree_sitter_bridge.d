@@ -2646,6 +2646,8 @@ class TreeSitterBridge {
                 return parseAssignmentExpression(node, loc);
             case "property_expression":
                 return parsePropertyExpression(node, loc);
+            case "function_literal":
+                return parseFunctionLiteral(node, loc);
             case "primary_expression":
                 // primary_expression wraps parenthesized expressions, literals, identifiers
                 // Just parse its first non-paren child
@@ -2662,6 +2664,89 @@ class TreeSitterBridge {
         }
     }
     
+    /**
+     * Parse function literal / delegate / lambda expression.
+     * Handles all 8 tree-sitter forms: function/delegate with block/arrow,
+     * bare params with block/arrow, bare block, and single-param arrow.
+     */
+    FunctionLiteralExpression parseFunctionLiteral(TSNode node, SourceLocation loc) {
+        bool isDelegateKeyword = false;
+        bool hasKeyword = false;
+        Type returnType = null;
+        Parameter[] parameters;
+        Statement body_ = null;
+        Expression arrowBody = null;
+        string singleParamName = null;
+        bool sawArrow = false;
+        bool hasParams = false;
+
+        // State for inline parameters (bare lambdas use _parameters inline rule,
+        // so "(", type, identifier, ")" appear directly as children)
+        bool inParenParams = false;
+        Type pendingParamType = null;
+
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            auto child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+
+            if (childType == "function") {
+                hasKeyword = true;
+            } else if (childType == "delegate") {
+                isDelegateKeyword = true;
+                hasKeyword = true;
+            } else if (childType == "=>") {
+                sawArrow = true;
+            } else if (childType == "parameters") {
+                // Named parameters node (from function/delegate keyword forms)
+                parameters = parseParameterList(child);
+                hasParams = true;
+            } else if (childType == "(" && !hasKeyword && !hasParams && !sawArrow) {
+                // Bare lambda: start of inline parameter list
+                inParenParams = true;
+            } else if (childType == ")" && inParenParams) {
+                // End of inline parameter list — flush any pending type-only param
+                if (pendingParamType !is null) {
+                    parameters ~= Parameter(pendingParamType, null);
+                    pendingParamType = null;
+                }
+                inParenParams = false;
+                hasParams = true;
+            } else if (childType == "type" && inParenParams) {
+                // Inline param type — flush previous if it had no name
+                if (pendingParamType !is null) {
+                    parameters ~= Parameter(pendingParamType, null);
+                }
+                pendingParamType = parseType(child);
+            } else if (childType == "identifier" && inParenParams) {
+                // Inline param name
+                string pname = TreeSitterParser.getNodeText(child, sourceText);
+                if (pendingParamType !is null) {
+                    parameters ~= Parameter(pendingParamType, pname);
+                    pendingParamType = null;
+                }
+            } else if (childType == "," && inParenParams) {
+                // Comma separator between inline params — skip
+            } else if (childType == "type" && !hasParams && !sawArrow && !inParenParams) {
+                returnType = parseType(child);
+            } else if (childType == "block_statement") {
+                body_ = parseBlockStatement(child);
+            } else if (childType == "do") {
+                // skip 'do' keyword before block_statement
+            } else if (childType == "identifier" && !hasParams && !sawArrow && !inParenParams) {
+                // Single-param shorthand: `x => expr`
+                singleParamName = TreeSitterParser.getNodeText(child, sourceText);
+            } else if (sawArrow && arrowBody is null
+                    && childType != "(" && childType != ")") {
+                // Arrow body expression
+                arrowBody = parseExpression(child);
+            }
+        }
+
+        return new FunctionLiteralExpression(loc, isDelegateKeyword, returnType,
+            parameters, body_, arrowBody, singleParamName);
+    }
+
     /**
      * Parse binary expression
      */

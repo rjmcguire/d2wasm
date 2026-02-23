@@ -50,6 +50,7 @@ class FuncContext {
         interface_,
         slice,
         staticArray,
+        delegate_,
     }
 
     enum THIS_LOCAL_ID = uint.max - 1;  // Sentinel for 'this' parameter
@@ -77,6 +78,7 @@ class FuncContext {
         Type elementType;               // slice/static-array element type
         uint dataOffset, dataSize;      // slice inline data
         uint elementCount, elementSize; // static array
+        FunctionDecl delegateLiftedFunc;  // for delegate_: the lifted lambda's FunctionDecl
 
         bool isStruct() const { return kind == VarKind.struct_; }
         bool isClass() const { return kind == VarKind.class_; }
@@ -84,6 +86,7 @@ class FuncContext {
         bool isSlice() const { return kind == VarKind.slice; }
         bool isStaticArray() const { return kind == VarKind.staticArray; }
         bool isScalar() const { return kind == VarKind.scalar; }
+        bool isDelegate() const { return kind == VarKind.delegate_; }
     }
 
     VarInfo[uint] varsByLocalId;    // uniqueLocalId → VarInfo (primary lookup)
@@ -473,6 +476,29 @@ class FuncContext {
                     varsByLocalId[varDecl.uniqueLocalId] = vi;
                 varsByName[varDecl.name] = vi;
 
+                return;
+            }
+
+            // Delegate/function type local — 8 bytes on shadow stack
+            if (auto funcType = cast(FunctionType)varDecl.type) {
+                frameSize = (frameSize + 3) & ~3;  // Align to 4 bytes
+
+                VarInfo vi;
+                vi.kind = VarKind.delegate_;
+                vi.addrMode = AddrMode.shadowStack;
+                vi.frameOffset = frameSize;
+                vi.type = varDecl.type;
+
+                // Store the lifted function reference for call_indirect type lookup
+                if (auto funcLit = cast(FunctionLiteralExpression)varDecl.initializer) {
+                    vi.delegateLiftedFunc = funcLit.liftedFunction;
+                }
+
+                if (varDecl.uniqueLocalId != uint.max)
+                    varsByLocalId[varDecl.uniqueLocalId] = vi;
+                varsByName[varDecl.name] = vi;
+
+                frameSize += 8;  // {tableIndex: i32, envPtr: i32}
                 return;
             }
 
@@ -962,6 +988,7 @@ class FuncContext {
                     case VarKind.staticArray: emitStaticArrayVarDecl(out_, varDecl); break;
                     case VarKind.slice:       emitSliceVarDecl(out_, varDecl); break;
                     case VarKind.scalar:      emitVarDecl(out_, varDecl); break;
+                    case VarKind.delegate_:   emitDelegateVarDecl(out_, varDecl); break;
                 }
             } else {
                 emitVarDecl(out_, varDecl);
@@ -2201,6 +2228,8 @@ class FuncContext {
             emitTemplateCall(out_, tmplInst);
         } else if (auto newExpr = cast(NewExpression)expr) {
             emitNewExpression(out_, newExpr);
+        } else if (auto funcLit = cast(FunctionLiteralExpression)expr) {
+            emitFunctionLiteral(out_, funcLit);
         } else {
             throw new EmitError("Unsupported expression type", expr.toString());
         }
@@ -4679,6 +4708,106 @@ class FuncContext {
         leb128u(out_, tempLocalA);
     }
 
+    /**
+     * Emit a function literal expression.
+     * Pushes {tableIndex, envPtr} onto the WASM stack.
+     * For Phase 1 (non-capturing): envPtr is always 0.
+     */
+    void emitFunctionLiteral(ref Appender!(ubyte[]) out_, FunctionLiteralExpression funcLit) {
+        auto lifted = funcLit.liftedFunction;
+        if (lifted is null)
+            throw new EmitError("Function literal has no lifted function");
+
+        uint tableIdx = emitter.getLambdaTableIndex(lifted.mangledName);
+
+        // Push tableIndex
+        out_ ~= Op.i32_const;
+        leb128s(out_, cast(int)tableIdx);
+
+        // Push envPtr (0 for non-capturing)
+        out_ ~= Op.i32_const;
+        leb128s(out_, 0);
+    }
+
+    /**
+     * Emit delegate variable declaration.
+     * Stores {tableIndex, envPtr} from the initializer expression into shadow stack.
+     */
+    void emitDelegateVarDecl(ref Appender!(ubyte[]) out_, VariableDeclarationStatement varDecl) {
+        auto info = resolveVar(varDecl.uniqueLocalId, varDecl.name);
+        if (info is null)
+            throw new EmitError("Delegate variable not found: " ~ varDecl.name);
+
+        if (varDecl.initializer is null)
+            return;  // Uninitialized delegate — leave as zero
+
+        // Emit the initializer — pushes {tableIndex, envPtr} (two i32s)
+        emitExpression(out_, varDecl.initializer);
+
+        // Stack: [tableIndex, envPtr]
+        // Store envPtr at FP + offset + 4
+        out_ ~= Op.local_set;
+        leb128u(out_, tempLocalA);  // save envPtr
+
+        out_ ~= Op.local_set;
+        leb128u(out_, tempLocalB);  // save tableIndex
+
+        // Store tableIndex at FP + frameOffset + 0
+        emitVarAddress(out_, info);
+        out_ ~= Op.local_get;
+        leb128u(out_, tempLocalB);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;  // align=4
+        leb128u(out_, 0);
+
+        // Store envPtr at FP + frameOffset + 4
+        emitVarAddress(out_, info);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.local_get;
+        leb128u(out_, tempLocalA);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;  // align=4
+        leb128u(out_, 0);
+    }
+
+    /**
+     * Emit a delegate call via call_indirect.
+     * Loads {tableIndex, envPtr} from delegate variable, pushes args, call_indirect.
+     */
+    void emitDelegateCall(ref Appender!(ubyte[]) out_, VarInfo* dgInfo,
+                          Expression[] args, FunctionDecl liftedFunc) {
+        // 1. Push __env (envPtr from delegate struct)
+        emitVarAddress(out_, dgInfo);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 4);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;  // align=4
+        leb128u(out_, 0);
+
+        // 2. Push user arguments
+        foreach (arg; args)
+            emitExpression(out_, arg);
+
+        // 3. Push tableIndex (consumed by call_indirect — must be on top of stack)
+        emitVarAddress(out_, dgInfo);
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;  // align=4
+        leb128u(out_, 0);
+
+        // 4. call_indirect with the delegate's type signature
+        //    The signature must match the lifted function: (__env: i32, user_params...) -> result
+        if (liftedFunc is null)
+            throw new EmitError("Cannot resolve delegate type for call_indirect");
+
+        uint typeIdx = emitter.getOrCreateDelegateCallType(liftedFunc);
+        out_ ~= Op.call_indirect;
+        leb128u(out_, typeIdx);
+        leb128u(out_, 0);  // table index 0
+    }
+
     void emitIncDec(ref Appender!(ubyte[]) out_, UnaryExpression expr, bool inc) {
         auto ident = cast(IdentifierExpression)expr.operand;
         if (!ident) {
@@ -4770,7 +4899,15 @@ class FuncContext {
         if (!ident) {
             throw new EmitError("Indirect calls not yet supported");
         }
-        
+
+        // Check if the callee is a delegate/function variable — emit call_indirect
+        if (auto dgInfo = resolveVar(ident.resolvedLocalId, ident.name)) {
+            if (dgInfo.isDelegate()) {
+                emitDelegateCall(out_, dgInfo, expr.arguments, dgInfo.delegateLiftedFunc);
+                return;
+            }
+        }
+
         // Check if this is struct construction (not a function call)
         auto symbol = emitter.symbolTable.lookupSymbol(ident.name);
         if (symbol && symbol.kind == SymbolKind.Type) {
@@ -6186,6 +6323,9 @@ class FuncContext {
                         break;
                     case VarKind.interface_:
                         size = 8;
+                        break;
+                    case VarKind.delegate_:
+                        size = 8; // {tableIndex: i32, envPtr: i32}
                         break;
                     case VarKind.scalar:
                         size = 0; // shouldn't reach here; scalars are wasmLocal

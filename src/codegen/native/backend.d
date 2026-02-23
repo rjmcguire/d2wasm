@@ -133,6 +133,7 @@ class NativeCompiledFunction : CompiledFunction {
         class_,
         slice,
         staticArray,
+        delegate_,
     }
 
     // Unified local variable info
@@ -650,6 +651,8 @@ class NativeCompiledFunction : CompiledFunction {
                         default: break;
                     }
                     break;
+                case VarKind.delegate_:
+                    assert(0, "delegate parameters not yet supported in native backend");
             }
         }
         
@@ -1758,6 +1761,7 @@ class NativeCompiledFunction : CompiledFunction {
                     case VarKind.class_:
                     case VarKind.staticArray:
                     case VarKind.slice:
+                    case VarKind.delegate_:
                         // Aggregate types: emit address (pointer) instead of loading value
                         gen.emitStackAddress(info.offset);
                         break;
@@ -2371,6 +2375,8 @@ class NativeCompiledFunction : CompiledFunction {
                             assert(0, "Cannot index struct variable: " ~ ident.name);
                         case VarKind.class_:
                             assert(0, "Cannot index class variable: " ~ ident.name);
+                        case VarKind.delegate_:
+                            assert(0, "Cannot index delegate variable: " ~ ident.name);
                         case VarKind.scalar:
                             assert(0, "Cannot index scalar variable: " ~ ident.name);
                     }
@@ -2793,6 +2799,8 @@ class NativeCompiledFunction : CompiledFunction {
                 assert(0, "Cannot index-assign struct variable: " ~ ident.name);
             case VarKind.class_:
                 assert(0, "Cannot index-assign class variable: " ~ ident.name);
+            case VarKind.delegate_:
+                assert(0, "Cannot index-assign delegate variable: " ~ ident.name);
             case VarKind.scalar:
                 assert(0, "Cannot index-assign scalar variable: " ~ ident.name);
         }

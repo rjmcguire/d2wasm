@@ -67,6 +67,9 @@ class TypeChecker {
     // Alias-this recursion guard (prevents infinite loops on cyclic alias-this chains)
     private int aliasThisDepth;
 
+    // Lambda counter for generating unique lifted function names
+    private uint lambdaCounter;
+
     this(SymbolTable symbolTable) {
         this.symbolTable = symbolTable;
         this.templateInstantiator = new TemplateInstantiator();
@@ -783,6 +786,8 @@ class TypeChecker {
             return checkTemplateInstantiation(tmplInst);
         } else if (auto newExpr = cast(NewExpression)expr) {
             return checkNewExpression(newExpr);
+        } else if (auto funcLit = cast(FunctionLiteralExpression)expr) {
+            return checkFunctionLiteralExpression(funcLit);
         }
 
         throw new TypeError("Unknown expression type", expr.location);
@@ -1325,6 +1330,7 @@ class TypeChecker {
         }
 
         Type funcType = checkExpression(expr.function_);
+        funcType = resolveAliasType(funcType);
 
         auto functionType = cast(FunctionType)funcType;
         if (!functionType) {
@@ -1937,6 +1943,68 @@ class TypeChecker {
             return allocType;
         // Structs return pointer
         return new PointerType(expr.location, allocType);
+    }
+
+    /**
+     * Type check a function literal / delegate / lambda expression.
+     * Creates a synthetic FunctionDecl (the "lifted" function) and type-checks its body.
+     */
+    Type checkFunctionLiteralExpression(FunctionLiteralExpression expr) {
+        import std.format : format;
+
+        // 1. If arrow body, wrap in return + compound statement
+        if (expr.arrowBody !is null && expr.body_ is null) {
+            auto retStmt = new ReturnStatement(expr.arrowBody.location, expr.arrowBody);
+            expr.body_ = new CompoundStatement(expr.location, [cast(Statement)retStmt]);
+        }
+
+        // 2. Handle single-param shorthand: `x => expr`
+        //    We cannot type-check without knowing the parameter type yet.
+        //    For now, require explicit parameter types.
+        if (expr.singleParamName.length > 0 && expr.parameters.length == 0) {
+            throw new TypeError(
+                "lambda shorthand 'name => expr' requires explicit parameter type",
+                expr.location);
+        }
+
+        if (expr.body_ is null)
+            throw new TypeError("function literal has no body", expr.location);
+
+        // 3. Create synthetic FunctionDecl for the lifted lambda
+        string name = format("__lambda_%d", lambdaCounter++);
+
+        // Build parameter list — prepend hidden __env parameter (i32 pointer)
+        auto envType = new BasicType(expr.location, BasicType.Kind.Int32);
+        Parameter envParam = Parameter(envType, "__env");
+        Parameter[] allParams = [envParam] ~ expr.parameters;
+
+        // Use explicit return type or int as placeholder (will be inferred)
+        Type retType = expr.returnType !is null
+            ? expr.returnType
+            : new BasicType(expr.location, BasicType.Kind.Int32);
+
+        auto funcDecl = new FunctionDecl(
+            expr.location, name, retType, allParams, expr.body_
+        );
+
+        // 4. Type-check the lambda body in an isolated scope
+        auto saved = symbolTable.saveAndResetScope();
+        scope(exit) symbolTable.restoreScope(saved);
+
+        checkFunctionDeclaration(funcDecl);
+
+        expr.liftedFunction = funcDecl;
+        expr.isNonCapturing = true;  // Phase 1: no capture analysis yet
+
+        // 5. Build the FunctionType (user-visible params only, not __env)
+        Type[] paramTypes;
+        foreach (p; expr.parameters)
+            paramTypes ~= p.type;
+
+        auto ft = new FunctionType(expr.location, funcDecl.returnType, paramTypes,
+                                   expr.isDelegateKeyword);
+        expr.type = ft;
+        return ft;
     }
 
     /**
