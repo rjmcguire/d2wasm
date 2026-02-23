@@ -1,0 +1,7 @@
+{
+  "name": "auto",
+  "description": "auto type inference with int, bool, struct, class, function calls, expressions",
+  "type": "wasm_exec",
+  "expected_result": 179,
+  "entry": "main"
+}

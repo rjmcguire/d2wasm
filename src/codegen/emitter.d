@@ -2784,6 +2784,8 @@ class BinaryEmitter {
             return cast(uint)imports.length + *idx;
         }
         
+        if (name.length == 0)
+            throw new EmitError("getFuncIndex called with empty function name (method not collected — missing parent declaration?)");
         throw new EmitError("Unknown function: " ~ name);
     }
     

@@ -53,7 +53,16 @@ class TreeSitterBridge {
             }
             
             if (TreeSitterParser.hasError(root)) {
-                throw new ParseError("Parse errors in source file", SourceLocation(filename, 1, 1, 0, 0));
+                SourceLocation[] errorLocs;
+                string[] errorTexts;
+                collectParseErrors(root, errorLocs, errorTexts, 7);
+
+                string msg = "Found " ~ to!string(errorLocs.length) ~ " parse error(s):";
+                foreach (i, loc; errorLocs) {
+                    msg ~= "\n  [" ~ to!string(i + 1) ~ "] line " ~ to!string(loc.line)
+                        ~ " col " ~ to!string(loc.column) ~ ": " ~ errorTexts[i];
+                }
+                throw new ParseError(msg, errorLocs.length > 0 ? errorLocs[0] : SourceLocation(filename, 1, 1, 0, 0));
             }
             
             // Convert tree-sitter parse tree to AST
@@ -96,6 +105,45 @@ class TreeSitterBridge {
         return declarations;
     }
     
+    /**
+     * Walk the parse tree and collect up to maxErrors error locations.
+     * Handles both ERROR nodes (explicit parse errors) and MISSING nodes
+     * (where tree-sitter expected a token but didn't find one).
+     */
+    private void collectParseErrors(TSNode node, ref SourceLocation[] locs, ref string[] texts, int maxErrors) {
+        if (locs.length >= maxErrors) return;
+        auto childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            if (locs.length >= maxErrors) return;
+            auto child = TreeSitterParser.getChild(node, i);
+            if (TreeSitterParser.getNodeType(child) == "ERROR") {
+                auto point = TreeSitterParser.getStartPoint(child);
+                locs ~= SourceLocation(filename, point.row + 1, point.column + 1, 0, 0);
+                auto text = TreeSitterParser.getNodeText(child, sourceText);
+                auto snippet = text.length > 30 ? text[0..30] ~ "..." : text;
+                texts ~= "near '" ~ snippet ~ "'";
+            } else if (TreeSitterParser.hasError(child)) {
+                bool anyGrandchildHasError = false;
+                auto gcCount = TreeSitterParser.getChildCount(child);
+                for (uint j = 0; j < gcCount; j++) {
+                    auto gc = TreeSitterParser.getChild(child, j);
+                    if (TreeSitterParser.hasError(gc)) {
+                        anyGrandchildHasError = true;
+                        break;
+                    }
+                }
+                if (anyGrandchildHasError) {
+                    collectParseErrors(child, locs, texts, maxErrors);
+                } else {
+                    auto point = TreeSitterParser.getStartPoint(child);
+                    locs ~= SourceLocation(filename, point.row + 1, point.column + 1, 0, 0);
+                    auto nodeType = TreeSitterParser.getNodeType(child);
+                    texts ~= "expected '" ~ nodeType ~ "'";
+                }
+            }
+        }
+    }
+
     /**
      * Parse function declaration (minimal implementation)
      */

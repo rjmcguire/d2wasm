@@ -58,6 +58,12 @@ class WASMBackend : Backend {
                         addedStructs[sd.name] = true;
                     }
                 }
+                if (auto cd = cast(ClassDecl)f.parent) {
+                    if (cd.name !in addedStructs) {
+                        decls ~= cast(Declaration)cd;
+                        addedStructs[cd.name] = true;
+                    }
+                }
             }
         }
 
