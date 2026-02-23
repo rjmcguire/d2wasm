@@ -359,8 +359,24 @@ class FuncContext {
                     return;
                 }
 
-                // Class local - allocate on shadow stack (same as struct)
+                // Class local
                 if (auto classDecl = userType.asClass()) {
+                    if (varDecl.initializer !is null) {
+                        // Class reference — stored as i32 WASM local (D reference semantics)
+                        VarInfo vi;
+                        vi.kind = VarKind.class_;
+                        vi.addrMode = AddrMode.wasmLocal;
+                        vi.wasmLocalIdx = cast(uint)localTypes.length;
+                        localTypes ~= ValType.i32;
+                        vi.type = varDecl.type;
+                        vi.classDecl = classDecl;
+                        if (varDecl.uniqueLocalId != uint.max)
+                            varsByLocalId[varDecl.uniqueLocalId] = vi;
+                        varsByName[varDecl.name] = vi;
+                        return;
+                    }
+
+                    // Stack-allocated class (no initializer) — existing behavior
                     frameSize = (frameSize + cast(uint)classDecl.classAlign - 1) & ~(cast(uint)classDecl.classAlign - 1);
 
                     VarInfo vi;
@@ -936,7 +952,12 @@ class FuncContext {
             if (auto info = resolveVar(varDecl.uniqueLocalId, varDecl.name)) {
                 final switch (info.kind) {
                     case VarKind.struct_:     emitStructVarDecl(out_, varDecl); break;
-                    case VarKind.class_:      emitClassVarDecl(out_, varDecl); break;
+                    case VarKind.class_:
+                        if (info.addrMode == AddrMode.wasmLocal)
+                            emitVarDecl(out_, varDecl);      // class reference: scalar init
+                        else
+                            emitClassVarDecl(out_, varDecl);  // stack-allocated class
+                        break;
                     case VarKind.interface_:  emitInterfaceVarDecl(out_, varDecl); break;
                     case VarKind.staticArray: emitStaticArrayVarDecl(out_, varDecl); break;
                     case VarKind.slice:       emitSliceVarDecl(out_, varDecl); break;

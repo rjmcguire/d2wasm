@@ -1932,7 +1932,10 @@ class TypeChecker {
             expr.resolvedClass = classDecl;
         }
 
-        // Return PointerType
+        // Classes are reference types — return UserType directly
+        if (expr.resolvedClass)
+            return allocType;
+        // Structs return pointer
         return new PointerType(expr.location, allocType);
     }
 
