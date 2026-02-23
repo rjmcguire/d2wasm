@@ -2,6 +2,6 @@
 // String literals are ubyte[] - validates slice struct machinery
 
 int main() {
-    ubyte[] msg = "hello";
+    string msg = "hello";
     return msg.length;  // 5
 }

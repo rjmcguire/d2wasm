@@ -261,7 +261,11 @@ class BinaryEmitter {
     
     CacheStats getCacheStats() {
         CacheStats stats;
-        stats.totalFunctions = functions.length;
+        // Exclude builtins (f.decl is null) — they're deterministic, not cached
+        size_t builtinCount = 0;
+        foreach (f; functions)
+            if (f.decl is null) builtinCount++;
+        stats.totalFunctions = functions.length - builtinCount;
         stats.cacheHits = cacheHits.length;
         stats.cacheMisses = stats.totalFunctions - stats.cacheHits;
         return stats;
@@ -2188,9 +2192,8 @@ class BinaryEmitter {
     }
     
     private ubyte[] emitFunctionBody(FuncInfo f) {
-        // Handle built-in functions — deterministic, always count as cached
+        // Handle built-in functions — deterministic, not tracked in cache stats
         if (f.decl is null) {
-            cacheHits[f.name] = true;
             return emitBuiltinBody(f);
         }
         

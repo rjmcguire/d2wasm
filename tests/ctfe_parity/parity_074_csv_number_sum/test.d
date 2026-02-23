@@ -1,4 +1,4 @@
-int parseNumber(string s, int start, int end) {
+int parseNumber(ubyte[] s, int start, int end) {
     int result = 0;
     int i = start;
     while (i < end) {
@@ -9,7 +9,8 @@ int parseNumber(string s, int start, int end) {
     return result;
 }
 
-int csvSum(string input) {
+int csvSum(string input_) {
+    ubyte[] input = cast(ubyte[])input_;
     int sum = 0;
     int fieldStart = 0;
     int i = 0;

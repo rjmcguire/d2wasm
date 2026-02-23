@@ -2027,6 +2027,12 @@ class TypeChecker {
         
         // For array types, indexing goes through opIndex (built-in intrinsic)
         if (auto arrType = cast(ArrayType)arrayType) {
+            // Disallow indexing string types (char[]) — individual code units aren't meaningful
+            if (auto elemBasic = cast(BasicType)arrType.elementType)
+                if (elemBasic.kind == BasicType.Kind.Char)
+                    throw new TypeError(
+                        "cannot index a string; use slicing `s[i..i+1]` or cast to `ubyte[]` first",
+                        expr.location);
             // Look up the built-in opIndex method
             auto opIndex = symbolTable.lookupBuiltinMethod("array", "opIndex");
             if (opIndex) {
@@ -2811,9 +2817,9 @@ class TypeChecker {
             // Char literal
             return new BasicType(literal.location, BasicType.Kind.Char);
         } else if (literal.value.type == typeid(string)) {
-            // String literal - treat as ubyte[] (raw bytes, no string semantics)
-            auto ubyteType = new BasicType(literal.location, BasicType.Kind.UInt8);
-            return new ArrayType(literal.location, ubyteType);
+            // String literal - treat as char[] (proper string type)
+            auto charType = new BasicType(literal.location, BasicType.Kind.Char);
+            return new ArrayType(literal.location, charType);
         } else if (literal.value.type == typeid(typeof(null))) {
             // Null literal
             return new BasicType(literal.location, BasicType.Kind.Void);  // TODO: Proper null type

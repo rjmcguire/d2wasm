@@ -112,13 +112,13 @@ struct CTFEResult {
  * 
  * Evaluates compile-time expressions by compiling to WASM and running with wasm3.
  */
-/// Check if a type represents a string (dynamic ubyte[]).
+/// Check if a type represents a string (dynamic char[]).
 /// Used by CTFE to detect string-returning functions and string locals.
 private bool isStringType(Type t) {
     if (auto arrType = cast(ArrayType)t) {
         if (arrType.arraySize is null) { // dynamic array (slice), not static
             if (auto basic = cast(BasicType)arrType.elementType) {
-                return basic.kind == BasicType.Kind.UInt8;
+                return basic.kind == BasicType.Kind.Char;
             }
         }
     }

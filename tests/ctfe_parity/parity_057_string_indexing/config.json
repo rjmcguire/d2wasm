@@ -1,7 +1,5 @@
 {
   "name": "string_indexing",
-  "description": "CTFE parity: byte-width slice element access",
-  "type": "wasm_exec",
-  "entry": "main",
-  "expected_result": 183
+  "description": "CTFE parity: string indexing is disallowed",
+  "type": "compile_error"
 }

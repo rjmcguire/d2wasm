@@ -1,4 +1,5 @@
-int tokenize(string input) {
+int tokenize(string input_) {
+    ubyte[] input = cast(ubyte[])input_;
     int count = 0;
     int i = 0;
     while (i < input.length) {

@@ -1,5 +1,6 @@
 int test() {
-    string expr = "6 5 + 4 *";
+    string expr_ = "6 5 + 4 *";
+    ubyte[] expr = cast(ubyte[])expr_;
     // 6, 5: stack = [6, 5]
     // +: pop 5,6 -> push 11: stack = [11]
     // 4: stack = [11, 4]

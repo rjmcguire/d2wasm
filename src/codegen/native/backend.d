@@ -1099,19 +1099,24 @@ class NativeCompiledFunction : CompiledFunction {
                         }
                     }
                 } else if (nli.isSlice) {
+                    // Unwrap reinterpret casts — no-op for same-layout slices
+                    Expression sliceInit = varDecl.initializer;
+                    if (auto castExpr = cast(CastExpression)sliceInit)
+                        sliceInit = castExpr.expression;
+
                     // Slice initialization from array literal, string literal, or import()
-                    if (auto arrLit = cast(ArrayLiteralExpression)varDecl.initializer) {
+                    if (auto arrLit = cast(ArrayLiteralExpression)sliceInit) {
                         compileSliceInit(nextLocalOffset, arrLit);
-                    } else if (auto importExpr = cast(ImportExpression)varDecl.initializer) {
+                    } else if (auto importExpr = cast(ImportExpression)sliceInit) {
                         // Milestone 86: import() in native backend
                         compileImportInit(nextLocalOffset, importExpr);
-                    } else if (auto litExpr = cast(LiteralExpression)varDecl.initializer) {
+                    } else if (auto litExpr = cast(LiteralExpression)sliceInit) {
                         if (litExpr.value.type == typeid(string)) {
                             compileStringLiteralInit(nextLocalOffset, litExpr.value.get!string());
                         } else {
                             throw new Exception("Unsupported literal type for slice init");
                         }
-                    } else if (auto sliceExpr = cast(SliceExpression)varDecl.initializer) {
+                    } else if (auto sliceExpr = cast(SliceExpression)sliceInit) {
                         // Slice init from another array: int[] s = arr[1..4]
                         auto sourceIdent = cast(IdentifierExpression)sliceExpr.array;
                         if (!sourceIdent)
@@ -1154,7 +1159,7 @@ class NativeCompiledFunction : CompiledFunction {
                         gen.emitMoveX9ToX0();
                         gen.emit(stencil_sub_i32);
                         gen.emitStoreLocal32(nli.offset + sliceInfo.capacityOffset);
-                    } else if (auto callExpr = cast(CallExpression)varDecl.initializer) {
+                    } else if (auto callExpr = cast(CallExpression)sliceInit) {
                         // Function call returning slice — hidden result pointer pattern
                         if (auto funcIdent = cast(IdentifierExpression)callExpr.function_) {
                             auto funcLabelPtr = funcIdent.name in functionLabels;
@@ -1200,7 +1205,7 @@ class NativeCompiledFunction : CompiledFunction {
                         } else {
                             throw new Exception("Complex call target not supported for slice init");
                         }
-                    } else if (auto identInit = cast(IdentifierExpression)varDecl.initializer) {
+                    } else if (auto identInit = cast(IdentifierExpression)sliceInit) {
                         // Manifest constant initializer: string[] arr = MANIFEST;
                         auto sym = symbolTable.lookupSymbol(identInit.name);
                         if (sym && sym.isConstant) {
@@ -1258,11 +1263,26 @@ class NativeCompiledFunction : CompiledFunction {
                             } else {
                                 throw new Exception("Non-manifest constant used as slice initializer: " ~ identInit.name);
                             }
+                        } else if (auto srcInfo = identInit.name in localVars) {
+                            if (srcInfo.isSlice) {
+                                // Copy slice struct from local/param variable
+                                gen.emitStackAddress(srcInfo.offset);
+                                gen.emitMoveX0ToX9();
+                                for (size_t off = 0; off < sliceInfo.totalSize; off += 4) {
+                                    gen.emitLoadFromX9Offset(off);
+                                    gen.emitStoreLocal32(nli.offset + off);
+                                }
+                            } else {
+                                throw new NativeCompileError("identifier '" ~ identInit.name ~ "' is not a slice variable", varDecl.location);
+                            }
                         } else {
-                            throw new Exception("Unknown identifier for slice init: " ~ identInit.name);
+                            throw new NativeCompileError("unknown identifier for slice init: " ~ identInit.name, varDecl.location);
                         }
                     } else {
-                        throw new Exception("Slice can only be initialized from array literal, string literal, slice, call, or import()");
+                        throw new NativeCompileError("slice variable '" ~ varDecl.name
+                            ~ "' can only be initialized from array literal, string literal, slice, call, or import()"
+                            ~ " (got " ~ typeid(sliceInit).name ~ ")",
+                            varDecl.location);
                     }
                 } else if (nli.isStaticArray) {
                     // Static array initialization from array literal
