@@ -958,8 +958,17 @@ class NativeCompiledFunction : CompiledFunction {
             // Compile initializer if present
             if (varDecl.initializer) {
                 if (nli.isStruct) {
+                    // Unwrap lowered operator overload calls
+                    Expression effectiveInit = varDecl.initializer;
+                    if (auto binary = cast(BinaryExpression)effectiveInit) {
+                        if (binary.loweredCall) effectiveInit = binary.loweredCall;
+                    }
+                    if (auto unary = cast(UnaryExpression)effectiveInit) {
+                        if (unary.loweredCall) effectiveInit = unary.loweredCall;
+                    }
+
                     // Struct template construction: Pair!(int, int)(10, 20)
-                    if (auto tmplInst = cast(TemplateInstantiationExpression)varDecl.initializer) {
+                    if (auto tmplInst = cast(TemplateInstantiationExpression)effectiveInit) {
                         if (tmplInst.resolvedStructInstantiation) {
                             auto sd = tmplInst.resolvedStructInstantiation;
                             for (size_t i = 0; i < sd.fields.length && i < tmplInst.callArguments.length; i++) {
@@ -969,7 +978,7 @@ class NativeCompiledFunction : CompiledFunction {
                                 gen.emitStoreLocal32(fieldOffset);
                             }
                         }
-                    } else if (auto call = cast(CallExpression)varDecl.initializer) {
+                    } else if (auto call = cast(CallExpression)effectiveInit) {
                         if (auto funcIdent = cast(IdentifierExpression)call.function_) {
                             auto symbol = symbolTable.lookupSymbol(funcIdent.name);
                             assert(symbol !is null,

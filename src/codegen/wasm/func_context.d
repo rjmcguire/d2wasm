@@ -1441,8 +1441,17 @@ class FuncContext {
             return;
         }
         
+        // Unwrap lowered operator overload calls (e.g. a + b → a.opBinary!"+"(b))
+        Expression effectiveInit = stmt.initializer;
+        if (auto binary = cast(BinaryExpression)effectiveInit) {
+            if (binary.loweredCall) effectiveInit = binary.loweredCall;
+        }
+        if (auto unary = cast(UnaryExpression)effectiveInit) {
+            if (unary.loweredCall) effectiveInit = unary.loweredCall;
+        }
+
         // Struct construction or function call returning struct
-        if (auto callExpr = cast(CallExpression)stmt.initializer) {
+        if (auto callExpr = cast(CallExpression)effectiveInit) {
             if (auto ident = cast(IdentifierExpression)callExpr.function_) {
                 auto sym = emitter.symbolTable.lookupSymbol(ident.name);
                 if (sym && sym.kind == SymbolKind.Type) {
@@ -1477,7 +1486,7 @@ class FuncContext {
         }
         
         // Struct template construction: Pair!(int, int)(10, 20)
-        if (auto tmplInst = cast(TemplateInstantiationExpression)stmt.initializer) {
+        if (auto tmplInst = cast(TemplateInstantiationExpression)effectiveInit) {
             if (tmplInst.resolvedStructInstantiation) {
                 emitStructFieldsInit(out_, structDecl, tmplInst.callArguments,
                                     EmitAddrMode.fromFP, info.frameOffset);
@@ -1486,7 +1495,7 @@ class FuncContext {
         }
 
         // Struct copy: Point b = a (copy from another struct variable)
-        if (auto identExpr = cast(IdentifierExpression)stmt.initializer) {
+        if (auto identExpr = cast(IdentifierExpression)effectiveInit) {
             // Check if source is a local struct
             if (auto srcInfo = resolveVar(identExpr.resolvedLocalId, identExpr.name)) if (srcInfo.isStruct) {
                 // Copy field by field from source to destination
@@ -1521,7 +1530,7 @@ class FuncContext {
             // TODO: copy from global struct
         }
         
-        throw new EmitError("Unsupported struct initializer: " ~ stmt.initializer.toString(), stmt.location);
+        throw new EmitError("Unsupported struct initializer: " ~ effectiveInit.toString(), stmt.location);
     }
     
     /**
