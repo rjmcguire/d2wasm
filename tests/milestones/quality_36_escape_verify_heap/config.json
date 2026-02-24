@@ -1,0 +1,8 @@
+{
+  "name": "escape_verify_heap",
+  "description": "Verify that escaping new stays on the heap (not incorrectly stack-promoted)",
+  "type": "compile_output",
+  "compiler_args": ["--escape-analysis", "-vv"],
+  "expected_output": "heap allocation retained in escaping",
+  "capability": "escape analysis strategy verification — heap retention confirmed via compile log"
+}

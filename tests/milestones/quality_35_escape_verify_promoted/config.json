@@ -1,0 +1,8 @@
+{
+  "name": "escape_verify_promoted",
+  "description": "Verify that non-escaping new is actually stack-promoted (not just correct)",
+  "type": "compile_output",
+  "compiler_args": ["--escape-analysis", "-vv"],
+  "expected_output": "stack-promoting new in nonEscaping",
+  "capability": "escape analysis strategy verification — stack promotion confirmed via compile log"
+}

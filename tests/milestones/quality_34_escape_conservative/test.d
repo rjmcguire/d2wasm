@@ -9,7 +9,7 @@ Pair* escapeReturn(int x, int y) @gc(heap) {
 }
 
 // Escapes via function call — must heap-allocate
-int readPair(Pair* p) @gc(heap) {
+int readPair(Pair* p) {
     return p.a + p.b;
 }
 int escapeViaCall() @gc(heap) {

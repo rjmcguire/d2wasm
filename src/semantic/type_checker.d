@@ -759,45 +759,48 @@ class TypeChecker {
             log(2, "Error: visiting null expression in TypeChecker");
             return new BasicType(SourceLocation(), BasicType.Kind.Void);
         }
-        // writeln("Checking expression type: ", typeid(expr).name);
-        
+
+        Type result;
         if (auto binary = cast(BinaryExpression)expr) {
-            return checkBinaryExpression(binary);
+            result = checkBinaryExpression(binary);
         } else if (auto unary = cast(UnaryExpression)expr) {
-            return checkUnaryExpression(unary);
+            result = checkUnaryExpression(unary);
         } else if (auto call = cast(CallExpression)expr) {
-            return checkCallExpression(call);
+            result = checkCallExpression(call);
         } else if (auto index = cast(IndexExpression)expr) {
-            return checkIndexExpression(index);
+            result = checkIndexExpression(index);
         } else if (auto member = cast(MemberExpression)expr) {
-            return checkMemberExpression(member);
+            result = checkMemberExpression(member);
         } else if (auto ident = cast(IdentifierExpression)expr) {
-            return checkIdentifierExpression(ident);
+            result = checkIdentifierExpression(ident);
         } else if (auto literal = cast(LiteralExpression)expr) {
-            return inferLiteralType(literal);
+            result = inferLiteralType(literal);
         } else if (auto cast_ = cast(CastExpression)expr) {
-            return checkCastExpression(cast_);
+            result = checkCastExpression(cast_);
         } else if (auto assign = cast(AssignmentExpression)expr) {
-            return checkAssignmentExpression(assign);
+            result = checkAssignmentExpression(assign);
         } else if (auto arrayLit = cast(ArrayLiteralExpression)expr) {
-            return checkArrayLiteralExpression(arrayLit);
+            result = checkArrayLiteralExpression(arrayLit);
         } else if (auto slice = cast(SliceExpression)expr) {
-            return checkSliceExpression(slice);
+            result = checkSliceExpression(slice);
         } else if (auto import_ = cast(ImportExpression)expr) {
-            return checkImportExpression(import_);
+            result = checkImportExpression(import_);
         } else if (auto traits = cast(TraitsExpression)expr) {
-            return checkTraitsExpression(traits);
+            result = checkTraitsExpression(traits);
         } else if (auto isExpr = cast(IsExpression)expr) {
-            return checkIsExpression(isExpr);
+            result = checkIsExpression(isExpr);
         } else if (auto tmplInst = cast(TemplateInstantiationExpression)expr) {
-            return checkTemplateInstantiation(tmplInst);
+            result = checkTemplateInstantiation(tmplInst);
         } else if (auto newExpr = cast(NewExpression)expr) {
-            return checkNewExpression(newExpr);
+            result = checkNewExpression(newExpr);
         } else if (auto funcLit = cast(FunctionLiteralExpression)expr) {
-            return checkFunctionLiteralExpression(funcLit);
+            result = checkFunctionLiteralExpression(funcLit);
+        } else {
+            throw new TypeError("Unknown expression type", expr.location);
         }
 
-        throw new TypeError("Unknown expression type", expr.location);
+        expr.type = result;
+        return result;
     }
     
     /**

@@ -77,6 +77,8 @@ private void analyzeFunction(FunctionDecl func, SymbolTable symbolTable) {
         if (!info.escapes) {
             info.newExpr.stackPromoted = true;
             log(2, "  escape: stack-promoting new in ", func.name);
+        } else {
+            log(2, "  escape: heap allocation retained in ", func.name);
         }
     }
 
@@ -142,9 +144,16 @@ private bool localEscapes(Statement stmt, uint localId) {
     } else if (auto exprStmt = cast(ExpressionStatement)stmt) {
         if (exprEscapesLocal(exprStmt.expression, localId)) return true;
     } else if (auto returnStmt = cast(ReturnStatement)stmt) {
-        // Returning the local → escapes
-        if (returnStmt.value !is null && containsLocalRef(returnStmt.value, localId))
-            return true;
+        // Returning the pointer itself → escapes
+        // But returning a field value (p.x) or derived computation (p.x + p.y) is safe
+        if (returnStmt.value !is null) {
+            // Direct return of the local variable → escape
+            if (auto retIdent = cast(IdentifierExpression)returnStmt.value) {
+                if (retIdent.resolvedLocalId == localId) return true;
+            }
+            // Check for escape contexts within the return expression
+            if (exprEscapesLocal(returnStmt.value, localId)) return true;
+        }
     } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
         // Assigning to another variable → alias escape
         if (varDecl.initializer !is null && varDecl.uniqueLocalId != localId) {
@@ -238,13 +247,18 @@ private bool exprEscapesLocal(Expression expr, uint localId) {
         }
     }
 
-    // Member expression: accessing fields of the local is OK (read/write)
-    // The local itself is not escaping, just being used.
-    // But if the member object is something else and contains the local, recurse.
+    // Member expression: accessing value-type fields of the local is OK.
+    // Pointer/slice/struct fields could leak the allocation's address.
     if (auto member = cast(MemberExpression)expr) {
-        // obj.field where obj IS the local → safe (field access, not escape)
         if (auto objIdent = cast(IdentifierExpression)member.object) {
-            if (objIdent.resolvedLocalId == localId) return false;
+            if (objIdent.resolvedLocalId == localId) {
+                // obj.field where obj IS the local
+                // Safe only if the field is a value type (int, bool, float, etc.)
+                if (member.type !is null && member.type.isBasicType())
+                    return false;
+                // Unknown or non-basic type → conservative: assume escape
+                return true;
+            }
         }
         // Otherwise recurse into the object expression
         if (exprEscapesLocal(member.object, localId)) return true;
