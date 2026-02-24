@@ -241,7 +241,16 @@ class NativeCompiledFunction : CompiledFunction {
         Label continueLabel;
     }
     private NativeLoopContext[] nativeLoopStack;
-    
+
+    // Exception handling (try/catch/throw) — global-flag mechanism
+    private struct NativeTryContext {
+        Label catchLabel;       // branch here when exception detected
+        Label afterLabel;       // branch here after normal try body (skip catch)
+    }
+    private NativeTryContext[] tryStack;
+    private ubyte* exceptionPendingAddr;  // absolute address in data section (i32)
+    private ubyte* exceptionValueAddr;    // absolute address in data section (i32)
+
     // For multi-function support: map function names to their labels
     private Label[string] functionLabels;
     private FunctionDecl[string] functionDecls;  // for looking up parameter counts
@@ -277,7 +286,10 @@ class NativeCompiledFunction : CompiledFunction {
         if (enableStackTrace) {
             dataSection.reserveInlineStack();
         }
-        
+
+        // Allocate exception globals in data section
+        allocateExceptionGlobals();
+
         // Store parameter count for call()
         this.paramCount = func.parameters.length;
         this.entryNeedsArena = func.needsArena && func.name != "main";
@@ -313,7 +325,10 @@ class NativeCompiledFunction : CompiledFunction {
         if (enableStackTrace) {
             dataSection.reserveInlineStack();
         }
-        
+
+        // Allocate exception globals in data section
+        allocateExceptionGlobals();
+
         // Store all function decls for call resolution
         // Methods use mangled names: StructName_methodName
         foreach (func; funcs) {
@@ -679,7 +694,139 @@ class NativeCompiledFunction : CompiledFunction {
             gen.emitEpilogue();
         }
     }
-    
+
+    // ========== Exception Handling Helpers ==========
+
+    /// Allocate exception globals in the data section.
+    /// Two i32 slots: __exception_pending (0=none) and __exception_value.
+    private void allocateExceptionGlobals() {
+        ubyte[4] zero = [0, 0, 0, 0];
+        exceptionPendingAddr = dataSection.addData(zero[]);
+        exceptionValueAddr = dataSection.addData(zero[]);
+    }
+
+    /// Emit exception check after a function call (void context — result already consumed or discarded).
+    /// If exception pending and inside try block: branch to catch handler.
+    /// If exception pending and not in try block: branch to epilogue (propagate).
+    private void emitNativeExceptionCheck() {
+        // Load __exception_pending from data section
+        gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)exceptionPendingAddr);
+        gen.emitLoadFromX9Offset(0);  // w0 = *exceptionPendingAddr
+        if (tryStack.length > 0) {
+            // Inside try block: branch to catch handler
+            gen.emitBranchIfNonZero(tryStack[$ - 1].catchLabel);
+        } else {
+            // Not in try block: propagate exception by returning
+            gen.emitBranchIfNonZero(epilogueLabel);
+        }
+    }
+
+    /// Emit exception check after a function call that returns a value in w0/x0.
+    /// Saves result to a temp slot, checks exception flag, restores on normal path.
+    private void emitNativeExceptionCheckWithValue() {
+        auto mark = temps.save();
+        size_t savedResultOffset = temps.alloc(8);
+
+        // Save call result (use 64-bit store to preserve pointers)
+        gen.emitStorePtr(savedResultOffset);
+
+        // Check exception flag
+        gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)exceptionPendingAddr);
+        gen.emitLoadFromX9Offset(0);  // w0 = *exceptionPendingAddr
+        if (tryStack.length > 0) {
+            gen.emitBranchIfNonZero(tryStack[$ - 1].catchLabel);
+        } else {
+            gen.emitBranchIfNonZero(epilogueLabel);
+        }
+
+        // Restore call result on normal path (64-bit load)
+        gen.emitLoadPtr(savedResultOffset);
+        temps.restore(mark);
+    }
+
+    /// Compile a throw expression: store value, set flag, branch to catch or epilogue.
+    private void compileThrowExpression(ThrowExpression expr) {
+        // Evaluate the thrown value into x0
+        compileExpression(expr.operand);
+
+        // Store value to __exception_value
+        gen.emitMoveX0ToX9();  // x9 = thrown value
+        gen.emitLoadImm64(cast(ulong)cast(size_t)exceptionValueAddr);
+        // STR w9, [x0] — store 32-bit value at address in x0
+        gen.emitStoreToPointerFromX9(0);
+
+        // Set __exception_pending = 1
+        gen.emitImm32(stencil_load_imm32, 1);  // w0 = 1
+        gen.emitMoveX0ToX9();  // x9 = 1
+        gen.emitLoadImm64(cast(ulong)cast(size_t)exceptionPendingAddr);
+        gen.emitStoreToPointerFromX9(0);  // *exceptionPendingAddr = 1
+
+        if (tryStack.length > 0) {
+            // Inside a try block: branch directly to catch handler
+            gen.emitBranch(tryStack[$ - 1].catchLabel);
+        } else {
+            // Not in a try block: propagate by returning
+            gen.emitBranch(epilogueLabel);
+        }
+    }
+
+    /// Compile a try/catch statement using labels and the global-flag mechanism.
+    private void compileTryStatement(TryStatement stmt) {
+        auto catchLabel = gen.newLabel();
+        auto afterLabel = gen.newLabel();
+
+        // Allocate locals for catch parameters before emitting any code
+        foreach (c; stmt.catches) {
+            if (c.paramName !is null && c.paramName.length > 0) {
+                if (c.paramName !in localVars) {
+                    NativeLocalInfo nli;
+                    nli.offset = nextLocalOffset;
+                    nli.kind = VarKind.scalar;
+                    localVars[c.paramName] = nli;
+                    nextLocalOffset += 4;
+                }
+            }
+        }
+
+        // Push try context so exception checks branch to catch handler
+        tryStack ~= NativeTryContext(catchLabel, afterLabel);
+
+        // Emit try body
+        compileStatement(stmt.tryBody);
+
+        // Pop try context
+        tryStack = tryStack[0 .. $ - 1];
+
+        // Normal exit: skip catch handler
+        gen.emitBranch(afterLabel);
+
+        // Catch handler
+        gen.bindLabel(catchLabel);
+
+        // Clear __exception_pending = 0
+        gen.emitImm32(stencil_load_imm32, 0);  // w0 = 0
+        gen.emitMoveX0ToX9();
+        gen.emitLoadImm64(cast(ulong)cast(size_t)exceptionPendingAddr);
+        gen.emitStoreToPointerFromX9(0);
+
+        // Bind caught value and emit catch body
+        if (stmt.catches.length > 0) {
+            auto c = stmt.catches[0];
+            if (c.paramName !is null && c.paramName.length > 0) {
+                // Load __exception_value into the catch parameter local
+                gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)exceptionValueAddr);
+                gen.emitLoadFromX9Offset(0);  // w0 = exception value
+                if (auto info = c.paramName in localVars) {
+                    gen.emitStoreLocal32(info.offset);
+                }
+            }
+            compileStatement(c.body_);
+        }
+
+        // After try/catch
+        gen.bindLabel(afterLabel);
+    }
+
     /**
      * Count bytes needed for locals in a statement (not just count of vars)
      */
@@ -733,9 +880,11 @@ class NativeCompiledFunction : CompiledFunction {
             bytes += countExpressionBytes(assign.left);
             bytes += countExpressionBytes(assign.right);
             bytes += countExpressionBytes(assign.loweredCall);
+        } else if (auto throwExpr = cast(ThrowExpression)expr) {
+            bytes += countExpressionBytes(throwExpr.operand);
         }
         // IdentifierExpression, TraitsExpression, IsExpression, TemplateInstantiationExpression,
-        // ImportExpression — no stack temp allocation
+        // ImportExpression, ThrowExpression — no stack temp allocation (beyond operand)
 
         return bytes;
     }
@@ -802,6 +951,15 @@ class NativeCompiledFunction : CompiledFunction {
             bytes += countExpressionBytes(retStmt.value);
         } else if (auto exprStmt = cast(ExpressionStatement)stmt) {
             bytes += countExpressionBytes(exprStmt.expression);
+        } else if (auto tryStmt = cast(TryStatement)stmt) {
+            bytes += countLocalBytesInStatement(tryStmt.tryBody);
+            foreach (c; tryStmt.catches) {
+                if (c.paramName !is null && c.paramName.length > 0)
+                    bytes += 4;  // catch parameter (i32)
+                bytes += countLocalBytesInStatement(c.body_);
+            }
+            if (tryStmt.finallyBody !is null)
+                bytes += countLocalBytesInStatement(tryStmt.finallyBody);
         } else if (cast(BreakStatement)stmt || cast(ContinueStatement)stmt
                    || cast(MixinStatement)stmt || cast(StructDeclarationStatement)stmt) {
             // No local allocations
@@ -1065,6 +1223,7 @@ class NativeCompiledFunction : CompiledFunction {
                                     throw new Exception("Function not compiled: " ~ funcIdent.name);
                                 }
                                 gen.emitCall(*funcLabelPtr);
+                                emitNativeExceptionCheck();
                                 // Result is now written to nextLocalOffset
                             }
                         } else if (auto memberFunc = cast(MemberExpression)call.function_) {
@@ -1215,6 +1374,7 @@ class NativeCompiledFunction : CompiledFunction {
                             gen.emitStackAddress(nli.offset);
 
                             gen.emitCall(*funcLabelPtr);
+                            emitNativeExceptionCheck();
                         } else {
                             throw new Exception("Complex call target not supported for slice init");
                         }
@@ -1350,6 +1510,7 @@ class NativeCompiledFunction : CompiledFunction {
                             // x0 = result address (stack address of static array)
                             gen.emitStackAddress(nextLocalOffset);
                             gen.emitCall(*funcLabelPtr);
+                            emitNativeExceptionCheck();
                         } else {
                             throw new Exception("Static array init from non-identifier call not supported");
                         }
@@ -1465,6 +1626,8 @@ class NativeCompiledFunction : CompiledFunction {
             if (nativeLoopStack.length == 0)
                 throw new Exception("continue statement outside of loop");
             gen.emitBranch(nativeLoopStack[$ - 1].continueLabel);
+        } else if (auto tryStmt = cast(TryStatement)stmt) {
+            compileTryStatement(tryStmt);
         } else if (cast(StructDeclarationStatement)stmt) {
             // Inner struct declaration — no runtime code
         } else if (auto mixinStmt = cast(MixinStatement)stmt) {
@@ -2088,6 +2251,8 @@ class NativeCompiledFunction : CompiledFunction {
 
                     // Emit the call (BL instruction)
                     gen.emitCall(*labelPtr);
+                    // Check for exception after call (preserves return value in x0)
+                    emitNativeExceptionCheckWithValue();
                     // Result is in x0
                     return;
                 }
@@ -2609,6 +2774,10 @@ class NativeCompiledFunction : CompiledFunction {
             }
 
             gen.emitCall(*labelPtr);
+            // Check for exception after template call (preserves return value)
+            emitNativeExceptionCheckWithValue();
+        } else if (auto throwExpr = cast(ThrowExpression)expr) {
+            compileThrowExpression(throwExpr);
         } else {
             throw new Exception("Expression type not yet supported in native backend: " ~
                 typeid(expr).toString());
@@ -2859,6 +3028,7 @@ class NativeCompiledFunction : CompiledFunction {
                     compileExpression(objMember);  // leaves address in x0
 
                     gen.emitCall(*labelPtr);
+                    emitNativeExceptionCheckWithValue();
                     return;
                 }
             }
@@ -2924,6 +3094,8 @@ class NativeCompiledFunction : CompiledFunction {
 
         // Emit the call
         gen.emitCall(*labelPtr);
+        // Check for exception after method call (preserves return value)
+        emitNativeExceptionCheckWithValue();
         // Result is in x0
     }
 
@@ -2993,6 +3165,8 @@ class NativeCompiledFunction : CompiledFunction {
 
         // Step 6: Indirect call via x9
         gen.emitCallIndirectX9();
+        // Check for exception after virtual method call (preserves return value)
+        emitNativeExceptionCheckWithValue();
         temps.restore(mark);
         // Result is in x0
     }
@@ -3119,6 +3293,7 @@ class NativeCompiledFunction : CompiledFunction {
             gen.emitStackAddress(resultOffset);  // x0 = result_ptr (reload cleanly)
 
             gen.emitCallIndirectX9();
+            emitNativeExceptionCheck();
             temps.restore(mark);
         } else if (info.isStruct) {
             // Direct struct method call with hidden result pointer
@@ -3167,6 +3342,7 @@ class NativeCompiledFunction : CompiledFunction {
             gen.emitStackAddress(resultOffset);
 
             gen.emitCall(*labelPtr);
+            emitNativeExceptionCheck();
         } else {
             throw new Exception("Struct-returning method call on non-struct/class variable: " ~ objIdent.name);
         }

@@ -119,6 +119,10 @@ class BinaryEmitter {
         uint arenaDropFuncIndex;
         uint arenaBaseGlobal;        // Index of $arena_base global
         uint arenaWatermarkGlobal;   // Index of $arena_wm_top global (watermark stack pointer)
+
+        // Exception handling globals
+        uint exceptionPendingGlobal;  // Index of __exception_pending global
+        uint exceptionValueGlobal;    // Index of __exception_value global
     }
     
     private {
@@ -151,7 +155,7 @@ class BinaryEmitter {
         GlobalInfo[] globals;
         uint heapPtrGlobal;  // Index of $heap_ptr global
         bool needsShadowStack = false;  // Set when any function has struct locals
-        
+
         // Function table for call_indirect (virtual dispatch + delegates)
         uint[] tableFunctions;        // function indices to put in table
         uint nextTypeId = 0;          // next available type ID for classes
@@ -329,7 +333,10 @@ class BinaryEmitter {
             
             // Always add shadow stack for struct locals
             addShadowStackGlobal();
-            
+
+            // Exception handling globals (always allocated — needed for scope guards too)
+            addExceptionGlobals();
+
             // Add call stack tracking global if enabled
             if (enableStackTrace) {
                 addCallStackGlobal();
@@ -1138,6 +1145,12 @@ class BinaryEmitter {
                     scanStatementForSliceTypes(s);
                 }
             }
+        } else if (auto tryStmt = cast(TryStatement)stmt) {
+            scanStatementForSliceTypes(tryStmt.tryBody);
+            foreach (c; tryStmt.catches)
+                scanStatementForSliceTypes(c.body_);
+            if (tryStmt.finallyBody !is null)
+                scanStatementForSliceTypes(tryStmt.finallyBody);
         } else {
             assert(0, "scanStatementForSliceTypes: unhandled statement type: " ~ typeid(stmt).name);
         }
@@ -1179,6 +1192,12 @@ class BinaryEmitter {
         } else if (auto forStmt = cast(ForStatement)stmt) {
             if (forStmt.init) collectInnerStructs(forStmt.init);
             if (forStmt.body_) collectInnerStructs(forStmt.body_);
+        } else if (auto tryStmt = cast(TryStatement)stmt) {
+            collectInnerStructs(tryStmt.tryBody);
+            foreach (c; tryStmt.catches)
+                collectInnerStructs(c.body_);
+            if (tryStmt.finallyBody !is null)
+                collectInnerStructs(tryStmt.finallyBody);
         }
     }
 
@@ -1326,6 +1345,14 @@ class BinaryEmitter {
             || cast(MixinStatement)stmt || cast(StructDeclarationStatement)stmt) {
             return false;
         }
+        if (auto tryStmt = cast(TryStatement)stmt) {
+            if (statementUsesCTFERuntime(tryStmt.tryBody)) return true;
+            foreach (c; tryStmt.catches)
+                if (statementUsesCTFERuntime(c.body_)) return true;
+            if (tryStmt.finallyBody !is null)
+                if (statementUsesCTFERuntime(tryStmt.finallyBody)) return true;
+            return false;
+        }
         return false;
     }
 
@@ -1349,6 +1376,9 @@ class BinaryEmitter {
         }
         if (auto returnStmt = cast(ReturnStatement)stmt) {
             return returnStmt.value is null;
+        }
+        if (cast(TryStatement)stmt) {
+            return false;  // try/catch is not a CTFE intrinsic
         }
         // Any other statement type means this isn't a pure-intrinsic function
         return false;
@@ -1704,6 +1734,28 @@ class BinaryEmitter {
         globals ~= sp;
     }
     
+    /**
+     * Add exception handling globals: __exception_pending and __exception_value.
+     * Used for try/catch/throw — global-flag exception mechanism.
+     */
+    private void addExceptionGlobals() {
+        exceptionPendingGlobal = cast(uint)globals.length;
+        GlobalInfo pending;
+        pending.type = ValType.i32;
+        pending.mutable = true;
+        pending.initValue = 0;
+        pending.name = "__exception_pending";
+        globals ~= pending;
+
+        exceptionValueGlobal = cast(uint)globals.length;
+        GlobalInfo value;
+        value.type = ValType.i32;
+        value.mutable = true;
+        value.initValue = 0;
+        value.name = "__exception_value";
+        globals ~= value;
+    }
+
     /**
      * Initialize call stack tracking data section.
      * Used for CTFE error stack traces (milestone 144).
@@ -2116,6 +2168,12 @@ class BinaryEmitter {
             scanExprForLambdas(retStmt.value, result);
         } else if (auto exprStmt = cast(ExpressionStatement)stmt) {
             scanExprForLambdas(exprStmt.expression, result);
+        } else if (auto tryStmt = cast(TryStatement)stmt) {
+            scanForLambdas(tryStmt.tryBody, result);
+            foreach (c; tryStmt.catches)
+                scanForLambdas(c.body_, result);
+            if (tryStmt.finallyBody !is null)
+                scanForLambdas(tryStmt.finallyBody, result);
         }
         // Other statement types: no expressions containing lambdas
     }
@@ -2144,6 +2202,8 @@ class BinaryEmitter {
             scanExprForLambdas(castExpr.expression, result);
         } else if (auto unaryExpr = cast(UnaryExpression)expr) {
             scanExprForLambdas(unaryExpr.operand, result);
+        } else if (auto throwExpr = cast(ThrowExpression)expr) {
+            scanExprForLambdas(throwExpr.operand, result);
         }
     }
 

@@ -238,3 +238,40 @@ class ContinueStatement : Statement {
         return "ContinueStatement";
     }
 }
+
+/**
+ * Try statement: try { body } catch (Type e) { handler } finally { cleanup }
+ */
+class TryStatement : Statement {
+    Statement tryBody;
+    CatchClause[] catches;
+    Statement finallyBody;  // null if no finally
+
+    this(SourceLocation loc, Statement tryBody, CatchClause[] catches, Statement finallyBody) {
+        super(loc);
+        this.tryBody = tryBody;
+        this.catches = catches;
+        this.finallyBody = finallyBody;
+    }
+
+    override string toString() const {
+        return format("TryStatement(%d catches)", catches.length);
+    }
+}
+
+/**
+ * Catch clause within a try statement
+ */
+class CatchClause {
+    SourceLocation location;
+    Type exceptionType;    // null for catch-all
+    string paramName;      // null if no binding
+    Statement body_;
+
+    this(SourceLocation loc, Type exceptionType, string paramName, Statement body_) {
+        this.location = loc;
+        this.exceptionType = exceptionType;
+        this.paramName = paramName;
+        this.body_ = body_;
+    }
+}

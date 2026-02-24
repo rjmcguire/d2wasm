@@ -1,0 +1,7 @@
+{
+  "name": "throw_propagation",
+  "description": "CTFE parity: throw propagates across function calls",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 99
+}

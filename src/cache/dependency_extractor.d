@@ -206,9 +206,15 @@ private class DependencyExtractor {
             if (varDecl.initializer) {
                 extractFromExpression(varDecl.initializer);
             }
+        } else if (auto tryStmt = cast(TryStatement)stmt) {
+            extractFromStatement(tryStmt.tryBody);
+            foreach (c; tryStmt.catches)
+                extractFromStatement(c.body_);
+            if (tryStmt.finallyBody !is null)
+                extractFromStatement(tryStmt.finallyBody);
         }
     }
-    
+
     private void extractFromExpression(Expression expr) {
         if (expr is null) return;
         
@@ -244,6 +250,8 @@ private class DependencyExtractor {
         } else if (auto assign = cast(AssignmentExpression)expr) {
             extractFromExpression(assign.left);
             extractFromExpression(assign.right);
+        } else if (auto throwExpr = cast(ThrowExpression)expr) {
+            extractFromExpression(throwExpr.operand);
         }
         // Note: Struct construction (Point(1,2)) is a CallExpression
         // Type dependency is tracked when we resolve the call target
@@ -275,8 +283,14 @@ private class DependencyExtractor {
             calls ~= findCallsInStatement(forStmt.body_);
         } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
             if (varDecl.initializer) calls ~= findCallsInExpression(varDecl.initializer);
+        } else if (auto tryStmt = cast(TryStatement)stmt) {
+            calls ~= findCallsInStatement(tryStmt.tryBody);
+            foreach (c; tryStmt.catches)
+                calls ~= findCallsInStatement(c.body_);
+            if (tryStmt.finallyBody !is null)
+                calls ~= findCallsInStatement(tryStmt.finallyBody);
         }
-        
+
         return calls;
     }
     
@@ -308,8 +322,10 @@ private class DependencyExtractor {
         } else if (auto assign = cast(AssignmentExpression)expr) {
             calls ~= findCallsInExpression(assign.left);
             calls ~= findCallsInExpression(assign.right);
+        } else if (auto throwExpr = cast(ThrowExpression)expr) {
+            calls ~= findCallsInExpression(throwExpr.operand);
         }
-        
+
         return calls;
     }
     

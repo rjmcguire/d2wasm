@@ -1,0 +1,7 @@
+{
+  "name": "try_catch_basic",
+  "description": "CTFE parity: basic try-catch with thrown integer",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 42
+}

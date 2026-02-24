@@ -185,6 +185,12 @@ class DependencyAnalyzer {
                     }
                 }
             }
+        } else if (auto tryStmt = cast(TryStatement)stmt) {
+            calls ~= findCallsInStatement(tryStmt.tryBody);
+            foreach (c; tryStmt.catches)
+                calls ~= findCallsInStatement(c.body_);
+            if (tryStmt.finallyBody !is null)
+                calls ~= findCallsInStatement(tryStmt.finallyBody);
         }
         // Note: AssignmentStatement doesn't exist - assignments are expressions
 
@@ -235,6 +241,8 @@ class DependencyAnalyzer {
             calls ~= findCallsInExpression(slice.array);
             calls ~= findCallsInExpression(slice.start);
             calls ~= findCallsInExpression(slice.end);
+        } else if (auto throwExpr = cast(ThrowExpression)expr) {
+            calls ~= findCallsInExpression(throwExpr.operand);
         }
         // IdentifierExpression, LiteralExpression, ImportExpression - no calls inside
 
@@ -273,6 +281,12 @@ class DependencyAnalyzer {
         } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
             if (varDecl.initializer)
                 result ~= findTemplateCallsInExpression(varDecl.initializer);
+        } else if (auto tryStmt = cast(TryStatement)stmt) {
+            result ~= findTemplateCallsInStatement(tryStmt.tryBody);
+            foreach (c; tryStmt.catches)
+                result ~= findTemplateCallsInStatement(c.body_);
+            if (tryStmt.finallyBody !is null)
+                result ~= findTemplateCallsInStatement(tryStmt.finallyBody);
         }
         return result;
     }
@@ -304,6 +318,8 @@ class DependencyAnalyzer {
             result ~= findTemplateCallsInExpression(assign.right);
             if (assign.loweredCall)
                 result ~= findTemplateCallsInExpression(assign.loweredCall);
+        } else if (auto throwExpr = cast(ThrowExpression)expr) {
+            result ~= findTemplateCallsInExpression(throwExpr.operand);
         }
         return result;
     }
@@ -334,6 +350,12 @@ class DependencyAnalyzer {
         } else if (auto forStmt = cast(ForStatement)stmt) {
             collectStructDepsFromStatements(forStmt.init);
             collectStructDepsFromStatements(forStmt.body_);
+        } else if (auto tryStmt = cast(TryStatement)stmt) {
+            collectStructDepsFromStatements(tryStmt.tryBody);
+            foreach (c; tryStmt.catches)
+                collectStructDepsFromStatements(c.body_);
+            if (tryStmt.finallyBody !is null)
+                collectStructDepsFromStatements(tryStmt.finallyBody);
         }
     }
 
@@ -371,6 +393,12 @@ class DependencyAnalyzer {
         } else if (auto forStmt = cast(ForStatement)stmt) {
             collectClassMethodDepsFromStatements(forStmt.init, result);
             collectClassMethodDepsFromStatements(forStmt.body_, result);
+        } else if (auto tryStmt = cast(TryStatement)stmt) {
+            collectClassMethodDepsFromStatements(tryStmt.tryBody, result);
+            foreach (c; tryStmt.catches)
+                collectClassMethodDepsFromStatements(c.body_, result);
+            if (tryStmt.finallyBody !is null)
+                collectClassMethodDepsFromStatements(tryStmt.finallyBody, result);
         }
     }
 

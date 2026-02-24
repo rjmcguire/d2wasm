@@ -164,6 +164,12 @@ private bool hasDirectAllocation(Statement stmt) {
         }
     } else if (auto structStmt = cast(StructDeclarationStatement)stmt) {
         // Inner struct methods don't affect the enclosing function's needsArena
+    } else if (auto tryStmt = cast(TryStatement)stmt) {
+        if (hasDirectAllocation(tryStmt.tryBody)) return true;
+        foreach (c; tryStmt.catches)
+            if (hasDirectAllocation(c.body_)) return true;
+        if (tryStmt.finallyBody !is null && hasDirectAllocation(tryStmt.finallyBody))
+            return true;
     }
 
     return false;
@@ -203,6 +209,8 @@ private bool hasDirectAllocationExpr(Expression expr) {
         if (hasDirectAllocationExpr(slice.array)) return true;
         if (hasDirectAllocationExpr(slice.start)) return true;
         if (hasDirectAllocationExpr(slice.end)) return true;
+    } else if (auto throwExpr = cast(ThrowExpression)expr) {
+        if (hasDirectAllocationExpr(throwExpr.operand)) return true;
     }
 
     return false;
@@ -242,6 +250,12 @@ private bool callsAllocatingFunction(Statement stmt, Declaration[] declarations)
                 if (callsAllocatingFunction(s, declarations)) return true;
             }
         }
+    } else if (auto tryStmt = cast(TryStatement)stmt) {
+        if (callsAllocatingFunction(tryStmt.tryBody, declarations)) return true;
+        foreach (c; tryStmt.catches)
+            if (callsAllocatingFunction(c.body_, declarations)) return true;
+        if (tryStmt.finallyBody !is null && callsAllocatingFunction(tryStmt.finallyBody, declarations))
+            return true;
     }
 
     return false;
@@ -292,6 +306,8 @@ private bool callsAllocatingFunctionExpr(Expression expr, Declaration[] declarat
         foreach (arg; tmpl.callArguments) {
             if (callsAllocatingFunctionExpr(arg, declarations)) return true;
         }
+    } else if (auto throwExpr = cast(ThrowExpression)expr) {
+        if (callsAllocatingFunctionExpr(throwExpr.operand, declarations)) return true;
     }
 
     return false;

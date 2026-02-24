@@ -151,6 +151,12 @@ class FuncContext {
     }
     LoopContext[] loopStack;
 
+    // Try/catch stack for exception handling
+    struct TryContext {
+        uint catchBlockDepth;  // blockDepth of the catch handler block
+    }
+    TryContext[] tryStack;
+
     // RAII tracking: struct locals that need destructor calls
     struct RAIIVarInfo {
         string name;           // Variable name
@@ -607,6 +613,25 @@ class FuncContext {
                     collectLocals(s);
                 }
             }
+        } else if (auto tryStmt = cast(TryStatement)stmt) {
+            collectLocals(tryStmt.tryBody);
+            foreach (c; tryStmt.catches) {
+                // Allocate WASM local for catch parameter
+                if (c.paramName !is null && c.paramName.length > 0) {
+                    uint wasmIdx = cast(uint)localTypes.length;
+                    localTypes ~= ValType.i32;
+                    VarInfo vi;
+                    vi.kind = VarKind.scalar;
+                    vi.addrMode = AddrMode.wasmLocal;
+                    vi.wasmLocalIdx = wasmIdx;
+                    vi.type = c.exceptionType;
+                    varsByName[c.paramName] = vi;
+                }
+                if (c.body_)
+                    collectLocals(c.body_);
+            }
+            if (tryStmt.finallyBody)
+                collectLocals(tryStmt.finallyBody);
         } else if (cast(ReturnStatement)stmt || cast(ExpressionStatement)stmt
                    || cast(BreakStatement)stmt || cast(ContinueStatement)stmt
                    || cast(StructDeclarationStatement)stmt) {
@@ -1083,6 +1108,8 @@ class FuncContext {
             leb128u(out_, blockDepth - ctx.continueBlockDepth);
         } else if (cast(StructDeclarationStatement)stmt) {
             // Inner struct declaration — no runtime code; methods already collected by emitter
+        } else if (auto tryStmt = cast(TryStatement)stmt) {
+            emitTryStatement(out_, tryStmt);
         } else {
             throw new EmitError("Unsupported statement type", stmt.location);
         }
@@ -1120,6 +1147,181 @@ class FuncContext {
         }
     }
     
+    /**
+     * Emit exception check after a function call.
+     * If __exception_pending is set:
+     *   - In a try block: branch to the catch handler
+     *   - Not in a try block: propagate by returning
+     */
+    /**
+     * Emit exception check after a function call (void context — no value on stack).
+     */
+    void emitExceptionCheck(ref Appender!(ubyte[]) out_) {
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.exceptionPendingGlobal);
+        if (tryStack.length > 0) {
+            // Inside try block: branch to catch handler
+            out_ ~= Op.br_if;
+            leb128u(out_, blockDepth - tryStack[$ - 1].catchBlockDepth);
+        } else {
+            // Not in try block: propagate exception by returning
+            out_ ~= Op.if_;
+            out_ ~= cast(ubyte)BlockType.void_;
+            blockDepth++;
+            // Push dummy return value if function returns non-void on WASM stack
+            if (!emitter.isVoidType(func.decl.returnType) && !hasLargeReturn) {
+                out_ ~= Op.i32_const;
+                leb128s(out_, 0);
+            }
+            emitEpilogue(out_);
+            out_ ~= Op.return_;
+            blockDepth--;
+            out_ ~= Op.end;
+        }
+    }
+
+    /**
+     * Emit exception check when a call result value is on the WASM stack.
+     * Saves the result to tempLocalA, checks, restores on normal path.
+     */
+    void emitExceptionCheckWithValue(ref Appender!(ubyte[]) out_) {
+        // Save the call result off the stack
+        out_ ~= Op.local_set;
+        leb128u(out_, tempLocalA);
+        // Check exception flag
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.exceptionPendingGlobal);
+        if (tryStack.length > 0) {
+            // Inside try block: branch to catch handler (stack is now clean)
+            out_ ~= Op.br_if;
+            leb128u(out_, blockDepth - tryStack[$ - 1].catchBlockDepth);
+        } else {
+            // Not in try block: propagate
+            out_ ~= Op.if_;
+            out_ ~= cast(ubyte)BlockType.void_;
+            blockDepth++;
+            if (!emitter.isVoidType(func.decl.returnType) && !hasLargeReturn) {
+                out_ ~= Op.i32_const;
+                leb128s(out_, 0);
+            }
+            emitEpilogue(out_);
+            out_ ~= Op.return_;
+            blockDepth--;
+            out_ ~= Op.end;
+        }
+        // Restore the call result to the stack for normal execution
+        out_ ~= Op.local_get;
+        leb128u(out_, tempLocalA);
+    }
+
+    /**
+     * Emit a throw expression.
+     * Sets __exception_value and __exception_pending, then returns.
+     */
+    void emitThrowExpression(ref Appender!(ubyte[]) out_, ThrowExpression expr) {
+        // Evaluate the thrown value
+        emitExpression(out_, expr.operand);
+        // Store in __exception_value
+        out_ ~= Op.global_set;
+        leb128u(out_, emitter.exceptionValueGlobal);
+        // Set __exception_pending = 1
+        out_ ~= Op.i32_const;
+        leb128s(out_, 1);
+        out_ ~= Op.global_set;
+        leb128u(out_, emitter.exceptionPendingGlobal);
+
+        if (tryStack.length > 0) {
+            // Inside a try block: branch directly to catch handler
+            out_ ~= Op.br;
+            leb128u(out_, blockDepth - tryStack[$ - 1].catchBlockDepth);
+        } else {
+            // Not in a try block: propagate by returning
+            if (!emitter.isVoidType(func.decl.returnType) && !hasLargeReturn) {
+                out_ ~= Op.i32_const;
+                leb128s(out_, 0);
+            }
+            emitEpilogue(out_);
+            out_ ~= Op.return_;
+        }
+    }
+
+    /**
+     * Emit a try/catch statement.
+     * Uses nested blocks: outer block for after-try-catch, inner block for catch target.
+     */
+    void emitTryStatement(ref Appender!(ubyte[]) out_, TryStatement stmt) {
+        // block $after_try_catch
+        out_ ~= Op.block;
+        out_ ~= cast(ubyte)BlockType.void_;
+        blockDepth++;
+        uint afterTryCatchDepth = blockDepth;
+
+        //   block $catch_handler
+        out_ ~= Op.block;
+        out_ ~= cast(ubyte)BlockType.void_;
+        blockDepth++;
+        uint catchHandlerDepth = blockDepth;
+
+        // Push try context so exception checks branch to catch handler
+        tryStack ~= TryContext(catchHandlerDepth);
+
+        // Emit try body
+        emitStatement(out_, stmt.tryBody);
+
+        // Pop try context
+        tryStack = tryStack[0 .. $ - 1];
+
+        // Normal exit: skip catch handler
+        out_ ~= Op.br;
+        leb128u(out_, blockDepth - afterTryCatchDepth);
+
+        //   end $catch_handler
+        blockDepth--;
+        out_ ~= Op.end;
+
+        // Catch handler: clear exception flag and bind caught value
+        out_ ~= Op.i32_const;
+        leb128s(out_, 0);
+        out_ ~= Op.global_set;
+        leb128u(out_, emitter.exceptionPendingGlobal);
+
+        // For each catch clause (currently just the first one)
+        if (stmt.catches.length > 0) {
+            auto c = stmt.catches[0];
+            if (c.paramName !is null && c.paramName.length > 0) {
+                // Bind caught value to the catch parameter local
+                out_ ~= Op.global_get;
+                leb128u(out_, emitter.exceptionValueGlobal);
+                auto info = resolveVar(0, c.paramName);
+                if (info !is null) {
+                    out_ ~= Op.local_set;
+                    leb128u(out_, info.wasmLocalIdx);
+                } else {
+                    // Catch param not found as local — try direct WASM local
+                    out_ ~= Op.drop;
+                }
+            }
+            emitStatement(out_, c.body_);
+        }
+
+        // end $after_try_catch
+        blockDepth--;
+        out_ ~= Op.end;
+
+        // If try body and all catches return, code after is unreachable
+        if (alwaysReturns(stmt.tryBody)) {
+            bool allCatchesReturn = true;
+            foreach (c; stmt.catches) {
+                if (!alwaysReturns(c.body_)) {
+                    allCatchesReturn = false;
+                    break;
+                }
+            }
+            if (allCatchesReturn)
+                out_ ~= Op.unreachable;
+        }
+    }
+
     /**
      * Copy a large return value to the hidden result pointer.
      * Works for structs and static arrays.
@@ -1227,7 +1429,7 @@ class FuncContext {
     
     void emitExpressionStatement(ref Appender!(ubyte[]) out_, ExpressionStatement stmt) {
         emitExpression(out_, stmt.expression);
-        
+
         // Drop result if expression leaves a value
         if (expressionHasValue(stmt.expression)) {
             out_ ~= Op.drop;
@@ -1282,6 +1484,15 @@ class FuncContext {
             return ifStmt.elseStatement !is null &&
                    alwaysReturns(ifStmt.thenStatement) &&
                    alwaysReturns(ifStmt.elseStatement);
+        }
+        if (auto tryStmt = cast(TryStatement)stmt) {
+            if (!alwaysReturns(tryStmt.tryBody))
+                return false;
+            foreach (c; tryStmt.catches) {
+                if (!alwaysReturns(c.body_))
+                    return false;
+            }
+            return true;
         }
         // Statements that don't return
         if (cast(ExpressionStatement)stmt || cast(VariableDeclarationStatement)stmt
@@ -2316,6 +2527,13 @@ class FuncContext {
             emitUnary(out_, unary);
         } else if (auto call = cast(CallExpression)expr) {
             emitCall(out_, call);
+            // Check for exception after real function calls (not struct/class construction)
+            if (!isConstructionCall(call)) {
+                if (expressionHasValue(call))
+                    emitExceptionCheckWithValue(out_);
+                else
+                    emitExceptionCheck(out_);
+            }
         } else if (auto assign = cast(AssignmentExpression)expr) {
             emitAssignment(out_, assign);
         } else if (auto member = cast(MemberExpression)expr) {
@@ -2335,10 +2553,19 @@ class FuncContext {
             leb128s(out_, isExpr.boolResult ? 1 : 0);
         } else if (auto tmplInst = cast(TemplateInstantiationExpression)expr) {
             emitTemplateCall(out_, tmplInst);
+            // Check for exception after real template function calls (not struct construction)
+            if (!tmplInst.resolvedStructInstantiation) {
+                if (expressionHasValue(tmplInst))
+                    emitExceptionCheckWithValue(out_);
+                else
+                    emitExceptionCheck(out_);
+            }
         } else if (auto newExpr = cast(NewExpression)expr) {
             emitNewExpression(out_, newExpr);
         } else if (auto funcLit = cast(FunctionLiteralExpression)expr) {
             emitFunctionLiteral(out_, funcLit);
+        } else if (auto throwExpr = cast(ThrowExpression)expr) {
+            emitThrowExpression(out_, throwExpr);
         } else {
             throw new EmitError("Unsupported expression type", expr.location);
         }
@@ -7178,7 +7405,17 @@ class FuncContext {
     //==========================================================================
     // Helpers
     //==========================================================================
-    
+
+    /// Returns true if a CallExpression is a struct/class construction (not a real function call).
+    bool isConstructionCall(CallExpression call) {
+        if (auto ident = cast(IdentifierExpression)call.function_) {
+            auto sym = emitter.symbolTable.lookupSymbol(ident.name);
+            if (sym && sym.kind == SymbolKind.Type)
+                return true;
+        }
+        return false;
+    }
+
     bool expressionHasValue(Expression expr) {
         // Most expressions produce values
         if (auto call = cast(CallExpression)expr) {

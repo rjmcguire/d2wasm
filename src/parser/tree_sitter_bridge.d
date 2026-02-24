@@ -2107,6 +2107,8 @@ class TreeSitterBridge {
                 return new BreakStatement(loc);
             case "continue_statement":
                 return new ContinueStatement(loc);
+            case "try_statement":
+                return parseTryStatement(node, loc);
             case "struct_declaration":
                 auto structResult = parseStructDeclaration(node);
                 if (auto sd = cast(StructDecl)structResult)
@@ -2623,6 +2625,8 @@ class TreeSitterBridge {
                 return parseCallExpression(node, loc);
             case "new_expression":
                 return parseNewExpression(node, loc);
+            case "throw_expression":
+                return parseThrowExpression(node, loc);
             case "import_expression":
                 return parseImportExpression(node, loc);
             case "traits_expression":
@@ -3073,6 +3077,95 @@ class TreeSitterBridge {
             throw new ParseError("new expression missing type", loc);
 
         return new NewExpression(loc, allocType, args);
+    }
+
+    /// Parse throw expression: throw expr
+    private Expression parseThrowExpression(TSNode node, SourceLocation loc) {
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            if (childType == "throw")
+                continue;
+            // First non-keyword child is the operand
+            return new ThrowExpression(loc, parseExpression(child));
+        }
+        throw new ParseError("throw expression missing operand", loc);
+    }
+
+    /// Parse try statement: try { body } catch (Type e) { handler } finally { cleanup }
+    private Statement parseTryStatement(TSNode node, SourceLocation loc) {
+        Statement tryBody;
+        CatchClause[] catches;
+        Statement finallyBody;
+
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            auto childLoc = makeSourceLocation(child);
+
+            if (childType == "try")
+                continue;
+            else if (childType == "scope_statement" || childType == "block_statement") {
+                // The try body
+                if (tryBody is null)
+                    tryBody = parseStatement(child);
+            } else if (childType == "catch_statement") {
+                catches ~= parseCatchClause(child, childLoc);
+            } else if (childType == "finally_statement") {
+                finallyBody = parseFinallyBody(child);
+            }
+        }
+
+        if (tryBody is null)
+            throw new ParseError("try statement missing body", loc);
+        if (catches.length == 0 && finallyBody is null)
+            throw new ParseError("try statement must have at least one catch or finally", loc);
+
+        return new TryStatement(loc, tryBody, catches, finallyBody);
+    }
+
+    /// Parse catch clause: catch (Type e) { body }
+    private CatchClause parseCatchClause(TSNode node, SourceLocation loc) {
+        Type exceptionType;
+        string paramName;
+        Statement body_;
+
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+
+            if (childType == "catch" || childType == "(" || childType == ")")
+                continue;
+            else if (childType == "type") {
+                exceptionType = parseType(child);
+            } else if (childType == "identifier") {
+                paramName = TreeSitterParser.getNodeText(child, sourceText);
+            } else if (childType == "scope_statement" || childType == "block_statement") {
+                body_ = parseStatement(child);
+            }
+        }
+
+        if (body_ is null)
+            throw new ParseError("catch clause missing body", loc);
+
+        return new CatchClause(loc, exceptionType, paramName, body_);
+    }
+
+    /// Parse finally body: finally { body }
+    private Statement parseFinallyBody(TSNode node) {
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+            if (childType == "finally")
+                continue;
+            if (childType == "scope_statement" || childType == "block_statement")
+                return parseStatement(child);
+        }
+        throw new ParseError("finally clause missing body", makeSourceLocation(node));
     }
 
     /// Parse a template instantiation call: max!int(3, 5) or foo!(int, 5)(args)

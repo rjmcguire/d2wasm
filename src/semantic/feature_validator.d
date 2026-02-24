@@ -252,6 +252,12 @@ class FeatureValidator {
             }
         } else if (auto exprStmt = cast(ExpressionStatement) stmt) {
             validateExpression(exprStmt.expression);
+        } else if (auto tryStmt = cast(TryStatement) stmt) {
+            validateStatement(tryStmt.tryBody);
+            foreach (c; tryStmt.catches)
+                validateStatement(c.body_);
+            if (tryStmt.finallyBody !is null)
+                validateStatement(tryStmt.finallyBody);
         }
     }
     
@@ -294,6 +300,8 @@ class FeatureValidator {
             foreach (arg; tmplInst.callArguments) {
                 validateExpression(arg);
             }
+        } else if (auto throwExpr = cast(ThrowExpression) expr) {
+            validateExpression(throwExpr.operand);
         }
         // LiteralExpression is always valid
     }

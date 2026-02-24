@@ -282,6 +282,17 @@ class TypeChecker {
             return false;
         }
         
+        if (auto tryStmt = cast(TryStatement)stmt) {
+            // A try statement returns if the try body returns AND all catch clauses return
+            if (!allPathsReturn(tryStmt.tryBody))
+                return false;
+            foreach (c; tryStmt.catches) {
+                if (!allPathsReturn(c.body_))
+                    return false;
+            }
+            return true;
+        }
+
         // Other statements (expression, variable declaration) don't return
         return false;
     }
@@ -748,6 +759,26 @@ class TypeChecker {
             collector.collectStructSymbol(structStmt.structDecl);
             // Type check struct members (methods, etc.)
             checkStructDeclaration(structStmt.structDecl);
+        } else if (auto tryStmt = cast(TryStatement)stmt) {
+            checkStatement(tryStmt.tryBody);
+            foreach (ref c; tryStmt.catches) {
+                if (auto ut = cast(UserType)c.exceptionType)
+                    ut.ensureResolved(symbolTable);
+                // Enter a scope for the catch parameter
+                symbolTable.enterScope("catch");
+                scope(exit) symbolTable.exitScope();
+                if (c.paramName !is null && c.paramName.length > 0) {
+                    Type paramType = c.exceptionType !is null ? c.exceptionType
+                        : new BasicType(c.location, BasicType.Kind.Int32);
+                    auto sym = new Symbol(c.paramName, SymbolKind.Variable, paramType,
+                                         null, c.location, false);
+                    sym.uniqueLocalId = symbolTable.nextLocalId++;
+                    symbolTable.addSymbol(sym);
+                }
+                checkStatement(c.body_);
+            }
+            if (tryStmt.finallyBody !is null)
+                checkStatement(tryStmt.finallyBody);
         }
     }
 
@@ -795,6 +826,9 @@ class TypeChecker {
             result = checkNewExpression(newExpr);
         } else if (auto funcLit = cast(FunctionLiteralExpression)expr) {
             result = checkFunctionLiteralExpression(funcLit);
+        } else if (auto throwExpr = cast(ThrowExpression)expr) {
+            checkExpression(throwExpr.operand);
+            result = new BasicType(SourceLocation(), BasicType.Kind.Int32);  // throw is noreturn, use int placeholder
         } else {
             throw new TypeError("Unknown expression type", expr.location);
         }

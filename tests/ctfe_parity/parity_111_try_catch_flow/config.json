@@ -1,0 +1,7 @@
+{
+  "name": "try_catch_flow",
+  "description": "CTFE parity: catch not entered when no exception thrown",
+  "type": "wasm_exec",
+  "entry": "main",
+  "expected_result": 10
+}

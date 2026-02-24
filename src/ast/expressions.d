@@ -781,3 +781,19 @@ class NewExpression : Expression {
     override bool isConstant() const { return false; }
     override bool hasLValue() const { return false; }
 }
+
+/**
+ * Throw expression: throw expr
+ */
+class ThrowExpression : Expression {
+    Expression operand;
+
+    this(SourceLocation loc, Expression operand) {
+        super(loc);
+        this.operand = operand;
+    }
+
+    override string toString() const { return "ThrowExpression"; }
+    override bool isConstant() const { return false; }
+    override bool hasLValue() const { return false; }
+}

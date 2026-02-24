@@ -123,6 +123,12 @@ private void collectNewLocals(Statement stmt, ref NewLocal[uint] result) {
             foreach (s; mixinStmt.expandedStatements)
                 collectNewLocals(s, result);
         }
+    } else if (auto tryStmt = cast(TryStatement)stmt) {
+        collectNewLocals(tryStmt.tryBody, result);
+        foreach (c; tryStmt.catches)
+            collectNewLocals(c.body_, result);
+        if (tryStmt.finallyBody !is null)
+            collectNewLocals(tryStmt.finallyBody, result);
     }
     // ExpressionStatement, ReturnStatement, BreakStatement, ContinueStatement,
     // StructDeclarationStatement — no local declarations to collect
@@ -182,6 +188,12 @@ private bool localEscapes(Statement stmt, uint localId) {
             foreach (s; mixinStmt.expandedStatements)
                 if (localEscapes(s, localId)) return true;
         }
+    } else if (auto tryStmt = cast(TryStatement)stmt) {
+        if (localEscapes(tryStmt.tryBody, localId)) return true;
+        foreach (c; tryStmt.catches)
+            if (localEscapes(c.body_, localId)) return true;
+        if (tryStmt.finallyBody !is null && localEscapes(tryStmt.finallyBody, localId))
+            return true;
     }
     // BreakStatement, ContinueStatement, StructDeclarationStatement — no escapes
 
@@ -287,6 +299,11 @@ private bool exprEscapesLocal(Expression expr, uint localId) {
         foreach (arg; tmpl.callArguments) {
             if (containsLocalRef(arg, localId)) return true;
         }
+    }
+
+    // Throw: recurse into operand
+    if (auto throwExpr = cast(ThrowExpression)expr) {
+        if (exprEscapesLocal(throwExpr.operand, localId)) return true;
     }
 
     return false;
@@ -396,6 +413,12 @@ private bool containsAddressOf(Statement stmt) {
             foreach (s; mixinStmt.expandedStatements)
                 if (containsAddressOf(s)) return true;
         }
+    } else if (auto tryStmt = cast(TryStatement)stmt) {
+        if (containsAddressOf(tryStmt.tryBody)) return true;
+        foreach (c; tryStmt.catches)
+            if (containsAddressOf(c.body_)) return true;
+        if (tryStmt.finallyBody !is null && containsAddressOf(tryStmt.finallyBody))
+            return true;
     }
     // BreakStatement, ContinueStatement, StructDeclarationStatement — no address-of
 
@@ -422,6 +445,9 @@ private bool exprContainsAddressOf(Expression expr) {
     }
     if (auto castExpr = cast(CastExpression)expr) {
         if (exprContainsAddressOf(castExpr.expression)) return true;
+    }
+    if (auto throwExpr = cast(ThrowExpression)expr) {
+        if (exprContainsAddressOf(throwExpr.operand)) return true;
     }
 
     return false;
@@ -460,6 +486,12 @@ private void checkAddressOfEscapes(Statement stmt, string funcName) {
             foreach (s; mixinStmt.expandedStatements)
                 checkAddressOfEscapes(s, funcName);
         }
+    } else if (auto tryStmt = cast(TryStatement)stmt) {
+        checkAddressOfEscapes(tryStmt.tryBody, funcName);
+        foreach (c; tryStmt.catches)
+            checkAddressOfEscapes(c.body_, funcName);
+        if (tryStmt.finallyBody !is null)
+            checkAddressOfEscapes(tryStmt.finallyBody, funcName);
     }
     // BreakStatement, ContinueStatement, StructDeclarationStatement — no-op
 }
