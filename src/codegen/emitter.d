@@ -41,16 +41,10 @@ public import codegen.wasm.sections : FuncSig, ImportInfo;
 //==============================================================================
 
 class EmitError : Exception {
-    string context;
-    SourceLocation sourceLocation;
-
-    this(string msg, string context = null, string file = __FILE__, size_t line = __LINE__) {
-        this.context = context;
-        super(context ? format("%s (in %s)", msg, context) : msg, file, line);
-    }
+    SourceLocation location;
 
     this(string msg, SourceLocation loc, string file = __FILE__, size_t line = __LINE__) {
-        this.sourceLocation = loc;
+        this.location = loc;
         super(msg, file, line);
     }
 }
@@ -392,7 +386,7 @@ class BinaryEmitter {
         } catch (EmitError e) {
             phase = EmitPhase.error;
             lastError = e.msg;
-            lastErrorLocation = e.sourceLocation;
+            lastErrorLocation = e.location;
             return null;
         } catch (Exception e) {
             phase = EmitPhase.error;
@@ -473,7 +467,7 @@ class BinaryEmitter {
             
         } catch (EmitError e) {
             lastError = e.msg;
-            lastErrorLocation = e.sourceLocation;
+            lastErrorLocation = e.location;
             return null;
         } catch (Exception e) {
             lastError = "Internal error: " ~ e.msg;
@@ -519,7 +513,7 @@ class BinaryEmitter {
 
         } catch (EmitError e) {
             lastError = e.msg;
-            lastErrorLocation = e.sourceLocation;
+            lastErrorLocation = e.location;
             return null;
         } catch (Exception e) {
             lastError = "Internal error: " ~ e.msg;
@@ -565,7 +559,7 @@ class BinaryEmitter {
 
         } catch (EmitError e) {
             lastError = e.msg;
-            lastErrorLocation = e.sourceLocation;
+            lastErrorLocation = e.location;
             return null;
         } catch (Exception e) {
             lastError = "Internal error: " ~ e.msg;
@@ -1404,7 +1398,7 @@ class BinaryEmitter {
 
         auto basic = cast(BasicType)t;
         if (!basic) {
-            throw new EmitError("Non-basic types not yet supported", t.toString());
+            throw new EmitError("Non-basic types not yet supported", t.location);
         }
         
         final switch (basic.kind) {
@@ -2890,7 +2884,7 @@ class BinaryEmitter {
             body_ ~= Op.end;
             
         } else {
-            throw new EmitError("Unknown built-in function: " ~ f.name);
+            throw new EmitError("Unknown built-in function: " ~ f.name, SourceLocation.init);
         }
         
         return body_.data;
@@ -3151,7 +3145,7 @@ private class EvalContext {
     void emitCallExpr(ref Appender!(ubyte[]) out_, CallExpression expr) {
         auto ident = cast(IdentifierExpression)expr.function_;
         if (!ident) {
-            throw new EmitError("Unsupported call expression in __eval");
+            throw new EmitError("Unsupported call expression in __eval", expr.location);
         }
         
         // Compiler intrinsics — raw opcodes
@@ -3174,7 +3168,7 @@ private class EvalContext {
         if (ident.name == "__text") {
             // __text(expr) - convert integer expression to string at compile time
             if (expr.arguments.length != 1) {
-                throw new EmitError("__text requires exactly one argument");
+                throw new EmitError("__text requires exactly one argument", expr.location);
             }
             
             // Evaluate the argument to get an integer value
@@ -3188,7 +3182,7 @@ private class EvalContext {
             out_ ~= Op.i32_const;
             leb128s(out_, structAddr);
         } else {
-            throw new EmitError("Unknown intrinsic in __eval: " ~ ident.name);
+            throw new EmitError("Unknown intrinsic in __eval: " ~ ident.name, expr.location);
         }
     }
     
@@ -3200,7 +3194,7 @@ private class EvalContext {
             if (literal.value.type == typeid(long)) {
                 return literal.value.get!long();
             }
-            throw new EmitError("Expected integer in __text argument");
+            throw new EmitError("Expected integer in __text argument", expr.location);
         }
         
         if (auto ident = cast(IdentifierExpression)expr) {
@@ -3213,7 +3207,7 @@ private class EvalContext {
                     }
                 }
             }
-            throw new EmitError("Unknown or non-integer identifier in __text: " ~ ident.name);
+            throw new EmitError("Unknown or non-integer identifier in __text: " ~ ident.name, expr.location);
         }
         
         if (auto binary = cast(BinaryExpression)expr) {
@@ -3241,11 +3235,11 @@ private class EvalContext {
                 case BinaryExpression.Operator.ShiftRight: return left >> right;
                 case BinaryExpression.Operator.UnsignedShiftRight: return left >>> right;
                 case BinaryExpression.Operator.Concat: 
-                    throw new EmitError("Concat not supported in __text argument");
+                    throw new EmitError("Concat not supported in __text argument", expr.location);
             }
         }
         
-        throw new EmitError("Cannot evaluate __text argument: " ~ expr.toString());
+        throw new EmitError("Cannot evaluate __text argument", expr.location);
     }
     
     void emitLiteral(ref Appender!(ubyte[]) out_, LiteralExpression expr) {
@@ -3263,7 +3257,7 @@ private class EvalContext {
             out_ ~= Op.i32_const;
             leb128s(out_, expr.value.get!long());
         } else {
-            throw new EmitError("Unsupported literal type in __eval");
+            throw new EmitError("Unsupported literal type in __eval", expr.location);
         }
     }
     

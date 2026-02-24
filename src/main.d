@@ -478,6 +478,9 @@ int compileFile(CompilerOptions options) {
     } catch (CTFEError e) {
         printError(e);
         return 1;
+    } catch (EmitError e) {
+        printError(e);
+        return 1;
     } catch (Exception e) {
         writeln("Internal Error: ", e.msg);
         log(1, "Stack trace:");

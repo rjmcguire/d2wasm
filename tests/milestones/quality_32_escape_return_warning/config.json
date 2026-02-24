@@ -1,0 +1,8 @@
+{
+  "name": "escape_return_warning",
+  "description": "Escape analysis warns when returning address of local variable",
+  "type": "compile_output",
+  "compiler_args": ["--escape-analysis"],
+  "expected_output": "returning address of local variable",
+  "capability": "escape analysis diagnostics — return &local produces clear error"
+}

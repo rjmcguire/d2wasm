@@ -628,7 +628,7 @@ class FuncContext {
             }
         }
         // TODO: Handle more complex constant expressions
-        throw new EmitError("Static array size must be a compile-time constant integer");
+        throw new EmitError("Static array size must be a compile-time constant integer", sizeExpr.location);
     }
     
     /**
@@ -1071,20 +1071,20 @@ class FuncContext {
             }
         } else if (cast(BreakStatement)stmt) {
             if (loopStack.length == 0)
-                throw new EmitError("break statement outside of loop");
+                throw new EmitError("break statement outside of loop", stmt.location);
             auto ctx = loopStack[$ - 1];
             out_ ~= Op.br;
             leb128u(out_, blockDepth - ctx.breakBlockDepth);
         } else if (cast(ContinueStatement)stmt) {
             if (loopStack.length == 0)
-                throw new EmitError("continue statement outside of loop");
+                throw new EmitError("continue statement outside of loop", stmt.location);
             auto ctx = loopStack[$ - 1];
             out_ ~= Op.br;
             leb128u(out_, blockDepth - ctx.continueBlockDepth);
         } else if (cast(StructDeclarationStatement)stmt) {
             // Inner struct declaration — no runtime code; methods already collected by emitter
         } else {
-            throw new EmitError("Unsupported statement type", stmt.toString());
+            throw new EmitError("Unsupported statement type", stmt.location);
         }
     }
     
@@ -1393,7 +1393,7 @@ class FuncContext {
     void emitVarDecl(ref Appender!(ubyte[]) out_, VariableDeclarationStatement stmt) {
         auto info = resolveVar(stmt.uniqueLocalId, stmt.name);
         if (!info) {
-            throw new EmitError("emitVarDecl: unresolved local: " ~ stmt.name);
+            throw new EmitError("emitVarDecl: unresolved local: " ~ stmt.name, stmt.location);
         }
 
         if (info.addrMode == AddrMode.shadowStack && info.kind == VarKind.scalar) {
@@ -1418,7 +1418,7 @@ class FuncContext {
         }
 
         if (info.addrMode != AddrMode.wasmLocal) {
-            throw new EmitError("emitVarDecl: expected scalar local: " ~ stmt.name);
+            throw new EmitError("emitVarDecl: expected scalar local: " ~ stmt.name, stmt.location);
         }
 
         if (stmt.initializer) {
@@ -1651,7 +1651,7 @@ class FuncContext {
             }
         }
         
-        throw new EmitError("Unsupported class initializer", stmt.initializer.toString());
+        throw new EmitError("Unsupported class initializer", stmt.location);
     }
     
     /**
@@ -1715,7 +1715,7 @@ class FuncContext {
                     leb128u(out_, 0);
                 }
             } else {
-                throw new EmitError("Unknown class for interface assignment: " ~ identExpr.name);
+                throw new EmitError("Unknown class for interface assignment: " ~ identExpr.name, identExpr.location);
             }
             
             // Now store itable_ptr at offset 4
@@ -1736,12 +1736,12 @@ class FuncContext {
                     out_ ~= cast(ubyte)0x02;
                     leb128u(out_, 0);
                 } else {
-                    throw new EmitError("Class " ~ srcClass.name ~ " has no itable for interface " ~ ifaceName);
+                    throw new EmitError("Class " ~ srcClass.name ~ " has no itable for interface " ~ ifaceName, stmt.location);
                 }
             }
             return;
         }
-        
+
         // Handle cast expression: ISpeak s = cast(ISpeak)dog;
         if (auto castExpr = cast(CastExpression)stmt.initializer) {
             if (castExpr.sourceClassDecl && castExpr.targetInterfaceDecl) {
@@ -1761,7 +1761,7 @@ class FuncContext {
                             emitVarAddress(out_, srcInfo);
                         }
                     } else {
-                        throw new EmitError("Unknown class in cast: " ~ identExpr.name);
+                        throw new EmitError("Unknown class in cast: " ~ identExpr.name, identExpr.location);
                     }
                     
                     out_ ~= Op.i32_store;
@@ -1780,19 +1780,19 @@ class FuncContext {
                         out_ ~= Op.i32_const;
                         leb128s(out_, cast(int)*itableBase);
                     } else {
-                        throw new EmitError("Class " ~ srcClass.name ~ " has no itable for " ~ ifaceName);
+                        throw new EmitError("Class " ~ srcClass.name ~ " has no itable for " ~ ifaceName, castExpr.location);
                     }
-                    
+
                     out_ ~= Op.i32_store;
                     out_ ~= cast(ubyte)0x02;
                     leb128u(out_, 0);
-                    
+
                     return;
                 }
             }
         }
         
-        throw new EmitError("Unsupported interface initializer");
+        throw new EmitError("Unsupported interface initializer", stmt.location);
     }
     
     /**
@@ -1961,7 +1961,7 @@ class FuncContext {
             if (!exists(fullPath)) fullPath = filename;
             
             if (!exists(fullPath)) {
-                throw new EmitError("import(): file not found: " ~ filename);
+                throw new EmitError("import(): file not found: " ~ filename, importExpr.location);
             }
             
             ubyte[] fileData = cast(ubyte[])read(fullPath);
@@ -2011,12 +2011,12 @@ class FuncContext {
         if (auto sliceExpr = cast(SliceExpression)stmt.initializer) {
             auto sourceIdent = cast(IdentifierExpression)sliceExpr.array;
             if (!sourceIdent) {
-                throw new EmitError("Complex slice source not supported");
+                throw new EmitError("Complex slice source not supported", sliceExpr.location);
             }
-            
+
             auto sourceInfo = resolveVar(sourceIdent.resolvedLocalId, sourceIdent.name);
             if (!sourceInfo || (!sourceInfo.isSlice && !sourceInfo.isStaticArray)) {
-                throw new EmitError("Can only slice local arrays for now");
+                throw new EmitError("Can only slice local arrays for now", sliceExpr.location);
             }
 
             // Calculate ptr = base + start * elemSize
@@ -2171,10 +2171,10 @@ class FuncContext {
     void emitSliceExpressionToTemp(ref Appender!(ubyte[]) out_, SliceExpression sliceExpr) {
         auto sourceIdent = cast(IdentifierExpression)sliceExpr.array;
         if (!sourceIdent)
-            throw new EmitError("Complex slice source not supported");
+            throw new EmitError("Complex slice source not supported", sliceExpr.location);
         auto srcInfo = resolveVar(sourceIdent.resolvedLocalId, sourceIdent.name);
         if (!srcInfo || (!srcInfo.isSlice && !srcInfo.isStaticArray))
-            throw new EmitError("Can only slice array-like variables");
+            throw new EmitError("Can only slice array-like variables", sliceExpr.location);
         uint elemSize = srcInfo.elementSize;
         const sliceSize = sliceLayout.totalSize;  // 12
 
@@ -2298,8 +2298,7 @@ class FuncContext {
             }
         }
 
-        throw new EmitError("Unsupported static array initializer",
-                           stmt.initializer ? stmt.initializer.toString() : "none");
+        throw new EmitError("Unsupported static array initializer", stmt.location);
     }
     
     //==========================================================================
@@ -2341,7 +2340,7 @@ class FuncContext {
         } else if (auto funcLit = cast(FunctionLiteralExpression)expr) {
             emitFunctionLiteral(out_, funcLit);
         } else {
-            throw new EmitError("Unsupported expression type", expr.toString());
+            throw new EmitError("Unsupported expression type", expr.location);
         }
     }
     
@@ -2355,7 +2354,7 @@ class FuncContext {
         // Non-intrinsic opIndex would emit a method call here
         // (not yet implemented - would call user-defined opIndex)
         
-        throw new EmitError("Non-intrinsic indexing not yet supported");
+        throw new EmitError("Non-intrinsic indexing not yet supported", expr.location);
     }
     
     /**
@@ -2388,13 +2387,13 @@ class FuncContext {
                     return;
                 }
             }
-            throw new EmitError("Cannot index member expression of non-slice type", memberExpr.toString());
+            throw new EmitError("Cannot index member expression of non-slice type", memberExpr.location);
         }
 
         // Get the array identifier
         auto arrayIdent = cast(IdentifierExpression)expr.array;
         if (!arrayIdent) {
-            throw new EmitError("Complex array indexing not yet supported");
+            throw new EmitError("Complex array indexing not yet supported", expr.location);
         }
         
         // Unified variable lookup
@@ -2520,7 +2519,7 @@ class FuncContext {
             }
         }
         
-        throw new EmitError("Unsupported array indexing on " ~ arrayIdent.name);
+        throw new EmitError("Unsupported array indexing on " ~ arrayIdent.name, arrayIdent.location);
     }
     
     /**
@@ -2551,13 +2550,13 @@ class FuncContext {
                     return;
                 }
             }
-            throw new EmitError("Cannot index-assign member expression of non-slice type");
+            throw new EmitError("Cannot index-assign member expression of non-slice type", memberExpr.location);
         }
 
         // Get the array identifier
         auto arrayIdent = cast(IdentifierExpression)indexExpr.array;
         if (!arrayIdent) {
-            throw new EmitError("Complex array index assignment not yet supported");
+            throw new EmitError("Complex array index assignment not yet supported", indexExpr.location);
         }
 
         // Check if it's a local on the shadow stack
@@ -2663,7 +2662,7 @@ class FuncContext {
             }
         }
 
-        throw new EmitError("Unsupported array index assignment on " ~ arrayIdent.name);
+        throw new EmitError("Unsupported array index assignment on " ~ arrayIdent.name, arrayIdent.location);
     }
     
     /**
@@ -2676,7 +2675,7 @@ class FuncContext {
             return;
         }
         
-        throw new EmitError("Unknown slice method: " ~ methodName);
+        throw new EmitError("Unknown slice method: " ~ methodName, SourceLocation.init);
     }
     
     /**
@@ -2690,7 +2689,7 @@ class FuncContext {
     void emitSliceReserve(ref Appender!(ubyte[]) out_, string sliceName,
                           VarInfo* sliceInfo, Expression[] args) {
         if (args.length != 1) {
-            throw new EmitError("reserve() requires exactly 1 argument");
+            throw new EmitError("reserve() requires exactly 1 argument", SourceLocation.init);
         }
         
         // We need several locals for this operation:
@@ -3777,10 +3776,10 @@ class FuncContext {
                 if (info.isClass) {
                     emitVarAddress(out_, info);
                 } else {
-                    throw new EmitError("Variable is not a class in cast: " ~ identExpr.name);
+                    throw new EmitError("Variable is not a class in cast: " ~ identExpr.name, expr.location);
                 }
             } else {
-                throw new EmitError("Unknown class variable in cast: " ~ identExpr.name);
+                throw new EmitError("Unknown class variable in cast: " ~ identExpr.name, expr.location);
             }
             
             // Emit itable_ptr
@@ -3789,10 +3788,10 @@ class FuncContext {
                 out_ ~= Op.i32_const;
                 leb128s(out_, cast(int)*itableBase);
             } else {
-                throw new EmitError("Class " ~ srcClass.name ~ " has no itable for interface " ~ ifaceName);
+                throw new EmitError("Class " ~ srcClass.name ~ " has no itable for interface " ~ ifaceName, expr.location);
             }
         } else {
-            throw new EmitError("Class→interface cast requires identifier expression");
+            throw new EmitError("Class→interface cast requires identifier expression", expr.location);
         }
     }
     
@@ -3951,7 +3950,7 @@ class FuncContext {
                     if (expr.memberName == "ptr") fieldOffset = 0;
                     else if (expr.memberName == "length") fieldOffset = cast(int)sliceLayout.lengthOffset;
                     else if (expr.memberName == "capacity") fieldOffset = cast(int)sliceLayout.capacityOffset;
-                    else throw new EmitError("Slice has no field '" ~ expr.memberName ~ "'");
+                    else throw new EmitError("Slice has no field '" ~ expr.memberName ~ "'", expr.location);
 
                     emitVarAddress(out_, info);
                     if (fieldOffset > 0) {
@@ -3980,7 +3979,7 @@ class FuncContext {
                                 if (expr.memberName == "length") subOffset = sliceLayout.lengthOffset;
                                 else if (expr.memberName == "ptr") subOffset = 0;
                                 else if (expr.memberName == "capacity") subOffset = sliceLayout.capacityOffset;
-                                else throw new EmitError("Slice field has no member '" ~ expr.memberName ~ "'");
+                                else throw new EmitError("Slice field has no member '" ~ expr.memberName ~ "'", expr.location);
                                 out_ ~= Op.local_get;
                                 leb128u(out_, thisInfo.wasmLocalIdx);
                                 out_ ~= Op.i32_const;
@@ -4076,7 +4075,7 @@ class FuncContext {
                         leb128s(out_, sliceLayout.capacityOffset);
                         out_ ~= Op.i32_add;
                     } else {
-                        throw new EmitError("Slice field has no member '" ~ expr.memberName ~ "'");
+                        throw new EmitError("Slice field has no member '" ~ expr.memberName ~ "'", expr.location);
                     }
                     out_ ~= Op.i32_load;
                     out_ ~= cast(ubyte)0x02;
@@ -4086,7 +4085,7 @@ class FuncContext {
             }
         }
 
-        throw new EmitError("Member access not yet fully implemented", expr.toString());
+        throw new EmitError("Member access not yet fully implemented", expr.location);
     }
     
     /**
@@ -4141,7 +4140,7 @@ class FuncContext {
                 return;
             }
         }
-        throw new EmitError("Cannot compute address of member", expr.toString());
+        throw new EmitError("Cannot compute address of member", expr.location);
     }
     
     /**
@@ -4271,7 +4270,7 @@ class FuncContext {
             if (value > uint.max || value < int.min) {
                 throw new EmitError(
                     format("Integer literal %d exceeds 32-bit range [%d, %d]", value, int.min, uint.max),
-                    "literal emission"
+                    expr.location
                 );
             }
             // If value is in unsigned range but above signed max, convert to signed
@@ -4295,7 +4294,7 @@ class FuncContext {
             out_ ~= Op.i32_const;
             leb128s(out_, structAddr);
         } else {
-            throw new EmitError("Unsupported literal type");
+            throw new EmitError("Unsupported literal type", expr.location);
         }
     }
     
@@ -4605,7 +4604,7 @@ class FuncContext {
                 }
             }
         }
-        throw new EmitError("Cannot take address of this expression", expr.toString());
+        throw new EmitError("Cannot take address of this expression", expr.location);
     }
 
     void emitDereference(ref Appender!(ubyte[]) out_, UnaryExpression expr) {
@@ -4666,11 +4665,11 @@ class FuncContext {
     void emitPointerMemberAccess(ref Appender!(ubyte[]) out_, MemberExpression expr) {
         auto aggDecl = resolvePointeeAggregate(expr.object);
         if (!aggDecl)
-            throw new EmitError("Cannot resolve type for pointer dereference", expr.toString());
+            throw new EmitError("Cannot resolve type for pointer dereference", expr.location);
 
         auto field = aggDecl.getField(expr.memberName);
         if (!field)
-            throw new EmitError(format("'%s' has no field '%s'", aggDecl.name, expr.memberName));
+            throw new EmitError(format("'%s' has no field '%s'", aggDecl.name, expr.memberName), expr.location);
 
         // Emit pointer value (the struct base address)
         emitExpression(out_, expr.object);
@@ -4688,11 +4687,11 @@ class FuncContext {
     void emitPointerMemberAssignment(ref Appender!(ubyte[]) out_, MemberExpression member, Expression value) {
         auto aggDecl = resolvePointeeAggregate(member.object);
         if (!aggDecl)
-            throw new EmitError("Cannot resolve type for pointer assignment", member.toString());
+            throw new EmitError("Cannot resolve type for pointer assignment", member.location);
 
         auto field = aggDecl.getField(member.memberName);
         if (!field)
-            throw new EmitError(format("'%s' has no field '%s'", aggDecl.name, member.memberName));
+            throw new EmitError(format("'%s' has no field '%s'", aggDecl.name, member.memberName), member.location);
 
         // Store: [ptr + offset, value] → i32.store
         emitExpression(out_, member.object);
@@ -4874,7 +4873,7 @@ class FuncContext {
     void emitFunctionLiteral(ref Appender!(ubyte[]) out_, FunctionLiteralExpression funcLit) {
         auto lifted = funcLit.liftedFunction;
         if (lifted is null)
-            throw new EmitError("Function literal has no lifted function");
+            throw new EmitError("Function literal has no lifted function", funcLit.location);
 
         uint tableIdx = emitter.getLambdaTableIndex(lifted.mangledName);
 
@@ -4893,7 +4892,7 @@ class FuncContext {
                 // src: address of captured variable (FP + its frameOffset)
                 auto capInfo = resolveVar(uint.max, capName);
                 if (capInfo is null)
-                    throw new EmitError("Captured variable not found: " ~ capName);
+                    throw new EmitError("Captured variable not found: " ~ capName, funcLit.location);
                 emitVarAddress(out_, capInfo);
 
                 // Store address into env slot
@@ -4927,7 +4926,7 @@ class FuncContext {
     void emitDelegateVarDecl(ref Appender!(ubyte[]) out_, VariableDeclarationStatement varDecl) {
         auto info = resolveVar(varDecl.uniqueLocalId, varDecl.name);
         if (info is null)
-            throw new EmitError("Delegate variable not found: " ~ varDecl.name);
+            throw new EmitError("Delegate variable not found: " ~ varDecl.name, varDecl.location);
 
         if (varDecl.initializer is null)
             return;  // Uninitialized delegate — leave as zero
@@ -4995,7 +4994,7 @@ class FuncContext {
         } else if (auto funcType = cast(FunctionType)dgInfo.type) {
             typeIdx = emitter.getOrCreateDelegateCallTypeFromFuncType(funcType);
         } else {
-            throw new EmitError("Cannot resolve delegate type for call_indirect");
+            throw new EmitError("Cannot resolve delegate type for call_indirect", SourceLocation.init);
         }
         out_ ~= Op.call_indirect;
         leb128u(out_, typeIdx);
@@ -5005,13 +5004,13 @@ class FuncContext {
     void emitIncDec(ref Appender!(ubyte[]) out_, UnaryExpression expr, bool inc) {
         auto ident = cast(IdentifierExpression)expr.operand;
         if (!ident) {
-            throw new EmitError("Increment/decrement requires identifier");
+            throw new EmitError("Increment/decrement requires identifier", expr.location);
         }
 
         // Check unified map first (locals and params)
         if (auto info = resolveVar(ident.resolvedLocalId, ident.name)) {
             if (info.addrMode != AddrMode.wasmLocal)
-                throw new EmitError("Increment/decrement requires scalar variable");
+                throw new EmitError("Increment/decrement requires scalar variable", ident.location);
             auto idx = info.wasmLocalIdx;
 
             if (expr.isPostfix) {
@@ -5074,7 +5073,7 @@ class FuncContext {
             }
         }
 
-        throw new EmitError("Increment/decrement: unknown variable: " ~ ident.name);
+        throw new EmitError("Increment/decrement: unknown variable: " ~ ident.name, ident.location);
     }
     
     void emitCall(ref Appender!(ubyte[]) out_, CallExpression expr) {
@@ -5091,7 +5090,7 @@ class FuncContext {
         
         auto ident = cast(IdentifierExpression)expr.function_;
         if (!ident) {
-            throw new EmitError("Indirect calls not yet supported");
+            throw new EmitError("Indirect calls not yet supported", expr.location);
         }
 
         // Check if the callee is a delegate/function variable — emit call_indirect
@@ -5382,7 +5381,7 @@ class FuncContext {
                                     leb128u(out_, *itableBase);
                                 } else {
                                     throw new EmitError("Class " ~ classDecl.name ~
-                                        " does not implement interface " ~ ifaceDecl.name);
+                                        " does not implement interface " ~ ifaceDecl.name, arg.location);
                                 }
                                 continue;
                             }
@@ -5395,12 +5394,12 @@ class FuncContext {
             if (auto sliceArg = cast(SliceExpression)arg) {
                 auto sourceIdent = cast(IdentifierExpression)sliceArg.array;
                 if (!sourceIdent) {
-                    throw new EmitError("Complex slice source not supported in call argument");
+                    throw new EmitError("Complex slice source not supported in call argument", sliceArg.location);
                 }
 
                 auto srcInfo = resolveVar(sourceIdent.resolvedLocalId, sourceIdent.name);
                 if (!srcInfo || (!srcInfo.isSlice && !srcInfo.isStaticArray)) {
-                    throw new EmitError("Can only sub-slice array-like variables: " ~ sourceIdent.name);
+                    throw new EmitError("Can only sub-slice array-like variables: " ~ sourceIdent.name, sourceIdent.location);
                 }
                 uint sourceElemSize = srcInfo.elementSize;
 
@@ -5521,7 +5520,7 @@ class FuncContext {
 
         auto inst = expr.resolvedInstantiation;
         if (!inst)
-            throw new EmitError("Template instantiation not resolved: " ~ expr.templateName);
+            throw new EmitError("Template instantiation not resolved: " ~ expr.templateName, expr.location);
 
         // Emit call arguments
         foreach (arg; expr.callArguments) {
@@ -5553,7 +5552,7 @@ class FuncContext {
         } else if (name == "__intrinsic_unreachable") {
             out_ ~= Op.unreachable;
         } else {
-            throw new EmitError("Unknown intrinsic: " ~ name);
+            throw new EmitError("Unknown intrinsic: " ~ name, SourceLocation.init);
         }
     }
 
@@ -5760,13 +5759,13 @@ class FuncContext {
                     return;
                 }
             }
-            throw new EmitError("Cannot resolve method '" ~ memberExpr.memberName ~ "' on nested member expression");
+            throw new EmitError("Cannot resolve method '" ~ memberExpr.memberName ~ "' on nested member expression", memberExpr.location);
         }
 
         // Get the struct type from the object
         auto objIdent = cast(IdentifierExpression)memberExpr.object;
         if (!objIdent) {
-            throw new EmitError("Method call on non-identifier object not yet supported");
+            throw new EmitError("Method call on non-identifier object not yet supported", memberExpr.location);
         }
 
         // Unified lookup
@@ -5800,7 +5799,7 @@ class FuncContext {
         }
 
         if (!structDecl && !classDecl) {
-            throw new EmitError("Cannot determine type for method call on " ~ objIdent.name);
+            throw new EmitError("Cannot determine type for method call on " ~ objIdent.name, objIdent.location);
         }
         
         // Find the method
@@ -5841,7 +5840,7 @@ class FuncContext {
         }
         
         if (!method) {
-            throw new EmitError("Type '" ~ typeName ~ "' has no method '" ~ memberExpr.memberName ~ "'");
+            throw new EmitError("Type '" ~ typeName ~ "' has no method '" ~ memberExpr.memberName ~ "'", memberExpr.location);
         }
         
         // Emit 'this' pointer as first argument (address of the instance)
@@ -5976,7 +5975,7 @@ class FuncContext {
         }
 
         if (methodSlot < 0 || !method) {
-            throw new EmitError("Interface " ~ ifaceDecl.name ~ " has no method " ~ methodName);
+            throw new EmitError("Interface " ~ ifaceDecl.name ~ " has no method " ~ methodName, SourceLocation.init);
         }
 
         // Emit obj_ptr as 'this' argument
@@ -6194,18 +6193,18 @@ class FuncContext {
         // Resolve object and method (same logic as emitMethodCall)
         auto objIdent = cast(IdentifierExpression)memberExpr.object;
         if (!objIdent)
-            throw new EmitError("Struct-returning method call on non-identifier object not yet supported");
+            throw new EmitError("Struct-returning method call on non-identifier object not yet supported", memberExpr.location);
 
         auto objInfo = resolveVar(objIdent.resolvedLocalId, objIdent.name);
         if (!objInfo)
-            throw new EmitError("Unknown variable for struct-returning method call: " ~ objIdent.name);
+            throw new EmitError("Unknown variable for struct-returning method call: " ~ objIdent.name, objIdent.location);
 
         StructDecl structDecl = null;
         ClassDecl classDecl = null;
         if (objInfo.isStruct) structDecl = objInfo.structDecl;
         else if (objInfo.isClass) classDecl = objInfo.classDecl;
         if (!structDecl && !classDecl)
-            throw new EmitError("Cannot determine type for struct-returning method call on " ~ objIdent.name);
+            throw new EmitError("Cannot determine type for struct-returning method call on " ~ objIdent.name, objIdent.location);
 
         // Find the method
         FunctionDecl method = null;
@@ -6223,7 +6222,7 @@ class FuncContext {
             }
         }
         if (!method)
-            throw new EmitError("No method '" ~ memberExpr.memberName ~ "' for struct-returning call");
+            throw new EmitError("No method '" ~ memberExpr.memberName ~ "' for struct-returning call", memberExpr.location);
 
         assert(emitter.isLargeReturnType(method.returnType),
             "emitStructReturnMethodCall called for non-large-return method '" ~ method.name ~ "'");
@@ -6464,7 +6463,7 @@ class FuncContext {
                     }
                 }
             }
-            throw new EmitError("Concat-assign (~=) only supported on slice locals/fields");
+            throw new EmitError("Concat-assign (~=) only supported on slice locals/fields", expr.location);
         }
 
         // Check for struct field assignment (p.x = value)
@@ -6494,7 +6493,7 @@ class FuncContext {
 
         auto ident = cast(IdentifierExpression)expr.left;
         if (!ident) {
-            throw new EmitError("Complex assignment targets not yet supported");
+            throw new EmitError("Complex assignment targets not yet supported", expr.location);
         }
 
         // Check captures first (lifted lambda env access)
@@ -6696,7 +6695,7 @@ class FuncContext {
             case AssignmentExpression.Operator.ShiftRightAssign:
                 assert(0, ">>= should be lowered to opShiftRight call");
             case AssignmentExpression.Operator.ConcatAssign:
-                throw new EmitError("~= should use slice path");
+                throw new EmitError("~= should use slice path", SourceLocation.init);
         }
     }
     
@@ -6736,7 +6735,7 @@ class FuncContext {
 
         auto objIdent = cast(IdentifierExpression)member.object;
         if (!objIdent) {
-            throw new EmitError("Complex member assignment targets not yet supported");
+            throw new EmitError("Complex member assignment targets not yet supported", member.location);
         }
         
         // Unified variable lookup
@@ -6747,7 +6746,7 @@ class FuncContext {
                 auto field = aggr.getField(member.memberName);
                 if (!field) {
                     throw new EmitError(format("Unknown field '%s' in '%s'",
-                                              member.memberName, aggr.name));
+                                              member.memberName, aggr.name), member.location);
                 }
 
                 // Store: addr + value
@@ -6782,7 +6781,7 @@ class FuncContext {
             }
         }
         
-        throw new EmitError("Unsupported member assignment target", member.toString());
+        throw new EmitError("Unsupported member assignment target", member.location);
     }
     
     /**

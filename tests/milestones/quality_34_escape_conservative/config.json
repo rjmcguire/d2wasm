@@ -1,0 +1,8 @@
+{
+  "name": "escape_conservative",
+  "description": "Escape analysis is conservative — escaping pointers stay heap-allocated and work correctly",
+  "type": "wasm_exec",
+  "entry": "main",
+  "compiler_args": ["--escape-analysis"],
+  "capability": "escape analysis correctness — conservatively keeps escaping allocations on heap"
+}

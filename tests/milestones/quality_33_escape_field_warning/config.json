@@ -1,0 +1,8 @@
+{
+  "name": "escape_field_warning",
+  "description": "Escape analysis warns when storing address of local in struct field",
+  "type": "compile_output",
+  "compiler_args": ["--escape-analysis"],
+  "expected_output": "storing address of local variable",
+  "capability": "escape analysis diagnostics — &local stored in field produces clear warning"
+}
