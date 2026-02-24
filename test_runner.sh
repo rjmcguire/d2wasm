@@ -60,6 +60,7 @@ run_test() {
     local test_type=$(jq -r '.type' "$config_file")
     local func_name=$(jq -r '.entry // .function // "main"' "$config_file")
     local args=$(jq -r '.args // [] | join(" ")' "$config_file")
+    local compiler_args=$(jq -r '.compiler_args // [] | join(" ")' "$config_file")
     local expected_exit=$(jq -r '.expected_exit // 0' "$config_file")
     
     # Handle unittest type (verified by dub test at startup)
@@ -83,7 +84,7 @@ run_test() {
     fi
     
     local compile_output
-    compile_output=$("$COMPILER" "$test_file" -o "$wasm_file" 2>&1)
+    compile_output=$("$COMPILER" "$test_file" -o "$wasm_file" $compiler_args 2>&1)
     local compile_status=$?
     
     # Handle compile_output test type (check output during compilation)

@@ -1337,6 +1337,8 @@ class BinaryEmitter {
 
     private bool containsOnlyCtfeIntrinsics(Statement stmt) {
         if (auto compound = cast(CompoundStatement)stmt) {
+            // Empty body is NOT ctfe-only — it's a valid runtime no-op function
+            if (compound.statements.length == 0) return false;
             foreach (s; compound.statements) {
                 if (!containsOnlyCtfeIntrinsics(s)) return false;
             }
@@ -2936,21 +2938,23 @@ class BinaryEmitter {
         return cast(uint)globals[arenaBaseGlobal].initValue;
     }
 
-    package uint getFuncIndex(string name) {
+    package uint getFuncIndex(string name, SourceLocation loc = SourceLocation.init) {
         // Check if it's an imported function
         if (auto idx = name in importIndex) {
             return *idx;  // Import indices start at 0
         }
-        
+
         // Check if it's a local function
         if (auto idx = name in funcIndex) {
             // Local function index + number of imports
             return cast(uint)imports.length + *idx;
         }
-        
+
         if (name.length == 0)
-            throw new EmitError("getFuncIndex called with empty function name (method not collected — missing parent declaration?)");
-        throw new EmitError("Unknown function: " ~ name);
+            throw new EmitError("getFuncIndex called with empty function name (method not collected — missing parent declaration?)", loc);
+        throw new EmitError("Unknown function: '" ~ name ~ "' — function was not collected by the emitter. "
+            ~ "Possible causes: void function with no return value, missing from dependency analysis, "
+            ~ "or unsupported calling pattern.", loc);
     }
     
     /**

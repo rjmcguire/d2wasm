@@ -1496,7 +1496,7 @@ class FuncContext {
                 }
                 // Function call returning aggregate — pass struct local's
                 // frame address directly as hidden result pointer
-                emitStructReturnCall(out_, ident.name, callExpr.arguments, info.frameOffset);
+                emitStructReturnCall(out_, ident.name, callExpr.arguments, info.frameOffset, callExpr.location);
                 return;
             }
             // Method call returning struct: Point p = s.origin()
@@ -2087,7 +2087,7 @@ class FuncContext {
         // Function call returning a slice — same hidden result pointer pattern as structs
         if (auto callExpr = cast(CallExpression)stmt.initializer) {
             if (auto ident = cast(IdentifierExpression)callExpr.function_) {
-                emitStructReturnCall(out_, ident.name, callExpr.arguments, info.frameOffset);
+                emitStructReturnCall(out_, ident.name, callExpr.arguments, info.frameOffset, callExpr.location);
                 return;
             }
         }
@@ -2293,7 +2293,7 @@ class FuncContext {
         // Function call returning static array: int[3] arr = makeArray(...)
         if (auto callExpr = cast(CallExpression)stmt.initializer) {
             if (auto ident = cast(IdentifierExpression)callExpr.function_) {
-                emitStructReturnCall(out_, ident.name, callExpr.arguments, info.frameOffset);
+                emitStructReturnCall(out_, ident.name, callExpr.arguments, info.frameOffset, callExpr.location);
                 return;
             }
         }
@@ -4853,7 +4853,7 @@ class FuncContext {
             leb128u(out_, tempLocalA);
             foreach (arg; expr.arguments)
                 emitExpression(out_, arg);
-            uint funcIdx = emitter.getFuncIndex(classDecl.constructor.mangledName);
+            uint funcIdx = emitter.getFuncIndex(classDecl.constructor.mangledName, expr.location);
             out_ ~= Op.call;
             leb128u(out_, funcIdx);
         } else {
@@ -5485,7 +5485,7 @@ class FuncContext {
         
         // Call — use IFTI resolved name if available
         string callName = expr.resolvedInstantiation ? expr.resolvedInstantiation.name : ident.name;
-        uint funcIdx = emitter.getFuncIndex(callName);
+        uint funcIdx = emitter.getFuncIndex(callName, expr.location);
         out_ ~= Op.call;
         leb128u(out_, funcIdx);
         
@@ -5529,7 +5529,7 @@ class FuncContext {
         }
 
         // Call the mangled function
-        uint funcIdx = emitter.getFuncIndex(inst.name);
+        uint funcIdx = emitter.getFuncIndex(inst.name, expr.location);
         out_ ~= Op.call;
         leb128u(out_, funcIdx);
     }
@@ -5725,7 +5725,7 @@ class FuncContext {
                 }
                 // Call the imported function
                 string importName = "__ctfe_runtime_" ~ memberExpr.memberName;
-                uint funcIdx = emitter.getFuncIndex(importName);
+                uint funcIdx = emitter.getFuncIndex(importName, memberExpr.location);
                 out_ ~= Op.call;
                 leb128u(out_, funcIdx);
                 return;
@@ -5754,7 +5754,7 @@ class FuncContext {
                         emitExpression(out_, arg);
                     }
                     // Direct call (struct method)
-                    uint funcIdx = emitter.getFuncIndex(method.mangledName);
+                    uint funcIdx = emitter.getFuncIndex(method.mangledName, memberExpr.location);
                     out_ ~= Op.call;
                     leb128u(out_, funcIdx);
                     return;
@@ -5888,7 +5888,7 @@ class FuncContext {
         // For classes: call_indirect through vtable (virtual dispatch)
         if (structDecl) {
             // Struct method: direct call
-            uint funcIdx = emitter.getFuncIndex(method.mangledName);
+            uint funcIdx = emitter.getFuncIndex(method.mangledName, memberExpr.location);
             out_ ~= Op.call;
             leb128u(out_, funcIdx);
         } else if (classDecl) {
@@ -5904,7 +5904,7 @@ class FuncContext {
             
             if (methodSlot < 0) {
                 // Not a virtual method (constructor/destructor) - use direct call
-                uint funcIdx = emitter.getFuncIndex(method.mangledName);
+                uint funcIdx = emitter.getFuncIndex(method.mangledName, memberExpr.location);
                 out_ ~= Op.call;
                 leb128u(out_, funcIdx);
             } else {
@@ -5939,7 +5939,7 @@ class FuncContext {
                 }
                 
                 // call_indirect with type signature
-                uint funcIdx = emitter.getFuncIndex(method.mangledName);
+                uint funcIdx = emitter.getFuncIndex(method.mangledName, memberExpr.location);
                 uint typeIdx = emitter.functions[funcIdx - cast(uint)emitter.imports.length].typeIndex;
                 
                 out_ ~= Op.call_indirect;
@@ -6059,7 +6059,7 @@ class FuncContext {
         }
         
         // Call the free function by name
-        uint funcIdx = emitter.getFuncIndex(memberExpr.memberName);
+        uint funcIdx = emitter.getFuncIndex(memberExpr.memberName, memberExpr.location);
         out_ ~= Op.call;
         leb128u(out_, funcIdx);
     }
@@ -6089,7 +6089,8 @@ class FuncContext {
      * as the hidden first parameter, so the callee writes into the caller's frame.
      */
     void emitStructReturnCall(ref Appender!(ubyte[]) out_, string funcName,
-                              Expression[] args, int resultFrameOffset) {
+                              Expression[] args, int resultFrameOffset,
+                              SourceLocation loc = SourceLocation.init) {
         assert(frameSize > 0, "emitStructReturnCall requires a shadow stack frame (frameSize > 0)");
         assert(funcName.length > 0, "emitStructReturnCall: empty function name");
         // Push hidden result pointer as first argument: FP + resultFrameOffset
@@ -6165,7 +6166,7 @@ class FuncContext {
         }
 
         // Call
-        uint funcIdx = emitter.getFuncIndex(funcName);
+        uint funcIdx = emitter.getFuncIndex(funcName, loc);
         out_ ~= Op.call;
         leb128u(out_, funcIdx);
 
@@ -6253,7 +6254,7 @@ class FuncContext {
 
         // --- Dispatch: direct call or virtual ---
         if (structDecl) {
-            uint funcIdx = emitter.getFuncIndex(method.mangledName);
+            uint funcIdx = emitter.getFuncIndex(method.mangledName, memberExpr.location);
             out_ ~= Op.call;
             leb128u(out_, funcIdx);
         } else if (classDecl) {
@@ -6264,7 +6265,7 @@ class FuncContext {
                 if (vm.name == method.name) { methodSlot = cast(int)i; break; }
 
             if (methodSlot < 0) {
-                uint funcIdx = emitter.getFuncIndex(method.mangledName);
+                uint funcIdx = emitter.getFuncIndex(method.mangledName, memberExpr.location);
                 out_ ~= Op.call;
                 leb128u(out_, funcIdx);
             } else {
@@ -6284,7 +6285,7 @@ class FuncContext {
                     out_ ~= Op.i32_add;
                 }
 
-                uint funcIdx = emitter.getFuncIndex(method.mangledName);
+                uint funcIdx = emitter.getFuncIndex(method.mangledName, memberExpr.location);
                 assert(funcIdx >= emitter.imports.length,
                     "emitStructReturnMethodCall: method funcIdx is an import, not a user function");
                 uint typeIdx = emitter.functions[funcIdx - cast(uint)emitter.imports.length].typeIndex;
