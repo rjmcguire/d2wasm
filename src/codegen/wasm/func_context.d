@@ -92,6 +92,16 @@ class FuncContext {
     VarInfo[uint] varsByLocalId;    // uniqueLocalId → VarInfo (primary lookup)
     VarInfo[string] varsByName;     // name → VarInfo (fallback for "this", legacy)
 
+    // Capture info for lifted lambdas (populated from FunctionLiteralExpression)
+    struct CaptureInfo {
+        string name;
+        uint localId;      // lambda's local ID for this capture
+        uint envOffset;    // byte offset in env struct
+        Type type;
+    }
+    CaptureInfo[] captures;
+    uint envParamIdx = uint.max;  // WASM local index of __env param
+
     /// Resolve a variable by localId (preferred) or name (fallback).
     /// Returns null if not found (e.g. globals, constants).
     VarInfo* resolveVar(uint localId, string name) {
@@ -318,6 +328,19 @@ class FuncContext {
             frameLine = frameInfo.line;
             frameColumn = frameInfo.column;
         }
+
+        // Populate capture info for lifted lambdas
+        if (f.lambdaExpr !is null && !f.lambdaExpr.isNonCapturing) {
+            envParamIdx = 0;  // __env is always the first WASM param (local index 0)
+            foreach (i, capName; f.lambdaExpr.capturedNames) {
+                CaptureInfo ci;
+                ci.name = capName;
+                ci.envOffset = f.lambdaExpr.capturedOffsets[i];
+                ci.type = f.lambdaExpr.capturedTypes[i];
+                ci.localId = uint.max;  // matched by name
+                captures ~= ci;
+            }
+        }
     }
     
     /**
@@ -499,10 +522,35 @@ class FuncContext {
                 varsByName[varDecl.name] = vi;
 
                 frameSize += 8;  // {tableIndex: i32, envPtr: i32}
+
+                // Allocate env struct on shadow stack for capturing lambdas
+                if (auto funcLit = cast(FunctionLiteralExpression)varDecl.initializer) {
+                    if (!funcLit.isNonCapturing && funcLit.envSize > 0) {
+                        frameSize = (frameSize + 3) & ~3;
+                        funcLit.envFrameOffset = frameSize;
+                        frameSize += funcLit.envSize;
+                    }
+                }
+
                 return;
             }
 
-            // Regular local - add to WASM locals
+            // Regular local - add to WASM locals (or shadow stack if captured)
+            if (varDecl.isCaptured) {
+                // Captured scalar: promote to shadow stack for addressability
+                frameSize = (frameSize + 3) & ~3;
+                VarInfo vi;
+                vi.kind = VarKind.scalar;
+                vi.addrMode = AddrMode.shadowStack;
+                vi.frameOffset = frameSize;
+                vi.type = varDecl.type;
+                if (varDecl.uniqueLocalId != uint.max)
+                    varsByLocalId[varDecl.uniqueLocalId] = vi;
+                varsByName[varDecl.name] = vi;
+                frameSize += 4;
+                return;
+            }
+
             auto vt = emitter.dTypeToValType(varDecl.type);
             uint wasmIdx = cast(uint)localTypes.length;
             localTypes ~= vt;
@@ -1316,7 +1364,32 @@ class FuncContext {
     
     void emitVarDecl(ref Appender!(ubyte[]) out_, VariableDeclarationStatement stmt) {
         auto info = resolveVar(stmt.uniqueLocalId, stmt.name);
-        if (!info || info.addrMode != AddrMode.wasmLocal) {
+        if (!info) {
+            throw new EmitError("emitVarDecl: unresolved local: " ~ stmt.name);
+        }
+
+        if (info.addrMode == AddrMode.shadowStack && info.kind == VarKind.scalar) {
+            // Captured scalar promoted to shadow stack — store via FP + offset
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, info.frameOffset);
+            out_ ~= Op.i32_add;
+
+            if (stmt.initializer) {
+                emitExpression(out_, stmt.initializer);
+            } else {
+                out_ ~= Op.i32_const;
+                leb128s(out_, 0);
+            }
+
+            out_ ~= Op.i32_store;
+            out_ ~= cast(ubyte) 0x02; // align=4
+            leb128u(out_, 0);          // offset=0
+            return;
+        }
+
+        if (info.addrMode != AddrMode.wasmLocal) {
             throw new EmitError("emitVarDecl: expected scalar local: " ~ stmt.name);
         }
 
@@ -4190,6 +4263,26 @@ class FuncContext {
     }
     
     void emitIdentifier(ref Appender!(ubyte[]) out_, IdentifierExpression expr) {
+        // Check captures first (lifted lambda env access)
+        foreach (ref cap; captures) {
+            if (cap.name == expr.name) {
+                // By-reference capture: env stores pointer to captured var's shadow stack slot
+                out_ ~= Op.local_get;
+                leb128u(out_, envParamIdx);  // __env
+                if (cap.envOffset > 0) {
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, cap.envOffset);
+                    out_ ~= Op.i32_add;
+                }
+                out_ ~= Op.i32_load;          // load pointer to captured var
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+                out_ ~= Op.i32_load;          // dereference: load value
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+                return;
+            }
+        }
         // Unified variable resolution: check varsByLocalId/varsByName first
         if (auto info = resolveVar(expr.resolvedLocalId, expr.name)) {
             final switch (info.addrMode) {
@@ -4203,6 +4296,12 @@ class FuncContext {
                     out_ ~= Op.i32_const;
                     leb128s(out_, info.frameOffset);
                     out_ ~= Op.i32_add;
+                    // Scalar on shadow stack (promoted for capture): load value
+                    if (info.kind == VarKind.scalar) {
+                        out_ ~= Op.i32_load;
+                        out_ ~= cast(ubyte)0x02;
+                        leb128u(out_, 0);
+                    }
                     return;
                 case AddrMode.paramPointer:
                     out_ ~= Op.local_get;
@@ -4720,13 +4819,46 @@ class FuncContext {
 
         uint tableIdx = emitter.getLambdaTableIndex(lifted.mangledName);
 
-        // Push tableIndex
-        out_ ~= Op.i32_const;
-        leb128s(out_, cast(int)tableIdx);
+        if (!funcLit.isNonCapturing) {
+            // Capturing lambda: construct env struct on shadow stack
+            // envFrameOffset was set during collectLocals
+            foreach (i, capName; funcLit.capturedNames) {
+                // Store pointer to captured var at env + captureOffset
+                // dest: FP + envFrameOffset + capturedOffsets[i]
+                out_ ~= Op.local_get;
+                leb128u(out_, fpLocal);
+                out_ ~= Op.i32_const;
+                leb128s(out_, funcLit.envFrameOffset + funcLit.capturedOffsets[i]);
+                out_ ~= Op.i32_add;
 
-        // Push envPtr (0 for non-capturing)
-        out_ ~= Op.i32_const;
-        leb128s(out_, 0);
+                // src: address of captured variable (FP + its frameOffset)
+                auto capInfo = resolveVar(uint.max, capName);
+                if (capInfo is null)
+                    throw new EmitError("Captured variable not found: " ~ capName);
+                emitVarAddress(out_, capInfo);
+
+                // Store address into env slot
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+            }
+
+            // Push {tableIndex, envPtr}
+            out_ ~= Op.i32_const;
+            leb128s(out_, cast(int)tableIdx);
+            // envPtr = FP + envFrameOffset (absolute address via SP)
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, funcLit.envFrameOffset);
+            out_ ~= Op.i32_add;
+        } else {
+            // Non-capturing: push {tableIndex, 0}
+            out_ ~= Op.i32_const;
+            leb128s(out_, cast(int)tableIdx);
+            out_ ~= Op.i32_const;
+            leb128s(out_, 0);
+        }
     }
 
     /**
@@ -6258,6 +6390,34 @@ class FuncContext {
             throw new EmitError("Complex assignment targets not yet supported");
         }
 
+        // Check captures first (lifted lambda env access)
+        foreach (ref cap; captures) {
+            if (cap.name == ident.name) {
+                // Load pointer to captured var from env
+                out_ ~= Op.local_get;
+                leb128u(out_, envParamIdx);
+                if (cap.envOffset > 0) {
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, cap.envOffset);
+                    out_ ~= Op.i32_add;
+                }
+                out_ ~= Op.i32_load;  // load pointer to captured var
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+                // Emit RHS value
+                emitExpression(out_, expr.right);
+                // Save value, store through pointer, leave value on stack
+                out_ ~= Op.local_tee;
+                leb128u(out_, tempLocalB);
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+                out_ ~= Op.local_get;
+                leb128u(out_, tempLocalB);
+                return;
+            }
+        }
+
         // Check for implicit field assignment in a method (fieldName = value)
         if (func.structParent !is null || func.classParent !is null) {
             AggregateDecl parent = func.structParent ? cast(AggregateDecl)func.structParent
@@ -6300,6 +6460,38 @@ class FuncContext {
                 }
                 out_ ~= Op.local_tee;
                 leb128u(out_, wasmIdx);
+                return;
+            }
+            // Scalar on shadow stack (promoted for capture): store value
+            if (info.addrMode == AddrMode.shadowStack && info.kind == VarKind.scalar) {
+                emitVarAddress(out_, info);  // FP + offset
+                if (expr.loweredCall) {
+                    emitExpression(out_, expr.loweredCall);
+                } else if (expr.operator != AssignmentExpression.Operator.Assign) {
+                    // Compound assignment: load current, compute, store
+                    // Duplicate the address for both load and store
+                    out_ ~= Op.local_set;
+                    leb128u(out_, tempLocalA);
+                    out_ ~= Op.local_get;
+                    leb128u(out_, tempLocalA);
+                    out_ ~= Op.local_get;
+                    leb128u(out_, tempLocalA);
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                    emitExpression(out_, expr.right);
+                    emitCompoundOp(out_, expr.operator);
+                } else {
+                    emitExpression(out_, expr.right);
+                }
+                // Save value, store it, leave value on stack (assignment is an expression)
+                out_ ~= Op.local_tee;
+                leb128u(out_, tempLocalB);
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+                out_ ~= Op.local_get;
+                leb128u(out_, tempLocalB);
                 return;
             }
             // Shadow-stack or param-pointer aggregate reassignment: s = expr

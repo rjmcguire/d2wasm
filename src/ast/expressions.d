@@ -735,6 +735,9 @@ class FunctionLiteralExpression : Expression {
     string[] capturedNames;
     Type[] capturedTypes;
     uint[] capturedOffsets;     // byte offsets in env struct
+    uint[] capturedOuterLocalIds;  // outer function's local IDs
+    uint envSize;               // total bytes for env struct
+    uint envFrameOffset;        // offset within enclosing function's shadow stack frame
     bool isNonCapturing;
 
     this(SourceLocation loc, bool isDelegateKeyword, Type returnType,

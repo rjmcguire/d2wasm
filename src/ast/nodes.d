@@ -298,6 +298,7 @@ struct Parameter {
     
     // Assigned by type checker - unique ID for this parameter
     uint uniqueLocalId = uint.max;  // uint.max = unassigned
+    bool isCaptured;  // true if captured by a delegate/lambda
     
     string toString() const {
         if (defaultValue) {
@@ -518,6 +519,8 @@ class VariableDecl : Declaration {
 
     // WASM global index for scalar globals (int, bool, etc.)
     uint wasmGlobalIndex = uint.max;  // uint.max = not a scalar global
+
+    bool isCaptured;  // true if captured by a delegate/lambda
     
     this(SourceLocation loc, string name, Type type, 
          Expression initializer = null, bool isPublic = false) {

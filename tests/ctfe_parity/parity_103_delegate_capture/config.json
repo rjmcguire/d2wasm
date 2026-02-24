@@ -1,0 +1,6 @@
+{
+  "name": "delegate_capture",
+  "description": "Capturing delegate with by-reference semantics",
+  "type": "wasm_exec",
+  "expected_value": 25
+}

@@ -152,6 +152,7 @@ class VariableDeclarationStatement : Statement {
     // Assigned by type checker - unique ID for this local variable
     uint uniqueLocalId = uint.max;  // uint.max = unassigned
     bool needsDestruction = false;  // Has destructor that needs calling
+    bool isCaptured;  // true if captured by a delegate/lambda
     
     this(SourceLocation loc, string name, Type type, Expression initializer = null) {
         super(loc);

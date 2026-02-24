@@ -70,6 +70,13 @@ class TypeChecker {
     // Lambda counter for generating unique lifted function names
     private uint lambdaCounter;
 
+    // Capture context for lambda/delegate capture analysis
+    private struct CaptureContext {
+        FunctionLiteralExpression lambdaExpr;
+        Scope outerScope;
+    }
+    private CaptureContext* activeCaptureCtx;
+
     this(SymbolTable symbolTable) {
         this.symbolTable = symbolTable;
         this.templateInstantiator = new TemplateInstantiator();
@@ -973,6 +980,43 @@ class TypeChecker {
                     return field.type;
                 }
             }
+            // Check if this is a captured variable from an outer scope (lambda/delegate)
+            if (activeCaptureCtx !is null) {
+                auto outerSymbol = activeCaptureCtx.outerScope.lookup(expr.name);
+                if (outerSymbol !is null &&
+                    (outerSymbol.kind == SymbolKind.Variable || outerSymbol.kind == SymbolKind.Parameter))
+                {
+                    auto lambdaExpr = activeCaptureCtx.lambdaExpr;
+
+                    // Check if already captured (repeated reference)
+                    bool alreadyCaptured = false;
+                    foreach (cn; lambdaExpr.capturedNames)
+                        if (cn == expr.name) { alreadyCaptured = true; break; }
+
+                    if (!alreadyCaptured) {
+                        lambdaExpr.capturedNames ~= expr.name;
+                        lambdaExpr.capturedTypes ~= outerSymbol.type;
+                        lambdaExpr.capturedOuterLocalIds ~= outerSymbol.uniqueLocalId;
+
+                        // Mark outer variable as captured
+                        if (auto varDecl = cast(VariableDecl)outerSymbol.declaration)
+                            varDecl.isCaptured = true;
+                    }
+
+                    // Allocate a local ID in the lambda's scope for this capture
+                    uint captureLocalId = symbolTable.allocateLocalId();
+                    expr.resolvedLocalId = captureLocalId;
+
+                    // Register in lambda scope so repeated references resolve normally
+                    auto capSymbol = new Symbol(expr.name, outerSymbol.kind,
+                        outerSymbol.type, outerSymbol.declaration, expr.location);
+                    capSymbol.uniqueLocalId = captureLocalId;
+                    symbolTable.addSymbol(capSymbol);
+
+                    return outerSymbol.type;
+                }
+            }
+
             throw new TypeError(
                 format("Undefined identifier '%s'", expr.name),
                 expr.location
@@ -1988,13 +2032,45 @@ class TypeChecker {
         );
 
         // 4. Type-check the lambda body in an isolated scope
+        //    Save outer scope BEFORE reset so capture analysis can search it
+        auto outerScope = symbolTable.getCurrentScope();
         auto saved = symbolTable.saveAndResetScope();
         scope(exit) symbolTable.restoreScope(saved);
+
+        // Set capture context so checkIdentifierExpression can detect captures
+        CaptureContext captureCtx = CaptureContext(expr, outerScope);
+        auto prevCtx = activeCaptureCtx;
+        activeCaptureCtx = &captureCtx;
+        scope(exit) activeCaptureCtx = prevCtx;
 
         checkFunctionDeclaration(funcDecl);
 
         expr.liftedFunction = funcDecl;
-        expr.isNonCapturing = true;  // Phase 1: no capture analysis yet
+
+        // Compute env struct layout from detected captures
+        uint offset = 0;
+        foreach (i, capName; expr.capturedNames) {
+            expr.capturedOffsets ~= offset;
+            offset += 4;  // each capture = 4 bytes (pointer to captured var)
+        }
+        expr.envSize = offset;
+        expr.isNonCapturing = (expr.capturedNames.length == 0);
+
+        // Mark captured variables on the enclosing function
+        if (currentFunctionDecl !is null && expr.capturedNames.length > 0) {
+            // Mark captured parameters
+            foreach (capName; expr.capturedNames) {
+                foreach (ref p; currentFunctionDecl.parameters) {
+                    if (p.name == capName) {
+                        p.isCaptured = true;
+                        break;
+                    }
+                }
+            }
+            // Mark captured local variables in the function body
+            if (currentFunctionDecl.body_ !is null)
+                markCapturedLocals(currentFunctionDecl.body_, expr.capturedNames);
+        }
 
         // 5. Build the FunctionType (user-visible params only, not __env)
         Type[] paramTypes;
@@ -2005,6 +2081,32 @@ class TypeChecker {
                                    expr.isDelegateKeyword);
         expr.type = ft;
         return ft;
+    }
+
+    /// Walk a statement tree and mark VariableDeclarationStatement nodes as captured
+    /// if their name appears in the capture list.
+    private static void markCapturedLocals(Statement stmt, string[] capturedNames) {
+        if (stmt is null) return;
+        if (auto compound = cast(CompoundStatement)stmt) {
+            foreach (s; compound.statements)
+                markCapturedLocals(s, capturedNames);
+        } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
+            foreach (cn; capturedNames) {
+                if (cn == varDecl.name) {
+                    varDecl.isCaptured = true;
+                    break;
+                }
+            }
+        } else if (auto ifStmt = cast(IfStatement)stmt) {
+            markCapturedLocals(ifStmt.thenStatement, capturedNames);
+            markCapturedLocals(ifStmt.elseStatement, capturedNames);
+        } else if (auto forStmt = cast(ForStatement)stmt) {
+            markCapturedLocals(forStmt.init, capturedNames);
+            markCapturedLocals(forStmt.body_, capturedNames);
+        } else if (auto whileStmt = cast(WhileStatement)stmt) {
+            markCapturedLocals(whileStmt.body_, capturedNames);
+        }
+        // Other statement types don't contain variable declarations
     }
 
     /**

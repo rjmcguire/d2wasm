@@ -64,6 +64,7 @@ class EmitError : Exception {
 //==============================================================================
 
 struct FuncInfo {
+    import ast.expressions : FunctionLiteralExpression;
     string name;
     uint typeIndex;
     FunctionDecl decl;
@@ -72,6 +73,7 @@ struct FuncInfo {
     StructDecl structParent;  // Non-null for struct methods
     ClassDecl classParent;    // Non-null for class methods
     ParamLayout paramLayout;  // Canonical parameter layout
+    FunctionLiteralExpression lambdaExpr;  // Non-null for lifted lambdas (capture info)
 }
 
 //==============================================================================
@@ -2054,6 +2056,7 @@ class BinaryEmitter {
             info.typeIndex = tIdx;
             info.isImport = false;
             info.paramLayout = layout;
+            info.lambdaExpr = funcLit;
 
             funcIndex[lifted.mangledName] = cast(uint)functions.length;
             functions ~= info;
