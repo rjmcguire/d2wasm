@@ -19,6 +19,14 @@ import semantic.symbol_table;
 public import codegen.native.backend : NativeBackend, NativeCompiledFunction;
 public import codegen.wasm.backend : WASMBackend, WASMCompiledFunction;
 
+/// A single call stack frame for exception trace reporting.
+struct CallStackFrame {
+    string funcName;
+    string fileName;
+    uint line;
+    uint column;
+}
+
 /**
  * Result of compiling and executing a function
  */
@@ -28,21 +36,34 @@ struct ExecutionResult {
     string stringValue;
     ubyte[] arrayBytes;
     string error;
-    
+    int throwLine;
+    int throwCol;
+    CallStackFrame[] callStack;
+
     static ExecutionResult fromInt(long v) {
-        return ExecutionResult(true, v, null, null, null);
+        return ExecutionResult(true, v);
     }
-    
+
     static ExecutionResult fromString(string s) {
-        return ExecutionResult(true, 0, s, null, null);
+        ExecutionResult r;
+        r.success = true;
+        r.stringValue = s;
+        return r;
     }
-    
+
     static ExecutionResult fromArray(ubyte[] bytes) {
-        return ExecutionResult(true, 0, null, bytes, null);
+        ExecutionResult r;
+        r.success = true;
+        r.arrayBytes = bytes;
+        return r;
     }
-    
-    static ExecutionResult failure(string err) {
-        return ExecutionResult(false, 0, null, null, err);
+
+    static ExecutionResult failure(string err, int line = 0, int col = 0) {
+        ExecutionResult r;
+        r.error = err;
+        r.throwLine = line;
+        r.throwCol = col;
+        return r;
     }
 }
 

@@ -251,6 +251,8 @@ class NativeCompiledFunction : CompiledFunction {
     private NativeTryContext[] tryStack;
     private ubyte* exceptionPendingAddr;  // absolute address in data section (i32)
     private ubyte* exceptionValueAddr;    // absolute address in data section (i32)
+    private ubyte* exceptionLineAddr;     // absolute address in data section (i32)
+    private ubyte* exceptionColAddr;      // absolute address in data section (i32)
 
     // For multi-function support: map function names to their labels
     private Label[string] functionLabels;
@@ -699,11 +701,13 @@ class NativeCompiledFunction : CompiledFunction {
     // ========== Exception Handling Helpers ==========
 
     /// Allocate exception globals in the data section.
-    /// Two i32 slots: __exception_pending (0=none) and __exception_value.
+    /// Four i32 slots: pending, value, line, col.
     private void allocateExceptionGlobals() {
         ubyte[4] zero = [0, 0, 0, 0];
         exceptionPendingAddr = dataSection.addData(zero[]);
         exceptionValueAddr = dataSection.addData(zero[]);
+        exceptionLineAddr = dataSection.addData(zero[]);
+        exceptionColAddr = dataSection.addData(zero[]);
     }
 
     /// Emit exception check after a function call (void context — result already consumed or discarded).
@@ -754,6 +758,16 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitMoveX0ToX9();  // x9 = thrown value
         gen.emitLoadImm64(cast(ulong)cast(size_t)exceptionValueAddr);
         // STR w9, [x0] — store 32-bit value at address in x0
+        gen.emitStoreToPointerFromX9(0);
+
+        // Store throw location
+        gen.emitImm32(stencil_load_imm32, cast(int)expr.location.line);
+        gen.emitMoveX0ToX9();
+        gen.emitLoadImm64(cast(ulong)cast(size_t)exceptionLineAddr);
+        gen.emitStoreToPointerFromX9(0);
+        gen.emitImm32(stencil_load_imm32, cast(int)expr.location.column);
+        gen.emitMoveX0ToX9();
+        gen.emitLoadImm64(cast(ulong)cast(size_t)exceptionColAddr);
         gen.emitStoreToPointerFromX9(0);
 
         // Set __exception_pending = 1
@@ -4549,7 +4563,8 @@ class NativeCompiledFunction : CompiledFunction {
 
         if (exceptionPendingAddr !is null && *cast(int*)exceptionPendingAddr != 0)
             return ExecutionResult.failure("uncaught exception (thrown value: "
-                ~ to!string(*cast(int*)exceptionValueAddr) ~ ")");
+                ~ to!string(*cast(int*)exceptionValueAddr) ~ ")",
+                *cast(int*)exceptionLineAddr, *cast(int*)exceptionColAddr);
         return ExecutionResult.fromInt(cast(int)result);  // Sign-extend 32-bit to 64-bit
     }
 
@@ -4617,7 +4632,8 @@ class NativeCompiledFunction : CompiledFunction {
 
         if (exceptionPendingAddr !is null && *cast(int*)exceptionPendingAddr != 0)
             return ExecutionResult.failure("uncaught exception (thrown value: "
-                ~ to!string(*cast(int*)exceptionValueAddr) ~ ")");
+                ~ to!string(*cast(int*)exceptionValueAddr) ~ ")",
+                *cast(int*)exceptionLineAddr, *cast(int*)exceptionColAddr);
         return ExecutionResult.fromInt(cast(int)result);  // Sign-extend 32-bit to 64-bit
     }
 
@@ -4688,7 +4704,8 @@ class NativeCompiledFunction : CompiledFunction {
 
         if (exceptionPendingAddr !is null && *cast(int*)exceptionPendingAddr != 0)
             return ExecutionResult.failure("uncaught exception (thrown value: "
-                ~ to!string(*cast(int*)exceptionValueAddr) ~ ")");
+                ~ to!string(*cast(int*)exceptionValueAddr) ~ ")",
+                *cast(int*)exceptionLineAddr, *cast(int*)exceptionColAddr);
 
         // Copy result bytes
         ubyte[] resultBytes = resultBuf[0 .. resultSize].dup;

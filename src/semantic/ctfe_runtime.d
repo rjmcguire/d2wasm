@@ -565,6 +565,57 @@ class CTFERuntime {
         return m3_GetMemorySize(runtime);
     }
     
+    /// A single call stack frame read from WASM linear memory.
+    struct CallStackFrame {
+        string funcName;
+        string fileName;
+        uint line;
+        uint column;
+    }
+
+    /**
+     * Read call stack frames from linear memory as structured data.
+     * Returns frames from bottom (first called) to top (most recent).
+     */
+    CallStackFrame[] getCallStackFrames() {
+        import codegen.wasm.types : CALL_STACK_DEPTH_OFFSET, CALL_STACK_FRAMES_OFFSET,
+                                    CALL_STACK_FRAME_SIZE, CALL_STACK_MAX_FRAMES;
+
+        if (!initialized) return null;
+
+        try {
+            uint depth = readU32(CALL_STACK_DEPTH_OFFSET);
+            if (depth == 0 || depth > CALL_STACK_MAX_FRAMES)
+                return null;
+
+            CallStackFrame[] result;
+            for (uint i = 0; i < depth; i++) {
+                uint frameAddr = CALL_STACK_FRAMES_OFFSET + i * CALL_STACK_FRAME_SIZE;
+
+                uint nameOffset = readU32(frameAddr + 0);
+                uint nameLen = readU32(frameAddr + 4);
+                uint fileOffset = readU32(frameAddr + 8);
+                uint fileLen = readU32(frameAddr + 12);
+
+                CallStackFrame frame;
+                frame.line = readU32(frameAddr + 16);
+                frame.column = readU32(frameAddr + 20);
+                frame.funcName = "<unknown>";
+                frame.fileName = "<unknown>";
+                try {
+                    if (nameLen > 0 && nameLen < 256)
+                        frame.funcName = readString(nameOffset, nameLen);
+                    if (fileLen > 0 && fileLen < 1024)
+                        frame.fileName = readString(fileOffset, fileLen);
+                } catch (Exception) {}
+                result ~= frame;
+            }
+            return result;
+        } catch (Exception) {
+            return null;
+        }
+    }
+
     /**
      * Read call stack from linear memory and format error message.
      * Called when CTFE execution fails to provide stack trace.

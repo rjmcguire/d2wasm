@@ -139,6 +139,24 @@ class WASMCompiledFunction : CompiledFunction {
         this.runtime.loadModule(wasm);
     }
 
+    /// Check for uncaught exception after WASM execution and build failure result.
+    private ExecutionResult checkUncaughtException() {
+        import codegen.backend : CallStackFrame;
+
+        auto r = ExecutionResult.failure("uncaught exception (thrown value: "
+            ~ to!string(runtime.getGlobalI32("__exception_value")) ~ ")",
+            runtime.getGlobalI32("__exception_line"),
+            runtime.getGlobalI32("__exception_col"));
+
+        // Read preserved call stack frames from WASM linear memory
+        auto wasmFrames = runtime.getCallStackFrames();
+        if (wasmFrames !is null) {
+            foreach (f; wasmFrames)
+                r.callStack ~= CallStackFrame(f.funcName, f.fileName, f.line, f.column);
+        }
+        return r;
+    }
+
     override ExecutionResult call(long[] args) {
         try {
             int[] intArgs;
@@ -151,8 +169,7 @@ class WASMCompiledFunction : CompiledFunction {
 
             auto result = runtime.callI32(funcName, intArgs);
             if (runtime.getGlobalI32("__exception_pending") != 0)
-                return ExecutionResult.failure("uncaught exception (thrown value: "
-                    ~ to!string(runtime.getGlobalI32("__exception_value")) ~ ")");
+                return checkUncaughtException();
             return ExecutionResult.fromInt(result.asInt());
 
         } catch (CTFERuntimeError e) {
@@ -172,8 +189,7 @@ class WASMCompiledFunction : CompiledFunction {
 
             auto result = runtime.callI32(targetFuncName, intArgs);
             if (runtime.getGlobalI32("__exception_pending") != 0)
-                return ExecutionResult.failure("uncaught exception (thrown value: "
-                    ~ to!string(runtime.getGlobalI32("__exception_value")) ~ ")");
+                return checkUncaughtException();
             return ExecutionResult.fromInt(result.asInt());
 
         } catch (CTFERuntimeError e) {
@@ -200,8 +216,7 @@ class WASMCompiledFunction : CompiledFunction {
             // Call function (void return, writes to resultAddr)
             auto result = runtime.callI32(targetFuncName, intArgs);
             if (runtime.getGlobalI32("__exception_pending") != 0)
-                return ExecutionResult.failure("uncaught exception (thrown value: "
-                    ~ to!string(runtime.getGlobalI32("__exception_value")) ~ ")");
+                return checkUncaughtException();
 
             // Read result bytes from memory
             ubyte[] resultBytes = runtime.readMemory(resultAddr, resultSize);

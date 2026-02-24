@@ -1,7 +1,2 @@
-error: CTFE execution error: CTFE execution failed: [trap] integer divide by zero
-
-Call stack (most recent first):
---> <unknown>:1:1 in `divide()`
-int divide(int a, int b) {
-note: while evaluating `enum BAD`
-enum BAD = divide(10, 0);
+integer divide by zero
+while evaluating `enum BAD`

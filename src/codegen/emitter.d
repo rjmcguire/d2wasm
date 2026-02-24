@@ -123,6 +123,8 @@ class BinaryEmitter {
         // Exception handling globals
         uint exceptionPendingGlobal;  // Index of __exception_pending global
         uint exceptionValueGlobal;    // Index of __exception_value global
+        uint exceptionLineGlobal;     // Index of __exception_line global
+        uint exceptionColGlobal;      // Index of __exception_col global
     }
     
     private {
@@ -1754,6 +1756,22 @@ class BinaryEmitter {
         value.initValue = 0;
         value.name = "__exception_value";
         globals ~= value;
+
+        exceptionLineGlobal = cast(uint)globals.length;
+        GlobalInfo line;
+        line.type = ValType.i32;
+        line.mutable = true;
+        line.initValue = 0;
+        line.name = "__exception_line";
+        globals ~= line;
+
+        exceptionColGlobal = cast(uint)globals.length;
+        GlobalInfo col;
+        col.type = ValType.i32;
+        col.mutable = true;
+        col.initValue = 0;
+        col.name = "__exception_col";
+        globals ~= col;
     }
 
     /**
@@ -2389,6 +2407,8 @@ class BinaryEmitter {
         if (exceptionPendingGlobal < globals.length) {
             globalExports ~= GlobalExport("__exception_pending", exceptionPendingGlobal);
             globalExports ~= GlobalExport("__exception_value", exceptionValueGlobal);
+            globalExports ~= GlobalExport("__exception_line", exceptionLineGlobal);
+            globalExports ~= GlobalExport("__exception_col", exceptionColGlobal);
         }
         
         if (auto content = buildExportSection(funcExports, needsMemory || needsArraySupport, globalExports))

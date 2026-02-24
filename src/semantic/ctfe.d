@@ -1681,7 +1681,21 @@ class CTFEEvaluator {
         auto result = cachedContext.callByName(funcDecl.name, args);
         statExecTime += MonoTime.currTime - t2;
         if (!result.success) {
-            throw new CTFEError("CTFE execution error: " ~ result.error, funcDecl.location);
+            auto loc = funcDecl.location;
+            if (result.throwLine > 0) {
+                loc.line = result.throwLine;
+                loc.column = result.throwCol;
+            }
+            auto err = new CTFEError(result.error, loc);
+            // Add intermediate call chain notes (skip innermost frame = thrower,
+            // already shown as primary error location)
+            if (result.callStack.length > 1) {
+                foreach_reverse (frame; result.callStack[0 .. $ - 1]) {
+                    auto frameLoc = SourceLocation(frame.fileName, frame.line, frame.column);
+                    err.addNote("called from `" ~ frame.funcName ~ "`", frameLoc);
+                }
+            }
+            throw err;
         }
 
         log(3, "CTFE [", backend.name, "]: ", funcDecl.name, "(", args, ") = ", result.intValue);

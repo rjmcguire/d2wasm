@@ -720,9 +720,18 @@ class FuncContext {
      * $sp = savedSp
      */
     void emitEpilogue(ref Appender!(ubyte[]) out_) {
-        // First, emit call stack pop if enabled
+        // Pop call stack frame on normal return only — preserve during exception propagation
+        // so the host can read the call chain for error reporting
         if (enableStackTrace) {
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.exceptionPendingGlobal);
+            out_ ~= Op.i32_eqz;
+            out_ ~= Op.if_;
+            out_ ~= cast(ubyte)BlockType.void_;
+            blockDepth++;
             emitCallStackPop(out_);
+            blockDepth--;
+            out_ ~= Op.end;
         }
 
         if (frameSize == 0) return;
@@ -1155,8 +1164,10 @@ class FuncContext {
      */
     /**
      * Emit exception check after a function call (void context — no value on stack).
+     * callSite is the location of the call expression — used to overwrite the
+     * call stack frame with the call-site location during exception propagation.
      */
-    void emitExceptionCheck(ref Appender!(ubyte[]) out_) {
+    void emitExceptionCheck(ref Appender!(ubyte[]) out_, SourceLocation callSite = SourceLocation.init) {
         out_ ~= Op.global_get;
         leb128u(out_, emitter.exceptionPendingGlobal);
         if (tryStack.length > 0) {
@@ -1168,6 +1179,7 @@ class FuncContext {
             out_ ~= Op.if_;
             out_ ~= cast(ubyte)BlockType.void_;
             blockDepth++;
+            emitCallStackOverwrite(out_, callSite);
             // Push dummy return value if function returns non-void on WASM stack
             if (!emitter.isVoidType(func.decl.returnType) && !hasLargeReturn) {
                 out_ ~= Op.i32_const;
@@ -1184,7 +1196,7 @@ class FuncContext {
      * Emit exception check when a call result value is on the WASM stack.
      * Saves the result to tempLocalA, checks, restores on normal path.
      */
-    void emitExceptionCheckWithValue(ref Appender!(ubyte[]) out_) {
+    void emitExceptionCheckWithValue(ref Appender!(ubyte[]) out_, SourceLocation callSite = SourceLocation.init) {
         // Save the call result off the stack
         out_ ~= Op.local_set;
         leb128u(out_, tempLocalA);
@@ -1200,6 +1212,7 @@ class FuncContext {
             out_ ~= Op.if_;
             out_ ~= cast(ubyte)BlockType.void_;
             blockDepth++;
+            emitCallStackOverwrite(out_, callSite);
             if (!emitter.isVoidType(func.decl.returnType) && !hasLargeReturn) {
                 out_ ~= Op.i32_const;
                 leb128s(out_, 0);
@@ -1215,6 +1228,53 @@ class FuncContext {
     }
 
     /**
+     * Overwrite the current call stack frame's line/col with the call-site location.
+     * Called during exception propagation so the host sees call-site locations
+     * instead of function-definition locations in the preserved call chain.
+     */
+    private void emitCallStackOverwrite(ref Appender!(ubyte[]) out_, SourceLocation callSite) {
+        import codegen.wasm.types : CALL_STACK_DEPTH_OFFSET, CALL_STACK_FRAMES_OFFSET,
+                                    CALL_STACK_FRAME_SIZE;
+
+        if (!enableStackTrace || callSite.line == 0)
+            return;
+
+        // Calculate frameAddr = FRAMES_OFFSET + (depth - 1) * FRAME_SIZE
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_FRAMES_OFFSET);
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_DEPTH_OFFSET);
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;  // align=4
+        out_ ~= cast(ubyte)0x00;  // offset=0
+        out_ ~= Op.i32_const;
+        leb128u(out_, 1);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.i32_const;
+        leb128u(out_, CALL_STACK_FRAME_SIZE);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_add;
+        out_ ~= Op.local_tee;
+        leb128u(out_, tempLocalB);
+
+        // Store call-site line at frameAddr + 16
+        out_ ~= Op.i32_const;
+        leb128u(out_, callSite.line);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;  // align=4
+        out_ ~= cast(ubyte)0x10;  // offset=16
+
+        // Store call-site column at frameAddr + 20
+        out_ ~= Op.local_get;
+        leb128u(out_, tempLocalB);
+        out_ ~= Op.i32_const;
+        leb128u(out_, callSite.column);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;  // align=4
+        out_ ~= cast(ubyte)0x14;  // offset=20
+    }
+
+    /**
      * Emit a throw expression.
      * Sets __exception_value and __exception_pending, then returns.
      */
@@ -1224,6 +1284,15 @@ class FuncContext {
         // Store in __exception_value
         out_ ~= Op.global_set;
         leb128u(out_, emitter.exceptionValueGlobal);
+        // Store throw location
+        out_ ~= Op.i32_const;
+        leb128s(out_, cast(int)expr.location.line);
+        out_ ~= Op.global_set;
+        leb128u(out_, emitter.exceptionLineGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, cast(int)expr.location.column);
+        out_ ~= Op.global_set;
+        leb128u(out_, emitter.exceptionColGlobal);
         // Set __exception_pending = 1
         out_ ~= Op.i32_const;
         leb128s(out_, 1);
@@ -2530,9 +2599,9 @@ class FuncContext {
             // Check for exception after real function calls (not struct/class construction)
             if (!isConstructionCall(call)) {
                 if (expressionHasValue(call))
-                    emitExceptionCheckWithValue(out_);
+                    emitExceptionCheckWithValue(out_, call.location);
                 else
-                    emitExceptionCheck(out_);
+                    emitExceptionCheck(out_, call.location);
             }
         } else if (auto assign = cast(AssignmentExpression)expr) {
             emitAssignment(out_, assign);
@@ -2556,9 +2625,9 @@ class FuncContext {
             // Check for exception after real template function calls (not struct construction)
             if (!tmplInst.resolvedStructInstantiation) {
                 if (expressionHasValue(tmplInst))
-                    emitExceptionCheckWithValue(out_);
+                    emitExceptionCheckWithValue(out_, tmplInst.location);
                 else
-                    emitExceptionCheck(out_);
+                    emitExceptionCheck(out_, tmplInst.location);
             }
         } else if (auto newExpr = cast(NewExpression)expr) {
             emitNewExpression(out_, newExpr);

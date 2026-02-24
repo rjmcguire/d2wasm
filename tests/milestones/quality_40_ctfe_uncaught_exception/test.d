@@ -3,4 +3,8 @@ int thrower() {
     return 0;
 }
 
-enum RESULT = thrower();
+int middle() {
+    return thrower();
+}
+
+enum RESULT = middle();
