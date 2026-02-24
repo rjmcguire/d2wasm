@@ -1152,8 +1152,9 @@ class BinaryEmitter {
     /// Scan an expression tree for NewExpression to enable __alloc
     private void scanExpressionForNewExpr(Expression expr) {
         if (needsArraySupport) return;  // Already enabled
-        if (cast(NewExpression)expr) {
-            needsArraySupport = true;
+        if (auto newExpr = cast(NewExpression)expr) {
+            if (!newExpr.stackPromoted)  // stack-promoted new doesn't need __alloc
+                needsArraySupport = true;
         } else if (auto call = cast(CallExpression)expr) {
             foreach (arg; call.arguments)
                 scanExpressionForNewExpr(arg);

@@ -538,6 +538,31 @@ class FuncContext {
                 return;
             }
 
+            // Stack-promoted new: reserve shadow stack space for the allocation,
+            // but keep the variable as a scalar i32 (pointer) in a WASM local
+            if (auto newExpr = cast(NewExpression)varDecl.initializer) {
+                if (newExpr.stackPromoted && newExpr.resolvedStruct !is null) {
+                    auto sd = newExpr.resolvedStruct;
+                    frameSize = (frameSize + 3) & ~3;
+                    newExpr.stackFrameOffset = frameSize;
+                    frameSize += sd.structSize;
+
+                    // The variable itself is a scalar pointer (i32 WASM local)
+                    uint wasmIdx = cast(uint)localTypes.length;
+                    localTypes ~= ValType.i32;
+
+                    VarInfo vi;
+                    vi.kind = VarKind.scalar;
+                    vi.addrMode = AddrMode.wasmLocal;
+                    vi.wasmLocalIdx = wasmIdx;
+                    vi.type = varDecl.type;
+                    if (varDecl.uniqueLocalId != uint.max)
+                        varsByLocalId[varDecl.uniqueLocalId] = vi;
+                    varsByName[varDecl.name] = vi;
+                    return;
+                }
+            }
+
             // Regular local - add to WASM locals (or shadow stack if captured)
             if (varDecl.isCaptured) {
                 // Captured scalar: promote to shadow stack for addressability
@@ -4752,6 +4777,27 @@ class FuncContext {
         }
 
         auto structDecl = expr.resolvedStruct;
+
+        if (expr.stackPromoted) {
+            // Stack-promoted: use pre-allocated shadow stack space
+            // tempLocalA = FP + stackFrameOffset
+            out_ ~= Op.local_get;
+            leb128u(out_, fpLocal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, cast(int)expr.stackFrameOffset);
+            out_ ~= Op.i32_add;
+            out_ ~= Op.local_set;
+            leb128u(out_, tempLocalA);
+
+            // Store fields (same as heap path)
+            emitFieldStores(out_, structDecl, expr.arguments);
+
+            // Return pointer (FP + offset)
+            out_ ~= Op.local_get;
+            leb128u(out_, tempLocalA);
+            return;
+        }
+
         int structSize = cast(int)structDecl.structSize;
 
         // __alloc(sizeof)

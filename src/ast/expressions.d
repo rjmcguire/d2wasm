@@ -764,6 +764,10 @@ class NewExpression : Expression {
     StructDecl resolvedStruct;  // Set by type checker
     ClassDecl resolvedClass;    // Set by type checker (for class new)
 
+    // Escape analysis: set by escape analyzer when pointer doesn't escape function
+    bool stackPromoted;         // Emit on shadow stack instead of __alloc
+    uint stackFrameOffset;      // Shadow stack offset (set by collectLocals)
+
     this(SourceLocation loc, Type type, Expression[] args) {
         super(loc);
         this.allocatedType = type;

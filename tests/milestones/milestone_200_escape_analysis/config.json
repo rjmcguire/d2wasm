@@ -1,0 +1,8 @@
+{
+  "name": "escape_analysis",
+  "description": "Escape analysis: stack-promote non-escaping new allocations",
+  "type": "wasm_exec",
+  "entry": "main",
+  "args": ["--escape-analysis"],
+  "capability": "escape analysis, stack promotion of new, pointer lifetime analysis"
+}

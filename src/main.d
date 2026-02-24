@@ -57,6 +57,9 @@ struct CompilerOptions {
     
     // Debug options
     bool stackTrace = true;   // Emit call stack tracking for CTFE errors (default: on)
+
+    // Optimization options
+    bool escapeAnalysis = false;  // Enable escape analysis for stack promotion of new (default: off)
 }
 
 int main(string[] args) {
@@ -107,7 +110,9 @@ int main(string[] args) {
             // Watch mode
             "watch|w", "Watch files and recompile on change", &options.watch,
             // Debug options
-            "stack-trace", "Emit call stack tracking for CTFE errors (default: on)", &options.stackTrace
+            "stack-trace", "Emit call stack tracking for CTFE errors (default: on)", &options.stackTrace,
+            // Optimization options
+            "escape-analysis", "Enable escape analysis for stack promotion of new (default: off)", &options.escapeAnalysis
         );
         
         log(3, "main() started");
@@ -330,6 +335,14 @@ int compileFile(CompilerOptions options) {
             import semantic.arena_analyzer : analyzeArenaNeeds;
             log(2, "Analyzing arena allocation needs...");
             analyzeArenaNeeds(ast);
+        }
+
+        // 6d. Escape analysis (optional)
+        // Stack-promotes non-escaping `new` allocations and warns on escaping &local
+        if (options.escapeAnalysis) {
+            import semantic.escape_analyzer : analyzeEscapes;
+            log(2, "Analyzing pointer escapes...");
+            analyzeEscapes(ast, symbolTable);
         }
 
         // 7. Code generation (binary WASM emission)
