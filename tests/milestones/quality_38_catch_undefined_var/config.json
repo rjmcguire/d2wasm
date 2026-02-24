@@ -1,0 +1,6 @@
+{
+  "name": "catch_undefined_var",
+  "description": "Using undefined variable in catch body should produce a clear error",
+  "type": "compile_error",
+  "capability": "Error quality - undefined identifier in catch"
+}

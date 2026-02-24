@@ -1,0 +1,6 @@
+{
+  "name": "try_no_catch",
+  "description": "try without catch or finally should produce a clear error",
+  "type": "compile_error",
+  "capability": "Error quality - try/catch syntax validation"
+}

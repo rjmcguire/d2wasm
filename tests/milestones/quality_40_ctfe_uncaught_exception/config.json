@@ -1,0 +1,6 @@
+{
+  "name": "ctfe_uncaught_exception",
+  "description": "Uncaught exception during CTFE should produce a clear error, not return garbage",
+  "type": "compile_error",
+  "capability": "Error quality - CTFE uncaught exception detection"
+}

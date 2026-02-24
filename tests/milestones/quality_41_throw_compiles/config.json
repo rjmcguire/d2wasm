@@ -1,0 +1,6 @@
+{
+  "name": "throw_compiles",
+  "description": "Basic try/catch/throw should compile without errors",
+  "type": "compile_only",
+  "capability": "Exception handling - basic compilation"
+}

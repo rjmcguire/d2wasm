@@ -2386,6 +2386,10 @@ class BinaryEmitter {
         if (needsArraySupport) {
             globalExports ~= GlobalExport("__heap_ptr", heapPtrGlobal);
         }
+        if (exceptionPendingGlobal < globals.length) {
+            globalExports ~= GlobalExport("__exception_pending", exceptionPendingGlobal);
+            globalExports ~= GlobalExport("__exception_value", exceptionValueGlobal);
+        }
         
         if (auto content = buildExportSection(funcExports, needsMemory || needsArraySupport, globalExports))
             emitSection(Section.export_, content);

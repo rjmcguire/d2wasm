@@ -19,6 +19,7 @@ import ast.statements;
 import ast.expressions;
 import semantic.symbol_table;
 import semantic.type_checker;
+import std.conv : to;
 
 alias ArrayType = ast.nodes.ArrayType;
 
@@ -4546,9 +4547,12 @@ class NativeCompiledFunction : CompiledFunction {
                 throw new Exception("Native backend: too many parameters (max 4 for now)");
         }
 
+        if (exceptionPendingAddr !is null && *cast(int*)exceptionPendingAddr != 0)
+            return ExecutionResult.failure("uncaught exception (thrown value: "
+                ~ to!string(*cast(int*)exceptionValueAddr) ~ ")");
         return ExecutionResult.fromInt(cast(int)result);  // Sign-extend 32-bit to 64-bit
     }
-    
+
     override ExecutionResult callByName(string targetFuncName, long[] args) {
         import codegen.native.codegen_interface : setjmp;
 
@@ -4611,9 +4615,12 @@ class NativeCompiledFunction : CompiledFunction {
                 return ExecutionResult.failure("Too many parameters (max 4)");
         }
 
+        if (exceptionPendingAddr !is null && *cast(int*)exceptionPendingAddr != 0)
+            return ExecutionResult.failure("uncaught exception (thrown value: "
+                ~ to!string(*cast(int*)exceptionValueAddr) ~ ")");
         return ExecutionResult.fromInt(cast(int)result);  // Sign-extend 32-bit to 64-bit
     }
-    
+
     override ExecutionResult callWithLargeReturn(string targetFuncName, long[] args, uint resultSize) {
         import codegen.native.codegen_interface : setjmp;
         import core.stdc.stdlib : malloc, free;
@@ -4679,12 +4686,16 @@ class NativeCompiledFunction : CompiledFunction {
                 return ExecutionResult.failure("Too many parameters (max 4)");
         }
 
+        if (exceptionPendingAddr !is null && *cast(int*)exceptionPendingAddr != 0)
+            return ExecutionResult.failure("uncaught exception (thrown value: "
+                ~ to!string(*cast(int*)exceptionValueAddr) ~ ")");
+
         // Copy result bytes
         ubyte[] resultBytes = resultBuf[0 .. resultSize].dup;
 
         return ExecutionResult.fromArray(resultBytes);
     }
-    
+
     override ubyte[] readMemory(ulong offset, uint length) {
         assert(offset != 0, "readMemory: null pointer dereference");
         auto ptr = cast(ubyte*)cast(size_t)offset;

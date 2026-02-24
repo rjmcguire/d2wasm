@@ -1,0 +1,6 @@
+{
+  "name": "try_catch_missing_return",
+  "description": "Function with try/catch where catch doesn't return should produce missing return error",
+  "type": "compile_error",
+  "capability": "Error quality - missing return in catch clause"
+}

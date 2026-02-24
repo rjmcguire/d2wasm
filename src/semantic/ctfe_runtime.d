@@ -540,6 +540,24 @@ class CTFERuntime {
     }
     
     /**
+     * Read a WASM global variable by name, returning its i32 value.
+     * Returns 0 if the global is not found.
+     */
+    int getGlobalI32(string name) {
+        if (!initialized || mod is null) return 0;
+
+        import std.string : toStringz;
+        auto global = m3_FindGlobal(mod, name.toStringz());
+        if (global is null) return 0;
+
+        M3TaggedValue val;
+        auto err = m3_GetGlobal(global, &val);
+        if (err !is null) return 0;
+
+        return cast(int)val.value.i32;
+    }
+
+    /**
      * Get memory size
      */
     uint getMemorySize() {

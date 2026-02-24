@@ -10,6 +10,7 @@ import codegen.backend : Backend, CompiledFunction, ExecutionResult;
 import codegen.emitter : BinaryEmitter;
 import ast.nodes;
 import semantic.symbol_table;
+import std.conv : to;
 
 /**
  * WASM Backend - compiles to WebAssembly, executes via wasm3
@@ -149,6 +150,9 @@ class WASMCompiledFunction : CompiledFunction {
             }
 
             auto result = runtime.callI32(funcName, intArgs);
+            if (runtime.getGlobalI32("__exception_pending") != 0)
+                return ExecutionResult.failure("uncaught exception (thrown value: "
+                    ~ to!string(runtime.getGlobalI32("__exception_value")) ~ ")");
             return ExecutionResult.fromInt(result.asInt());
 
         } catch (CTFERuntimeError e) {
@@ -167,6 +171,9 @@ class WASMCompiledFunction : CompiledFunction {
             }
 
             auto result = runtime.callI32(targetFuncName, intArgs);
+            if (runtime.getGlobalI32("__exception_pending") != 0)
+                return ExecutionResult.failure("uncaught exception (thrown value: "
+                    ~ to!string(runtime.getGlobalI32("__exception_value")) ~ ")");
             return ExecutionResult.fromInt(result.asInt());
 
         } catch (CTFERuntimeError e) {
@@ -192,7 +199,9 @@ class WASMCompiledFunction : CompiledFunction {
 
             // Call function (void return, writes to resultAddr)
             auto result = runtime.callI32(targetFuncName, intArgs);
-            // Note: result is void but callI32 still works
+            if (runtime.getGlobalI32("__exception_pending") != 0)
+                return ExecutionResult.failure("uncaught exception (thrown value: "
+                    ~ to!string(runtime.getGlobalI32("__exception_value")) ~ ")");
 
             // Read result bytes from memory
             ubyte[] resultBytes = runtime.readMemory(resultAddr, resultSize);

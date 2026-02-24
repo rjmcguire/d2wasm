@@ -655,6 +655,9 @@ class CTFEEvaluator {
 
             // Call __eval() to get the result string pointer
             auto result = runtime.callI32("__eval");
+            if (runtime.getGlobalI32("__exception_pending") != 0)
+                throw new CTFEError("uncaught exception during CTFE evaluation (thrown value: "
+                    ~ to!string(runtime.getGlobalI32("__exception_value")) ~ ")", expr.location);
             uint structPtr = result.asInt();
 
             log(3, "CTFE: __eval returned struct at ", structPtr);
@@ -1523,6 +1526,9 @@ class CTFEEvaluator {
         try {
             runtime.loadModule(wasmBytes);
             auto result = runtime.callI32("__eval");
+            if (runtime.getGlobalI32("__exception_pending") != 0)
+                throw new CTFEError("uncaught exception during CTFE evaluation (thrown value: "
+                    ~ to!string(runtime.getGlobalI32("__exception_value")) ~ ")", expr.location);
             return result.asInt();
         } catch (CTFERuntimeError e) {
             throw new CTFEError("CTFE execution error: " ~ e.msg, expr.location);
@@ -1581,6 +1587,9 @@ class CTFEEvaluator {
         try {
             runtime.loadModule(wasmBytes);
             auto result = runtime.callF64("__eval");
+            if (runtime.getGlobalI32("__exception_pending") != 0)
+                throw new CTFEError("uncaught exception during CTFE evaluation (thrown value: "
+                    ~ to!string(runtime.getGlobalI32("__exception_value")) ~ ")", expr.location);
             return result.asDouble();
         } catch (CTFERuntimeError e) {
             throw new CTFEError("CTFE execution error: " ~ e.msg, expr.location);
@@ -1816,9 +1825,12 @@ class CTFEEvaluator {
             }
             
             auto result = runtime.callI32(funcName, intArgs);
+            if (runtime.getGlobalI32("__exception_pending") != 0)
+                throw new CTFEError("uncaught exception during CTFE evaluation (thrown value: "
+                    ~ to!string(runtime.getGlobalI32("__exception_value")) ~ ")", SourceLocation.init);
             log(3, "CTFE: Result = ", result.asInt());
             return result.asInt();
-            
+
         } catch (CTFERuntimeError e) {
             throw new CTFEError("CTFE: wasm3 execution failed: " ~ e.msg, SourceLocation.init);
         }
