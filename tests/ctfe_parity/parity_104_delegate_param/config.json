@@ -1,0 +1,6 @@
+{
+  "name": "delegate_param",
+  "description": "Passing a delegate as a function parameter",
+  "type": "wasm_exec",
+  "expected_value": 25
+}

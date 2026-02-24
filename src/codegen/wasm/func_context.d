@@ -289,6 +289,9 @@ class FuncContext {
                                 uvi.elementType = arrayType.elementType;
                                 uvi.elementSize = wasmElementSize(arrayType.elementType);
                             }
+                        } else if (cast(FunctionType)p.type) {
+                            uvi.kind = VarKind.delegate_;
+                            uvi.addrMode = AddrMode.paramPointer;
                         } else {
                             uvi.kind = VarKind.scalar;
                             uvi.addrMode = AddrMode.wasmLocal;
@@ -4507,6 +4510,7 @@ class FuncContext {
     }
     
     void emitUnary(ref Appender!(ubyte[]) out_, UnaryExpression expr) {
+        if (expr.loweredCall) { emitExpression(out_, expr.loweredCall); return; }
         final switch (expr.operator) {
             case UnaryExpression.Operator.Plus:
                 emitExpression(out_, expr.operand);
@@ -4930,11 +4934,14 @@ class FuncContext {
         leb128u(out_, 0);
 
         // 4. call_indirect with the delegate's type signature
-        //    The signature must match the lifted function: (__env: i32, user_params...) -> result
-        if (liftedFunc is null)
+        uint typeIdx;
+        if (liftedFunc !is null) {
+            typeIdx = emitter.getOrCreateDelegateCallType(liftedFunc);
+        } else if (auto funcType = cast(FunctionType)dgInfo.type) {
+            typeIdx = emitter.getOrCreateDelegateCallTypeFromFuncType(funcType);
+        } else {
             throw new EmitError("Cannot resolve delegate type for call_indirect");
-
-        uint typeIdx = emitter.getOrCreateDelegateCallType(liftedFunc);
+        }
         out_ ~= Op.call_indirect;
         leb128u(out_, typeIdx);
         leb128u(out_, 0);  // table index 0
@@ -5255,6 +5262,50 @@ class FuncContext {
                         leb128u(out_, emitter.spGlobal);
 
                         totalCopySize += sliceSize;
+                        continue;
+                    }
+
+                    if (argInfo.isDelegate) {
+                        // Delegate - copy 8-byte fat pointer to temp, pass temp address
+                        enum delegateSize = 8;
+
+                        out_ ~= Op.global_get;
+                        leb128u(out_, emitter.spGlobal);
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, delegateSize);
+                        out_ ~= Op.i32_sub;
+                        out_ ~= Op.global_set;
+                        leb128u(out_, emitter.spGlobal);
+
+                        // Copy 2 fields (tableIndex, envPtr)
+                        foreach (fieldOffset; [0, 4]) {
+                            out_ ~= Op.global_get;
+                            leb128u(out_, emitter.spGlobal);
+                            if (fieldOffset > 0) {
+                                out_ ~= Op.i32_const;
+                                leb128s(out_, fieldOffset);
+                                out_ ~= Op.i32_add;
+                            }
+
+                            emitVarAddress(out_, argInfo);
+                            if (fieldOffset > 0) {
+                                out_ ~= Op.i32_const;
+                                leb128s(out_, fieldOffset);
+                                out_ ~= Op.i32_add;
+                            }
+                            out_ ~= Op.i32_load;
+                            out_ ~= cast(ubyte)0x02;
+                            leb128u(out_, 0);
+
+                            out_ ~= Op.i32_store;
+                            out_ ~= cast(ubyte)0x02;
+                            leb128u(out_, 0);
+                        }
+
+                        out_ ~= Op.global_get;
+                        leb128u(out_, emitter.spGlobal);
+
+                        totalCopySize += delegateSize;
                         continue;
                     }
                 }

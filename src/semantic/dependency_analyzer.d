@@ -213,6 +213,8 @@ class DependencyAnalyzer {
                 calls ~= findCallsInExpression(binary.loweredCall);
         } else if (auto unary = cast(UnaryExpression)expr) {
             calls ~= findCallsInExpression(unary.operand);
+            if (unary.loweredCall)
+                calls ~= findCallsInExpression(unary.loweredCall);
         } else if (auto index = cast(IndexExpression)expr) {
             calls ~= findCallsInExpression(index.array);
             calls ~= findCallsInExpression(index.index);
@@ -291,6 +293,8 @@ class DependencyAnalyzer {
                 result ~= findTemplateCallsInExpression(binary.loweredCall);
         } else if (auto unary = cast(UnaryExpression)expr) {
             result ~= findTemplateCallsInExpression(unary.operand);
+            if (unary.loweredCall)
+                result ~= findTemplateCallsInExpression(unary.loweredCall);
         } else if (auto call = cast(CallExpression)expr) {
             result ~= findTemplateCallsInExpression(call.function_);
             foreach (arg; call.arguments)

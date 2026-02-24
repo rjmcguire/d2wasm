@@ -1,0 +1,6 @@
+{
+  "name": "method_template",
+  "description": "Method template with IFTI on struct",
+  "type": "wasm_exec",
+  "expected_output": "15"
+}

@@ -1854,6 +1854,51 @@ class TreeSitterBridge {
                 }
             }
 
+            // Check for delegate/function type: returnType delegate/function (paramTypes...)
+            // Tree-sitter: type children = [returnType, "delegate"/"function", parameters]
+            {
+                bool hasDelegateOrFunction = false;
+                bool isDg = false;
+                for (uint i = 0; i < childCount; i++) {
+                    TSNode child = TreeSitterParser.getChild(node, i);
+                    string childType = TreeSitterParser.getNodeType(child);
+                    if (childType == "delegate") { hasDelegateOrFunction = true; isDg = true; break; }
+                    if (childType == "function") { hasDelegateOrFunction = true; isDg = false; break; }
+                }
+                if (hasDelegateOrFunction) {
+                    Type returnType;
+                    Type[] paramTypes;
+                    for (uint i = 0; i < childCount; i++) {
+                        TSNode child = TreeSitterParser.getChild(node, i);
+                        string childType = TreeSitterParser.getNodeType(child);
+                        if (childType == "delegate" || childType == "function") {
+                            continue;
+                        } else if (childType == "parameters") {
+                            // Parse each parameter's type
+                            uint pCount = TreeSitterParser.getChildCount(child);
+                            for (uint j = 0; j < pCount; j++) {
+                                TSNode pChild = TreeSitterParser.getChild(child, j);
+                                if (TreeSitterParser.getNodeType(pChild) == "parameter") {
+                                    uint ppCount = TreeSitterParser.getChildCount(pChild);
+                                    for (uint k = 0; k < ppCount; k++) {
+                                        TSNode ppChild = TreeSitterParser.getChild(pChild, k);
+                                        if (TreeSitterParser.getNodeType(ppChild) == "type") {
+                                            paramTypes ~= parseType(ppChild);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (returnType is null) {
+                            returnType = parseType(child);
+                        }
+                    }
+                    if (returnType is null)
+                        returnType = new BasicType(loc, BasicType.Kind.Void);
+                    return new FunctionType(loc, returnType, paramTypes, isDg);
+                }
+            }
+
             // Look for the actual type inside the type node, skipping type_ctor
             for (uint i = 0; i < childCount; i++) {
                 TSNode child = TreeSitterParser.getChild(node, i);

@@ -1,0 +1,6 @@
+{
+  "name": "opbinary",
+  "description": "Struct opBinary operator overloading via method template",
+  "type": "wasm_exec",
+  "expected_output": "10"
+}

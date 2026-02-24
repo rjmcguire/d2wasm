@@ -1,0 +1,6 @@
+{
+  "name": "opequals_opcmp",
+  "description": "Struct opEquals and opCmp operator overloading",
+  "type": "wasm_exec",
+  "expected_output": "7"
+}

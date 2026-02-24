@@ -721,6 +721,7 @@ class NativeCompiledFunction : CompiledFunction {
                 bytes += countExpressionBytes(arg);
         } else if (auto unary = cast(UnaryExpression)expr) {
             bytes += countExpressionBytes(unary.operand);
+            bytes += countExpressionBytes(unary.loweredCall);
         } else if (auto member = cast(MemberExpression)expr) {
             bytes += countExpressionBytes(member.object);
         } else if (auto index = cast(IndexExpression)expr) {
@@ -1731,7 +1732,9 @@ class NativeCompiledFunction : CompiledFunction {
                     throw new Exception("Operator not yet supported in native backend");
             }
         } else if (auto unaryOp = cast(UnaryExpression)expr) {
-            if (unaryOp.operator == UnaryExpression.Operator.Minus && isF64Expression(unaryOp.operand)) {
+            if (unaryOp.loweredCall) {
+                compileExpression(unaryOp.loweredCall);
+            } else if (unaryOp.operator == UnaryExpression.Operator.Minus && isF64Expression(unaryOp.operand)) {
                 compileExpression(unaryOp.operand);
                 gen.emit(stencil_neg_f64);
             } else if (unaryOp.operator == UnaryExpression.Operator.Minus) {

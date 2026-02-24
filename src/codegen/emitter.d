@@ -1394,6 +1394,11 @@ class BinaryEmitter {
             return ValType.i32;
         }
 
+        // Delegate/function types are passed as i32 pointer to {tableIdx, envPtr}
+        if (cast(FunctionType)t) {
+            return ValType.i32;
+        }
+
         auto basic = cast(BasicType)t;
         if (!basic) {
             throw new EmitError("Non-basic types not yet supported", t.toString());
@@ -1444,6 +1449,30 @@ class BinaryEmitter {
         // so just build its layout as a non-method, non-main function.
         auto layout = buildLayout(liftedFunc, false, false);
         return registerSignature(layout);
+    }
+
+    /**
+     * Get or create a type index for a delegate call from its FunctionType.
+     * Used when calling delegate parameters (no lifted function available).
+     * Signature: (__env: i32, user_params...) -> result
+     */
+    package uint getOrCreateDelegateCallTypeFromFuncType(FunctionType funcType) {
+        FuncSig sig;
+        // __env is first param
+        sig.params ~= ValType.i32;
+        // User params
+        foreach (pt; funcType.parameterTypes)
+            sig.params ~= dTypeToValType(pt);
+        // Return type
+        if (!isVoidType(funcType.returnType))
+            sig.results ~= dTypeToValType(funcType.returnType);
+
+        if (auto existing = sig in typeIndex)
+            return *existing;
+        auto tIdx = cast(uint)types.length;
+        types ~= sig;
+        typeIndex[sig] = tIdx;
+        return tIdx;
     }
     
     //==========================================================================

@@ -99,6 +99,7 @@ class UnaryExpression : Expression {
     Operator operator;
     Expression operand;
     bool isPostfix;  // For increment/decrement operators
+    Expression loweredCall;  // For operator overloading (opUnary)
     
     this(SourceLocation loc, Operator operator, Expression operand, bool isPostfix = false) {
         super(loc);

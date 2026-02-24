@@ -806,11 +806,15 @@ class TypeChecker {
     Type checkBinaryExpression(BinaryExpression expr) {
         Type leftType = checkExpression(expr.left);
         Type rightType = checkExpression(expr.right);
-        
+
         // Arithmetic operators
-        if (expr.operator >= BinaryExpression.Operator.Add && 
+        if (expr.operator >= BinaryExpression.Operator.Add &&
             expr.operator <= BinaryExpression.Operator.Modulo) {
-            
+
+            // Try operator overloading on struct types
+            if (auto result = tryBinaryOperatorOverload(expr, leftType))
+                return result;
+
             if (!isArithmeticType(leftType) || !isArithmeticType(rightType)) {
                 throw new TypeError(
                     format("Arithmetic operator requires numeric types, got '%s' and '%s'",
@@ -818,7 +822,7 @@ class TypeChecker {
                     expr.location
                 );
             }
-            
+
             return promoteArithmeticTypes(leftType, rightType, expr.location);
         }
         
@@ -848,6 +852,16 @@ class TypeChecker {
                 if (leftStruct !is null && rightStruct !is null && leftStruct is rightStruct) {
                     expr.loweredCall = synthesizeStructEquals(expr, leftStruct);
                     return new BasicType(expr.location, BasicType.Kind.Bool);
+                }
+            }
+
+            // Struct ordering: lower to opCmp
+            if (expr.operator >= BinaryExpression.Operator.Less &&
+                expr.operator <= BinaryExpression.Operator.GreaterEqual) {
+                auto leftStruct = leftType.asStruct();
+                if (leftStruct !is null) {
+                    if (auto result = tryOpCmpOverload(expr, leftStruct))
+                        return result;
                 }
             }
 
@@ -914,6 +928,10 @@ class TypeChecker {
             expr.operator == BinaryExpression.Operator.BitwiseOr ||
             expr.operator == BinaryExpression.Operator.BitwiseXor) {
 
+            // Try operator overloading on struct types
+            if (auto result = tryBinaryOperatorOverload(expr, leftType))
+                return result;
+
             if (!isIntegerType(cast(BasicType)leftType.resolve()) || !isIntegerType(cast(BasicType)rightType.resolve())) {
                 throw new TypeError(
                     format("Bitwise operator requires integer types, got '%s' and '%s'",
@@ -927,6 +945,10 @@ class TypeChecker {
 
         // Concatenation operator (~)
         if (expr.operator == BinaryExpression.Operator.Concat) {
+            // Try operator overloading on struct types
+            if (auto result = tryBinaryOperatorOverload(expr, leftType))
+                return result;
+
             if (auto arrType = cast(ArrayType)leftType) {
                 return arrType;
             }
@@ -1149,11 +1171,11 @@ class TypeChecker {
                                 expr.location
                             );
                         }
-                        
+
                         for (size_t i = 0; i < expr.arguments.length; i++) {
                             Type argType = checkExpression(expr.arguments[i]);
                             Type paramType = method.parameters[i].type;
-                            
+
                             auto compat = checkTypeCompatibility(argType, paramType);
                             if (!compat.isCompatible) {
                                 throw new TypeError(
@@ -1163,8 +1185,15 @@ class TypeChecker {
                                 );
                             }
                         }
-                        
+
                         return method.returnType;
+                    }
+
+                    // Try method template with IFTI
+                    if (auto tmpl = getStructMemberTemplate(structDecl, memberExpr.memberName)) {
+                        auto result = checkMethodTemplateCall(expr, memberExpr, structDecl, tmpl);
+                        if (result)
+                            return result;
                     }
                 }
                 
@@ -1181,11 +1210,11 @@ class TypeChecker {
                                 expr.location
                             );
                         }
-                        
+
                         for (size_t i = 0; i < expr.arguments.length; i++) {
                             Type argType = checkExpression(expr.arguments[i]);
                             Type paramType = method.parameters[i].type;
-                            
+
                             auto compat = checkTypeCompatibility(argType, paramType);
                             if (!compat.isCompatible) {
                                 throw new TypeError(
@@ -1195,8 +1224,15 @@ class TypeChecker {
                                 );
                             }
                         }
-                        
+
                         return method.returnType;
+                    }
+
+                    // Try method template with IFTI
+                    if (auto tmpl = getClassMemberTemplate(classDecl, memberExpr.memberName)) {
+                        auto result = checkMethodTemplateCall(expr, memberExpr, classDecl, tmpl);
+                        if (result)
+                            return result;
                     }
                 }
                 
@@ -1750,6 +1786,81 @@ class TypeChecker {
     }
 
     /**
+     * Handle a method template call with IFTI: obj.method(args) where method is a TemplateDecl.
+     * Deduces template type args from call args, instantiates, and returns result type.
+     */
+    Type checkMethodTemplateCall(CallExpression expr, MemberExpression memberExpr,
+                                  AggregateDecl aggregate, TemplateDecl tmpl) {
+        auto eponymous = cast(FunctionDecl)tmpl.eponymousMember();
+        if (!eponymous)
+            return null;
+
+        // Type-check call arguments
+        Type[] argTypes;
+        foreach (arg; expr.arguments)
+            argTypes ~= checkExpression(arg);
+
+        // Deduce template type args from call arguments
+        TemplateArg[] deducedArgs = new TemplateArg[tmpl.templateParams.length];
+        bool allDeduced = true;
+        foreach (j, tp; tmpl.templateParams) {
+            // For value params (e.g., string op), can't deduce from call args
+            if (tp.valueType !is null) {
+                allDeduced = false;
+                break;
+            }
+            // For type params, try to deduce from argument types
+            bool found = false;
+            foreach (i, param; eponymous.parameters) {
+                if (i >= argTypes.length) break;
+                if (auto tpt = cast(TemplateParamType)param.type) {
+                    if (tpt.paramName == tp.paramName) {
+                        deducedArgs[j] = TemplateArg(argTypes[i], null);
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if (!found) {
+                allDeduced = false;
+                break;
+            }
+        }
+
+        if (!allDeduced)
+            return null;
+
+        auto instantiated = instantiateMethodTemplate(aggregate, tmpl, deducedArgs, expr.location);
+        if (!instantiated)
+            return null;
+
+        // Rewrite callee to use instantiated method name
+        memberExpr.memberName = instantiated.name;
+
+        // Validate call args against instantiated params
+        if (expr.arguments.length != instantiated.parameters.length) {
+            throw new TypeError(
+                format("Method '%s' expects %d arguments, got %d",
+                       memberExpr.memberName, instantiated.parameters.length, expr.arguments.length),
+                expr.location
+            );
+        }
+        for (size_t i = 0; i < expr.arguments.length; i++) {
+            Type paramType = instantiated.parameters[i].type;
+            auto compat = checkTypeCompatibility(argTypes[i], paramType);
+            if (!compat.isCompatible) {
+                throw new TypeError(
+                    format("Argument %d: expected type '%s', got '%s'",
+                           i + 1, paramType.toString(), argTypes[i].toString()),
+                    expr.arguments[i].location
+                );
+            }
+        }
+
+        return instantiated.returnType;
+    }
+
+    /**
      * Get a method from a struct by name, returns null if not found
      */
     FunctionDecl getStructMethod(StructDecl structDecl, string methodName) {
@@ -1762,7 +1873,7 @@ class TypeChecker {
         }
         return null;
     }
-    
+
     /**
      * Get a method from a class by name, returns null if not found
      */
@@ -1780,6 +1891,82 @@ class TypeChecker {
             current = current.baseClassDecl;
         }
         return null;
+    }
+
+    /**
+     * Get a member template from a struct by name, returns null if not found
+     */
+    TemplateDecl getStructMemberTemplate(StructDecl structDecl, string name) {
+        foreach (member; structDecl.members) {
+            if (auto tmpl = cast(TemplateDecl)member) {
+                if (tmpl.name == name)
+                    return tmpl;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Get a member template from a class by name (searches hierarchy)
+     */
+    TemplateDecl getClassMemberTemplate(ClassDecl classDecl, string name) {
+        ClassDecl current = classDecl;
+        while (current) {
+            foreach (member; current.members) {
+                if (auto tmpl = cast(TemplateDecl)member) {
+                    if (tmpl.name == name)
+                        return tmpl;
+                }
+            }
+            current = current.baseClassDecl;
+        }
+        return null;
+    }
+
+    /**
+     * Instantiate a method template on an aggregate (struct/class) with given
+     * template arguments. Sets isMethod, parent, adds to aggregate members,
+     * and type-checks with the aggregate as currentStructDecl/currentClassDecl.
+     */
+    FunctionDecl instantiateMethodTemplate(AggregateDecl aggregate, TemplateDecl tmpl,
+                                            TemplateArg[] args, SourceLocation loc) {
+        auto result = cast(FunctionDecl)templateInstantiator.instantiate(tmpl, args);
+        if (!result)
+            return null;
+
+        // Wire up as a method of this aggregate
+        result.isMethod = true;
+        result.parent = aggregate;
+
+        // Add to aggregate members if not already there (for emitter collection)
+        bool alreadyAdded = false;
+        foreach (m; aggregate.members) {
+            if (m is result) {
+                alreadyAdded = true;
+                break;
+            }
+        }
+        if (!alreadyAdded)
+            aggregate.members ~= result;
+
+        // Type-check with aggregate context
+        if (!result.isTypeChecked) {
+            auto saved = symbolTable.saveAndResetScope();
+            scope(exit) symbolTable.restoreScope(saved);
+            auto prevStruct = currentStructDecl;
+            auto prevClass = currentClassDecl;
+            if (auto sd = cast(StructDecl)aggregate)
+                currentStructDecl = sd;
+            if (auto cd = cast(ClassDecl)aggregate)
+                currentClassDecl = cd;
+            scope(exit) {
+                currentStructDecl = prevStruct;
+                currentClassDecl = prevClass;
+            }
+            checkFunctionDeclaration(result);
+        }
+
+        return result;
     }
     
     /**
@@ -2077,8 +2264,8 @@ class TypeChecker {
         foreach (p; expr.parameters)
             paramTypes ~= p.type;
 
-        auto ft = new FunctionType(expr.location, funcDecl.returnType, paramTypes,
-                                   expr.isDelegateKeyword);
+        bool isDg = expr.isDelegateKeyword || !expr.isNonCapturing;
+        auto ft = new FunctionType(expr.location, funcDecl.returnType, paramTypes, isDg);
         expr.type = ft;
         return ft;
     }
@@ -2118,6 +2305,11 @@ class TypeChecker {
         final switch (expr.operator) {
             case UnaryExpression.Operator.Plus:
             case UnaryExpression.Operator.Minus:
+                // Try operator overloading on struct types
+                if (auto structDecl = operandType.asStruct()) {
+                    if (auto result = tryUnaryOperatorOverload(expr, structDecl))
+                        return result;
+                }
                 // Arithmetic unary operators require numeric type
                 if (!isNumericType(operandType)) {
                     throw new TypeError(
@@ -2139,6 +2331,11 @@ class TypeChecker {
                 return new BasicType(expr.location, BasicType.Kind.Bool);
                 
             case UnaryExpression.Operator.BitwiseNot:
+                // Try operator overloading on struct types
+                if (auto structDecl = operandType.asStruct()) {
+                    if (auto result = tryUnaryOperatorOverload(expr, structDecl))
+                        return result;
+                }
                 // Bitwise not requires integral type
                 if (!isIntegralType(operandType)) {
                     throw new TypeError(
@@ -2307,6 +2504,19 @@ class TypeChecker {
      */
     private Expression synthesizeStructEquals(BinaryExpression expr, StructDecl structDecl) {
         auto loc = expr.location;
+
+        // Check for user-defined opEquals first
+        auto opEquals = getStructMethod(structDecl, "opEquals");
+        if (opEquals !is null) {
+            auto memberExpr = new MemberExpression(loc, expr.left, "opEquals");
+            auto callExpr = new CallExpression(loc, memberExpr, [expr.right]);
+            checkExpression(callExpr);
+            if (expr.operator == BinaryExpression.Operator.NotEqual)
+                return new UnaryExpression(loc, UnaryExpression.Operator.LogicalNot, callExpr);
+            return callExpr;
+        }
+
+        // Fallback: field-wise equality
         Expression synthesized = null;
 
         foreach (field; structDecl.fields) {
@@ -2328,6 +2538,195 @@ class TypeChecker {
             synthesized = new UnaryExpression(loc, UnaryExpression.Operator.LogicalNot, synthesized);
 
         return synthesized;
+    }
+
+    /**
+     * Try to lower a binary expression to an opBinary method template call.
+     * Returns the result type if successful, null otherwise.
+     */
+    private Type tryBinaryOperatorOverload(BinaryExpression expr, Type leftType) {
+        auto structDecl = leftType.asStruct();
+        if (!structDecl)
+            return null;
+
+        string opString = binaryOpToString(expr.operator);
+        if (!opString)
+            return null;
+
+        auto tmpl = getStructMemberTemplate(structDecl, "opBinary");
+        if (!tmpl)
+            return null;
+
+        auto loc = expr.location;
+        auto strArg = LiteralExpression.string_(loc, opString);
+        auto method = instantiateMethodTemplate(structDecl, tmpl,
+            [TemplateArg(null, strArg)], loc);
+        if (!method)
+            return null;
+
+        auto memberExpr = new MemberExpression(loc, expr.left, method.name);
+        auto callExpr = new CallExpression(loc, memberExpr, [expr.right]);
+        auto resultType = checkCallExpression(callExpr);
+        expr.loweredCall = callExpr;
+        return resultType;
+    }
+
+    /**
+     * Try to lower a comparison expression to an opCmp method call.
+     * a < b  → a.opCmp(b) < 0
+     * a > b  → a.opCmp(b) > 0
+     * a <= b → a.opCmp(b) <= 0
+     * a >= b → a.opCmp(b) >= 0
+     */
+    private Type tryOpCmpOverload(BinaryExpression expr, StructDecl structDecl) {
+        auto opCmp = getStructMethod(structDecl, "opCmp");
+        if (!opCmp)
+            return null;
+
+        auto loc = expr.location;
+        auto memberExpr = new MemberExpression(loc, expr.left, "opCmp");
+        auto callExpr = new CallExpression(loc, memberExpr, [expr.right]);
+        checkCallExpression(callExpr);
+
+        // Rewrite: a.opCmp(b) <op> 0
+        auto zero = LiteralExpression.integer(loc, 0);
+        auto cmpExpr = new BinaryExpression(loc, callExpr, expr.operator, zero);
+        checkExpression(cmpExpr);
+        expr.loweredCall = cmpExpr;
+        return new BasicType(loc, BasicType.Kind.Bool);
+    }
+
+    /**
+     * Map BinaryExpression.Operator to the D operator string for opBinary.
+     */
+    private static string binaryOpToString(BinaryExpression.Operator op) {
+        final switch (op) {
+            case BinaryExpression.Operator.Add: return "+";
+            case BinaryExpression.Operator.Subtract: return "-";
+            case BinaryExpression.Operator.Multiply: return "*";
+            case BinaryExpression.Operator.Divide: return "/";
+            case BinaryExpression.Operator.Modulo: return "%";
+            case BinaryExpression.Operator.BitwiseAnd: return "&";
+            case BinaryExpression.Operator.BitwiseOr: return "|";
+            case BinaryExpression.Operator.BitwiseXor: return "^";
+            case BinaryExpression.Operator.Concat: return "~";
+            // Non-overloadable operators
+            case BinaryExpression.Operator.Equal:
+            case BinaryExpression.Operator.NotEqual:
+            case BinaryExpression.Operator.Less:
+            case BinaryExpression.Operator.LessEqual:
+            case BinaryExpression.Operator.Greater:
+            case BinaryExpression.Operator.GreaterEqual:
+            case BinaryExpression.Operator.LogicalAnd:
+            case BinaryExpression.Operator.LogicalOr:
+            case BinaryExpression.Operator.ShiftLeft:
+            case BinaryExpression.Operator.ShiftRight:
+            case BinaryExpression.Operator.UnsignedShiftRight:
+                return null;
+        }
+    }
+
+    /**
+     * Try to lower a unary expression to an opUnary method template call.
+     * Returns the result type if successful, null otherwise.
+     */
+    private Type tryUnaryOperatorOverload(UnaryExpression expr, StructDecl structDecl) {
+        string opString;
+        if (expr.operator == UnaryExpression.Operator.Minus)
+            opString = "-";
+        else if (expr.operator == UnaryExpression.Operator.BitwiseNot)
+            opString = "~";
+        else if (expr.operator == UnaryExpression.Operator.Plus)
+            opString = "+";
+        else
+            return null;
+
+        auto tmpl = getStructMemberTemplate(structDecl, "opUnary");
+        if (!tmpl)
+            return null;
+
+        auto loc = expr.location;
+        auto strArg = LiteralExpression.string_(loc, opString);
+        auto method = instantiateMethodTemplate(structDecl, tmpl,
+            [TemplateArg(null, strArg)], loc);
+        if (!method)
+            return null;
+
+        auto memberExpr = new MemberExpression(loc, expr.operand, method.name);
+        auto callExpr = new CallExpression(loc, memberExpr, null);
+        auto resultType = checkCallExpression(callExpr);
+        expr.loweredCall = callExpr;
+        return resultType;
+    }
+
+    /**
+     * Try to lower a compound assignment to an opOpAssign method template call.
+     * a += b → a.opOpAssign!"+"(b)
+     * Falls back to opBinary: a = a.opBinary!"+"(b)
+     */
+    private Type tryCompoundAssignOverload(AssignmentExpression expr, StructDecl structDecl) {
+        string opString = compoundOpToString(expr.operator);
+        if (!opString)
+            return null;
+
+        auto loc = expr.location;
+
+        // Try opOpAssign first
+        auto tmpl = getStructMemberTemplate(structDecl, "opOpAssign");
+        if (tmpl) {
+            auto strArg = LiteralExpression.string_(loc, opString);
+            auto method = instantiateMethodTemplate(structDecl, tmpl,
+                [TemplateArg(null, strArg)], loc);
+            if (method) {
+                auto memberExpr = new MemberExpression(loc, expr.left, method.name);
+                auto callExpr = new CallExpression(loc, memberExpr, [expr.right]);
+                auto resultType = checkCallExpression(callExpr);
+                expr.loweredCall = callExpr;
+                return resultType;
+            }
+        }
+
+        // Fallback: rewrite a += b → a = a.opBinary!"+"(b)
+        auto binaryTmpl = getStructMemberTemplate(structDecl, "opBinary");
+        if (binaryTmpl) {
+            auto strArg = LiteralExpression.string_(loc, opString);
+            auto method = instantiateMethodTemplate(structDecl, binaryTmpl,
+                [TemplateArg(null, strArg)], loc);
+            if (method) {
+                auto memberExpr = new MemberExpression(loc, expr.left, method.name);
+                auto callExpr = new CallExpression(loc, memberExpr, [expr.right]);
+                auto resultType = checkCallExpression(callExpr);
+                // Rewrite to plain assignment: a = a.opBinary!"+"(b)
+                auto assignExpr = new AssignmentExpression(loc, expr.left,
+                    AssignmentExpression.Operator.Assign, callExpr);
+                checkExpression(assignExpr);
+                expr.loweredCall = assignExpr;
+                return resultType;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Map AssignmentExpression.Operator to the D operator string.
+     */
+    private static string compoundOpToString(AssignmentExpression.Operator op) {
+        final switch (op) {
+            case AssignmentExpression.Operator.AddAssign: return "+";
+            case AssignmentExpression.Operator.SubtractAssign: return "-";
+            case AssignmentExpression.Operator.MultiplyAssign: return "*";
+            case AssignmentExpression.Operator.DivideAssign: return "/";
+            case AssignmentExpression.Operator.ModuloAssign: return "%";
+            case AssignmentExpression.Operator.AndAssign: return "&";
+            case AssignmentExpression.Operator.OrAssign: return "|";
+            case AssignmentExpression.Operator.XorAssign: return "^";
+            case AssignmentExpression.Operator.ConcatAssign: return "~";
+            case AssignmentExpression.Operator.Assign:
+            case AssignmentExpression.Operator.ShiftLeftAssign:
+            case AssignmentExpression.Operator.ShiftRightAssign:
+                return null;
+        }
     }
 
     private bool checkCompilesTrait(TraitsExpression expr) {
@@ -2623,6 +3022,14 @@ class TypeChecker {
             return leftType;
         }
 
+        // Try opOpAssign on struct types for compound assignments
+        if (expr.operator != AssignmentExpression.Operator.Assign) {
+            if (auto structDecl = leftType.asStruct()) {
+                if (auto result = tryCompoundAssignOverload(expr, structDecl))
+                    return result;
+            }
+        }
+
         // Special case: ~= on arrays appends an element
         if (expr.operator == AssignmentExpression.Operator.ConcatAssign) {
             if (auto arrayType = cast(ArrayType)leftType) {
@@ -2778,6 +3185,23 @@ class TypeChecker {
             
             // Same kind (both dynamic or both static)
             return TypeCompatibility.compatible();
+        }
+
+        // FunctionType compatibility: function→delegate with same signature
+        auto fromFunc = cast(FunctionType)from;
+        auto toFunc = cast(FunctionType)to;
+        if (fromFunc && toFunc) {
+            if (fromFunc.parameterTypes.length == toFunc.parameterTypes.length) {
+                bool paramsOk = true;
+                foreach (i, fp; fromFunc.parameterTypes) {
+                    if (!typesEqual(fp, toFunc.parameterTypes[i])) {
+                        paramsOk = false;
+                        break;
+                    }
+                }
+                if (paramsOk && typesEqual(fromFunc.returnType, toFunc.returnType))
+                    return TypeCompatibility.compatible();
+            }
         }
 
         return TypeCompatibility.incompatible();
