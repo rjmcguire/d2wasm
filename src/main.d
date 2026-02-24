@@ -366,7 +366,13 @@ int compileFile(CompilerOptions options) {
             ubyte[] wasm = emitter.emit(ast);
             
             if (wasm is null) {
-                writeln("Code Generation Error: ", emitter.error());
+                import diagnostic.error_format : formatError;
+                auto loc = emitter.errorLocation();
+                if (loc.line > 0) {
+                    stderr.write(formatError("CodeGen", emitter.error(), loc));
+                } else {
+                    stderr.writeln("error: ", emitter.error());
+                }
                 return 1;
             }
             

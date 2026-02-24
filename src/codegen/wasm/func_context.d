@@ -1521,7 +1521,7 @@ class FuncContext {
             // TODO: copy from global struct
         }
         
-        throw new EmitError("Unsupported struct initializer", stmt.initializer.toString());
+        throw new EmitError("Unsupported struct initializer: " ~ stmt.initializer.toString(), stmt.location);
     }
     
     /**
