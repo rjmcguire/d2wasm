@@ -688,12 +688,21 @@ class NativeCompiledFunction : CompiledFunction {
         
         // Emit inline call stack pop (only on normal return — preserve during exception
         // propagation so the host can read the call chain for error reporting)
+        // Save return value (x0) to a temp slot — the exception check clobbers x0,
+        // and emitInlinePopCall uses x10 as scratch, so we can't use a register.
+        // Must use temps (not push/pop) because emitInlinePopCall uses SP-relative addressing.
+        auto retSaveMark = temps.save();
+        size_t retSaveSlot = temps.alloc(8);
+        gen.emitStorePtr(retSaveSlot);
         gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)exceptionPendingAddr);
         gen.emitLoadFromX9Offset(0);  // w0 = __exception_pending
         auto skipPopLabel = gen.newLabel();
         gen.emitBranchIfNonZero(skipPopLabel);
         emitInlinePopCall();
         gen.bindLabel(skipPopLabel);
+        // Restore return value
+        gen.emitLoadPtr(retSaveSlot);
+        temps.restore(retSaveMark);
         
         // Emit epilogue
         if (totalLocalBytes > 0) {
@@ -789,14 +798,14 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitLoadFromX9Offset(0);  // w0 = depth
 
         // x0 = depth * 24
-        gen.emitMoveX0ToX9();  // x9 = depth
+        gen.emitMoveX0ToX1();  // x1 = depth
         gen.emitImm32(stencil_load_imm32, 24);  // w0 = 24
-        gen.emit(stencil_mul_i32);  // w0 = depth * 24
+        gen.emit(stencil_mul_i32);  // w0 = w1 * w0 = depth * 24
 
         // x0 = exceptionSlotsAddr + depth * 24
-        gen.emitMoveX0ToX9();  // x9 = offset
+        gen.emitMoveX0ToX1();  // x1 = offset
         gen.emitLoadImm64(cast(ulong)cast(size_t)exceptionSlotsAddr);  // x0 = base
-        gen.emit(stencil_add_i64);  // x0 = base + offset
+        gen.emit(stencil_add_i64);  // x0 = x1 + x0 = offset + base
 
         // Save slotAddr to a temp
         auto mark2 = temps.save();
@@ -852,12 +861,12 @@ class NativeCompiledFunction : CompiledFunction {
         // Increment depth
         gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)exceptionDepthAddr);
         gen.emitLoadFromX9Offset(0);  // w0 = depth
-        gen.emitMoveX0ToX9();
-        gen.emitImm32(stencil_load_imm32, 1);
-        gen.emit(stencil_add_i32);  // w0 = depth + 1
-        gen.emitMoveX0ToX9();
-        gen.emitLoadImm64(cast(ulong)cast(size_t)exceptionDepthAddr);
-        gen.emitStoreToPointerFromX9(0);
+        gen.emitMoveX0ToX1();  // x1 = depth
+        gen.emitImm32(stencil_load_imm32, 1);  // w0 = 1
+        gen.emit(stencil_add_i32);  // w0 = w1 + w0 = depth + 1
+        gen.emitMoveX0ToX9();  // x9 = depth + 1
+        gen.emitLoadImm64(cast(ulong)cast(size_t)exceptionDepthAddr);  // x0 = addr
+        gen.emitStoreToPointerFromX9(0);  // *addr = depth + 1
 
         // Set __exception_pending = 1
         gen.emitImm32(stencil_load_imm32, 1);
@@ -902,11 +911,14 @@ class NativeCompiledFunction : CompiledFunction {
         // Decrement depth: depth--
         gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)exceptionDepthAddr);
         gen.emitLoadFromX9Offset(0);  // w0 = depth
-        gen.emitMoveX0ToX9();
-        gen.emitImm32(stencil_load_imm32, 1);
+        // SUB w0, w0, w1: left=w0=depth, right=w1=1
+        gen.emitImm32(stencil_load_imm32, 1);  // w0 = 1
+        gen.emitMoveX0ToX1();  // w1 = 1
+        gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)exceptionDepthAddr);
+        gen.emitLoadFromX9Offset(0);  // w0 = depth
         gen.emit(stencil_sub_i32);  // w0 = depth - 1
-        gen.emitMoveX0ToX9();
-        gen.emitLoadImm64(cast(ulong)cast(size_t)exceptionDepthAddr);
+        gen.emitMoveX0ToX9();  // x9 = depth - 1
+        gen.emitLoadImm64(cast(ulong)cast(size_t)exceptionDepthAddr);  // x0 = addr
         gen.emitStoreToPointerFromX9(0);  // *depthAddr = depth - 1
 
         // Clear __exception_pending if depth is now 0
@@ -929,12 +941,12 @@ class NativeCompiledFunction : CompiledFunction {
                 // Compute slotAddr = exceptionSlotsAddr + depth * 24
                 gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)exceptionDepthAddr);
                 gen.emitLoadFromX9Offset(0);  // w0 = depth (already decremented)
-                gen.emitMoveX0ToX9();
-                gen.emitImm32(stencil_load_imm32, 24);
-                gen.emit(stencil_mul_i32);  // w0 = depth * 24
-                gen.emitMoveX0ToX9();
-                gen.emitLoadImm64(cast(ulong)cast(size_t)exceptionSlotsAddr);
-                gen.emit(stencil_add_i64);  // x0 = base + offset
+                gen.emitMoveX0ToX1();  // x1 = depth
+                gen.emitImm32(stencil_load_imm32, 24);  // w0 = 24
+                gen.emit(stencil_mul_i32);  // w0 = w1 * w0 = depth * 24
+                gen.emitMoveX0ToX1();  // x1 = offset
+                gen.emitLoadImm64(cast(ulong)cast(size_t)exceptionSlotsAddr);  // x0 = base
+                gen.emit(stencil_add_i64);  // x0 = x1 + x0 = offset + base
                 gen.emitMoveX0ToX9();
                 gen.emitLoadFromX9Offset(20);  // w0 = slot.value
 

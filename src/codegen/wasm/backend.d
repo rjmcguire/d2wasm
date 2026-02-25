@@ -77,11 +77,13 @@ class WASMBackend : Backend {
             lastErrorLoc = emitter.errorLocation();
             return null;
         }
-        // Debug: dump CTFE WASM module for disassembly
-        try {
-            import std.file : fwrite = write;
-            fwrite("/tmp/ctfe_debug.wasm", wasmBytes);
-        } catch (Exception) {}
+        version (none) {
+            // Debug: dump CTFE WASM module for disassembly
+            try {
+                import std.file : fwrite = write;
+                fwrite("/tmp/ctfe_debug.wasm", wasmBytes);
+            } catch (Exception) {}
+        }
 
         return new WASMCompiledFunction(entryFuncName, wasmBytes,
             emitter.getArenaBaseValue(), emitter.exceptionArrayOffset, buildNeedsArenaMap(funcs));

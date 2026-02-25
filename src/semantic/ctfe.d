@@ -1708,6 +1708,10 @@ class CTFEEvaluator {
         } else if (result.throwLine > 0) {
             loc.line = result.throwLine;
             loc.column = result.throwCol;
+            // Clear extents from the fallback AST node — the exception slot only
+            // carries line/col, so the original node's byte offsets are misleading.
+            loc.startOffset = 0;
+            loc.endOffset = 0;
         }
         auto err = new CTFEError(result.error, loc);
         // Add call stack as notes — innermost frame is "in", outer frames are "called from".
