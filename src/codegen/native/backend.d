@@ -13,7 +13,7 @@ import codegen.native.arm64_codegen : NativeCodeGen, CallFrameData, ErrorLocData
 import codegen.native.arm64.stencil_table;
 import codegen.native.stencil_catalog;
 import codegen.native.codegen_interface : Label, NativeDataSection, NativeCTFEContext,
-    HostFunctionTable, CTFEErrorKind, ctfeErrorMessage, ctfeErrorMessageWithStack, setjmp;
+    HostFunctionTable, CTFEErrorKind, ctfeErrorMessage, setjmp;
 import ast.nodes;
 import ast.statements;
 import ast.expressions;
@@ -250,9 +250,8 @@ class NativeCompiledFunction : CompiledFunction {
     }
     private NativeTryContext[] tryStack;
     private ubyte* exceptionPendingAddr;  // absolute address in data section (i32)
-    private ubyte* exceptionValueAddr;    // absolute address in data section (i32)
-    private ubyte* exceptionLineAddr;     // absolute address in data section (i32)
-    private ubyte* exceptionColAddr;      // absolute address in data section (i32)
+    private ubyte* exceptionDepthAddr;    // absolute address in data section (i32)
+    private ubyte* exceptionSlotsAddr;    // absolute address of exception slot array (100 * 24 bytes)
 
     // For multi-function support: map function names to their labels
     private Label[string] functionLabels;
@@ -687,8 +686,14 @@ class NativeCompiledFunction : CompiledFunction {
         // Bind epilogue label - return statements jump here
         gen.bindLabel(epilogueLabel);
         
-        // Emit inline call stack pop (before return)
+        // Emit inline call stack pop (only on normal return — preserve during exception
+        // propagation so the host can read the call chain for error reporting)
+        gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)exceptionPendingAddr);
+        gen.emitLoadFromX9Offset(0);  // w0 = __exception_pending
+        auto skipPopLabel = gen.newLabel();
+        gen.emitBranchIfNonZero(skipPopLabel);
         emitInlinePopCall();
+        gen.bindLabel(skipPopLabel);
         
         // Emit epilogue
         if (totalLocalBytes > 0) {
@@ -701,13 +706,14 @@ class NativeCompiledFunction : CompiledFunction {
     // ========== Exception Handling Helpers ==========
 
     /// Allocate exception globals in the data section.
-    /// Four i32 slots: pending, value, line, col.
+    /// Two i32 scalars (pending, depth) plus a slot array (100 * 24 bytes).
     private void allocateExceptionGlobals() {
         ubyte[4] zero = [0, 0, 0, 0];
         exceptionPendingAddr = dataSection.addData(zero[]);
-        exceptionValueAddr = dataSection.addData(zero[]);
-        exceptionLineAddr = dataSection.addData(zero[]);
-        exceptionColAddr = dataSection.addData(zero[]);
+        exceptionDepthAddr = dataSection.addData(zero[]);
+        // Pre-allocate 100 exception slots (24 bytes each)
+        auto slotBytes = new ubyte[](2400);
+        exceptionSlotsAddr = dataSection.addData(slotBytes);
     }
 
     /// Emit exception check after a function call (void context — result already consumed or discarded).
@@ -749,40 +755,115 @@ class NativeCompiledFunction : CompiledFunction {
         temps.restore(mark);
     }
 
-    /// Compile a throw expression: store value, set flag, branch to catch or epilogue.
+    /// Compile a throw expression: write exception slot, set flag, branch to catch or epilogue.
     private void compileThrowExpression(ThrowExpression expr) {
+        import codegen.error_kind : ErrorKind;
+
         // Evaluate the thrown value into x0
         compileExpression(expr.operand);
 
-        // Store value to __exception_value
-        gen.emitMoveX0ToX9();  // x9 = thrown value
-        gen.emitLoadImm64(cast(ulong)cast(size_t)exceptionValueAddr);
-        // STR w9, [x0] — store 32-bit value at address in x0
+        // Save thrown value to a temp slot
+        auto mark = temps.save();
+        size_t valueTempSlot = temps.alloc(4);
+        gen.emitStoreLocal32(valueTempSlot);
+
+        // Write exception slot: slots[depth]
+        emitNativeExceptionSlotWrite(ErrorKind.UserThrow, expr.location, valueTempSlot);
+
+        temps.restore(mark);
+
+        if (tryStack.length > 0) {
+            gen.emitBranch(tryStack[$ - 1].catchLabel);
+        } else {
+            gen.emitBranch(epilogueLabel);
+        }
+    }
+
+    /// Write an exception slot at the current depth and set __exception_pending.
+    /// For UserThrow, valueTempSlot contains the thrown i32 value.
+    /// For runtime errors, pass valueTempSlot = size_t.max to write 0.
+    private void emitNativeExceptionSlotWrite(uint kind, SourceLocation loc, size_t valueTempSlot = size_t.max) {
+        // Compute slotAddr = exceptionSlotsAddr + depth * 24
+        // Load depth
+        gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)exceptionDepthAddr);
+        gen.emitLoadFromX9Offset(0);  // w0 = depth
+
+        // x0 = depth * 24
+        gen.emitMoveX0ToX9();  // x9 = depth
+        gen.emitImm32(stencil_load_imm32, 24);  // w0 = 24
+        gen.emit(stencil_mul_i32);  // w0 = depth * 24
+
+        // x0 = exceptionSlotsAddr + depth * 24
+        gen.emitMoveX0ToX9();  // x9 = offset
+        gen.emitLoadImm64(cast(ulong)cast(size_t)exceptionSlotsAddr);  // x0 = base
+        gen.emit(stencil_add_i64);  // x0 = base + offset
+
+        // Save slotAddr to a temp
+        auto mark2 = temps.save();
+        size_t slotAddrTemp = temps.alloc(8);
+        gen.emitStorePtr(slotAddrTemp);
+
+        // emitStoreToPointerFromX9 does STR w9, [x0, #offset]:
+        //   x0 = address, x9 = value to store
+
+        // Write kind (offset 0)
+        gen.emitImm32(stencil_load_imm32, cast(int)kind);
+        gen.emitMoveX0ToX9();  // x9 = kind (value)
+        gen.emitLoadPtr(slotAddrTemp);  // x0 = slotAddr (address)
         gen.emitStoreToPointerFromX9(0);
 
-        // Store throw location
-        gen.emitImm32(stencil_load_imm32, cast(int)expr.location.line);
+        // Write file info: we store 0 for native (no WASM memory file strings)
+        // File offset (offset 4) = 0
+        gen.emitImm32(stencil_load_imm32, 0);
         gen.emitMoveX0ToX9();
-        gen.emitLoadImm64(cast(ulong)cast(size_t)exceptionLineAddr);
-        gen.emitStoreToPointerFromX9(0);
-        gen.emitImm32(stencil_load_imm32, cast(int)expr.location.column);
+        gen.emitLoadPtr(slotAddrTemp);
+        gen.emitStoreToPointerFromX9(4);
+
+        // File len (offset 8) = 0
+        gen.emitImm32(stencil_load_imm32, 0);
         gen.emitMoveX0ToX9();
-        gen.emitLoadImm64(cast(ulong)cast(size_t)exceptionColAddr);
+        gen.emitLoadPtr(slotAddrTemp);
+        gen.emitStoreToPointerFromX9(8);
+
+        // Write line (offset 12)
+        gen.emitImm32(stencil_load_imm32, cast(int)loc.line);
+        gen.emitMoveX0ToX9();
+        gen.emitLoadPtr(slotAddrTemp);
+        gen.emitStoreToPointerFromX9(12);
+
+        // Write col (offset 16)
+        gen.emitImm32(stencil_load_imm32, cast(int)loc.column);
+        gen.emitMoveX0ToX9();
+        gen.emitLoadPtr(slotAddrTemp);
+        gen.emitStoreToPointerFromX9(16);
+
+        // Write value (offset 20)
+        if (valueTempSlot != size_t.max) {
+            gen.emitLoadLocal32(valueTempSlot);  // w0 = thrown value
+        } else {
+            gen.emitImm32(stencil_load_imm32, 0);
+        }
+        gen.emitMoveX0ToX9();  // x9 = value
+        gen.emitLoadPtr(slotAddrTemp);  // x0 = slotAddr
+        gen.emitStoreToPointerFromX9(20);
+
+        temps.restore(mark2);
+
+        // Increment depth
+        gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)exceptionDepthAddr);
+        gen.emitLoadFromX9Offset(0);  // w0 = depth
+        gen.emitMoveX0ToX9();
+        gen.emitImm32(stencil_load_imm32, 1);
+        gen.emit(stencil_add_i32);  // w0 = depth + 1
+        gen.emitMoveX0ToX9();
+        gen.emitLoadImm64(cast(ulong)cast(size_t)exceptionDepthAddr);
         gen.emitStoreToPointerFromX9(0);
 
         // Set __exception_pending = 1
-        gen.emitImm32(stencil_load_imm32, 1);  // w0 = 1
-        gen.emitMoveX0ToX9();  // x9 = 1
+        gen.emitImm32(stencil_load_imm32, 1);
+        gen.emitMoveX0ToX9();
         gen.emitLoadImm64(cast(ulong)cast(size_t)exceptionPendingAddr);
-        gen.emitStoreToPointerFromX9(0);  // *exceptionPendingAddr = 1
-
-        if (tryStack.length > 0) {
-            // Inside a try block: branch directly to catch handler
-            gen.emitBranch(tryStack[$ - 1].catchLabel);
-        } else {
-            // Not in a try block: propagate by returning
-            gen.emitBranch(epilogueLabel);
-        }
+        gen.emitStoreToPointerFromX9(0);
     }
 
     /// Compile a try/catch statement using labels and the global-flag mechanism.
@@ -818,19 +899,45 @@ class NativeCompiledFunction : CompiledFunction {
         // Catch handler
         gen.bindLabel(catchLabel);
 
-        // Clear __exception_pending = 0
-        gen.emitImm32(stencil_load_imm32, 0);  // w0 = 0
+        // Decrement depth: depth--
+        gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)exceptionDepthAddr);
+        gen.emitLoadFromX9Offset(0);  // w0 = depth
+        gen.emitMoveX0ToX9();
+        gen.emitImm32(stencil_load_imm32, 1);
+        gen.emit(stencil_sub_i32);  // w0 = depth - 1
+        gen.emitMoveX0ToX9();
+        gen.emitLoadImm64(cast(ulong)cast(size_t)exceptionDepthAddr);
+        gen.emitStoreToPointerFromX9(0);  // *depthAddr = depth - 1
+
+        // Clear __exception_pending if depth is now 0
+        gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)exceptionDepthAddr);
+        gen.emitLoadFromX9Offset(0);  // w0 = new depth
+        auto skipClearLabel = gen.newLabel();
+        gen.emitBranchIfNonZero(skipClearLabel);
+        // depth == 0: clear pending
+        gen.emitImm32(stencil_load_imm32, 0);
         gen.emitMoveX0ToX9();
         gen.emitLoadImm64(cast(ulong)cast(size_t)exceptionPendingAddr);
         gen.emitStoreToPointerFromX9(0);
+        gen.bindLabel(skipClearLabel);
 
         // Bind caught value and emit catch body
         if (stmt.catches.length > 0) {
             auto c = stmt.catches[0];
             if (c.paramName !is null && c.paramName.length > 0) {
-                // Load __exception_value into the catch parameter local
-                gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)exceptionValueAddr);
-                gen.emitLoadFromX9Offset(0);  // w0 = exception value
+                // Read value from slot[depth].value (offset 20)
+                // Compute slotAddr = exceptionSlotsAddr + depth * 24
+                gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)exceptionDepthAddr);
+                gen.emitLoadFromX9Offset(0);  // w0 = depth (already decremented)
+                gen.emitMoveX0ToX9();
+                gen.emitImm32(stencil_load_imm32, 24);
+                gen.emit(stencil_mul_i32);  // w0 = depth * 24
+                gen.emitMoveX0ToX9();
+                gen.emitLoadImm64(cast(ulong)cast(size_t)exceptionSlotsAddr);
+                gen.emit(stencil_add_i64);  // x0 = base + offset
+                gen.emitMoveX0ToX9();
+                gen.emitLoadFromX9Offset(20);  // w0 = slot.value
+
                 if (auto info = c.paramName in localVars) {
                     gen.emitStoreLocal32(info.offset);
                 }
@@ -4511,6 +4618,70 @@ class NativeCompiledFunction : CompiledFunction {
         return null;
     }
 
+    /// Read uncaught exception from the native exception slot stack.
+    private ExecutionResult readNativeUncaughtException() {
+        import codegen.backend : CallStackFrame;
+        import codegen.error_kind : ErrorKind, errorKindMessage;
+        import codegen.native.codegen_interface : CallFrame;
+
+        int depth = *cast(int*)exceptionDepthAddr;
+        if (depth <= 0)
+            return ExecutionResult.failure("uncaught exception (unknown)");
+
+        // Read slot[depth - 1]
+        ubyte* slotAddr = exceptionSlotsAddr + (depth - 1) * 24;
+        uint kind = *cast(uint*)(slotAddr + 0);
+        int line = *cast(int*)(slotAddr + 12);
+        int col = *cast(int*)(slotAddr + 16);
+        int value = *cast(int*)(slotAddr + 20);
+
+        string msg = errorKindMessage(cast(ErrorKind)kind);
+        if (cast(ErrorKind)kind == ErrorKind.UserThrow) {
+            msg ~= " (thrown value: " ~ to!string(value) ~ ")";
+        }
+
+        auto r = ExecutionResult.failure(msg, "", line, col);
+
+        // Read call stack frames from inline stack in data section
+        if (dataSection.stackReserved) {
+            auto frames = dataSection.getInlineCallStack();
+            foreach (f; frames)
+                r.callStack ~= CallStackFrame(f.funcName, f.fileName, f.line, 0);
+        }
+        return r;
+    }
+
+    /// Build structured failure result from a native trap (div-by-zero, null deref, etc.)
+    private ExecutionResult buildTrapResult(NativeCTFEContext* ctx) {
+        import codegen.backend : CallStackFrame;
+        import codegen.native.codegen_interface : CallFrame;
+
+        string msg = ctfeErrorMessage(ctx.errorKind);
+        string errFile;
+        int errLine, errCol;
+
+        if (ctx.errorLoc.line > 0) {
+            errFile = ctx.errorLoc.fileName;
+            errLine = cast(int)ctx.errorLoc.line;
+            errCol = cast(int)ctx.errorLoc.column;
+        }
+
+        auto r = ExecutionResult.failure(msg, errFile, errLine, errCol);
+
+        // Read call stack frames (prefer inline stack from data section)
+        CallFrame[] frames;
+        if (ctx.dataSection !is null && ctx.dataSection.stackReserved) {
+            frames = ctx.dataSection.getInlineCallStack();
+        }
+        if (frames.length == 0) {
+            frames = ctx.callStack;
+        }
+        foreach (f; frames) {
+            r.callStack ~= CallStackFrame(f.funcName, f.fileName, f.line, 0);
+        }
+        return r;
+    }
+
     override ExecutionResult call(long[] args) {
         import codegen.native.codegen_interface : setjmp;
 
@@ -4524,7 +4695,7 @@ class NativeCompiledFunction : CompiledFunction {
         // Set up error recovery point - longjmp returns here on trap
         if (setjmp(ctx.errorJump) != 0) {
             // Got here via longjmp - error occurred
-            return ExecutionResult.failure(ctfeErrorMessageWithStack(&ctx));
+            return buildTrapResult(&ctx);
         }
 
         // Prepend arena (0) if entry function needs it (native uses __ctfe_alloc, not arena)
@@ -4562,9 +4733,7 @@ class NativeCompiledFunction : CompiledFunction {
         }
 
         if (exceptionPendingAddr !is null && *cast(int*)exceptionPendingAddr != 0)
-            return ExecutionResult.failure("uncaught exception (thrown value: "
-                ~ to!string(*cast(int*)exceptionValueAddr) ~ ")",
-                *cast(int*)exceptionLineAddr, *cast(int*)exceptionColAddr);
+            return readNativeUncaughtException();
         return ExecutionResult.fromInt(cast(int)result);  // Sign-extend 32-bit to 64-bit
     }
 
@@ -4595,7 +4764,7 @@ class NativeCompiledFunction : CompiledFunction {
         // Set up error recovery point - longjmp returns here on trap
         if (setjmp(ctx.errorJump) != 0) {
             // Got here via longjmp - error occurred
-            return ExecutionResult.failure(ctfeErrorMessageWithStack(&ctx));
+            return buildTrapResult(&ctx);
         }
 
         // Prepend arena (0) if target function needs it
@@ -4631,9 +4800,7 @@ class NativeCompiledFunction : CompiledFunction {
         }
 
         if (exceptionPendingAddr !is null && *cast(int*)exceptionPendingAddr != 0)
-            return ExecutionResult.failure("uncaught exception (thrown value: "
-                ~ to!string(*cast(int*)exceptionValueAddr) ~ ")",
-                *cast(int*)exceptionLineAddr, *cast(int*)exceptionColAddr);
+            return readNativeUncaughtException();
         return ExecutionResult.fromInt(cast(int)result);  // Sign-extend 32-bit to 64-bit
     }
 
@@ -4671,7 +4838,7 @@ class NativeCompiledFunction : CompiledFunction {
 
         // Set up error recovery point
         if (setjmp(ctx.errorJump) != 0) {
-            return ExecutionResult.failure(ctfeErrorMessageWithStack(&ctx));
+            return buildTrapResult(&ctx);
         }
 
         // Prepend result pointer, then arena (0) if needed, then user args
@@ -4703,9 +4870,7 @@ class NativeCompiledFunction : CompiledFunction {
         }
 
         if (exceptionPendingAddr !is null && *cast(int*)exceptionPendingAddr != 0)
-            return ExecutionResult.failure("uncaught exception (thrown value: "
-                ~ to!string(*cast(int*)exceptionValueAddr) ~ ")",
-                *cast(int*)exceptionLineAddr, *cast(int*)exceptionColAddr);
+            return readNativeUncaughtException();
 
         // Copy result bytes
         ubyte[] resultBytes = resultBuf[0 .. resultSize].dup;

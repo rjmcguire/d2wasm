@@ -52,6 +52,26 @@ class CTFEError : Exception {
     }
 }
 
+/// Read the uncaught exception message from the WASM runtime's exception slots.
+private string readUncaughtExceptionMessage(R)(R runtime, uint exceptionArrayOffset) {
+    import codegen.error_kind : ErrorKind, errorKindMessage;
+    import codegen.wasm.types : EXCEPTION_SLOT_SIZE, EXCEPTION_SLOT_KIND, EXCEPTION_SLOT_VALUE;
+
+    int depth = runtime.getGlobalI32("__exception_depth");
+    if (depth <= 0)
+        return "uncaught exception (unknown)";
+
+    uint slotAddr = exceptionArrayOffset + cast(uint)(depth - 1) * EXCEPTION_SLOT_SIZE;
+    uint kind = runtime.readU32(slotAddr + EXCEPTION_SLOT_KIND);
+    int value = cast(int)runtime.readU32(slotAddr + EXCEPTION_SLOT_VALUE);
+
+    string msg = errorKindMessage(cast(ErrorKind)kind);
+    if (cast(ErrorKind)kind == ErrorKind.UserThrow) {
+        msg = "uncaught exception (thrown value: " ~ to!string(value) ~ ")";
+    }
+    return msg;
+}
+
 /**
  * Result of a CTFE evaluation that can be either a string, integer, or array.
  */
@@ -196,6 +216,7 @@ class CTFEEvaluator {
     private uint statCacheMisses;         // times we needed to compile new functions
     private uint statCallCount;           // total CTFE calls
     private uint ctfeWrapperCounter;      // unique names for synthetic wrapper functions
+    private uint lastExceptionArrayOffset; // cached from last WASM compilation
     private Duration statCompileTime;     // total time spent compiling
     private Duration statExecTime;        // total time spent executing
     private Duration statAnalysisTime;    // total time in dependency analysis
@@ -656,8 +677,7 @@ class CTFEEvaluator {
             // Call __eval() to get the result string pointer
             auto result = runtime.callI32("__eval");
             if (runtime.getGlobalI32("__exception_pending") != 0)
-                throw new CTFEError("uncaught exception during CTFE evaluation (thrown value: "
-                    ~ to!string(runtime.getGlobalI32("__exception_value")) ~ ")", expr.location);
+                throw new CTFEError(readUncaughtExceptionMessage(runtime, emitter.getExceptionArrayOffset()), expr.location);
             uint structPtr = result.asInt();
 
             log(3, "CTFE: __eval returned struct at ", structPtr);
@@ -676,7 +696,14 @@ class CTFEEvaluator {
             return resultStr;
             
         } catch (CTFERuntimeError e) {
-            throw new CTFEError("CTFE: wasm3 execution failed: " ~ e.msg, expr.location);
+            // Extract short message (strip prefix and trailing formatted stack)
+            string msg = e.msg;
+            auto nlIdx = msg.indexOf('\n');
+            if (nlIdx >= 0) msg = msg[0..nlIdx];
+            enum prefix = "CTFE execution failed: ";
+            if (msg.length > prefix.length && msg[0..prefix.length] == prefix)
+                msg = msg[prefix.length..$];
+            throw new CTFEError(msg, expr.location);
         }
     }
 
@@ -1051,7 +1078,7 @@ class CTFEEvaluator {
                         ensureCompiledForFunction(funcDecl);
                         auto result = cachedContext.callWithLargeReturn(funcDecl.name, [], reader.sliceSize);
                         if (!result.success)
-                            throw new CTFEError("CTFE execution error: " ~ result.error, callExpr.location);
+                            throw buildCTFEError(result, callExpr.location);
 
                         // Read outer slice header
                         auto outerSlice = reader.readSlice(result.arrayBytes);
@@ -1087,7 +1114,7 @@ class CTFEEvaluator {
             ensureCompiledForFunction(funcDecl);
             auto result = cachedContext.callWithLargeReturn(funcDecl.name, [], reader.sliceSize);
             if (!result.success)
-                throw new CTFEError("CTFE execution error: " ~ result.error, callExpr.location);
+                throw buildCTFEError(result, callExpr.location);
             auto slice = reader.readSlice(result.arrayBytes);
             ubyte[] strBytes = cachedContext.readMemory(slice.dataPtr, slice.length);
             return CTFEResult.fromString(cast(string)strBytes.idup);
@@ -1099,7 +1126,7 @@ class CTFEEvaluator {
                 ensureCompiledForFunction(funcDecl);
                 auto result = cachedContext.callWithLargeReturn(funcDecl.name, [], reader.sliceSize);
                 if (!result.success)
-                    throw new CTFEError("CTFE execution error: " ~ result.error, callExpr.location);
+                    throw buildCTFEError(result, callExpr.location);
                 auto slice = reader.readSlice(result.arrayBytes);
                 uint elemSize = reader.elementSizeOf(arrType.elementType);
                 ubyte[] rawData = cachedContext.readMemory(slice.dataPtr, slice.length * elemSize);
@@ -1333,7 +1360,7 @@ class CTFEEvaluator {
         statExecTime += MonoTime.currTime - t2;
 
         if (!result.success) {
-            throw new CTFEError("CTFE execution error: " ~ result.error, funcDecl.location);
+            throw buildCTFEError(result, funcDecl.location);
         }
 
         log(3, "CTFE: ", funcDecl.name, " returned ", result.arrayBytes.length, " bytes");
@@ -1425,7 +1452,7 @@ class CTFEEvaluator {
         statExecTime += MonoTime.currTime - t2;
 
         if (!result.success) {
-            throw new CTFEError("CTFE execution error: " ~ result.error, funcDecl.location);
+            throw buildCTFEError(result, funcDecl.location);
         }
         
         log(3, "CTFE: ", funcDecl.name, " returned ", result.arrayBytes.length, " bytes");
@@ -1527,8 +1554,7 @@ class CTFEEvaluator {
             runtime.loadModule(wasmBytes);
             auto result = runtime.callI32("__eval");
             if (runtime.getGlobalI32("__exception_pending") != 0)
-                throw new CTFEError("uncaught exception during CTFE evaluation (thrown value: "
-                    ~ to!string(runtime.getGlobalI32("__exception_value")) ~ ")", expr.location);
+                throw new CTFEError(readUncaughtExceptionMessage(runtime, emitter.getExceptionArrayOffset()), expr.location);
             return result.asInt();
         } catch (CTFERuntimeError e) {
             throw new CTFEError("CTFE execution error: " ~ e.msg, expr.location);
@@ -1588,8 +1614,7 @@ class CTFEEvaluator {
             runtime.loadModule(wasmBytes);
             auto result = runtime.callF64("__eval");
             if (runtime.getGlobalI32("__exception_pending") != 0)
-                throw new CTFEError("uncaught exception during CTFE evaluation (thrown value: "
-                    ~ to!string(runtime.getGlobalI32("__exception_value")) ~ ")", expr.location);
+                throw new CTFEError(readUncaughtExceptionMessage(runtime, emitter.getExceptionArrayOffset()), expr.location);
             return result.asDouble();
         } catch (CTFERuntimeError e) {
             throw new CTFEError("CTFE execution error: " ~ e.msg, expr.location);
@@ -1673,6 +1698,36 @@ class CTFEEvaluator {
         }
     }
 
+    /// Build a CTFEError from a failed ExecutionResult with structured location and call chain.
+    private CTFEError buildCTFEError(ExecutionResult result, SourceLocation fallbackLoc) {
+        import codegen.backend : ExecutionResult;
+        // Use precise error location if available, otherwise fall back
+        auto loc = fallbackLoc;
+        if (result.throwFile.length > 0 && result.throwLine > 0) {
+            loc = SourceLocation(result.throwFile, result.throwLine, result.throwCol);
+        } else if (result.throwLine > 0) {
+            loc.line = result.throwLine;
+            loc.column = result.throwCol;
+        }
+        auto err = new CTFEError(result.error, loc);
+        // Add call stack as notes — innermost frame is "in", outer frames are "called from".
+        // The exception slot has the precise error location; frames have function-definition
+        // locations, so there's no redundancy with the primary error.
+        if (result.callStack.length > 0) {
+            bool first = true;
+            foreach_reverse (frame; result.callStack) {
+                auto frameLoc = SourceLocation(frame.fileName, frame.line, frame.column);
+                if (first) {
+                    err.addNote("in `" ~ frame.funcName ~ "()`", frameLoc);
+                    first = false;
+                } else {
+                    err.addNote("called from `" ~ frame.funcName ~ "()`", frameLoc);
+                }
+            }
+        }
+        return err;
+    }
+
     long executeViaBackend(FunctionDecl funcDecl, long[] args) {
         ensureCompiledForFunction(funcDecl);
 
@@ -1681,21 +1736,7 @@ class CTFEEvaluator {
         auto result = cachedContext.callByName(funcDecl.name, args);
         statExecTime += MonoTime.currTime - t2;
         if (!result.success) {
-            auto loc = funcDecl.location;
-            if (result.throwLine > 0) {
-                loc.line = result.throwLine;
-                loc.column = result.throwCol;
-            }
-            auto err = new CTFEError(result.error, loc);
-            // Add intermediate call chain notes (skip innermost frame = thrower,
-            // already shown as primary error location)
-            if (result.callStack.length > 1) {
-                foreach_reverse (frame; result.callStack[0 .. $ - 1]) {
-                    auto frameLoc = SourceLocation(frame.fileName, frame.line, frame.column);
-                    err.addNote("called from `" ~ frame.funcName ~ "`", frameLoc);
-                }
-            }
-            throw err;
+            throw buildCTFEError(result, funcDecl.location);
         }
 
         log(3, "CTFE [", backend.name, "]: ", funcDecl.name, "(", args, ") = ", result.intValue);
@@ -1814,7 +1855,8 @@ class CTFEEvaluator {
         if (result is null) {
             log(3, "CTFE compile error: ", emitter.error());
         }
-        
+
+        lastExceptionArrayOffset = emitter.getExceptionArrayOffset();
         return result;
     }
     
@@ -1840,13 +1882,18 @@ class CTFEEvaluator {
             
             auto result = runtime.callI32(funcName, intArgs);
             if (runtime.getGlobalI32("__exception_pending") != 0)
-                throw new CTFEError("uncaught exception during CTFE evaluation (thrown value: "
-                    ~ to!string(runtime.getGlobalI32("__exception_value")) ~ ")", SourceLocation.init);
+                throw new CTFEError(readUncaughtExceptionMessage(runtime, lastExceptionArrayOffset), SourceLocation.init);
             log(3, "CTFE: Result = ", result.asInt());
             return result.asInt();
 
         } catch (CTFERuntimeError e) {
-            throw new CTFEError("CTFE: wasm3 execution failed: " ~ e.msg, SourceLocation.init);
+            string msg = e.msg;
+            auto nlIdx = msg.indexOf('\n');
+            if (nlIdx >= 0) msg = msg[0..nlIdx];
+            enum prefix = "CTFE execution failed: ";
+            if (msg.length > prefix.length && msg[0..prefix.length] == prefix)
+                msg = msg[prefix.length..$];
+            throw new CTFEError(msg, SourceLocation.init);
         }
     }
 }

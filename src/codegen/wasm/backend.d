@@ -38,7 +38,7 @@ class WASMBackend : Backend {
         }
 
         return new WASMCompiledFunction(func.name, wasmBytes,
-            emitter.getArenaBaseValue(), buildNeedsArenaMap([func]));
+            emitter.getArenaBaseValue(), emitter.exceptionArrayOffset, buildNeedsArenaMap([func]));
     }
 
     override CompiledFunction compileWithDependencies(FunctionDecl[] funcs, string entryFuncName) {
@@ -77,16 +77,14 @@ class WASMBackend : Backend {
             lastErrorLoc = emitter.errorLocation();
             return null;
         }
-        version(none) {
-            // Debug: dump CTFE WASM module for disassembly
-            try {
-                import std.file : fwrite = write;
-                fwrite("/tmp/ctfe_debug.wasm", wasmBytes);
-            } catch (Exception) {}
-        }
+        // Debug: dump CTFE WASM module for disassembly
+        try {
+            import std.file : fwrite = write;
+            fwrite("/tmp/ctfe_debug.wasm", wasmBytes);
+        } catch (Exception) {}
 
         return new WASMCompiledFunction(entryFuncName, wasmBytes,
-            emitter.getArenaBaseValue(), buildNeedsArenaMap(funcs));
+            emitter.getArenaBaseValue(), emitter.exceptionArrayOffset, buildNeedsArenaMap(funcs));
     }
 
     override ubyte[] compileModule(Declaration[] decls) {
@@ -128,27 +126,112 @@ class WASMCompiledFunction : CompiledFunction {
     private ubyte[] wasmBytes;
     private CTFERuntime runtime;
     private uint arenaBaseValue;
+    private uint exceptionArrayBase;  // Memory offset of exception slot array
     private bool[string] needsArenaFuncs;
 
-    this(string name, ubyte[] wasm, uint arenaBase = 0, bool[string] needsArena = null) {
+    this(string name, ubyte[] wasm, uint arenaBase = 0, uint excArrayBase = 0, bool[string] needsArena = null) {
         this.funcName = name;
         this.wasmBytes = wasm;
         this.arenaBaseValue = arenaBase;
+        this.exceptionArrayBase = excArrayBase;
         this.needsArenaFuncs = needsArena;
         this.runtime = new CTFERuntime();
         this.runtime.loadModule(wasm);
     }
 
     /// Check for uncaught exception after WASM execution and build failure result.
+    /// Reads from the exception slot stack in WASM linear memory.
     private ExecutionResult checkUncaughtException() {
         import codegen.backend : CallStackFrame;
+        import codegen.error_kind : ErrorKind, errorKindMessage;
+        import codegen.wasm.types : EXCEPTION_SLOT_SIZE, EXCEPTION_SLOT_KIND,
+                                    EXCEPTION_SLOT_FILE_OFFSET, EXCEPTION_SLOT_FILE_LEN,
+                                    EXCEPTION_SLOT_LINE, EXCEPTION_SLOT_COL, EXCEPTION_SLOT_VALUE;
 
-        auto r = ExecutionResult.failure("uncaught exception (thrown value: "
-            ~ to!string(runtime.getGlobalI32("__exception_value")) ~ ")",
-            runtime.getGlobalI32("__exception_line"),
-            runtime.getGlobalI32("__exception_col"));
+        int depth = runtime.getGlobalI32("__exception_depth");
+        if (depth <= 0) {
+            return ExecutionResult.failure("uncaught exception (unknown)");
+        }
+
+        // Read the most recent exception slot: slot[depth - 1]
+        uint slotAddr = exceptionArrayBase + cast(uint)(depth - 1) * EXCEPTION_SLOT_SIZE;
+        uint kind = runtime.readU32(slotAddr + EXCEPTION_SLOT_KIND);
+        uint fileOff = runtime.readU32(slotAddr + EXCEPTION_SLOT_FILE_OFFSET);
+        uint fileLen = runtime.readU32(slotAddr + EXCEPTION_SLOT_FILE_LEN);
+        int line = cast(int)runtime.readU32(slotAddr + EXCEPTION_SLOT_LINE);
+        int col = cast(int)runtime.readU32(slotAddr + EXCEPTION_SLOT_COL);
+        int value = cast(int)runtime.readU32(slotAddr + EXCEPTION_SLOT_VALUE);
+
+        // Build message from error kind
+        string msg = errorKindMessage(cast(ErrorKind)kind);
+        if (cast(ErrorKind)kind == ErrorKind.UserThrow) {
+            msg ~= " (thrown value: " ~ to!string(value) ~ ")";
+        }
+
+        // Read filename from WASM memory
+        string errFile;
+        try {
+            if (fileLen > 0 && fileLen < 1024)
+                errFile = runtime.readString(fileOff, fileLen);
+        } catch (Exception) {}
+
+        auto r = ExecutionResult.failure(msg, errFile, line, col);
 
         // Read preserved call stack frames from WASM linear memory
+        auto wasmFrames = runtime.getCallStackFrames();
+        if (wasmFrames !is null) {
+            foreach (f; wasmFrames)
+                r.callStack ~= CallStackFrame(f.funcName, f.fileName, f.line, f.column);
+        }
+        return r;
+    }
+
+    /// Build structured failure result from a WASM trap (genuinely unexpected traps).
+    /// For div-by-zero and other runtime errors, exceptions now propagate via slots,
+    /// so this is only a fallback for genuine wasm3 traps.
+    private ExecutionResult buildTrapResult(CTFERuntimeError e) {
+        import codegen.backend : CallStackFrame;
+        import codegen.error_kind : ErrorKind, errorKindMessage;
+        import codegen.wasm.types : EXCEPTION_SLOT_SIZE, EXCEPTION_SLOT_KIND,
+                                    EXCEPTION_SLOT_FILE_OFFSET, EXCEPTION_SLOT_FILE_LEN,
+                                    EXCEPTION_SLOT_LINE, EXCEPTION_SLOT_COL;
+        import std.string : indexOf;
+
+        // Check if there's exception slot data (e.g., overflow guard hit unreachable)
+        string errFile;
+        int errLine, errCol;
+        string msg;
+
+        try {
+            int depth = runtime.getGlobalI32("__exception_depth");
+            if (depth > 0) {
+                uint slotAddr = exceptionArrayBase + cast(uint)(depth - 1) * EXCEPTION_SLOT_SIZE;
+                uint kind = runtime.readU32(slotAddr + EXCEPTION_SLOT_KIND);
+                uint fileOff = runtime.readU32(slotAddr + EXCEPTION_SLOT_FILE_OFFSET);
+                uint fileLen = runtime.readU32(slotAddr + EXCEPTION_SLOT_FILE_LEN);
+                errLine = cast(int)runtime.readU32(slotAddr + EXCEPTION_SLOT_LINE);
+                errCol = cast(int)runtime.readU32(slotAddr + EXCEPTION_SLOT_COL);
+                if (fileLen > 0 && fileLen < 1024)
+                    errFile = runtime.readString(fileOff, fileLen);
+                msg = errorKindMessage(cast(ErrorKind)kind);
+            }
+        } catch (Exception) {}
+
+        if (msg.length == 0) {
+            // Fallback: extract from wasm3 error message
+            msg = e.msg;
+            if (msg.length > 0) {
+                auto nlIdx = msg.indexOf('\n');
+                if (nlIdx >= 0) msg = msg[0..nlIdx];
+                enum prefix = "CTFE execution failed: ";
+                if (msg.length > prefix.length && msg[0..prefix.length] == prefix)
+                    msg = msg[prefix.length..$];
+            }
+        }
+
+        auto r = ExecutionResult.failure(msg, errFile, errLine, errCol);
+
+        // Read call stack frames
         auto wasmFrames = runtime.getCallStackFrames();
         if (wasmFrames !is null) {
             foreach (f; wasmFrames)
@@ -173,7 +256,7 @@ class WASMCompiledFunction : CompiledFunction {
             return ExecutionResult.fromInt(result.asInt());
 
         } catch (CTFERuntimeError e) {
-            return ExecutionResult.failure(e.msg);
+            return buildTrapResult(e);
         }
     }
 
@@ -193,7 +276,7 @@ class WASMCompiledFunction : CompiledFunction {
             return ExecutionResult.fromInt(result.asInt());
 
         } catch (CTFERuntimeError e) {
-            return ExecutionResult.failure(e.msg);
+            return buildTrapResult(e);
         }
     }
 
@@ -224,7 +307,7 @@ class WASMCompiledFunction : CompiledFunction {
             return ExecutionResult.fromArray(resultBytes);
 
         } catch (CTFERuntimeError e) {
-            return ExecutionResult.failure(e.msg);
+            return buildTrapResult(e);
         }
     }
 

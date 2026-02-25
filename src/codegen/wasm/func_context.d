@@ -973,6 +973,67 @@ class FuncContext {
     }
     
     /**
+     * Emit checked division or modulo: if divisor is zero, write an exception
+     * slot and propagate as a regular exception (no unreachable trap).
+     *
+     * Stack on entry: [..., dividend, divisor]
+     * Stack on exit:  [..., quotient_or_remainder]
+     */
+    void emitCheckedDivOrMod(ref Appender!(ubyte[]) out_, Op divOp, SourceLocation loc) {
+        import codegen.error_kind : ErrorKind;
+
+        // Save divisor, test for zero
+        //   Stack: [..., dividend, divisor]
+        out_ ~= Op.local_tee;
+        leb128u(out_, tempLocalB);
+        //   Stack: [..., dividend, divisor]  (divisor also in tempLocalB)
+        out_ ~= Op.i32_eqz;
+        //   Stack: [..., dividend, is_zero]
+
+        out_ ~= Op.if_;
+        out_ ~= BlockType.void_;
+        blockDepth++;
+
+        // Note: the dividend is on the OUTER stack, not inside this void block.
+        // We must NOT drop it here — void blocks start with an empty virtual stack.
+        // The dividend remains on the outer stack and is consumed by divOp after `end`.
+
+        // Determine error kind: DivByZero for div_s, ModByZero for rem_s
+        auto kind = (divOp == Op.i32_rem_s || divOp == Op.i32_rem_u)
+            ? ErrorKind.ModByZero : ErrorKind.DivByZero;
+
+        // Write exception slot and set pending flag (value=0 for runtime errors)
+        emitExceptionSlotWrite(out_, kind, loc);
+
+        if (tryStack.length > 0) {
+            // Inside a try block: branch to catch handler
+            out_ ~= Op.br;
+            leb128u(out_, blockDepth - tryStack[$ - 1].catchBlockDepth);
+        } else {
+            // Not in a try block: propagate by returning.
+            // Don't call emitCallStackOverwrite here — the error originates in THIS
+            // function, so the call stack frame should keep the function-definition
+            // location. The precise error location is already in the exception slot.
+            if (!emitter.isVoidType(func.decl.returnType) && !hasLargeReturn) {
+                out_ ~= Op.i32_const;
+                leb128s(out_, 0);
+            }
+            emitEpilogue(out_);
+            out_ ~= Op.return_;
+        }
+
+        blockDepth--;
+        out_ ~= Op.end;
+
+        // Restore divisor and perform the operation
+        //   Stack: [..., dividend]
+        out_ ~= Op.local_get;
+        leb128u(out_, tempLocalB);
+        //   Stack: [..., dividend, divisor]
+        out_ ~= divOp;
+    }
+
+    /**
      * Emit destructor calls for variables going out of scope.
      * Called at the end of compound statements and before return.
      * Variables are destructed in reverse declaration order.
@@ -1157,15 +1218,127 @@ class FuncContext {
     }
     
     /**
-     * Emit exception check after a function call.
-     * If __exception_pending is set:
-     *   - In a try block: branch to the catch handler
-     *   - Not in a try block: propagate by returning
+     * Write an exception slot at the current depth and set __exception_pending.
+     *
+     * Emits WASM that:
+     * 1. Checks for overflow (depth >= 100 → unreachable)
+     * 2. Computes slotAddr = exceptionArrayOffset + depth * 24
+     * 3. Writes kind, file_offset, file_len, line, col, value to the slot
+     * 4. Increments __exception_depth
+     * 5. Sets __exception_pending = 1
+     *
+     * For UserThrow, `valueLocal` is the WASM local index holding the thrown value.
+     * For runtime errors, pass valueLocal = uint.max and value 0 is written.
      */
+    void emitExceptionSlotWrite(ref Appender!(ubyte[]) out_,
+        uint kind, SourceLocation loc, uint valueLocal = uint.max)
+    {
+        import codegen.wasm.types : EXCEPTION_SLOT_SIZE, EXCEPTION_MAX_SLOTS,
+                                    EXCEPTION_SLOT_KIND, EXCEPTION_SLOT_FILE_OFFSET,
+                                    EXCEPTION_SLOT_FILE_LEN, EXCEPTION_SLOT_LINE,
+                                    EXCEPTION_SLOT_COL, EXCEPTION_SLOT_VALUE;
+
+        // Overflow check: if depth >= 100, halt
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.exceptionDepthGlobal);
+        out_ ~= Op.i32_const;
+        leb128u(out_, EXCEPTION_MAX_SLOTS);
+        out_ ~= Op.i32_ge_u;
+        out_ ~= Op.if_;
+        out_ ~= BlockType.void_;
+        blockDepth++;
+        out_ ~= Op.unreachable;
+        blockDepth--;
+        out_ ~= Op.end;
+
+        // Compute slotAddr = exceptionArrayOffset + depth * 24
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.exceptionDepthGlobal);
+        out_ ~= Op.i32_const;
+        leb128u(out_, EXCEPTION_SLOT_SIZE);
+        out_ ~= Op.i32_mul;
+        out_ ~= Op.i32_const;
+        leb128u(out_, emitter.exceptionArrayOffset);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.local_tee;
+        leb128u(out_, tempLocalA);
+
+        // Write kind (offset 0)
+        out_ ~= Op.i32_const;
+        leb128u(out_, kind);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;  // align=4
+        out_ ~= cast(ubyte)EXCEPTION_SLOT_KIND;
+
+        // Write file_offset (offset 4)
+        out_ ~= Op.local_get;
+        leb128u(out_, tempLocalA);
+        out_ ~= Op.i32_const;
+        leb128u(out_, frameFileOffset);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        out_ ~= cast(ubyte)EXCEPTION_SLOT_FILE_OFFSET;
+
+        // Write file_len (offset 8)
+        out_ ~= Op.local_get;
+        leb128u(out_, tempLocalA);
+        out_ ~= Op.i32_const;
+        leb128u(out_, frameFileLen);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        out_ ~= cast(ubyte)EXCEPTION_SLOT_FILE_LEN;
+
+        // Write line (offset 12)
+        out_ ~= Op.local_get;
+        leb128u(out_, tempLocalA);
+        out_ ~= Op.i32_const;
+        leb128u(out_, loc.line);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        out_ ~= cast(ubyte)EXCEPTION_SLOT_LINE;
+
+        // Write col (offset 16)
+        out_ ~= Op.local_get;
+        leb128u(out_, tempLocalA);
+        out_ ~= Op.i32_const;
+        leb128u(out_, loc.column);
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        out_ ~= cast(ubyte)EXCEPTION_SLOT_COL;
+
+        // Write value (offset 20)
+        out_ ~= Op.local_get;
+        leb128u(out_, tempLocalA);
+        if (valueLocal != uint.max) {
+            out_ ~= Op.local_get;
+            leb128u(out_, valueLocal);
+        } else {
+            out_ ~= Op.i32_const;
+            leb128s(out_, 0);
+        }
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte)0x02;
+        out_ ~= cast(ubyte)EXCEPTION_SLOT_VALUE;
+
+        // Increment depth
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.exceptionDepthGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 1);
+        out_ ~= Op.i32_add;
+        out_ ~= Op.global_set;
+        leb128u(out_, emitter.exceptionDepthGlobal);
+
+        // Set __exception_pending = 1
+        out_ ~= Op.i32_const;
+        leb128s(out_, 1);
+        out_ ~= Op.global_set;
+        leb128u(out_, emitter.exceptionPendingGlobal);
+    }
+
     /**
      * Emit exception check after a function call (void context — no value on stack).
-     * callSite is the location of the call expression — used to overwrite the
-     * call stack frame with the call-site location during exception propagation.
+     * If exception pending: propagate by returning (or branch to catch handler).
      */
     void emitExceptionCheck(ref Appender!(ubyte[]) out_, SourceLocation callSite = SourceLocation.init) {
         out_ ~= Op.global_get;
@@ -1179,7 +1352,6 @@ class FuncContext {
             out_ ~= Op.if_;
             out_ ~= cast(ubyte)BlockType.void_;
             blockDepth++;
-            emitCallStackOverwrite(out_, callSite);
             // Push dummy return value if function returns non-void on WASM stack
             if (!emitter.isVoidType(func.decl.returnType) && !hasLargeReturn) {
                 out_ ~= Op.i32_const;
@@ -1212,7 +1384,6 @@ class FuncContext {
             out_ ~= Op.if_;
             out_ ~= cast(ubyte)BlockType.void_;
             blockDepth++;
-            emitCallStackOverwrite(out_, callSite);
             if (!emitter.isVoidType(func.decl.returnType) && !hasLargeReturn) {
                 out_ ~= Op.i32_const;
                 leb128s(out_, 0);
@@ -1276,28 +1447,18 @@ class FuncContext {
 
     /**
      * Emit a throw expression.
-     * Sets __exception_value and __exception_pending, then returns.
+     * Writes exception slot with UserThrow kind, then propagates.
      */
     void emitThrowExpression(ref Appender!(ubyte[]) out_, ThrowExpression expr) {
-        // Evaluate the thrown value
+        import codegen.error_kind : ErrorKind;
+
+        // Evaluate the thrown value and save to tempLocalB
         emitExpression(out_, expr.operand);
-        // Store in __exception_value
-        out_ ~= Op.global_set;
-        leb128u(out_, emitter.exceptionValueGlobal);
-        // Store throw location
-        out_ ~= Op.i32_const;
-        leb128s(out_, cast(int)expr.location.line);
-        out_ ~= Op.global_set;
-        leb128u(out_, emitter.exceptionLineGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, cast(int)expr.location.column);
-        out_ ~= Op.global_set;
-        leb128u(out_, emitter.exceptionColGlobal);
-        // Set __exception_pending = 1
-        out_ ~= Op.i32_const;
-        leb128s(out_, 1);
-        out_ ~= Op.global_set;
-        leb128u(out_, emitter.exceptionPendingGlobal);
+        out_ ~= Op.local_set;
+        leb128u(out_, tempLocalB);
+
+        // Write exception slot (reads thrown value from tempLocalB)
+        emitExceptionSlotWrite(out_, ErrorKind.UserThrow, expr.location, tempLocalB);
 
         if (tryStack.length > 0) {
             // Inside a try block: branch directly to catch handler
@@ -1317,8 +1478,11 @@ class FuncContext {
     /**
      * Emit a try/catch statement.
      * Uses nested blocks: outer block for after-try-catch, inner block for catch target.
+     * Catch reads from the exception slot stack.
      */
     void emitTryStatement(ref Appender!(ubyte[]) out_, TryStatement stmt) {
+        import codegen.wasm.types : EXCEPTION_SLOT_SIZE, EXCEPTION_SLOT_VALUE;
+
         // block $after_try_catch
         out_ ~= Op.block;
         out_ ~= cast(ubyte)BlockType.void_;
@@ -1348,25 +1512,54 @@ class FuncContext {
         blockDepth--;
         out_ ~= Op.end;
 
-        // Catch handler: clear exception flag and bind caught value
+        // Catch handler: decrement depth, conditionally clear pending flag
+        // __exception_depth--
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.exceptionDepthGlobal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, 1);
+        out_ ~= Op.i32_sub;
+        out_ ~= Op.global_set;
+        leb128u(out_, emitter.exceptionDepthGlobal);
+
+        // if (depth == 0) __exception_pending = 0
+        out_ ~= Op.global_get;
+        leb128u(out_, emitter.exceptionDepthGlobal);
+        out_ ~= Op.i32_eqz;
+        out_ ~= Op.if_;
+        out_ ~= BlockType.void_;
+        blockDepth++;
         out_ ~= Op.i32_const;
         leb128s(out_, 0);
         out_ ~= Op.global_set;
         leb128u(out_, emitter.exceptionPendingGlobal);
+        blockDepth--;
+        out_ ~= Op.end;
 
         // For each catch clause (currently just the first one)
         if (stmt.catches.length > 0) {
             auto c = stmt.catches[0];
             if (c.paramName !is null && c.paramName.length > 0) {
-                // Bind caught value to the catch parameter local
+                // Read caught value from slot[depth].value
+                // slotAddr = exceptionArrayOffset + depth * 24
                 out_ ~= Op.global_get;
-                leb128u(out_, emitter.exceptionValueGlobal);
+                leb128u(out_, emitter.exceptionDepthGlobal);
+                out_ ~= Op.i32_const;
+                leb128u(out_, EXCEPTION_SLOT_SIZE);
+                out_ ~= Op.i32_mul;
+                out_ ~= Op.i32_const;
+                leb128u(out_, emitter.exceptionArrayOffset);
+                out_ ~= Op.i32_add;
+                // Load value field (offset 20)
+                out_ ~= Op.i32_load;
+                out_ ~= cast(ubyte)0x02;  // align=4
+                out_ ~= cast(ubyte)EXCEPTION_SLOT_VALUE;  // offset=20
+
                 auto info = resolveVar(0, c.paramName);
                 if (info !is null) {
                     out_ ~= Op.local_set;
                     leb128u(out_, info.wasmLocalIdx);
                 } else {
-                    // Catch param not found as local — try direct WASM local
                     out_ ~= Op.drop;
                 }
             }
@@ -4799,8 +4992,18 @@ class FuncContext {
             case BinaryExpression.Operator.Add: op = Op.i32_add; break;
             case BinaryExpression.Operator.Subtract: op = Op.i32_sub; break;
             case BinaryExpression.Operator.Multiply: op = Op.i32_mul; break;
-            case BinaryExpression.Operator.Divide: op = Op.i32_div_s; break;
-            case BinaryExpression.Operator.Modulo: op = Op.i32_rem_s; break;
+            case BinaryExpression.Operator.Divide:
+                if (enableStackTrace) {
+                    emitCheckedDivOrMod(out_, Op.i32_div_s, expr.location);
+                    return;
+                }
+                op = Op.i32_div_s; break;
+            case BinaryExpression.Operator.Modulo:
+                if (enableStackTrace) {
+                    emitCheckedDivOrMod(out_, Op.i32_rem_s, expr.location);
+                    return;
+                }
+                op = Op.i32_rem_s; break;
             case BinaryExpression.Operator.Equal: op = Op.i32_eq; break;
             case BinaryExpression.Operator.NotEqual: op = Op.i32_ne; break;
             case BinaryExpression.Operator.Less: op = Op.i32_lt_s; break;
@@ -6856,7 +7059,7 @@ class FuncContext {
                     out_ ~= Op.local_get;
                     leb128u(out_, wasmIdx);
                     emitExpression(out_, expr.right);
-                    emitCompoundOp(out_, expr.operator);
+                    emitCompoundOp(out_, expr.operator, expr.location);
                 } else {
                     emitExpression(out_, expr.right);
                 }
@@ -6882,7 +7085,7 @@ class FuncContext {
                     out_ ~= cast(ubyte)0x02;
                     leb128u(out_, 0);
                     emitExpression(out_, expr.right);
-                    emitCompoundOp(out_, expr.operator);
+                    emitCompoundOp(out_, expr.operator, expr.location);
                 } else {
                     emitExpression(out_, expr.right);
                 }
@@ -6954,7 +7157,7 @@ class FuncContext {
                         out_ ~= Op.global_get;
                         leb128u(out_, varDecl.wasmGlobalIndex);
                         emitExpression(out_, expr.right);
-                        emitCompoundOp(out_, expr.operator);
+                        emitCompoundOp(out_, expr.operator, expr.location);
                     } else {
                         emitExpression(out_, expr.right);
                     }
@@ -6974,15 +7177,26 @@ class FuncContext {
     }
 
     /// Emit the compound operation for compound assignment operators.
-    private void emitCompoundOp(ref Appender!(ubyte[]) out_, AssignmentExpression.Operator op) {
+    private void emitCompoundOp(ref Appender!(ubyte[]) out_, AssignmentExpression.Operator op,
+            SourceLocation loc = SourceLocation.init) {
         final switch (op) {
             case AssignmentExpression.Operator.Assign:
                 assert(0, "emitCompoundOp called with Assign");
             case AssignmentExpression.Operator.AddAssign: out_ ~= Op.i32_add; break;
             case AssignmentExpression.Operator.SubtractAssign: out_ ~= Op.i32_sub; break;
             case AssignmentExpression.Operator.MultiplyAssign: out_ ~= Op.i32_mul; break;
-            case AssignmentExpression.Operator.DivideAssign: out_ ~= Op.i32_div_s; break;
-            case AssignmentExpression.Operator.ModuloAssign: out_ ~= Op.i32_rem_s; break;
+            case AssignmentExpression.Operator.DivideAssign:
+                if (enableStackTrace) {
+                    emitCheckedDivOrMod(out_, Op.i32_div_s, loc);
+                    break;
+                }
+                out_ ~= Op.i32_div_s; break;
+            case AssignmentExpression.Operator.ModuloAssign:
+                if (enableStackTrace) {
+                    emitCheckedDivOrMod(out_, Op.i32_rem_s, loc);
+                    break;
+                }
+                out_ ~= Op.i32_rem_s; break;
             case AssignmentExpression.Operator.AndAssign: out_ ~= Op.i32_and; break;
             case AssignmentExpression.Operator.OrAssign: out_ ~= Op.i32_or; break;
             case AssignmentExpression.Operator.XorAssign: out_ ~= Op.i32_xor; break;

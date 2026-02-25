@@ -36,6 +36,7 @@ struct ExecutionResult {
     string stringValue;
     ubyte[] arrayBytes;
     string error;
+    string throwFile;
     int throwLine;
     int throwCol;
     CallStackFrame[] callStack;
@@ -58,9 +59,10 @@ struct ExecutionResult {
         return r;
     }
 
-    static ExecutionResult failure(string err, int line = 0, int col = 0) {
+    static ExecutionResult failure(string err, string file = "", int line = 0, int col = 0) {
         ExecutionResult r;
         r.error = err;
+        r.throwFile = file;
         r.throwLine = line;
         r.throwCol = col;
         return r;

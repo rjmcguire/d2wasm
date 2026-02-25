@@ -120,11 +120,10 @@ class BinaryEmitter {
         uint arenaBaseGlobal;        // Index of $arena_base global
         uint arenaWatermarkGlobal;   // Index of $arena_wm_top global (watermark stack pointer)
 
-        // Exception handling globals
+        // Exception handling globals and slot array
         uint exceptionPendingGlobal;  // Index of __exception_pending global
-        uint exceptionValueGlobal;    // Index of __exception_value global
-        uint exceptionLineGlobal;     // Index of __exception_line global
-        uint exceptionColGlobal;      // Index of __exception_col global
+        uint exceptionDepthGlobal;    // Index of __exception_depth global
+        uint exceptionArrayOffset;    // Memory offset of pre-allocated exception slot array
     }
     
     private {
@@ -325,6 +324,9 @@ class BinaryEmitter {
             phase = EmitPhase.collecting;
             collect(decls);
             
+            // Pre-allocate exception slot array in data section (must be before finalizeHeapPtr)
+            allocateExceptionSlotArray();
+
             // If array/heap operations are needed, add built-ins
             if (needsArraySupport) {
                 addArrayBuiltins();
@@ -332,7 +334,7 @@ class BinaryEmitter {
                 finalizeHeapPtr();
                 finalizeArenaBase();
             }
-            
+
             // Always add shadow stack for struct locals
             addShadowStackGlobal();
 
@@ -450,7 +452,10 @@ class BinaryEmitter {
 
             // Collect array literals from the expression
             collectArrayLiterals(expr);
-            
+
+            // Pre-allocate exception slot array (must be before finalizeHeapPtr)
+            allocateExceptionSlotArray();
+
             // Add built-ins (__alloc, __array_concat, arena)
             addArrayBuiltins();
             addArenaBuiltins();
@@ -1737,8 +1742,18 @@ class BinaryEmitter {
     }
     
     /**
-     * Add exception handling globals: __exception_pending and __exception_value.
-     * Used for try/catch/throw — global-flag exception mechanism.
+     * Pre-allocate the exception slot array in the data section.
+     * Must be called BEFORE finalizeHeapPtr() so the heap pointer accounts for this data.
+     */
+    private void allocateExceptionSlotArray() {
+        import codegen.wasm.types : EXCEPTION_ARRAY_SIZE;
+        exceptionArrayOffset = addData(new ubyte[](EXCEPTION_ARRAY_SIZE));
+    }
+
+    /**
+     * Add exception handling globals.
+     * Two mutable globals: __exception_pending (hot-path check) and __exception_depth (slot index).
+     * Exception data (kind, file, line, col, value) lives in pre-allocated slots in linear memory.
      */
     private void addExceptionGlobals() {
         exceptionPendingGlobal = cast(uint)globals.length;
@@ -1749,29 +1764,13 @@ class BinaryEmitter {
         pending.name = "__exception_pending";
         globals ~= pending;
 
-        exceptionValueGlobal = cast(uint)globals.length;
-        GlobalInfo value;
-        value.type = ValType.i32;
-        value.mutable = true;
-        value.initValue = 0;
-        value.name = "__exception_value";
-        globals ~= value;
-
-        exceptionLineGlobal = cast(uint)globals.length;
-        GlobalInfo line;
-        line.type = ValType.i32;
-        line.mutable = true;
-        line.initValue = 0;
-        line.name = "__exception_line";
-        globals ~= line;
-
-        exceptionColGlobal = cast(uint)globals.length;
-        GlobalInfo col;
-        col.type = ValType.i32;
-        col.mutable = true;
-        col.initValue = 0;
-        col.name = "__exception_col";
-        globals ~= col;
+        exceptionDepthGlobal = cast(uint)globals.length;
+        GlobalInfo depth;
+        depth.type = ValType.i32;
+        depth.mutable = true;
+        depth.initValue = 0;
+        depth.name = "__exception_depth";
+        globals ~= depth;
     }
 
     /**
@@ -2406,9 +2405,7 @@ class BinaryEmitter {
         }
         if (exceptionPendingGlobal < globals.length) {
             globalExports ~= GlobalExport("__exception_pending", exceptionPendingGlobal);
-            globalExports ~= GlobalExport("__exception_value", exceptionValueGlobal);
-            globalExports ~= GlobalExport("__exception_line", exceptionLineGlobal);
-            globalExports ~= GlobalExport("__exception_col", exceptionColGlobal);
+            globalExports ~= GlobalExport("__exception_depth", exceptionDepthGlobal);
         }
         
         if (auto content = buildExportSection(funcExports, needsMemory || needsArraySupport, globalExports))
@@ -3014,6 +3011,11 @@ class BinaryEmitter {
     package uint getArenaBaseValue() {
         if (!hasArenaBuiltins) return 0;
         return cast(uint)globals[arenaBaseGlobal].initValue;
+    }
+
+    /// Get the memory offset of the pre-allocated exception slot array.
+    uint getExceptionArrayOffset() {
+        return exceptionArrayOffset;
     }
 
     package uint getFuncIndex(string name, SourceLocation loc = SourceLocation.init) {

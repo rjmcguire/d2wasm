@@ -623,28 +623,34 @@ class CTFERuntime {
     string formatErrorWithStack(string baseError) {
         import codegen.wasm.types : CALL_STACK_DEPTH_OFFSET, CALL_STACK_FRAMES_OFFSET,
                                     CALL_STACK_FRAME_SIZE, CALL_STACK_MAX_FRAMES;
-        
+
         if (!initialized) return baseError;
-        
+
         try {
+            string result = baseError;
+
+            // Exception location is now read from exception slots by the backend
+            // (checkUncaughtException / buildTrapResult). This function only appends
+            // the call stack trace.
+
             // Read stack depth
             uint depth = readU32(CALL_STACK_DEPTH_OFFSET);
             if (depth == 0 || depth > CALL_STACK_MAX_FRAMES) {
-                return baseError;  // No stack or invalid
+                return result;
             }
-            
+
             // Build stack trace
             string[] frames;
             for (uint i = 0; i < depth; i++) {
                 uint frameAddr = CALL_STACK_FRAMES_OFFSET + i * CALL_STACK_FRAME_SIZE;
-                
+
                 uint nameOffset = readU32(frameAddr + 0);
                 uint nameLen = readU32(frameAddr + 4);
                 uint fileOffset = readU32(frameAddr + 8);
                 uint fileLen = readU32(frameAddr + 12);
                 uint line = readU32(frameAddr + 16);
                 uint column = readU32(frameAddr + 20);
-                
+
                 // Read function and file names
                 string funcName = "<unknown>";
                 string fileName = "<unknown>";
@@ -658,25 +664,53 @@ class CTFERuntime {
                 } catch (Exception) {
                     // Ignore read errors
                 }
-                
+
                 frames ~= format("  --> %s:%d:%d in `%s()`", fileName, line, column, funcName);
             }
-            
+
             // Format final error message
-            if (frames.length == 0) {
-                return baseError;
-            }
-            
-            string result = baseError ~ "\n\nCall stack (most recent first):";
-            foreach_reverse (frame; frames) {
-                result ~= "\n" ~ frame;
+            if (frames.length > 0) {
+                result ~= "\n\nCall stack (most recent first):";
+                foreach_reverse (frame; frames) {
+                    result ~= "\n" ~ frame;
+                }
             }
             return result;
-            
+
         } catch (Exception e) {
             // If anything fails, just return the base error
             return baseError;
         }
+    }
+}
+
+/// Read a source line from file (1-indexed), caching results
+private string readSourceLine(string filePath, uint line) nothrow {
+    import codegen.native.codegen_interface : getSourceLine;
+    return getSourceLine(filePath, line);
+}
+
+/// Generate a string of N spaces
+private string spaces(size_t n) nothrow {
+    if (n == 0) return "";
+    try {
+        char[] s = new char[n];
+        s[] = ' ';
+        return cast(string)s;
+    } catch (Exception) {
+        return "";
+    }
+}
+
+/// Left-pad a string to a minimum width
+private string padLeft(string s, size_t width) nothrow {
+    if (s.length >= width) return s;
+    try {
+        char[] padding = new char[width - s.length];
+        padding[] = ' ';
+        return cast(string)padding ~ s;
+    } catch (Exception) {
+        return s;
     }
 }
 

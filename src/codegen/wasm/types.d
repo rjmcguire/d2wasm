@@ -73,19 +73,32 @@ enum ExportKind : ubyte {
 //   8-1543:     frames[64] - InlineFrame (24 bytes each)
 //               Per frame: nameOffset(4), nameLen(4), fileOffset(4),
 //                          fileLen(4), line(4), column(4)
-//   1544-2047:  String pool for function/file names
+//   1544-2047:  String pool for function/file names (expanded, no more error location area)
 
 enum : uint {
     MEMORY_RESERVED = 2048,   // Reserved bytes at start (includes call stack buffer)
     MEMORY_ALIGNMENT = 8,     // Alignment for allocations
-    
+
     // Call stack buffer layout
     CALL_STACK_DEPTH_OFFSET = 0,
     CALL_STACK_MAX_DEPTH_OFFSET = 4,
     CALL_STACK_FRAMES_OFFSET = 8,
     CALL_STACK_FRAME_SIZE = 24,   // 6 × u32 fields
     CALL_STACK_MAX_FRAMES = 64,
-    CALL_STACK_STRING_POOL_OFFSET = 1544,  // 8 + 64*24
+
+    // Exception slot layout (24 bytes each, allocated in data section)
+    EXCEPTION_SLOT_SIZE = 24,
+    EXCEPTION_MAX_SLOTS = 100,
+    EXCEPTION_ARRAY_SIZE = 2400,    // 100 * 24 bytes
+    // Field offsets within each slot
+    EXCEPTION_SLOT_KIND = 0,        // u32: ErrorKind enum
+    EXCEPTION_SLOT_FILE_OFFSET = 4, // u32: offset of filename string in WASM memory
+    EXCEPTION_SLOT_FILE_LEN = 8,    // u32: length of filename string
+    EXCEPTION_SLOT_LINE = 12,       // u32: line number
+    EXCEPTION_SLOT_COL = 16,        // u32: column number
+    EXCEPTION_SLOT_VALUE = 20,      // u32: thrown i32 for UserThrow, 0 for runtime errors
+
+    CALL_STACK_STRING_POOL_OFFSET = 1544,  // 8 + 64*24 (error location area removed)
 
     // Arena memory layout
     // ArenaHeader: { offset: i32, end: i32, parent: i32, save_count: i32 }

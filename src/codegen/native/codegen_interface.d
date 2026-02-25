@@ -53,30 +53,11 @@ extern(C) nothrow @nogc {
 
 /**
  * Error types that can occur during native CTFE execution.
- * Used with longjmp to abort execution and report errors.
+ * Aliased from the shared ErrorKind enum for backward compatibility.
  */
-enum CTFEErrorKind {
-    None = 0,
-    DivByZero = 1,
-    OutOfBounds = 2,
-    NullDeref = 3,
-    OutOfMemory = 4,
-    Overflow = 5,
-}
-
-/**
- * Convert error kind to human-readable message.
- */
-string ctfeErrorMessage(CTFEErrorKind kind) {
-    final switch (kind) {
-        case CTFEErrorKind.None: return "no error";
-        case CTFEErrorKind.DivByZero: return "integer divide by zero";
-        case CTFEErrorKind.OutOfBounds: return "array index out of bounds";
-        case CTFEErrorKind.NullDeref: return "null pointer dereference";
-        case CTFEErrorKind.OutOfMemory: return "CTFE out of memory";
-        case CTFEErrorKind.Overflow: return "integer overflow";
-    }
-}
+import codegen.error_kind : ErrorKind, errorKindMessage;
+alias CTFEErrorKind = ErrorKind;
+alias ctfeErrorMessage = errorKindMessage;
 
 /**
  * Format error message with call stack.
@@ -114,26 +95,29 @@ private string formatInlineCallStack(NativeCTFEContext* ctx, CallFrame[] frames)
             result ~= "\n --> " ~ file ~ ":" ~ lineNum ~ ":" ~ colNum;
             
             string sourceLine = getSourceLine(ctx.errorLoc.fileName, ctx.errorLoc.line);
+            string paddedNum = padLeft(lineNum, 3);
+            string gutter = spaces(paddedNum.length) ~ " |";
             if (sourceLine.length > 0) {
-                result ~= "\n  |";
-                result ~= "\n" ~ padLeft(lineNum, 3) ~ " | " ~ sourceLine;
-                
+                result ~= "\n" ~ gutter;
+                result ~= "\n" ~ paddedNum ~ " | " ~ sourceLine;
+
                 // Add caret at column position
                 if (ctx.errorLoc.column > 0) {
-                    result ~= "\n  | " ~ spaces(ctx.errorLoc.column - 1) ~ "^^^";
+                    result ~= "\n" ~ gutter ~ " " ~ spaces(ctx.errorLoc.column - 1) ~ "^^^";
                 }
             }
         }
-        
+
         // Show call stack
         if (frames.length > 0) {
             foreach_reverse (i, frame; frames) {
                 string file = frame.fileName.length > 0 ? baseName(frame.fileName) : "<unknown>";
                 string lineNum = to!string(frame.line);
-                
+
                 if (i == frames.length - 1) {
                     // Top of stack - just note the function name
-                    result ~= "\n  |";
+                    string paddedNum = padLeft(lineNum, 3);
+                    result ~= "\n" ~ spaces(paddedNum.length) ~ " |";
                     result ~= "\nnote: in `" ~ frame.funcName ~ "()`";
                 } else {
                     result ~= "\nnote: called from `" ~ frame.funcName ~ "()` at " ~ file ~ ":" ~ lineNum;
@@ -426,38 +410,43 @@ struct NativeCTFEContext {
                 result ~= "\n --> " ~ file ~ ":" ~ lineNum ~ ":" ~ colNum;
                 
                 string sourceLine = getSourceLine(errorLoc.fileName, errorLoc.line);
+                string paddedNum = padLeft(lineNum, 3);
+                string gutter = spaces(paddedNum.length) ~ " |";
                 if (sourceLine.length > 0) {
-                    result ~= "\n  |";
-                    result ~= "\n" ~ padLeft(lineNum, 3) ~ " | " ~ sourceLine;
-                    
+                    result ~= "\n" ~ gutter;
+                    result ~= "\n" ~ paddedNum ~ " | " ~ sourceLine;
+
                     // Add caret/underline at column position
                     if (errorLoc.column > 0) {
-                        result ~= "\n  | " ~ spaces(errorLoc.column - 1) ~ "^^^";
+                        result ~= "\n" ~ gutter ~ " " ~ spaces(errorLoc.column - 1) ~ "^^^";
                     }
                 }
             }
-            
+
             // Show call stack
             if (callStack.length > 0) {
                 foreach_reverse (i, frame; callStack) {
                     string file = frame.fileName.length > 0 ? baseName(frame.fileName) : "<unknown>";
                     string lineNum = to!string(frame.line);
-                    
+
                     // Skip innermost if we already showed errorLoc from same function
-                    if (i == callStack.length - 1 && errorLoc.line > 0 && 
+                    if (i == callStack.length - 1 && errorLoc.line > 0 &&
                         errorLoc.fileName == frame.fileName) {
-                        result ~= "\n  |";
+                        string pn = padLeft(lineNum, 3);
+                        result ~= "\n" ~ spaces(pn.length) ~ " |";
                         result ~= "\nnote: in `" ~ frame.funcName ~ "()`";
                         continue;
                     }
-                    
+
                     result ~= "\nnote: called from `" ~ frame.funcName ~ "()` at " ~ file ~ ":" ~ lineNum;
-                    
+
                     string sourceLine = getSourceLine(frame.fileName, frame.line);
                     if (sourceLine.length > 0) {
-                        result ~= "\n  |";
-                        result ~= "\n" ~ padLeft(lineNum, 3) ~ " | " ~ sourceLine;
-                        result ~= "\n  |";
+                        string pn = padLeft(lineNum, 3);
+                        string gt = spaces(pn.length) ~ " |";
+                        result ~= "\n" ~ gt;
+                        result ~= "\n" ~ pn ~ " | " ~ sourceLine;
+                        result ~= "\n" ~ gt;
                     }
                 }
             }
