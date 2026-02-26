@@ -1,5 +1,6 @@
 {
-    "type": "wasm_exec",
-    "entry": "getValue",
-    "expected_result": 78
+  "type": "wasm_exec",
+  "entry": "getValue",
+  "expected_result": 78,
+  "mangled_entry": "_D4test12class_locals8getValueFZi"
 }

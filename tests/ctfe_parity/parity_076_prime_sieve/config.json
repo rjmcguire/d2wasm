@@ -2,6 +2,6 @@
   "name": "prime_sieve",
   "description": "CTFE parity: Sieve of Eratosthenes counting primes up to 50",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 15
 }

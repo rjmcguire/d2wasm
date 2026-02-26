@@ -3,5 +3,6 @@
   "description": "Compiler intrinsics via CTFE",
   "type": "wasm_exec",
   "entry": "result",
-  "expected_result": 20
+  "expected_result": 20,
+  "mangled_entry": "_D4test6resultFZi"
 }

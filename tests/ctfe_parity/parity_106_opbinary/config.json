@@ -2,5 +2,6 @@
   "name": "opbinary",
   "description": "Struct opBinary operator overloading via method template",
   "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
   "expected_output": "10"
 }

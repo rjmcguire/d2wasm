@@ -2,6 +2,6 @@
   "name": "slice_length",
   "description": "CTFE parity: slice .length property",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 3
 }

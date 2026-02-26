@@ -2,5 +2,6 @@
   "name": "struct_global_field",
   "description": "Global struct literal in data section, read first field",
   "type": "wasm_exec",
-  "entry": "main"
+  "entry": "_D4test4mainFZi",
+  "mangled_entry": "_D4test4mainFZi"
 }

@@ -236,10 +236,9 @@ class MixinExpander {
     private void setupCTFE() {
         // Collect all declarations into symbol table for CTFE
         // (structs, functions, manifest constants - everything CTFE might reference)
+        // Use collectSymbols to handle ModuleDecl and set module path for mangling
         auto collector = new SymbolCollector(tempSymbolTable);
-        foreach (decl; allDeclarations) {
-            collector.collectSymbol(decl);
-        }
+        collector.collectSymbols(allDeclarations);
         
         // Create evaluator - this registers the lazy resolver with the symbol table
         // Actual evaluation happens when resolveManifestValue() is called

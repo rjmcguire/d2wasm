@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "expected_result": 22,
   "entry": "result",
-  "capability": "__text(expression) evaluates then converts"
+  "capability": "__text(expression) evaluates then converts",
+  "mangled_entry": "_D4test6resultFZi"
 }

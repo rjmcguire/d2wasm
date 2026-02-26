@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "expected_result": 2048,
   "entry": "result",
-  "capability": "__ctfe_runtime magic module, CTFE host function binding"
+  "capability": "__ctfe_runtime magic module, CTFE host function binding",
+  "mangled_entry": "_D4test6resultFZi"
 }

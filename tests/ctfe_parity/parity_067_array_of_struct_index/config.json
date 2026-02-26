@@ -2,6 +2,6 @@
   "name": "array_of_struct_index",
   "description": "CTFE parity: array of struct indexing and field access",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 50
 }

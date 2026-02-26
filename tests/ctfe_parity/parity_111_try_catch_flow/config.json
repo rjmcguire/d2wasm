@@ -2,6 +2,6 @@
   "name": "try_catch_flow",
   "description": "CTFE parity: catch not entered when no exception thrown",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 10
 }

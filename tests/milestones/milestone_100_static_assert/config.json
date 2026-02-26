@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "entry": "result",
   "expected_result": 4,
-  "capability": "static assert(condition, message)"
+  "capability": "static assert(condition, message)",
+  "mangled_entry": "_D4test6resultFZi"
 }

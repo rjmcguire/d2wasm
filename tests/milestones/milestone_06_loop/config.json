@@ -3,6 +3,9 @@
   "description": "Function with a for loop",
   "type": "wasm_exec",
   "entry": "sum_to",
-  "args": ["5"],
-  "capability": "Loops (loop/br/br_if), local variables"
+  "args": [
+    "5"
+  ],
+  "capability": "Loops (loop/br/br_if), local variables",
+  "mangled_entry": "_D4test6sum_toFiZi"
 }

@@ -2,6 +2,7 @@
   "name": "pointers",
   "description": "Pointer types, address-of, auto-deref, pointer params, emplace intrinsic",
   "type": "wasm_exec",
-  "entry": "main",
-  "args": []
+  "entry": "_D4test4mainFZi",
+  "args": [],
+  "mangled_entry": "_D4test4mainFZi"
 }

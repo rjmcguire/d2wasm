@@ -2,5 +2,6 @@
   "name": "struct_field_offset",
   "description": "Read second field to verify offset calculation",
   "type": "wasm_exec",
-  "entry": "main"
+  "entry": "_D4test4mainFZi",
+  "mangled_entry": "_D4test4mainFZi"
 }

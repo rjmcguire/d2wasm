@@ -1,7 +1,8 @@
 {
-    "name": "name_mangling",
-    "description": "D-compatible name mangling",
-    "type": "wasm_exec",
-    "entry": "testValue",
-    "expected_result": 151
+  "name": "name_mangling",
+  "description": "D-compatible name mangling",
+  "type": "wasm_exec",
+  "entry": "testValue",
+  "expected_result": 151,
+  "mangled_entry": "_D4test6mangle9testValueFZi"
 }

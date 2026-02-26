@@ -2,5 +2,6 @@
   "name": "import_in_function",
   "description": "import() inside CTFE function",
   "type": "wasm_exec",
-  "expected_result": 3
+  "expected_result": 3,
+  "mangled_entry": "_D4test4mainFZi"
 }

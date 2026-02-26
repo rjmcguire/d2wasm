@@ -2,6 +2,6 @@
   "name": "static_array",
   "description": "Output parity: static array",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 50
 }

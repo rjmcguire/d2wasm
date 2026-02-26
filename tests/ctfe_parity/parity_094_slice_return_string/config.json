@@ -2,6 +2,6 @@
   "name": "slice_return_string",
   "description": "CTFE parity: dynamic string[] slice return and element access",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 14
 }

@@ -2,6 +2,6 @@
   "name": "slice_return_byte",
   "description": "CTFE parity: dynamic ubyte[] slice return and element access",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 60
 }

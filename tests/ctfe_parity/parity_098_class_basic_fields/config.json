@@ -2,6 +2,6 @@
   "name": "class_basic_fields",
   "description": "Basic class with fields and methods (no inheritance)",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 45
 }

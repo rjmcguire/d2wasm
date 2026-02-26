@@ -2,5 +2,6 @@
   "name": "arena_hidden_param",
   "description": "Hidden __arena parameter threaded through function calls",
   "type": "wasm_exec",
-  "expected_result": 42
+  "expected_result": 42,
+  "mangled_entry": "_D4test4mainFZi"
 }

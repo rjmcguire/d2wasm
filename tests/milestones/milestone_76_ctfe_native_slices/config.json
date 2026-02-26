@@ -2,5 +2,6 @@
   "name": "ctfe_native_slices",
   "description": "CTFE slices in native backend (array literals + indexing)",
   "type": "wasm_exec",
-  "expected_result": 35
+  "expected_result": 35,
+  "mangled_entry": "_D4test4mainFZi"
 }

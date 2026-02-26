@@ -2,6 +2,6 @@
   "name": "ctfe_css_tokenizer",
   "description": "CTFE parity: CSS tokenizer counting tokens at compile time",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 7
 }

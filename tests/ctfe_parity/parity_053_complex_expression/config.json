@@ -2,6 +2,6 @@
   "name": "complex_expression",
   "description": "CTFE parity: complex expressions, precedence, chained conditions",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 188
 }

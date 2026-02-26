@@ -387,6 +387,21 @@ class NativeCompiledFunction : CompiledFunction {
         return func.name;
     }
 
+    /// Resolve a function call to its mangled name for label/decl lookup.
+    /// Handles IFTI (resolved instantiation) and regular calls via symbol table.
+    private string resolveMangledName(IdentifierExpression funcIdent, CallExpression call = null) {
+        // IFTI: use resolved instantiation's mangled name
+        if (call && call.resolvedInstantiation)
+            return getMangledName(call.resolvedInstantiation);
+        // Look up symbol table for the FunctionDecl
+        auto sym = symbolTable.lookupSymbol(funcIdent.name);
+        if (sym && sym.declaration) {
+            if (auto fd = cast(FunctionDecl)sym.declaration)
+                return getMangledName(fd);
+        }
+        return funcIdent.name;  // fallback for builtins etc.
+    }
+
     private void moveRegToX0(int regIdx) {
         switch (regIdx) {
             case 0: break;  // already in x0
@@ -1309,13 +1324,14 @@ class NativeCompiledFunction : CompiledFunction {
                             } else if (symbol && symbol.kind == SymbolKind.Function) {
                                 // Function call returning struct — hidden result pointer pattern
                                 // ARM64: x0 = result ptr, [x1 = arena], x1/x2..xN = actual args
-                                assert((funcIdent.name in functionLabels) !is null,
-                                    "Struct return call to '" ~ funcIdent.name ~
+                                string structCallName = resolveMangledName(funcIdent, call);
+                                assert((structCallName in functionLabels) !is null,
+                                    "Struct return call to '" ~ structCallName ~
                                     "' but no function label exists");
 
                                 // Check if callee needs arena
                                 bool calleeNeedsArena = false;
-                                if (auto calleeDecl = funcIdent.name in functionDecls) {
+                                if (auto calleeDecl = structCallName in functionDecls) {
                                     calleeNeedsArena = (*calleeDecl).needsArena;
                                 }
                                 int arenaShift = calleeNeedsArena ? 1 : 0;
@@ -1352,9 +1368,9 @@ class NativeCompiledFunction : CompiledFunction {
                                 gen.emitStackAddress(nextLocalOffset);
 
                                 // Call the function
-                                auto funcLabelPtr = funcIdent.name in functionLabels;
+                                auto funcLabelPtr = structCallName in functionLabels;
                                 if (funcLabelPtr is null) {
-                                    throw new Exception("Function not compiled: " ~ funcIdent.name);
+                                    throw new Exception("Function not compiled: " ~ structCallName);
                                 }
                                 gen.emitCall(*funcLabelPtr);
                                 emitNativeExceptionCheck();
@@ -1468,12 +1484,13 @@ class NativeCompiledFunction : CompiledFunction {
                     } else if (auto callExpr = cast(CallExpression)sliceInit) {
                         // Function call returning slice — hidden result pointer pattern
                         if (auto funcIdent = cast(IdentifierExpression)callExpr.function_) {
-                            auto funcLabelPtr = funcIdent.name in functionLabels;
+                            string sliceCallName = resolveMangledName(funcIdent, callExpr);
+                            auto funcLabelPtr = sliceCallName in functionLabels;
                             if (funcLabelPtr is null)
-                                throw new Exception("Function not compiled: " ~ funcIdent.name);
+                                throw new Exception("Function not compiled: " ~ sliceCallName);
 
                             bool calleeNeedsArena = false;
-                            if (auto calleeDecl = funcIdent.name in functionDecls)
+                            if (auto calleeDecl = sliceCallName in functionDecls)
                                 calleeNeedsArena = (*calleeDecl).needsArena;
                             int arenaShift = calleeNeedsArena ? 1 : 0;
 
@@ -1602,13 +1619,14 @@ class NativeCompiledFunction : CompiledFunction {
                     } else if (auto call = cast(CallExpression)varDecl.initializer) {
                         // Function call returning static array — hidden result pointer
                         if (auto funcIdent = cast(IdentifierExpression)call.function_) {
-                            auto funcLabelPtr = funcIdent.name in functionLabels;
+                            string saCallName = resolveMangledName(funcIdent, call);
+                            auto funcLabelPtr = saCallName in functionLabels;
                             if (funcLabelPtr is null)
-                                throw new Exception("Function not compiled: " ~ funcIdent.name);
+                                throw new Exception("Function not compiled: " ~ saCallName);
 
                             // Check if callee needs arena
                             bool calleeNeedsArena = false;
-                            if (auto calleeDecl = funcIdent.name in functionDecls) {
+                            if (auto calleeDecl = saCallName in functionDecls) {
                                 calleeNeedsArena = (*calleeDecl).needsArena;
                             }
                             int arenaShift = calleeNeedsArena ? 1 : 0;
@@ -2313,8 +2331,8 @@ class NativeCompiledFunction : CompiledFunction {
                     return;
                 }
 
-                // IFTI: use resolved instantiation name if available
-                string callName = call.resolvedInstantiation ? call.resolvedInstantiation.name : funcIdent.name;
+                // Resolve to mangled name for function label lookup
+                string callName = resolveMangledName(funcIdent, call);
 
                 // Check if this is a call to a known function
                 if (auto labelPtr = callName in functionLabels) {
@@ -2882,9 +2900,10 @@ class NativeCompiledFunction : CompiledFunction {
             if (!inst)
                 throw new Exception("Template instantiation not resolved: " ~ tmplInst.templateName);
 
-            auto labelPtr = inst.name in functionLabels;
+            string instCallName = getMangledName(inst);
+            auto labelPtr = instCallName in functionLabels;
             if (!labelPtr)
-                throw new Exception("Template instantiation label not found: " ~ inst.name);
+                throw new Exception("Template instantiation label not found: " ~ instCallName);
 
             // Check if callee needs arena
             bool calleeNeedsArena = inst.needsArena;

@@ -2,6 +2,7 @@
   "name": "template_constraint",
   "description": "Template constraint with __traits (if clause)",
   "type": "wasm_exec",
-  "entry": "main",
-  "expected_result": 42
+  "entry": "_D4test4mainFZi",
+  "expected_result": 42,
+  "mangled_entry": "_D4test4mainFZi"
 }

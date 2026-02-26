@@ -1,5 +1,6 @@
 {
-    "type": "wasm_exec",
-    "entry": "main",
-    "expected": 112
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected": 112,
+  "mangled_entry": "_D4test18interface_typeinfo4mainFZi"
 }

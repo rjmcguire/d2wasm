@@ -3,5 +3,6 @@
   "description": "IFTI with CTFE manifest constant evaluation",
   "type": "wasm_exec",
   "entry": "result",
-  "expected_result": 8
+  "expected_result": 8,
+  "mangled_entry": "_D4test6resultFZi"
 }

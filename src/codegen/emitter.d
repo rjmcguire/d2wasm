@@ -59,7 +59,8 @@ class EmitError : Exception {
 
 struct FuncInfo {
     import ast.expressions : FunctionLiteralExpression;
-    string name;
+    string name;        // Mangled name (funcIndex key)
+    string exportName;  // Bare name for WASM export (null = use name)
     uint typeIndex;
     FunctionDecl decl;
     bool exported;
@@ -710,9 +711,14 @@ class BinaryEmitter {
                 collectImportedFunction(importedFunc);
             }
         }
-        
+
         // Second pass: collect local functions, global variables, and struct methods
         foreach (decl; decls) {
+            // Track module boundaries so each function is mangled with the correct module path
+            if (auto modDecl = cast(ModuleDecl)decl) {
+                symbolTable.setModulePath(modDecl.modulePath);
+                continue;
+            }
             if (cast(TemplateDecl)decl) {
                 continue;  // Skip uninstantiated templates
             } else if (auto funcDecl = cast(FunctionDecl)decl) {
@@ -1052,22 +1058,33 @@ class BinaryEmitter {
         auto layout = buildLayout(decl, false, decl.name == "main");
         uint tIdx = registerSignature(layout);
 
-        // Set mangled name — free functions keep their original name for exports
-        if (!decl.mangledName)
-            decl.mangledName = decl.name;
+        // Compute mangled name using module path from symbol table
+        if (!decl.mangledName) {
+            if (symbolTable.modulePath.length > 0) {
+                import codegen.mangle : computeMangledName;
+                decl.mangledName = computeMangledName(symbolTable.modulePath, decl);
+            } else {
+                decl.mangledName = decl.name;
+            }
+        }
 
         // Add function
         FuncInfo info;
         info.name = decl.mangledName;
+        info.exportName = decl.name;  // Bare name for WASM exports
         info.typeIndex = tIdx;
         info.decl = decl;
         info.exported = true;  // Export all for now
         info.paramLayout = layout;
 
         funcIndex[decl.mangledName] = cast(uint)functions.length;
+        // Also register bare name for backward-compatible lookups.
+        // This will be removed when all call sites use mangled names.
+        if (decl.name != decl.mangledName && decl.name !in funcIndex)
+            funcIndex[decl.name] = cast(uint)functions.length;
         functions ~= info;
     }
-    
+
     /**
      * Check if a type can be emitted to WASM (basic types only for now)
      */
@@ -1971,10 +1988,13 @@ class BinaryEmitter {
         // 4. Sort functions by name
         functions.sort!((a, b) => a.name < b.name);
         
-        // Rebuild funcIndex
+        // Rebuild funcIndex (mangled names + bare-name aliases)
         funcIndex.clear();
         foreach (i, ref f; functions) {
             funcIndex[f.name] = cast(uint)i;
+            // Re-add bare-name alias for backward-compatible lookups
+            if (f.exportName.length > 0 && f.exportName != f.name && f.exportName !in funcIndex)
+                funcIndex[f.exportName] = cast(uint)i;
         }
         
         // 5. Sort imports by (module, field)
@@ -2393,7 +2413,7 @@ class BinaryEmitter {
         FuncExport[] funcExports;
         foreach (i, f; functions) {
             if (f.exported) {
-                // Index: local functions start after imports
+                // Export with mangled name
                 funcExports ~= FuncExport(f.name, cast(uint)imports.length + cast(uint)i);
             }
         }

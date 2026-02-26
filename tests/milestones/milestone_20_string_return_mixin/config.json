@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "expected_result": 42,
   "entry": "result",
-  "capability": "string-returning function via CTFE, result used in mixin"
+  "capability": "string-returning function via CTFE, result used in mixin",
+  "mangled_entry": "_D4test6resultFZi"
 }

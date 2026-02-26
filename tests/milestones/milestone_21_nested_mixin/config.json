@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "expected_result": 42,
   "entry": "result",
-  "capability": "nested mixin evaluation, CTFE with internal mixin expansion"
+  "capability": "nested mixin evaluation, CTFE with internal mixin expansion",
+  "mangled_entry": "_D4test6resultFZi"
 }

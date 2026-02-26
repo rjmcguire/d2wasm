@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "expected_result": 2147483647,
   "entry": "test_max",
-  "capability": "Integer bounds preservation"
+  "capability": "Integer bounds preservation",
+  "mangled_entry": "_D4test8test_maxFZi"
 }

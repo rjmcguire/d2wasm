@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "expected_result": 2,
   "entry": "result",
-  "capability": "static if else branch selection"
+  "capability": "static if else branch selection",
+  "mangled_entry": "_D4test6resultFZi"
 }

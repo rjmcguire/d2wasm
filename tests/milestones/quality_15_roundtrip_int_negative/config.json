@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "expected_result": -42,
   "entry": "result",
-  "capability": "Negative integer preservation"
+  "capability": "Negative integer preservation",
+  "mangled_entry": "_D4test6resultFZi"
 }

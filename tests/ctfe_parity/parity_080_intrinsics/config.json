@@ -2,6 +2,6 @@
   "name": "intrinsics",
   "description": "CTFE parity: compiler intrinsics (shift left, arithmetic shift right)",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 20
 }

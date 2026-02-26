@@ -2,5 +2,6 @@
   "name": "slice_length_write",
   "description": "Writable slice .length to grow/shrink array",
   "type": "wasm_exec",
-  "entry": "main"
+  "entry": "_D4test4mainFZi",
+  "mangled_entry": "_D4test4mainFZi"
 }

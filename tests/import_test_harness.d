@@ -229,7 +229,13 @@ int main(string[] args) {
     }
     
     // Find entry function
-    string entryName = "entry" in config ? config["entry"].str : "result";
+    string entryName;
+    if (auto p = "mangled_entry" in config)
+        entryName = p.str;
+    else if (auto p = "entry" in config)
+        entryName = p.str;
+    else
+        entryName = "result";
     IM3Function func;
     err = m3_FindFunction(&func, runtime, entryName.toStringz);
     if (err) {

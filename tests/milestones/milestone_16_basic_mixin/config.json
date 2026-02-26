@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "expected_result": 42,
   "entry": "result",
-  "capability": "mixin(string) with manifest constant, tree-sitter parse, AST splice"
+  "capability": "mixin(string) with manifest constant, tree-sitter parse, AST splice",
+  "mangled_entry": "_D4test6resultFZi"
 }

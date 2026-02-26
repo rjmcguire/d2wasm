@@ -2,6 +2,6 @@
   "name": "is_expression",
   "description": "CTFE parity: is-expressions for type category and exact match",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 42
 }

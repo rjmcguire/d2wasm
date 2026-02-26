@@ -2,6 +2,6 @@
   "name": "traits_allMembers",
   "description": "CTFE parity: __traits(allMembers, T).length returns member count",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 3
 }

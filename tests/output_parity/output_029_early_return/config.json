@@ -2,6 +2,6 @@
   "name": "early_return",
   "description": "Output parity: early return from loop",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 42
 }

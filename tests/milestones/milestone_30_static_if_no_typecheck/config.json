@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "expected_result": 42,
   "entry": "result",
-  "capability": "static if branch exclusion before type checking"
+  "capability": "static if branch exclusion before type checking",
+  "mangled_entry": "_D4test6resultFZi"
 }

@@ -2,5 +2,6 @@
   "name": "ctfe_caching",
   "description": "CTFE function caching across multiple evaluations",
   "type": "wasm_exec",
-  "expected_result": 104
+  "expected_result": 104,
+  "mangled_entry": "_D4test4mainFZi"
 }

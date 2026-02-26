@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "expected_result": 2048,
   "entry": "result",
-  "capability": "__ctfe_runtime.push/pop, arena scope management"
+  "capability": "__ctfe_runtime.push/pop, arena scope management",
+  "mangled_entry": "_D4test6resultFZi"
 }

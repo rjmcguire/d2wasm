@@ -1064,11 +1064,11 @@ class FuncContext {
         leb128u(out_, info.frameOffset);
         out_ ~= Op.i32_add;
         
-        // Call the destructor
-        string dtorName = info.structDecl.name ~ "_~this";
+        // Call the destructor using its mangled name
+        string dtorName = dtor.mangledName ? dtor.mangledName : info.structDecl.name ~ "_~this";
         if (auto funcIdx = dtorName in emitter.funcIndex) {
             out_ ~= Op.call;
-            leb128u(out_, *funcIdx);
+            leb128u(out_, cast(uint)emitter.imports.length + *funcIdx);
         } else {
             // Destructor not registered - this shouldn't happen
             // For now, just drop the this pointer

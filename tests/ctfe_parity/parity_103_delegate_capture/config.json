@@ -2,5 +2,6 @@
   "name": "delegate_capture",
   "description": "Capturing delegate with by-reference semantics",
   "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
   "expected_value": 25
 }

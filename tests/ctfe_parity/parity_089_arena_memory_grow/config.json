@@ -2,6 +2,6 @@
   "name": "arena_memory_grow",
   "description": "CTFE parity: arena grows via memory.grow when allocations exceed initial page",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 0
 }

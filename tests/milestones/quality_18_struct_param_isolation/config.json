@@ -2,5 +2,6 @@
   "name": "struct_param_isolation",
   "description": "Struct parameter mutations don't affect caller's original",
   "type": "wasm_exec",
-  "entry": "main"
+  "entry": "_D4test4mainFZi",
+  "mangled_entry": "_D4test4mainFZi"
 }

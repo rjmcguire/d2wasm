@@ -2,6 +2,6 @@
   "name": "bitwise",
   "description": "Output parity: bitwise operators",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 542
 }

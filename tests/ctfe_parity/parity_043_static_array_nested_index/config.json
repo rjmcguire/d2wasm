@@ -2,6 +2,6 @@
   "name": "static_array_nested_index",
   "description": "CTFE parity: indexing arrays with computed and nested indices",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 70
 }

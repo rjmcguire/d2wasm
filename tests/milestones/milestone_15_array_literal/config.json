@@ -1,5 +1,6 @@
 {
-    "type": "wasm_exec",
-    "function": "getLength",
-    "description": "Array literal parsing and CTFE evaluation"
+  "type": "wasm_exec",
+  "function": "getLength",
+  "description": "Array literal parsing and CTFE evaluation",
+  "mangled_entry": "_D4test9getLengthFZi"
 }

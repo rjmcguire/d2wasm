@@ -2,5 +2,6 @@
   "name": "struct_param",
   "description": "Pass struct to function by value (pointer to copy)",
   "type": "wasm_exec",
-  "entry": "main"
+  "entry": "_D4test4mainFZi",
+  "mangled_entry": "_D4test4mainFZi"
 }

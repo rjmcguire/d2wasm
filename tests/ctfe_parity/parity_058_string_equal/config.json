@@ -2,6 +2,6 @@
   "name": "string_equal",
   "description": "CTFE parity: stringEqual from runtime/object.d",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 11
 }

@@ -2,6 +2,6 @@
   "name": "max_min_values",
   "description": "CTFE parity: arithmetic near INT_MAX and INT_MIN boundaries",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 200
 }

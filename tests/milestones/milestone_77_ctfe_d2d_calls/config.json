@@ -2,5 +2,6 @@
   "name": "ctfe_d2d_calls",
   "description": "D-to-D function calls in CTFE",
   "type": "wasm_exec",
-  "expected_result": 52
+  "expected_result": 52,
+  "mangled_entry": "_D4test4mainFZi"
 }

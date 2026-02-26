@@ -54,9 +54,9 @@ echo "  OK: All output files created"
 
 # Test 3: Verify WASM correctness
 echo "Test 3: Verify WASM correctness..."
-R1=$(wasm3 --func run1 "$TEST_DIR/out/file1.wasm" 2>&1 | grep -o 'Result: [0-9]*' | grep -o '[0-9]*')
-R2=$(wasm3 --func run2 "$TEST_DIR/out/file2.wasm" 2>&1 | grep -o 'Result: [0-9]*' | grep -o '[0-9]*')
-R3=$(wasm3 --func run3 "$TEST_DIR/out/file3.wasm" 2>&1 | grep -o 'Result: [0-9]*' | grep -o '[0-9]*')
+R1=$(wasm3 --func _D5file14run1FZi "$TEST_DIR/out/file1.wasm" 2>&1 | grep -o 'Result: [0-9]*' | grep -o '[0-9]*' || true)
+R2=$(wasm3 --func _D5file24run2FZi "$TEST_DIR/out/file2.wasm" 2>&1 | grep -o 'Result: [0-9]*' | grep -o '[0-9]*' || true)
+R3=$(wasm3 --func _D5file34run3FZi "$TEST_DIR/out/file3.wasm" 2>&1 | grep -o 'Result: [0-9]*' | grep -o '[0-9]*' || true)
 
 if [ "$R1" != "3" ]; then echo "FAIL: file1 result=$R1, expected 3"; exit 1; fi
 if [ "$R2" != "6" ]; then echo "FAIL: file2 result=$R2, expected 6"; exit 1; fi

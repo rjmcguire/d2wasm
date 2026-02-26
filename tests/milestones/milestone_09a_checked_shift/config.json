@@ -2,6 +2,7 @@
   "name": "checked_shift",
   "description": "Checked shift operator functions with valid amounts",
   "type": "wasm_exec",
-  "entry": "main",
-  "expected_result": 20
+  "entry": "_D4test4mainFZi",
+  "expected_result": 20,
+  "mangled_entry": "_D4test4mainFZi"
 }

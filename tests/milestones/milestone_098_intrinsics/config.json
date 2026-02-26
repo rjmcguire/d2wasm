@@ -2,6 +2,7 @@
   "name": "intrinsics",
   "description": "Compiler intrinsics emit raw opcodes",
   "type": "wasm_exec",
-  "entry": "main",
-  "expected_result": 20
+  "entry": "_D4test4mainFZi",
+  "expected_result": 20,
+  "mangled_entry": "_D4test4mainFZi"
 }

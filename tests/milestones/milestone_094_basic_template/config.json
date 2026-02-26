@@ -2,6 +2,7 @@
   "name": "basic_template",
   "description": "Basic function template with explicit instantiation",
   "type": "wasm_exec",
-  "entry": "main",
-  "expected_result": 8
+  "entry": "_D4test4mainFZi",
+  "expected_result": 8,
+  "mangled_entry": "_D4test4mainFZi"
 }

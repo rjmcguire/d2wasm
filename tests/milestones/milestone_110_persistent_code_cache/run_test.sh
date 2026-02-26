@@ -71,7 +71,7 @@ fi
 echo "  OK: 6 hit, 1 miss"
 
 # Test 4: Verify correctness of output
-RESULT=$(wasm3 --func main "$CACHE_DIR/test.wasm" 2>&1 | grep -o 'Result: [0-9]*' | grep -o '[0-9]*')
+RESULT=$(wasm3 --func _D4test4mainFZi "$CACHE_DIR/test.wasm" 2>&1 | grep -o 'Result: [0-9]*' | grep -o '[0-9]*' || true)
 if [ "$RESULT" != "4" ]; then
     echo "FAIL: Expected result 4, got $RESULT"
     exit 1

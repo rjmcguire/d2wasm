@@ -2,6 +2,7 @@
   "name": "struct_template_ctfe",
   "description": "Struct template construction in CTFE",
   "type": "wasm_exec",
-  "entry": "main",
-  "expected_result": 300
+  "entry": "_D4test4mainFZi",
+  "expected_result": 300,
+  "mangled_entry": "_D4test4mainFZi"
 }

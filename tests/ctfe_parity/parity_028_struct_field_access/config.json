@@ -2,6 +2,6 @@
   "name": "struct_field_access",
   "description": "CTFE parity: struct field access",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 60
 }

@@ -3,6 +3,10 @@
   "description": "Function with binary arithmetic operation",
   "type": "wasm_exec",
   "entry": "add",
-  "args": ["2", "3"],
-  "capability": "Binary operations (i32.add)"
+  "args": [
+    "2",
+    "3"
+  ],
+  "capability": "Binary operations (i32.add)",
+  "mangled_entry": "_D4test3addFiiZi"
 }

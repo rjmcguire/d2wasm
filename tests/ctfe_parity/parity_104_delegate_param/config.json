@@ -2,5 +2,6 @@
   "name": "delegate_param",
   "description": "Passing a delegate as a function parameter",
   "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
   "expected_value": 25
 }

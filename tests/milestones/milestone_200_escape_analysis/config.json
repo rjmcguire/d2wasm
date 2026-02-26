@@ -2,7 +2,10 @@
   "name": "escape_analysis",
   "description": "Escape analysis: stack-promote non-escaping new allocations",
   "type": "wasm_exec",
-  "entry": "main",
-  "compiler_args": ["--escape-analysis"],
-  "capability": "escape analysis, stack promotion of new, pointer lifetime analysis"
+  "entry": "_D4test4mainFZi",
+  "compiler_args": [
+    "--escape-analysis"
+  ],
+  "capability": "escape analysis, stack promotion of new, pointer lifetime analysis",
+  "mangled_entry": "_D4test4mainFZi"
 }

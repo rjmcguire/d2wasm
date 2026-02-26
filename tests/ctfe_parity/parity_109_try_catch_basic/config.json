@@ -2,6 +2,6 @@
   "name": "try_catch_basic",
   "description": "CTFE parity: basic try-catch with thrown integer",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 42
 }

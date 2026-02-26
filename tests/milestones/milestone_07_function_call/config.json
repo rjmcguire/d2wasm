@@ -3,6 +3,10 @@
   "description": "Function that calls another function",
   "type": "wasm_exec",
   "entry": "double_add",
-  "args": ["3", "4"],
-  "capability": "Function calls (call instruction)"
+  "args": [
+    "3",
+    "4"
+  ],
+  "capability": "Function calls (call instruction)",
+  "mangled_entry": "_D4test10double_addFiiZi"
 }

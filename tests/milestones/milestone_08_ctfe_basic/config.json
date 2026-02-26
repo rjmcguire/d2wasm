@@ -3,5 +3,6 @@
   "description": "Basic CTFE: evaluate enum initializer at compile time",
   "type": "wasm_exec",
   "entry": "getValue",
-  "capability": "CTFE detection, wasm3 integration, result capture"
+  "capability": "CTFE detection, wasm3 integration, result capture",
+  "mangled_entry": "_D4test8getValueFZi"
 }

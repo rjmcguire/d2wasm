@@ -2,5 +2,6 @@
   "name": "function_literal",
   "description": "Non-capturing function literal with call_indirect",
   "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
   "expected_value": 42
 }

@@ -2,5 +2,6 @@
   "name": "arena_basic",
   "description": "Basic array operations work through arena allocator",
   "type": "wasm_exec",
-  "expected_result": 60
+  "expected_result": 60,
+  "mangled_entry": "_D4test4mainFZi"
 }

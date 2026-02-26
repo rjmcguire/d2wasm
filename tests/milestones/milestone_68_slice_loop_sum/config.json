@@ -2,5 +2,6 @@
   "name": "slice_loop_sum",
   "description": "Build slice with appends, sum elements in loop",
   "type": "wasm_exec",
-  "entry": "main"
+  "entry": "_D4test4mainFZi",
+  "mangled_entry": "_D4test4mainFZi"
 }

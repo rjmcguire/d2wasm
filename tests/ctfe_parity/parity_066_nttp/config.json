@@ -2,6 +2,6 @@
   "name": "nttp",
   "description": "CTFE parity: non-type template parameters",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 45
 }

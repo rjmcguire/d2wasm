@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "expected_result": 10,
   "entry": "result",
-  "capability": "static if with manifest constant comparison"
+  "capability": "static if with manifest constant comparison",
+  "mangled_entry": "_D4test6resultFZi"
 }

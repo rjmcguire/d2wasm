@@ -1,5 +1,6 @@
 {
-    "type": "wasm_exec",
-    "expected_result": 0,
-    "description": "Static array declaration and read - zero-initialized memory"
+  "type": "wasm_exec",
+  "expected_result": 0,
+  "description": "Static array declaration and read - zero-initialized memory",
+  "mangled_entry": "_D4test4mainFZi"
 }

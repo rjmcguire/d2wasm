@@ -2,6 +2,6 @@
   "name": "collatz_sequence",
   "description": "CTFE parity: Collatz conjecture step counting with mixed arithmetic",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 24
 }

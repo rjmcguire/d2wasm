@@ -1,5 +1,6 @@
 {
     "description": "Unique local IDs - type checker assigns unique IDs to variables/parameters",
     "expected_result": 24,
-    "type": "run"
+    "type": "run",
+    "mangled_entry": "_D4test4mainFZi"
 }

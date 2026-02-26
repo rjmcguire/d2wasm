@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "expected_result": 7,
   "entry": "result",
-  "capability": "__text in mixin code generation"
+  "capability": "__text in mixin code generation",
+  "mangled_entry": "_D4test6resultFZi"
 }

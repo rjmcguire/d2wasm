@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "expected_result": 1,
   "entry": "result",
-  "capability": "Boolean value preservation"
+  "capability": "Boolean value preservation",
+  "mangled_entry": "_D4test6resultFZi"
 }

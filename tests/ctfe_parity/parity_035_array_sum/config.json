@@ -2,6 +2,6 @@
   "name": "array_sum",
   "description": "CTFE parity: sum elements of static array",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 15
 }

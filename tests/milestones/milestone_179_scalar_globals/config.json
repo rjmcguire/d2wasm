@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "expected_result": 0,
   "entry": "test",
-  "capability": "scalar global variables"
+  "capability": "scalar global variables",
+  "mangled_entry": "_D4test4testFZi"
 }

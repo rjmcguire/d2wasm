@@ -1,4 +1,5 @@
 // runtime/object.d — auto-imported before user code
+module object;
 
 bool stringEqual(string a_, string b_) {
     ubyte[] a = cast(ubyte[])a_;

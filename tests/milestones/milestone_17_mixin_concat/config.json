@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "expected_result": 42,
   "entry": "result",
-  "capability": "mixin with string concatenation, CTFE string evaluation"
+  "capability": "mixin with string concatenation, CTFE string evaluation",
+  "mangled_entry": "_D4test6resultFZi"
 }

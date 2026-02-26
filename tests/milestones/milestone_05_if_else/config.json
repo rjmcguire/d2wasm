@@ -3,6 +3,10 @@
   "description": "Function with if/else returning a value",
   "type": "wasm_exec",
   "entry": "max",
-  "args": ["3", "7"],
-  "capability": "Conditionals (if/else blocks), comparisons (i32.gt_s)"
+  "args": [
+    "3",
+    "7"
+  ],
+  "capability": "Conditionals (if/else blocks), comparisons (i32.gt_s)",
+  "mangled_entry": "_D4test3maxFiiZi"
 }

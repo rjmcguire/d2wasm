@@ -266,8 +266,21 @@ class FunctionDecl : Declaration {
     @property void isProperty(bool v) { attrs.isProperty_ = v; }
 
     Declaration parent;  // enclosing struct/class, null for free functions
-    string mangledName;  // D ABI mangled name, set during emitter collection
+    private string _mangledName;  // D ABI mangled name, set during symbol collection
     string gcStrategy;   // @gc(heap) etc. — null if not set
+
+    /// Get the mangled name.
+    string mangledName() const { return _mangledName; }
+
+    /// Set the mangled name, with -vvv tracing.
+    void mangledName(string v, string file = __FILE__, size_t line = __LINE__) {
+        import diagnostic.log : log;
+        if (_mangledName.length > 0 && v != _mangledName)
+            log(2, "mangledName OVERWRITE on '", name, "': '", _mangledName, "' -> '", v, "' at ", file, ":", line);
+        else
+            log(2, "mangledName SET on '", name, "': '", _mangledName, "' -> '", v, "' at ", file, ":", line);
+        _mangledName = v;
+    }
 
     TemplateParamType[] templateParams;  // empty for non-template functions
     @property bool isTemplate() const { return templateParams.length > 0; }

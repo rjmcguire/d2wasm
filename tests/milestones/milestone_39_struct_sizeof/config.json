@@ -2,5 +2,6 @@
   "name": "struct_sizeof",
   "description": "Struct .sizeof returns correct size with alignment",
   "type": "wasm_exec",
-  "entry": "main"
+  "entry": "_D4test4mainFZi",
+  "mangled_entry": "_D4test4mainFZi"
 }

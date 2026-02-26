@@ -1,7 +1,8 @@
 {
-    "name": "class_type_checking", 
-    "description": "Class type checking for field access",
-    "type": "wasm_exec",
-    "entry": "getValue",
-    "expected_result": 155
+  "name": "class_type_checking",
+  "description": "Class type checking for field access",
+  "type": "wasm_exec",
+  "entry": "getValue",
+  "expected_result": 155,
+  "mangled_entry": "_D4test15class_typecheck8getValueFZi"
 }

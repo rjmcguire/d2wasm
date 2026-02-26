@@ -1,5 +1,6 @@
 {
-    "type": "wasm_exec",
-    "entry": "getValue",
-    "expected_result": 8
+  "type": "wasm_exec",
+  "entry": "getValue",
+  "expected_result": 8,
+  "mangled_entry": "_D4test10vtable_gen8getValueFZi"
 }

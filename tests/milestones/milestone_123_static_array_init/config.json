@@ -1,5 +1,6 @@
 {
-    "type": "wasm_exec",
-    "expected_result": 6,
-    "description": "Static array initialized with array literal"
+  "type": "wasm_exec",
+  "expected_result": 6,
+  "description": "Static array initialized with array literal",
+  "mangled_entry": "_D4test4mainFZi"
 }

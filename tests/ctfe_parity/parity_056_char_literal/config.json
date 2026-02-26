@@ -2,6 +2,6 @@
   "name": "char_literal",
   "description": "CTFE parity: char literal emission",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 113
 }

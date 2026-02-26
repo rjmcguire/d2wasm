@@ -2,6 +2,6 @@
   "name": "struct_method",
   "description": "CTFE parity: struct with getter and mutating methods",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 60
 }

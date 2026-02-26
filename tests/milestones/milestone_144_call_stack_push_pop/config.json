@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "expected_result": 0,
   "entry": "test",
-  "capability": "Call stack tracking opcodes for CTFE error stack traces"
+  "capability": "Call stack tracking opcodes for CTFE error stack traces",
+  "mangled_entry": "_D4test4testFZi"
 }

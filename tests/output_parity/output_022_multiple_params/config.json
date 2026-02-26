@@ -2,6 +2,6 @@
   "name": "multiple_params",
   "description": "Output parity: 4 parameters",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 100
 }

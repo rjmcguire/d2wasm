@@ -213,6 +213,9 @@ int compileFile(CompilerOptions options) {
         log(2, "Parsed ", ast.length, " top-level declarations");
 
         // 2a. Auto-import runtime/object.d (prepend runtime declarations)
+        //     runtime/object.d has "module object;" so its symbols get module ["object"].
+        //     Insert a synthetic module decl between runtime and user code to reset
+        //     the module path for user declarations (default from filename).
         {
             // Try relative to executable, then relative to CWD
             string exeDir = dirName(thisExePath());
@@ -227,7 +230,10 @@ int compileFile(CompilerOptions options) {
                         auto rtSource = readText(runtimePath);
                         auto rtBridge = new TreeSitterBridge(runtimePath, rtSource);
                         Declaration[] rtDecls = rtBridge.parseSourceFile();
-                        ast = rtDecls ~ ast;
+                        // Insert synthetic module decl for user code default
+                        auto defaultModName = baseName(stripExtension(options.inputFile));
+                        auto userModuleDecl = new ModuleDecl(SourceLocation.init, [defaultModName]);
+                        ast = rtDecls ~ [cast(Declaration)userModuleDecl] ~ ast;
                         log(2, "Auto-imported ", rtDecls.length, " declarations from ", runtimePath);
                     } catch (Exception e) {
                         log(1, "Warning: failed to parse runtime/object.d: ", e.msg);
@@ -283,19 +289,20 @@ int compileFile(CompilerOptions options) {
         // Output target is always WASM32 (ptrSize=4).
         // options.backend controls the CTFE backend, not the output format.
         symbolTable.targetPtrSize = 4;
+        // Set default module path from filename immediately — before anything can trigger CTFE.
+        // An explicit `module` declaration in the source will override this during collectSymbols.
+        {
+            import std.path : baseName, stripExtension;
+            symbolTable.setModulePath([baseName(stripExtension(options.inputFile))]);
+        }
         symbolTable.addBuiltinSymbols();
         
-        // Extract module declaration if present
-        foreach (decl; ast) {
-            if (auto moduleDecl = cast(ModuleDecl)decl) {
-                symbolTable.setModulePath(moduleDecl.modulePath);
-                log(2, "Module: ", symbolTable.moduleFullyQualifiedName());
-                break;  // Only one module declaration per file
-            }
-        }
-        
+        // Collect symbols — handles ModuleDecl inline, infers default module from filename
         auto symbolCollector = new SymbolCollector(symbolTable);
-        symbolCollector.collectSymbols(ast);
+        symbolCollector.collectSymbols(ast, options.inputFile);
+
+        if (symbolTable.modulePath.length > 0)
+            log(2, "Module: ", symbolTable.moduleFullyQualifiedName());
         
         log(2, "Symbol table built with ", symbolTable.getGlobalScope().getAllSymbols().length, " global symbols");
         

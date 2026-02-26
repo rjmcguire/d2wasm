@@ -2,6 +2,7 @@
   "name": "is_expression",
   "description": "is(...) compile-time type introspection expressions",
   "type": "wasm_exec",
-  "entry": "main",
-  "expected_result": 42
+  "entry": "_D4test4mainFZi",
+  "expected_result": 42,
+  "mangled_entry": "_D4test4mainFZi"
 }

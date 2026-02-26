@@ -1,5 +1,6 @@
 {
     "description": "Scope tree with parent pointer - inner scope sees outer variables",
     "expected_result": 15,
-    "type": "run"
+    "type": "run",
+    "mangled_entry": "_D4test4mainFZi"
 }

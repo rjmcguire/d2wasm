@@ -2,6 +2,6 @@
   "name": "struct_template_method",
   "description": "CTFE parity: struct template with method call",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 42
 }

@@ -2,6 +2,6 @@
   "name": "fibonacci_iterative",
   "description": "CTFE parity: iterative fibonacci with temp variable swap",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 665
 }

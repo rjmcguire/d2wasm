@@ -2,6 +2,6 @@
   "name": "comparisons",
   "description": "CTFE parity: comparison operators",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 6
 }

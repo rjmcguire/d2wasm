@@ -67,7 +67,7 @@ if [ ! -f "$TEST_DIR/test.wasm" ]; then
     exit 1
 fi
 
-RESULT=$(wasm3 --func main "$TEST_DIR/test.wasm" 2>&1 | grep -o 'Result: [0-9]*' | grep -o '[0-9]*')
+RESULT=$(wasm3 --func _D4test4mainFZi "$TEST_DIR/test.wasm" 2>&1 | grep -o 'Result: [0-9]*' | grep -o '[0-9]*')
 if [ "$RESULT" != "42" ]; then
     echo "FAIL: Expected 42, got $RESULT"
     kill $PID 2>/dev/null

@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "expected_result": 0,
   "entry": "test",
-  "capability": "inner struct declarations"
+  "capability": "inner struct declarations",
+  "mangled_entry": "_D4test4testFZi"
 }

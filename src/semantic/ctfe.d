@@ -193,9 +193,16 @@ private Type deduceTypeFromExpression(Expression expr) {
 /// Compute a unique key for a function using D ABI mangling.
 private string ctfeFuncKey(FunctionDecl func) {
     import codegen.mangle : computeMangledName;
+    if (func.mangledName.length > 0)
+        return func.mangledName;
     if (func.isMethod && func.parent !is null)
         return computeMangledName([], func);
     return func.name;
+}
+
+/// Get the WASM export name for a function (mangled if available, bare name fallback).
+private static string exportName(FunctionDecl f) {
+    return f.mangledName.length > 0 ? f.mangledName : f.name;
 }
 
 class CTFEEvaluator {
@@ -1076,7 +1083,7 @@ class CTFEEvaluator {
                         // Nested array return: T[][]
                         uint innerElemSize = reader.elementSizeOf(innerArr.elementType);
                         ensureCompiledForFunction(funcDecl);
-                        auto result = cachedContext.callWithLargeReturn(funcDecl.name, [], reader.sliceSize);
+                        auto result = cachedContext.callWithLargeReturn(exportName(funcDecl), [], reader.sliceSize);
                         if (!result.success)
                             throw buildCTFEError(result, callExpr.location);
 
@@ -1112,7 +1119,7 @@ class CTFEEvaluator {
         // For string-returning functions, use hidden result pointer pattern
         if (returnsString) {
             ensureCompiledForFunction(funcDecl);
-            auto result = cachedContext.callWithLargeReturn(funcDecl.name, [], reader.sliceSize);
+            auto result = cachedContext.callWithLargeReturn(exportName(funcDecl), [], reader.sliceSize);
             if (!result.success)
                 throw buildCTFEError(result, callExpr.location);
             auto slice = reader.readSlice(result.arrayBytes);
@@ -1124,7 +1131,7 @@ class CTFEEvaluator {
         if (auto arrType = cast(ArrayType)funcDecl.returnType) {
             if (arrType.arraySize is null && !returnsString) {
                 ensureCompiledForFunction(funcDecl);
-                auto result = cachedContext.callWithLargeReturn(funcDecl.name, [], reader.sliceSize);
+                auto result = cachedContext.callWithLargeReturn(exportName(funcDecl), [], reader.sliceSize);
                 if (!result.success)
                     throw buildCTFEError(result, callExpr.location);
                 auto slice = reader.readSlice(result.arrayBytes);
@@ -1337,7 +1344,7 @@ class CTFEEvaluator {
 
             auto t1 = MonoTime.currTime;
             auto allFuncs = contextFunctions ~ newFuncs;
-            cachedContext = backend.compileWithDependencies(allFuncs, funcDecl.name);
+            cachedContext = backend.compileWithDependencies(allFuncs, exportName(funcDecl));
             statCompileTime += MonoTime.currTime - t1;
             if (cachedContext is null) {
                 auto errLoc = backend.errorLocation();
@@ -1356,7 +1363,7 @@ class CTFEEvaluator {
         // Execute with large return - allocate result space and prepend address to args
         uint totalSize = elemCount * elemSize;
         auto t2 = MonoTime.currTime;
-        auto result = cachedContext.callWithLargeReturn(funcDecl.name, args, totalSize);
+        auto result = cachedContext.callWithLargeReturn(exportName(funcDecl), args, totalSize);
         statExecTime += MonoTime.currTime - t2;
 
         if (!result.success) {
@@ -1430,7 +1437,7 @@ class CTFEEvaluator {
 
             auto t1 = MonoTime.currTime;
             auto allFuncs = contextFunctions ~ newFuncs;
-            cachedContext = backend.compileWithDependencies(allFuncs, funcDecl.name);
+            cachedContext = backend.compileWithDependencies(allFuncs, exportName(funcDecl));
             statCompileTime += MonoTime.currTime - t1;
             if (cachedContext is null) {
                 auto errLoc = backend.errorLocation();
@@ -1448,7 +1455,7 @@ class CTFEEvaluator {
 
         // Execute with large return - struct is written to result buffer
         auto t2 = MonoTime.currTime;
-        auto result = cachedContext.callWithLargeReturn(funcDecl.name, args, structSize);
+        auto result = cachedContext.callWithLargeReturn(exportName(funcDecl), args, structSize);
         statExecTime += MonoTime.currTime - t2;
 
         if (!result.success) {
@@ -1679,7 +1686,7 @@ class CTFEEvaluator {
 
             auto t1 = MonoTime.currTime;
             auto allFuncs = contextFunctions ~ newFuncs;
-            cachedContext = backend.compileWithDependencies(allFuncs, funcDecl.name);
+            cachedContext = backend.compileWithDependencies(allFuncs, exportName(funcDecl));
             statCompileTime += MonoTime.currTime - t1;
             if (cachedContext is null) {
                 auto errLoc = backend.errorLocation();
@@ -1737,7 +1744,7 @@ class CTFEEvaluator {
 
         // Execute - use callByName to call any function in the context
         auto t2 = MonoTime.currTime;
-        auto result = cachedContext.callByName(funcDecl.name, args);
+        auto result = cachedContext.callByName(exportName(funcDecl), args);
         statExecTime += MonoTime.currTime - t2;
         if (!result.success) {
             throw buildCTFEError(result, funcDecl.location);

@@ -2,7 +2,8 @@
   "name": "new_class",
   "description": "Heap allocation of class instances with new, vtable init, constructor support",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "args": [],
-  "capability": "new expression for classes, vtable pointer init, constructor calls"
+  "capability": "new expression for classes, vtable pointer init, constructor calls",
+  "mangled_entry": "_D4test4mainFZi"
 }

@@ -2,6 +2,6 @@
   "name": "slice_append",
   "description": "CTFE parity: slice append operator",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 8
 }

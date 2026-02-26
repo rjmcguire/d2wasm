@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "expected_result": 42,
   "entry": "result",
-  "capability": "mixin as statement inside function scope"
+  "capability": "mixin as statement inside function scope",
+  "mangled_entry": "_D4test6resultFZi"
 }

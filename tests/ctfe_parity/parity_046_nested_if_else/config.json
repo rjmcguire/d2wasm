@@ -2,6 +2,6 @@
   "name": "nested_if_else",
   "description": "CTFE parity: deeply nested if-else with multiple return paths",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 21
 }

@@ -2,6 +2,6 @@
   "name": "slice_variable_bounds",
   "description": "CTFE parity: slice expression with variable bounds",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 90
 }

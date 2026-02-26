@@ -2,6 +2,6 @@
   "name": "ifti",
   "description": "CTFE parity: Implicit Function Template Instantiation",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 8
 }

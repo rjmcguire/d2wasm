@@ -2,6 +2,7 @@
   "name": "multi_template",
   "description": "Multiple instantiations of the same template with different types",
   "type": "wasm_exec",
-  "entry": "main",
-  "expected_result": 50
+  "entry": "_D4test4mainFZi",
+  "expected_result": 50,
+  "mangled_entry": "_D4test4mainFZi"
 }

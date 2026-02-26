@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "expected_result": 0,
   "entry": "test",
-  "capability": "Linear memory reservation for call stack tracking"
+  "capability": "Linear memory reservation for call stack tracking",
+  "mangled_entry": "_D4test4testFZi"
 }

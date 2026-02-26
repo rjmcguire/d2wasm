@@ -2,6 +2,6 @@
   "name": "static_array_return",
   "description": "CTFE parity: function returning a static array",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 60
 }

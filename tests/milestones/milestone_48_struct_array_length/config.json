@@ -2,5 +2,6 @@
   "name": "struct_array_length",
   "description": "String .length via struct field access (arrays as built-in structs)",
   "type": "wasm_exec",
-  "entry": "main"
+  "entry": "_D4test4mainFZi",
+  "mangled_entry": "_D4test4mainFZi"
 }

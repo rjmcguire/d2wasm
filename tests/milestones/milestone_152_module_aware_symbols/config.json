@@ -1,7 +1,8 @@
 {
-    "name": "module_aware_symbols",
-    "description": "Module-aware symbol table",
-    "type": "wasm_exec",
-    "entry": "getValue",
-    "expected_result": 152
+  "name": "module_aware_symbols",
+  "description": "Module-aware symbol table",
+  "type": "wasm_exec",
+  "entry": "getValue",
+  "expected_result": 152,
+  "mangled_entry": "_D4test7symbols5aware8getValueFZi"
 }

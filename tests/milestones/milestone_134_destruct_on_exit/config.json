@@ -1,5 +1,6 @@
 {
     "description": "CompoundStatement destructOnExit list - type checker tracks variables for RAII",
     "expected_result": 7,
-    "type": "run"
+    "type": "run",
+    "mangled_entry": "_D4test4mainFZi"
 }

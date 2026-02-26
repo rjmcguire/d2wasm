@@ -2,6 +2,6 @@
   "name": "nested_struct",
   "description": "CTFE parity: nested struct access",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 42
 }

@@ -245,7 +245,10 @@ class SymbolTable {
      * Set the current module path from a ModuleDecl.
      * Called during compilation setup.
      */
-    void setModulePath(string[] path) {
+    void setModulePath(string[] path, string file = __FILE__, size_t line = __LINE__) {
+        import diagnostic.log : log;
+        import std.array : join;
+        log(3, "setModulePath: [", path.join("."), "] at ", file, ":", line);
         _modulePath = path.dup;
     }
     
@@ -689,10 +692,22 @@ class SymbolCollector {
     }
     
     /**
-     * Collect symbols from declaration list
+     * Collect symbols from declaration list.
+     * Handles ModuleDecl inline to update module path as it iterates.
+     * If sourceFilename is provided and no explicit ModuleDecl is found,
+     * infers default module from the filename (e.g., "test.d" → ["test"]).
      */
-    void collectSymbols(Declaration[] declarations) {
+    void collectSymbols(Declaration[] declarations, string sourceFilename = null) {
+        // Set default module from filename if no module path set yet
+        if (sourceFilename.length > 0 && symbolTable.modulePath.length == 0) {
+            import std.path : baseName, stripExtension;
+            symbolTable.setModulePath([baseName(stripExtension(sourceFilename))]);
+        }
         foreach (decl; declarations) {
+            if (auto modDecl = cast(ModuleDecl)decl) {
+                symbolTable.setModulePath(modDecl.modulePath);
+                continue;
+            }
             collectSymbol(decl);
         }
     }
@@ -738,6 +753,11 @@ class SymbolCollector {
     }
 
     private void collectFunctionSymbol(FunctionDecl decl) {
+        // Compute mangled name early so it's available before CTFE or emitter runs
+        if (!decl.mangledName && symbolTable.modulePath.length > 0) {
+            import codegen.mangle : computeMangledName;
+            decl.mangledName = computeMangledName(symbolTable.modulePath, decl);
+        }
         auto symbol = new Symbol(
             decl.name,
             SymbolKind.Function,

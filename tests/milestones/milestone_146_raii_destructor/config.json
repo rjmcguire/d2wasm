@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "expected_result": 0,
   "entry": "test",
-  "capability": "RAII destructor calls"
+  "capability": "RAII destructor calls",
+  "mangled_entry": "_D4test4testFZi"
 }

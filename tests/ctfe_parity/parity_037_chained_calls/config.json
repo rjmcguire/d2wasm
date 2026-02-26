@@ -2,6 +2,6 @@
   "name": "chained_calls",
   "description": "CTFE parity: deeply chained function calls",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 23
 }

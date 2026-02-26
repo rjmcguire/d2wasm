@@ -3,5 +3,6 @@
   "description": "Function that returns a constant i32 value",
   "type": "wasm_exec",
   "entry": "answer",
-  "capability": "Function bodies, i32.const, return"
+  "capability": "Function bodies, i32.const, return",
+  "mangled_entry": "_D4test6answerFZi"
 }

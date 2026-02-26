@@ -2,6 +2,6 @@
   "name": "bool",
   "description": "Output parity: bool operations",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 2
 }

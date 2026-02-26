@@ -2,6 +2,6 @@
   "name": "traits_hasMember",
   "description": "CTFE parity: __traits(hasMember) struct introspection",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 15
 }

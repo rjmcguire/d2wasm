@@ -2,6 +2,6 @@
   "name": "for_continue",
   "description": "CTFE parity: break and continue in for loop",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 18
 }

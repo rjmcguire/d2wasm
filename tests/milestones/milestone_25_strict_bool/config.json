@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "expected_result": 1,
   "entry": "result",
-  "capability": "bool type, comparison returns bool, bool in conditions"
+  "capability": "bool type, comparison returns bool, bool in conditions",
+  "mangled_entry": "_D4test6resultFZi"
 }

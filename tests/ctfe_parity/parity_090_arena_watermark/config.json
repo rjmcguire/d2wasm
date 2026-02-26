@@ -2,6 +2,6 @@
   "name": "arena_watermark",
   "description": "CTFE parity: arena watermark save/restore works across repeated function calls",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 0
 }

@@ -2,7 +2,8 @@
   "name": "new_expression",
   "description": "Heap allocation with new, gated behind @gc(heap) attribute",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "args": [],
-  "capability": "new expression, @gc(heap) attribute, __alloc bump allocator"
+  "capability": "new expression, @gc(heap) attribute, __alloc bump allocator",
+  "mangled_entry": "_D4test4mainFZi"
 }

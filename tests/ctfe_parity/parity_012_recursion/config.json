@@ -2,6 +2,6 @@
   "name": "recursion",
   "description": "CTFE parity: recursive function calls",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 55
 }

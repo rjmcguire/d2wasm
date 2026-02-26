@@ -2,6 +2,6 @@
   "name": "class_inheritance_chain",
   "description": "Three-level class inheritance with virtual dispatch through base class parameter",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 43
 }

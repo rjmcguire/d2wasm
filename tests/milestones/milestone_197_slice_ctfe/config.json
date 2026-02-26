@@ -2,7 +2,8 @@
   "name": "slice_ctfe",
   "description": "CTFE function returning dynamic int[] array",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 60,
-  "capability": "Dynamic array return from CTFE functions, manifest array initialization"
+  "capability": "Dynamic array return from CTFE functions, manifest array initialization",
+  "mangled_entry": "_D4test4mainFZi"
 }

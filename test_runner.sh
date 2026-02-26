@@ -58,7 +58,7 @@ run_test() {
     
     # Parse config
     local test_type=$(jq -r '.type' "$config_file")
-    local func_name=$(jq -r '.entry // .function // "main"' "$config_file")
+    local func_name=$(jq -r '.mangled_entry // .entry // .function // "main"' "$config_file")
     local args=$(jq -r '.args // [] | join(" ")' "$config_file")
     local compiler_args=$(jq -r '.compiler_args // [] | join(" ")' "$config_file")
     local expected_exit=$(jq -r '.expected_exit // 0' "$config_file")
@@ -217,7 +217,7 @@ run_test() {
                 # Try to build it
                 if [ -f "$harness.d" ]; then
                     echo "Building import test harness..."
-                    if ! dub build --skip-registry=standard --single "$harness.d" --compiler=dmd 2>/dev/null; then
+                    if ! dub build --skip-registry=standard --single "$harness.d" 2>/dev/null; then
                         echo -e "${YELLOW}SKIP${NC} $test_name (harness build failed)"
                         return 0
                     fi

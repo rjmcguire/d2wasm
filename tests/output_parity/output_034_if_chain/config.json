@@ -2,6 +2,6 @@
   "name": "if_chain",
   "description": "Output parity: if-else-if chain",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 2
 }

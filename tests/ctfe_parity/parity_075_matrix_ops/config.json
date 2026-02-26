@@ -2,6 +2,6 @@
   "name": "matrix_ops",
   "description": "CTFE parity: 3x3 matrix multiply and determinant with structs",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 47
 }

@@ -4,6 +4,7 @@
   "type": "wasm_import_exec",
   "expected_result": 42,
   "entry": "result",
+  "mangled_entry": "_D4test6resultFZi",
   "imports": {
     "test": {
       "set_value": {"params": ["i32"], "result": null, "behavior": "set_state"},

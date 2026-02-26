@@ -2,6 +2,6 @@
   "name": "static_array",
   "description": "CTFE parity: static array init and indexing",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 50
 }

@@ -2,6 +2,6 @@
   "name": "struct_equality",
   "description": "CTFE parity: compiler-generated default struct equality (== and !=)",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 30
 }

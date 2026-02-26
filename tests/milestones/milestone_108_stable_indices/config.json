@@ -2,6 +2,7 @@
   "name": "stable_indices",
   "description": "Verify same source produces identical WASM across compilations",
   "type": "deterministic",
-  "entry": "main",
-  "expected_result": 30
+  "entry": "_D4test4mainFZi",
+  "expected_result": 30,
+  "mangled_entry": "_D4test4mainFZi"
 }

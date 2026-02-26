@@ -2,7 +2,10 @@
   "name": "escape_stack_promote",
   "description": "Escape analysis stack-promotes non-escaping new allocations and computes correct results",
   "type": "wasm_exec",
-  "entry": "main",
-  "compiler_args": ["--escape-analysis"],
-  "capability": "escape analysis correctness — stack-promoted new behaves identically to heap-allocated new"
+  "entry": "_D4test4mainFZi",
+  "compiler_args": [
+    "--escape-analysis"
+  ],
+  "capability": "escape analysis correctness — stack-promoted new behaves identically to heap-allocated new",
+  "mangled_entry": "_D4test4mainFZi"
 }

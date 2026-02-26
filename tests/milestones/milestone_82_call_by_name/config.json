@@ -2,5 +2,6 @@
   "name": "call_by_name",
   "description": "Call any function by name without recompiling",
   "type": "wasm_exec",
-  "expected_result": 396
+  "expected_result": 396,
+  "mangled_entry": "_D4test4mainFZi"
 }

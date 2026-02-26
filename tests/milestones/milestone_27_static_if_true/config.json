@@ -4,5 +4,6 @@
   "type": "wasm_exec",
   "expected_result": 1,
   "entry": "result",
-  "capability": "static if parsing, compile-time condition evaluation"
+  "capability": "static if parsing, compile-time condition evaluation",
+  "mangled_entry": "_D4test6resultFZi"
 }

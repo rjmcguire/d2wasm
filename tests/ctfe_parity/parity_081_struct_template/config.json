@@ -2,6 +2,6 @@
   "name": "struct_template",
   "description": "CTFE parity: struct template construction and field access",
   "type": "wasm_exec",
-  "entry": "main",
+  "entry": "_D4test4mainFZi",
   "expected_result": 300
 }

@@ -4,6 +4,7 @@
   "type": "wasm_import_exec",
   "expected_result": 42,
   "entry": "result",
+  "mangled_entry": "_D4test6resultFZi",
   "imports": {
     "math": {
       "add": {"params": ["i32", "i32"], "result": "i32", "behavior": "add"}
