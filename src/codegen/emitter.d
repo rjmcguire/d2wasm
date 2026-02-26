@@ -719,6 +719,9 @@ class BinaryEmitter {
                 symbolTable.setModulePath(modDecl.modulePath);
                 continue;
             }
+            if (cast(ImportDecl)decl) {
+                continue;  // Import declarations handled during import resolution
+            }
             if (cast(TemplateDecl)decl) {
                 continue;  // Skip uninstantiated templates
             } else if (auto funcDecl = cast(FunctionDecl)decl) {

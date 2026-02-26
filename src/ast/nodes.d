@@ -166,6 +166,46 @@ class ModuleDecl : Declaration {
 }
 
 /**
+ * Import declaration: import animals.dog;
+ *
+ * Also stores selective imports (import foo : bar;) and module aliases
+ * (import io = std.stdio;) for future use.
+ */
+class ImportDecl : Declaration {
+    /// Module path components: ["animals", "dog"] for import animals.dog;
+    string[] importPath;
+
+    struct SelectiveImport {
+        string localName;
+        string remoteName;
+    }
+    /// For `import foo : bar, baz = quux;`
+    SelectiveImport[] selectiveImports;
+
+    /// For `import io = std.stdio;`
+    string moduleAlias;
+
+    /// Set during import resolution (Object to avoid circular module dependency)
+    Object resolvedModule;
+
+    this(SourceLocation loc, string[] importPath) {
+        import std.array : join;
+        super(loc, importPath.length > 0 ? importPath.join(".") : "");
+        this.importPath = importPath;
+    }
+
+    /// Get the fully qualified module name: "animals.dog"
+    string fullyQualifiedName() const {
+        import std.array : join;
+        return importPath.join(".");
+    }
+
+    override string toString() const {
+        return format("import %s;", fullyQualifiedName());
+    }
+}
+
+/**
  * Abstract base for all type nodes
  */
 abstract class Type : ASTNode {

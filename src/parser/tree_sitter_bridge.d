@@ -700,14 +700,12 @@ class TreeSitterBridge {
                 return null;  // Magic modules don't create declarations
             }
         }
-        
-        // For regular imports, we'd need to load and parse the module
-        // For now, just warn and return null
-        throw new ParseError(
-            "Cannot import module '" ~ moduleName ~ "': module imports not yet implemented",
-            loc,
-            "only magic modules like __ctfe_runtime are supported"
-        );
+
+        // Split module name on "." into path components
+        import std.array : split;
+        string[] importPath = moduleName.split(".");
+
+        return new ImportDecl(loc, importPath);
     }
     
     /**

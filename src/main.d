@@ -30,6 +30,7 @@ import codegen.emitter;
 import codegen.backend;
 import diagnostic.error_format : printError;
 import semantic.ctfe : CTFEError;
+import semantic.import_resolver : ImportError;
 
 struct CompilerOptions {
     string inputFile;
@@ -60,6 +61,9 @@ struct CompilerOptions {
 
     // Optimization options
     bool escapeAnalysis = false;  // Enable escape analysis for stack promotion of new (default: off)
+
+    // Import paths
+    string[] importPaths;         // -I flags for module search paths
 }
 
 int main(string[] args) {
@@ -112,7 +116,9 @@ int main(string[] args) {
             // Debug options
             "stack-trace", "Emit call stack tracking for CTFE errors (default: on)", &options.stackTrace,
             // Optimization options
-            "escape-analysis", "Enable escape analysis for stack promotion of new (default: off)", &options.escapeAnalysis
+            "escape-analysis", "Enable escape analysis for stack promotion of new (default: off)", &options.escapeAnalysis,
+            // Import paths
+            "import-path", "Add import search path (can be specified multiple times)", &options.importPaths
         );
         
         log(3, "main() started");
@@ -269,22 +275,98 @@ int compileFile(CompilerOptions options) {
             writeln();
         }
         
+        // 2c. Import resolution — resolve ImportDecl nodes to modules
+        import semantic.module_ : Module, ModulePhase;
+        import semantic.module_registry : ModuleRegistry;
+        import semantic.import_resolver : ImportResolver;
+
+        auto modRegistry = new ModuleRegistry();
+        modRegistry.searchPaths = options.importPaths.dup;
+        // Also search relative to the input file's directory
+        modRegistry.searchPaths ~= dirName(absolutePath(options.inputFile));
+
+        // Determine root module path
+        string[] rootModulePath;
+        foreach (decl; ast) {
+            if (auto modDecl = cast(ModuleDecl)decl) {
+                rootModulePath = modDecl.modulePath;
+                break;
+            }
+        }
+        if (rootModulePath.length == 0)
+            rootModulePath = [baseName(stripExtension(options.inputFile))];
+
+        auto rootModule = new Module();
+        rootModule.modulePath = rootModulePath;
+        rootModule.sourceFilePath = absolutePath(options.inputFile);
+        rootModule.sourceText = sourceCode;
+        rootModule.ast = ast;
+        rootModule.phase = ModulePhase.parsed;
+        modRegistry.registerModule(rootModule);
+
+        // Scan root AST for ImportDecls
+        foreach (decl; ast) {
+            if (auto imp = cast(ImportDecl)decl)
+                rootModule.importDecls ~= imp;
+        }
+
+        // Resolve imports recursively (parse-on-demand)
+        auto importResolver = new ImportResolver(modRegistry,
+            delegate Declaration[](string filename, string src) {
+                auto b = new TreeSitterBridge(filename, src);
+                return b.parseSourceFile();
+            });
+        importResolver.resolveImports(rootModule);
+
+        // Process imported modules: mixin expand, collect symbols
+        Declaration[] allImportedDecls;  // for CTFE augmentation
+        auto topoModules = modRegistry.topologicalOrder();
+        foreach (depMod; topoModules) {
+            if (depMod is rootModule)
+                continue;  // root module handled by main pipeline
+
+            // Mixin expand imported module
+            if (depMod.phase < ModulePhase.symbolsCollected) {
+                auto depExpander = new MixinExpander(options.backend);
+                try {
+                    depMod.ast = depExpander.expandMixins(depMod.ast);
+                } catch (MixinError e) {
+                    printError(e);
+                    return 1;
+                }
+
+                // Create per-module symbol table with ModuleScope
+                depMod.symbolTable = new SymbolTable();
+                depMod.symbolTable.targetPtrSize = 4;
+                depMod.symbolTable.addBuiltinSymbols();
+                depMod.symbolTable.setModulePath(depMod.modulePath);
+                depMod.symbolTable.initModuleScope(depMod.modulePath);
+
+                auto depCollector = new SymbolCollector(depMod.symbolTable);
+                depCollector.collectSymbols(depMod.ast);
+                depMod.phase = ModulePhase.symbolsCollected;
+            }
+
+            allImportedDecls ~= depMod.ast;
+            log(2, "Processed imported module: ", depMod.fullyQualifiedName());
+        }
+
         // 3. Feature validation
         log(1, "Running feature validation...");
-        
+
         auto validator = new FeatureValidator();
         validator.validateSourceFile(ast);
-        
+
         log(2, "Feature validation passed");
-        
+
         if (options.onlyValidate) {
             writeln("Validation complete - no unsupported features found");
             return 0;
         }
-        
+
         // 4. Symbol table construction
         log(1, "Building symbol table...");
-        
+
         auto symbolTable = new SymbolTable();
         // Output target is always WASM32 (ptrSize=4).
         // options.backend controls the CTFE backend, not the output format.
@@ -296,6 +378,26 @@ int compileFile(CompilerOptions options) {
             symbolTable.setModulePath([baseName(stripExtension(options.inputFile))]);
         }
         symbolTable.addBuiltinSymbols();
+        symbolTable.initModuleScope(rootModulePath);
+
+        // Wire imported ModuleScopes into root module's ModuleScope
+        foreach (depMod; topoModules) {
+            if (depMod is rootModule || depMod.symbolTable is null)
+                continue;
+            if (depMod.symbolTable.moduleScope !is null && symbolTable.moduleScope !is null) {
+                symbolTable.moduleScope.addImport(depMod.symbolTable.moduleScope);
+                // Wire selective imports if any
+                foreach (impDecl; rootModule.importDecls) {
+                    if (impDecl.resolvedModule is depMod) {
+                        foreach (ref sel; impDecl.selectiveImports) {
+                            symbolTable.moduleScope.addSelectiveImport(
+                                sel.localName, depMod.symbolTable.moduleScope, sel.remoteName);
+                        }
+                    }
+                }
+            }
+        }
+        rootModule.symbolTable = symbolTable;
         
         // Collect symbols — handles ModuleDecl inline, infers default module from filename
         auto symbolCollector = new SymbolCollector(symbolTable);
@@ -313,7 +415,9 @@ int compileFile(CompilerOptions options) {
         import semantic.ctfe;
         // Create evaluator - registers lazy resolver with symbol table
         // Actual evaluation happens when manifest constant values are accessed
-        auto ctfeEvaluator = new CTFEEvaluator(symbolTable, ast, options.backend, options.stackTrace);
+        // Prepend imported module declarations so CTFE can find cross-module functions
+        auto ctfeDecls = allImportedDecls ~ ast;
+        auto ctfeEvaluator = new CTFEEvaluator(symbolTable, ctfeDecls, options.backend, options.stackTrace);
         
         log(2, "CTFE resolver ready");
         
@@ -470,6 +574,9 @@ int compileFile(CompilerOptions options) {
         
         return 0;
         
+    } catch (ImportError e) {
+        printError(e);
+        return 1;
     } catch (ParseError e) {
         printError(e);
         return 1;

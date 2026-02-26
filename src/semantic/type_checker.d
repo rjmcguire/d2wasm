@@ -109,6 +109,8 @@ class TypeChecker {
             checkVariableDeclaration(varDecl);
         } else if (auto enumDecl = cast(EnumDecl)decl) {
             checkEnumDeclaration(enumDecl);
+        } else if (cast(ImportDecl)decl) {
+            // Import declarations are handled during import resolution — skip
         }
     }
     

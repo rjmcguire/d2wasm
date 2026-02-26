@@ -198,6 +198,84 @@ class Scope {
 }
 
 /**
+ * Module-level scope that encodes D's import visibility rules.
+ *
+ * Lookup order:
+ *   1. Own symbols (this module's declarations)
+ *   2. Selective imports (highest cross-module priority)
+ *   3. Wildcard imports (public symbols from imported modules; ambiguity = error)
+ *   4. Fall through to parent (globalScope for builtins)
+ */
+class ModuleScope : Scope {
+    /// Imported modules' ModuleScopes for wildcard import lookup
+    ModuleScope[] importedModules;
+
+    /// Selective imports: localName → entries from source modules
+    struct SelectiveEntry {
+        ModuleScope source;
+        string remoteName;
+    }
+    SelectiveEntry[][string] selectiveImports;
+
+    /// Module identity (for error messages)
+    string[] modulePath;
+
+    this(Scope globalParent, string[] modulePath) {
+        super(globalParent, "module:" ~ modulePath.join("."));
+        this.modulePath = modulePath;
+    }
+
+    void addImport(ModuleScope imported) {
+        importedModules ~= imported;
+    }
+
+    void addSelectiveImport(string localName, ModuleScope source, string remoteName) {
+        selectiveImports[localName] ~= SelectiveEntry(source, remoteName);
+    }
+
+    /// Override: after checking own symbols, check imports, then fall through to global
+    override Symbol lookup(string name) {
+        // 1. Own symbols (this module's declarations)
+        if (auto local = lookupLocal(name))
+            return local;
+
+        // 2. Selective imports (highest cross-module priority)
+        if (auto entries = name in selectiveImports) {
+            foreach (ref entry; *entries) {
+                if (auto sym = entry.source.lookupLocal(entry.remoteName))
+                    return sym;
+            }
+        }
+
+        // 3. Wildcard imports (all public symbols from imported modules)
+        Symbol found = null;
+        ModuleScope foundIn = null;
+        foreach (imp; importedModules) {
+            if (auto sym = imp.lookupLocal(name)) {
+                if (sym.declaration !is null &&
+                    sym.declaration.visibility == Visibility.private_)
+                    continue;  // private symbols not importable
+                if (found !is null && found !is sym) {
+                    throw new SemanticError(
+                        format("Ambiguous symbol '%s': found in both module '%s' and '%s'",
+                               name, foundIn.modulePath.join("."), imp.modulePath.join(".")),
+                        SourceLocation.init);
+                }
+                found = sym;
+                foundIn = imp;
+            }
+        }
+        if (found !is null)
+            return found;
+
+        // 4. Fall through to parent (globalScope for builtins)
+        if (parent)
+            return parent.lookup(name);
+        return null;
+    }
+}
+
+/**
  * Semantic analysis error
  */
 class SemanticError : Exception {
@@ -216,6 +294,9 @@ class SymbolTable {
     private Scope globalScope;
     private Scope currentScope;
     private Scope[] scopeStack;
+
+    /// Module scope (if initialized via initModuleScope). Null for legacy single-file mode.
+    ModuleScope moduleScope;
     
     // Built-in methods registry: maps (typeKind, methodName) to FunctionDecl
     // typeKind is a string like "array", "string", etc.
@@ -240,7 +321,18 @@ class SymbolTable {
         globalScope = new Scope(null, "global");
         currentScope = globalScope;
     }
-    
+
+    /**
+     * Initialize a ModuleScope as child of globalScope.
+     * After this call, currentScope == moduleScope, so all subsequent
+     * symbol additions go into the module scope (not globalScope).
+     * Builtins remain in globalScope and are found via parent chain.
+     */
+    void initModuleScope(string[] modPath) {
+        moduleScope = new ModuleScope(globalScope, modPath);
+        currentScope = moduleScope;
+    }
+
     /**
      * Set the current module path from a ModuleDecl.
      * Called during compilation setup.
@@ -385,10 +477,10 @@ class SymbolTable {
         uint nextLocalId;
     }
 
-    /// Save current scope state and reset to global scope.
+    /// Save current scope state and reset to module scope (or global if no module scope).
     ScopeState saveAndResetScope() {
         auto saved = ScopeState(currentScope, scopeStack.dup, nextLocalId);
-        currentScope = globalScope;
+        currentScope = moduleScope ? moduleScope : globalScope;
         scopeStack = null;
         nextLocalId = 0;
         return saved;
@@ -496,6 +588,11 @@ class SymbolTable {
      * Look up symbol in global scope only
      */
     Symbol lookupGlobalSymbol(string name) {
+        // Check module scope first (user symbols land here when initModuleScope is active)
+        if (moduleScope !is null) {
+            if (auto sym = moduleScope.lookupLocal(name))
+                return sym;
+        }
         return globalScope.lookupLocal(name);
     }
     
@@ -514,10 +611,10 @@ class SymbolTable {
     }
     
     /**
-     * Check if we're in global scope
+     * Check if we're in global/module scope (i.e., not inside a function)
      */
     bool inGlobalScope() {
-        return currentScope == globalScope;
+        return currentScope is globalScope || currentScope is moduleScope;
     }
     
     /**
@@ -708,6 +805,8 @@ class SymbolCollector {
                 symbolTable.setModulePath(modDecl.modulePath);
                 continue;
             }
+            if (cast(ImportDecl)decl)
+                continue;  // Import declarations handled during import resolution
             collectSymbol(decl);
         }
     }
