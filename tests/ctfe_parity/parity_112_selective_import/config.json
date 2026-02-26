@@ -1,0 +1,8 @@
+{
+  "name": "selective_import",
+  "description": "CTFE parity: selective and renamed imports evaluated at compile time",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 75,
+  "compiler_args": ["--import-path", "tests/ctfe_parity/parity_112_selective_import"]
+}

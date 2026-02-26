@@ -1,0 +1,8 @@
+{
+  "name": "module_alias",
+  "description": "Module alias: import h = helper; h.add(30, 12)",
+  "type": "wasm_exec",
+  "expected_result": 42,
+  "mangled_entry": "_D4test4mainFZi",
+  "compiler_args": ["--import-path", "tests/milestones/milestone_203_module_alias"]
+}

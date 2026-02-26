@@ -1003,7 +1003,15 @@ class CTFEEvaluator {
         // IFTI: if the call has a resolved instantiation, use it directly
         FunctionDecl funcDecl = callExpr.resolvedInstantiation;
 
-        // Otherwise, find the function declaration by name
+        // Use scope-based lookup first — handles renamed imports, selective
+        // imports, and wildcard imports through the same ModuleScope mechanism.
+        if (!funcDecl) {
+            auto sym = symbolTable.lookupSymbol(funcName);
+            if (sym && sym.kind == SymbolKind.Function)
+                funcDecl = cast(FunctionDecl)sym.declaration;
+        }
+
+        // Fallback: linear scan of all declarations (for functions not yet in scope)
         if (!funcDecl) {
             foreach (decl; allDeclarations) {
                 if (auto fd = cast(FunctionDecl)decl) {

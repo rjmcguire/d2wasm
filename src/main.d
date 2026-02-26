@@ -384,16 +384,27 @@ int compileFile(CompilerOptions options) {
         foreach (depMod; topoModules) {
             if (depMod is rootModule || depMod.symbolTable is null)
                 continue;
-            if (depMod.symbolTable.moduleScope !is null && symbolTable.moduleScope !is null) {
-                symbolTable.moduleScope.addImport(depMod.symbolTable.moduleScope);
-                // Wire selective imports if any
-                foreach (impDecl; rootModule.importDecls) {
-                    if (impDecl.resolvedModule is depMod) {
-                        foreach (ref sel; impDecl.selectiveImports) {
-                            symbolTable.moduleScope.addSelectiveImport(
-                                sel.localName, depMod.symbolTable.moduleScope, sel.remoteName);
-                        }
+            if (depMod.symbolTable.moduleScope is null || symbolTable.moduleScope is null)
+                continue;
+
+            // For each ImportDecl that resolved to this dep module, wire appropriately
+            foreach (impDecl; rootModule.importDecls) {
+                if (impDecl.resolvedModule !is depMod)
+                    continue;
+
+                if (impDecl.moduleAlias.length > 0) {
+                    // Module alias: `import io = std.stdio;` — namespace only, no wildcard
+                    symbolTable.moduleScope.addModuleAlias(
+                        impDecl.moduleAlias, depMod.symbolTable.moduleScope);
+                } else if (impDecl.selectiveImports.length > 0) {
+                    // Selective: `import foo : bar;` — only named symbols, no wildcard
+                    foreach (ref sel; impDecl.selectiveImports) {
+                        symbolTable.moduleScope.addSelectiveImport(
+                            sel.localName, depMod.symbolTable.moduleScope, sel.remoteName);
                     }
+                } else {
+                    // Plain wildcard import
+                    symbolTable.moduleScope.addImport(depMod.symbolTable.moduleScope);
                 }
             }
         }
@@ -487,7 +498,7 @@ int compileFile(CompilerOptions options) {
                 }
             }
             
-            ubyte[] wasm = emitter.emit(ast);
+            ubyte[] wasm = emitter.emit(allImportedDecls ~ ast);
             
             if (wasm is null) {
                 import diagnostic.error_format : formatError;

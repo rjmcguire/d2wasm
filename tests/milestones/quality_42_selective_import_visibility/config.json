@@ -1,0 +1,7 @@
+{
+  "name": "selective_import_visibility",
+  "description": "Selective import should not expose unselected symbols (sub not visible)",
+  "type": "compile_error",
+  "expected_errors": ["sub"],
+  "compiler_args": ["--import-path", "tests/milestones/quality_42_selective_import_visibility"]
+}

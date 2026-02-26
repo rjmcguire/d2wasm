@@ -175,10 +175,7 @@ class TreeSitterBridge {
                             log(2, "Parsed module declaration: ", modDecl.fullyQualifiedName());
                         }
                     } else if (nodeType == "import_declaration") {
-                        auto importDecl = parseImportDeclaration(child);
-                        if (importDecl !is null) {
-                            declarations ~= importDecl;
-                        }
+                        declarations ~= parseImportDeclaration(child);
                     } else if (nodeType == "comment" || nodeType.length == 0) {
                         // skip
                     } else {
@@ -549,10 +546,7 @@ class TreeSitterBridge {
                     log(2, "Parsed module declaration: ", modDecl.fullyQualifiedName());
                 }
             } else if (childType == "import_declaration") {
-                auto importDecl = parseImportDeclaration(child);
-                if (importDecl !is null) {
-                    result ~= importDecl;
-                }
+                result ~= parseImportDeclaration(child);
             } else if (childType == "comment" || childType == "module" ||
                        childType == ";" || childType.length == 0) {
                 // skip
@@ -655,57 +649,119 @@ class TreeSitterBridge {
     }
     
     /**
-     * Parse import declaration: import modulename;
-     * Returns null for magic modules (they're handled specially in CTFE).
+     * Parse import declaration.
+     *
+     * Tree-sitter grammar structure:
+     *   import_declaration
+     *     ├─ "import"
+     *     ├─ imported              (module_fqn, optional alias field)
+     *     ├─ [","  imported ...]   (multiple imports)
+     *     ├─ [":"  import_bind ...]  (selective imports on last `imported`)
+     *     └─ ";"
+     *
+     * Returns one ImportDecl per `imported` node.  Returns empty array for
+     * magic modules.
      */
-    Declaration parseImportDeclaration(TSNode node) {
+    Declaration[] parseImportDeclaration(TSNode node) {
+        import std.array : split;
+
         SourceLocation loc = makeSourceLocation(node);
-        
-        // Extract module name from import declaration
-        // Structure varies by tree-sitter D grammar:
-        // - Could be: import_declaration -> import, module_fqn, ;
-        // - Or: import_declaration -> import, single_import, ;
-        // - Or: import_declaration containing just the module name
-        string moduleName;
-        
+
+        // Collect `imported` and `import_bind` children
+        struct ImportedInfo {
+            string[] importPath;
+            string moduleAlias;   // non-empty for `import io = std.stdio;`
+        }
+        ImportedInfo[] importeds;
+        ImportDecl.SelectiveImport[] selectives;
+
         uint childCount = TreeSitterParser.getChildCount(node);
         for (uint i = 0; i < childCount; i++) {
             TSNode child = TreeSitterParser.getChild(node, i);
-            string nodeType = TreeSitterParser.getNodeType(child);
-            string text = TreeSitterParser.getNodeText(child, sourceText);
-            
-            // Try various possible node types for module name
-            if (nodeType == "module_fqn" || nodeType == "identifier" || 
-                nodeType == "single_import" || nodeType == "module_name" ||
-                nodeType == "imported" || nodeType == "type") {
-                // For wrapper nodes, might need to go deeper
-                if (nodeType == "single_import" || nodeType == "module_name" || nodeType == "imported") {
-                    moduleName = extractModuleName(child);
-                } else {
-                    moduleName = text;
+            string childType = TreeSitterParser.getNodeType(child);
+
+            if (childType == "imported") {
+                // Extract module_fqn from the `imported` node
+                ImportedInfo info;
+
+                // Check for alias field: `import io = std.stdio;`
+                TSNode aliasNode = TreeSitterParser.getChildByFieldName(child, "alias");
+                if (TreeSitterParser.isValid(aliasNode)) {
+                    info.moduleAlias = TreeSitterParser.getNodeText(aliasNode, sourceText);
                 }
-                if (moduleName.length > 0 && moduleName != "import") {
-                    break;
+
+                // Find the module_fqn child
+                uint ic = TreeSitterParser.getChildCount(child);
+                for (uint j = 0; j < ic; j++) {
+                    TSNode grandchild = TreeSitterParser.getChild(child, j);
+                    string gtype = TreeSitterParser.getNodeType(grandchild);
+                    if (gtype == "module_fqn") {
+                        info.importPath = parseModuleFQN(grandchild);
+                        break;
+                    }
                 }
+
+                // Fallback: if no module_fqn child, try the whole text
+                if (info.importPath.length == 0) {
+                    string text = extractModuleName(child);
+                    if (text.length > 0) {
+                        info.importPath = text.split(".");
+                    }
+                }
+
+                if (info.importPath.length > 0)
+                    importeds ~= info;
+            } else if (childType == "import_bind") {
+                // Selective import binding: `bar` or `x = y`
+                string[] idents;
+                uint bc = TreeSitterParser.getChildCount(child);
+                for (uint j = 0; j < bc; j++) {
+                    TSNode grandchild = TreeSitterParser.getChild(child, j);
+                    if (TreeSitterParser.getNodeType(grandchild) == "identifier")
+                        idents ~= TreeSitterParser.getNodeText(grandchild, sourceText);
+                }
+                if (idents.length >= 2) {
+                    // `x = y` form: first identifier is local name, second is remote
+                    selectives ~= ImportDecl.SelectiveImport(idents[0], idents[1]);
+                } else if (idents.length == 1) {
+                    // plain `bar` — local and remote are the same
+                    selectives ~= ImportDecl.SelectiveImport(idents[0], idents[0]);
+                }
+            } else if (childType == "module_fqn") {
+                // Legacy fallback: bare module_fqn directly under import_declaration
+                importeds ~= ImportedInfo(parseModuleFQN(child), null);
             }
         }
-        
-        if (moduleName.length == 0) {
+
+        if (importeds.length == 0) {
             throw new ParseError("Import declaration missing module name", loc);
         }
-        
-        // Check if this is a magic module
-        foreach (magic; MAGIC_MODULES) {
-            if (moduleName == magic) {
-                return null;  // Magic modules don't create declarations
+
+        // Attach selective bindings to the last imported (D spec)
+        // Build ImportDecl array, filtering magic modules
+        Declaration[] result;
+        foreach (idx, ref info; importeds) {
+            import std.array : join;
+            string moduleName = info.importPath.join(".");
+
+            // Skip magic modules
+            bool isMagic = false;
+            foreach (magic; MAGIC_MODULES) {
+                if (moduleName == magic) { isMagic = true; break; }
             }
+            if (isMagic) continue;
+
+            auto decl = new ImportDecl(loc, info.importPath);
+            decl.moduleAlias = info.moduleAlias;
+
+            // Selective imports attach to the last `imported`
+            if (idx == importeds.length - 1 && selectives.length > 0)
+                decl.selectiveImports = selectives;
+
+            result ~= decl;
         }
 
-        // Split module name on "." into path components
-        import std.array : split;
-        string[] importPath = moduleName.split(".");
-
-        return new ImportDecl(loc, importPath);
+        return result;
     }
     
     /**

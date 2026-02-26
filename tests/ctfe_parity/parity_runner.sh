@@ -82,12 +82,14 @@ run_test_with_backend() {
     local wasm_file="$test_dir/test.wasm"
     rm -f "$wasm_file"
     
+    local compiler_args=$(jq -r '.compiler_args // [] | join(" ")' "$config_file")
+
     if [ $VERBOSE -eq 1 ]; then
-        echo "  Compiling with --backend=$backend..."
+        echo "  Compiling with --backend=$backend $compiler_args..."
     fi
-    
+
     local compile_output
-    compile_output=$("$COMPILER" --backend="$backend" "$test_file" -o "$wasm_file" 2>&1)
+    compile_output=$("$COMPILER" --backend="$backend" "$test_file" -o "$wasm_file" $compiler_args 2>&1)
     local compile_status=$?
     
     if [ $compile_status -ne 0 ]; then

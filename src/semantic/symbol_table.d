@@ -217,6 +217,9 @@ class ModuleScope : Scope {
     }
     SelectiveEntry[][string] selectiveImports;
 
+    /// Module aliases: "io" → std.stdio's ModuleScope
+    ModuleScope[string] moduleAliases;
+
     /// Module identity (for error messages)
     string[] modulePath;
 
@@ -231,6 +234,15 @@ class ModuleScope : Scope {
 
     void addSelectiveImport(string localName, ModuleScope source, string remoteName) {
         selectiveImports[localName] ~= SelectiveEntry(source, remoteName);
+    }
+
+    void addModuleAlias(string aliasName, ModuleScope target) {
+        moduleAliases[aliasName] = target;
+    }
+
+    ModuleScope lookupModuleAlias(string name) {
+        if (auto p = name in moduleAliases) return *p;
+        return null;
     }
 
     /// Override: after checking own symbols, check imports, then fall through to global
@@ -331,6 +343,11 @@ class SymbolTable {
     void initModuleScope(string[] modPath) {
         moduleScope = new ModuleScope(globalScope, modPath);
         currentScope = moduleScope;
+    }
+
+    /// Look up a module alias registered in this module's scope.
+    ModuleScope lookupModuleAlias(string name) {
+        return moduleScope ? moduleScope.lookupModuleAlias(name) : null;
     }
 
     /**

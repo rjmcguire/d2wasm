@@ -1026,6 +1026,13 @@ class TypeChecker {
         }
         
         Symbol symbol = symbolTable.lookupSymbol(expr.name);
+
+        // Renamed import fixup: lookupSymbol resolves through renamed selective
+        // imports (e.g., `product` → `mul`). Update the identifier so all
+        // downstream consumers (CTFE, emitter) see the real declaration name.
+        if (symbol && symbol.name != expr.name)
+            expr.name = symbol.name;
+
         if (!symbol) {
             // Inside a method, check if it's a field of the current struct/class (implicit this)
             if (currentStructDecl) {
@@ -1142,9 +1149,23 @@ class TypeChecker {
                 if (objIdent.name == "__ctfe_runtime") {
                     return checkCTFERuntimeCall(memberExpr.memberName, expr.arguments, expr.location);
                 }
+                // Module alias resolution: h.add(x, y) → add(x, y)
+                // Add resolved symbol to current scope so normal call resolution
+                // handles all cases (IFTI, struct construction, variadic, etc.)
+                if (auto modScope = symbolTable.lookupModuleAlias(objIdent.name)) {
+                    auto sym = modScope.lookup(memberExpr.memberName);
+                    if (sym is null)
+                        throw new TypeError(
+                            format("Module '%s' has no symbol '%s'", objIdent.name, memberExpr.memberName),
+                            expr.location);
+                    // Add to current scope (module-level or function-level)
+                    symbolTable.addSymbol(sym);
+                    // Rewrite callee to plain identifier, fall through to normal resolution
+                    expr.function_ = new IdentifierExpression(memberExpr.location, memberExpr.memberName);
+                }
             }
         }
-        
+
         // Check if this is a struct construction (TypeName(args...))
         if (auto identExpr = cast(IdentifierExpression)expr.function_) {
             auto symbol = symbolTable.lookupSymbol(identExpr.name);
@@ -1458,7 +1479,7 @@ class TypeChecker {
                 expr.function_.location
             );
         }
-        
+
         // Special handling for builtin variadic functions
         bool isVariadicBuiltin = false;
         string funcName = "unknown";
@@ -2821,6 +2842,21 @@ class TypeChecker {
     }
 
     Type checkMemberExpression(MemberExpression expr) {
+        // Module alias resolution: h.member → add to current scope, rewrite to plain identifier
+        if (auto ident = cast(IdentifierExpression)expr.object) {
+            if (auto modScope = symbolTable.lookupModuleAlias(ident.name)) {
+                auto sym = modScope.lookup(expr.memberName);
+                if (sym is null)
+                    throw new TypeError(
+                        format("Module '%s' has no symbol '%s'", ident.name, expr.memberName),
+                        expr.location);
+                symbolTable.addSymbol(sym);
+                // Rewrite to plain identifier and resolve normally
+                auto rewritten = new IdentifierExpression(expr.location, expr.memberName);
+                return checkIdentifierExpression(rewritten);
+            }
+        }
+
         // Check if the object is a type name (for Type.sizeof, Type.alignof, etc.)
         if (auto ident = cast(IdentifierExpression)expr.object) {
             auto symbol = symbolTable.lookupSymbol(ident.name);
