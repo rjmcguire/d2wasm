@@ -60,6 +60,21 @@ extern (C) {
     // S-expression output (for hashing)
     char* ts_node_string(TSNode node);
     
+    // Incremental parsing
+    struct TSInputEdit {
+        uint32_t start_byte;
+        uint32_t old_end_byte;
+        uint32_t new_end_byte;
+        TSPoint start_point;
+        TSPoint old_end_point;
+        TSPoint new_end_point;
+    }
+
+    void ts_tree_edit(TSTree* tree, const(TSInputEdit)* edit);
+    TSTree* ts_tree_copy(TSTree* tree);
+    TSRange* ts_tree_get_changed_ranges(
+        TSTree* old_tree, TSTree* new_tree, uint32_t* length);
+
     // Memory management
     void free(void* ptr);  // libc free - ts_node_string returns malloc'd memory
 
@@ -190,4 +205,112 @@ class TreeSitterParser {
         scope(exit) free(sexp);
         return to!string(sexp);
     }
+
+    // --- Incremental parsing API ---
+
+    /**
+     * Apply an edit to the current tree and reparse incrementally.
+     * Returns the root node of the new tree. The old tree is replaced.
+     *
+     * Params:
+     *   edit = describes what byte range was replaced
+     *   newSource = the full source text after the edit
+     *
+     * Returns: root node of the new (incrementally parsed) tree
+     */
+    TSNode reparseIncremental(TSInputEdit edit, string newSource) {
+        if (!currentTree)
+            throw new Exception("reparseIncremental: no current tree (call parseString first)");
+
+        // Copy old tree so we can compare afterwards
+        auto oldTree = ts_tree_copy(currentTree);
+
+        // Apply the edit descriptor to the current tree
+        ts_tree_edit(currentTree, &edit);
+
+        // Incremental reparse: tree-sitter reuses unchanged subtrees
+        auto newTree = ts_parser_parse_string(
+            parser, currentTree, newSource.toStringz(), cast(uint32_t)newSource.length);
+        if (!newTree) {
+            ts_tree_delete(oldTree);
+            throw new Exception("reparseIncremental: incremental parse failed");
+        }
+
+        // Replace current tree
+        ts_tree_delete(currentTree);
+        currentTree = newTree;
+
+        // Clean up old copy (caller can use getChangedRanges before this if needed)
+        ts_tree_delete(oldTree);
+
+        return ts_tree_root_node(currentTree);
+    }
+
+    /**
+     * Get the changed byte ranges between two trees.
+     * Typically called between the old tree (before edit) and the new tree (after reparse).
+     *
+     * Returns: array of TSRange structs describing changed regions.
+     */
+    static TSRange[] getChangedRanges(TSTree* oldTree, TSTree* newTree) {
+        uint32_t rangeCount;
+        TSRange* ranges = ts_tree_get_changed_ranges(oldTree, newTree, &rangeCount);
+        if (ranges is null || rangeCount == 0)
+            return null;
+
+        // Copy into D-managed array
+        auto result = new TSRange[rangeCount];
+        import core.stdc.string : memcpy;
+        memcpy(result.ptr, ranges, rangeCount * TSRange.sizeof);
+        free(ranges);
+        return result;
+    }
+
+    /**
+     * Full incremental reparse with change detection.
+     * Applies the edit, reparses, and returns changed byte ranges.
+     *
+     * Params:
+     *   edit = describes what byte range was replaced
+     *   newSource = the full source text after the edit
+     *
+     * Returns: array of changed byte ranges (may be empty if parse trees are identical)
+     */
+    IncrementalParseResult reparseWithChanges(TSInputEdit edit, string newSource) {
+        if (!currentTree)
+            throw new Exception("reparseWithChanges: no current tree");
+
+        // Keep a copy of the old tree for diffing
+        auto oldTree = ts_tree_copy(currentTree);
+
+        // Apply edit to current tree (mutates in place)
+        ts_tree_edit(currentTree, &edit);
+
+        // Incremental reparse
+        auto newTree = ts_parser_parse_string(
+            parser, currentTree, newSource.toStringz(), cast(uint32_t)newSource.length);
+        if (!newTree) {
+            ts_tree_delete(oldTree);
+            throw new Exception("reparseWithChanges: incremental parse failed");
+        }
+
+        // Get changed ranges before we lose the old tree
+        auto changedRanges = getChangedRanges(oldTree, newTree);
+
+        // Clean up
+        ts_tree_delete(oldTree);
+        ts_tree_delete(currentTree);
+        currentTree = newTree;
+
+        IncrementalParseResult result;
+        result.root = ts_tree_root_node(currentTree);
+        result.changedRanges = changedRanges;
+        return result;
+    }
+}
+
+/// Result of an incremental reparse operation.
+struct IncrementalParseResult {
+    TSNode root;            /// Root node of the new parse tree
+    TSRange[] changedRanges; /// Byte ranges that changed between old and new tree
 }

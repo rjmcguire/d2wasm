@@ -64,6 +64,9 @@ struct CompilerOptions {
 
     // Import paths
     string[] importPaths;         // -I flags for module search paths
+
+    // Dependency graph (diagnostic)
+    bool depGraph = false;        // --dep-graph: build and print dependency graph after type checking
 }
 
 int main(string[] args) {
@@ -118,7 +121,9 @@ int main(string[] args) {
             // Optimization options
             "escape-analysis", "Enable escape analysis for stack promotion of new (default: off)", &options.escapeAnalysis,
             // Import paths
-            "import-path", "Add import search path (can be specified multiple times)", &options.importPaths
+            "import-path", "Add import search path (can be specified multiple times)", &options.importPaths,
+            // Dependency graph
+            "dep-graph", "Build and print dependency graph after type checking", &options.depGraph
         );
         
         log(3, "main() started");
@@ -350,7 +355,22 @@ int compileFile(CompilerOptions options) {
         log(2, "Evaluating manifest constants...");
         controller.evaluateAllManifestConstants();
 
-        // 6c. Arena allocation analysis
+        // 6c. Dependency graph (diagnostic)
+        if (options.depGraph) {
+            import incremental.graph_builder : GraphBuilder;
+            log(1, "Building dependency graph...");
+            auto graphBuilder = new GraphBuilder();
+
+            // Build from all modules in compilation order
+            foreach (mod; modulesCtx.modulesInOrder()) {
+                if (mod.sourceText.length > 0 && mod.ast.length > 0)
+                    graphBuilder.build(mod.sourceFilePath, mod.sourceText, mod.ast);
+            }
+
+            graphBuilder.graph.printStats();
+        }
+
+        // 6d. Arena allocation analysis
         // Determine which functions allocate (directly or transitively)
         // and mark them with needsArena for hidden parameter threading
         {
@@ -359,7 +379,7 @@ int compileFile(CompilerOptions options) {
             analyzeArenaNeeds(ast);
         }
 
-        // 6d. Escape analysis (optional)
+        // 6e. Escape analysis (optional)
         // Stack-promotes non-escaping `new` allocations and warns on escaping &local
         if (options.escapeAnalysis) {
             import semantic.escape_analyzer : analyzeEscapes;
