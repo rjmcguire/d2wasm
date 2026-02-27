@@ -48,7 +48,8 @@ if [ "$HITS2" != "7" ] || [ "$MISSES2" != "0" ]; then
 fi
 echo "  OK: 7 hits, 0 misses"
 
-# Test 3: Modified source - only changed function should miss
+# Test 3: Modified source - changed function AND its callers should miss
+# add() changed, and main() calls add(), so dep-graph invalidation evicts both
 echo "Test 3: Modified source..."
 cat > "$TEST_FILE" << 'EOF'
 int add(int a, int b) {
@@ -64,11 +65,11 @@ OUTPUT3=$("$COMPILER" "$TEST_FILE" -o "$CACHE_DIR/test.wasm" --cache="$CACHE_DIR
 HITS3=$(echo "$OUTPUT3" | grep -o '"cacheHits": [0-9]*' | grep -o '[0-9]*')
 MISSES3=$(echo "$OUTPUT3" | grep -o '"cacheMisses": [0-9]*' | grep -o '[0-9]*')
 
-if [ "$HITS3" != "6" ] || [ "$MISSES3" != "1" ]; then
-    echo "FAIL: Modified source should have 6 hits, 1 miss. Got hits=$HITS3 misses=$MISSES3"
+if [ "$HITS3" != "5" ] || [ "$MISSES3" != "2" ]; then
+    echo "FAIL: Modified source should have 5 hits, 2 misses. Got hits=$HITS3 misses=$MISSES3"
     exit 1
 fi
-echo "  OK: 6 hit, 1 miss"
+echo "  OK: 5 hits, 2 misses"
 
 # Test 4: Verify correctness of output
 RESULT=$(wasm3 --func _D4test4mainFZi "$CACHE_DIR/test.wasm" 2>&1 | grep -o 'Result: [0-9]*' | grep -o '[0-9]*' || true)

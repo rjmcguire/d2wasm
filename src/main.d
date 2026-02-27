@@ -424,7 +424,7 @@ int compileFile(CompilerOptions options) {
                 // Compare new graph against old graph to find transitively dirty
                 // functions, then evict them from the emitter's code cache.
                 if (graphBuilder !is null) {
-                    string graphPath = buildPath(options.cacheDir, "dep_graph.bin");
+                    string graphPath = buildPath(options.cacheDir, moduleName ~ "_dep_graph.bin");
                     auto oldGraph = DeclDependencyGraph.loadFromFile(graphPath);
                     if (oldGraph !is null) {
                         // Build lookup from old graph: mangledName → old node (for functions)
@@ -477,7 +477,7 @@ int compileFile(CompilerOptions options) {
 
                     // Save new graph for next run
                     graphBuilder.graph.saveToFile(graphPath);
-                    log(2, "Saved dep_graph.bin (", graphBuilder.graph.serialize().length, " bytes)");
+                    log(2, "Saved ", moduleName, "_dep_graph.bin (", graphBuilder.graph.serialize().length, " bytes)");
                 }
             }
 
