@@ -1091,11 +1091,14 @@ class TypeChecker {
             );
         }
         
+        // Store the resolved declaration for downstream passes (dep graph, etc.)
+        expr.declaration = symbol.declaration;
+
         // Store the resolved uniqueLocalId for codegen
         if (symbol.kind == SymbolKind.Variable || symbol.kind == SymbolKind.Parameter) {
             expr.resolvedLocalId = symbol.uniqueLocalId;
         }
-        
+
         return symbol.type;
     }
     

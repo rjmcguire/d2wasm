@@ -32,6 +32,7 @@ class GraphBuilder {
     /// Map from Declaration identity (cast to void*) to node ID, for dedup.
     private uint[void*] declToNode;
 
+
     this() {
         graph = new DeclDependencyGraph();
     }
@@ -369,7 +370,6 @@ class GraphBuilder {
                 walkType(ownerId, expr.type);
         }
         else if (auto ident = cast(IdentifierExpression)expr) {
-            // IdentifierExpression.declaration may be set for some cases
             if (ident.declaration !is null) {
                 if (auto mc = cast(ManifestConstantDecl)ident.declaration) {
                     auto mid = nodeIdFor(mc);

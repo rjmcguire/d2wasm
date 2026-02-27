@@ -1,0 +1,7 @@
+{
+  "name": "dep_graph",
+  "description": "Dependency graph: multi-module with structs, methods, manifest constants, cross-module calls",
+  "type": "compile_output",
+  "expected_output": "Dependency graph:",
+  "compiler_args": ["--dep-graph", "--import-path", "tests/ctfe_parity/parity_123_dep_graph"]
+}
