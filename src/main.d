@@ -224,27 +224,7 @@ int compileFile(CompilerOptions options) {
             writeln();
         }
 
-        // 2b. Mixin expansion - must happen before symbol collection
-        log(1, "Expanding mixins...");
-
-        import semantic.mixin_expander;
-        auto mixinExpander = new MixinExpander(options.backend);
-        try {
-            ast = mixinExpander.expandMixins(ast);
-        } catch (MixinError e) {
-            printError(e);
-            return 1;
-        }
-
-        log(2, "Mixin expansion complete. ", ast.length, " declarations after expansion");
-
-        if (options.printAst) {
-            writeln("\n=== AST (after mixin expansion) ===");
-            printAST(ast);
-            writeln();
-        }
-
-        // 2c. Import resolution — resolve ImportDecl nodes to modules
+        // 2b. Import resolution — resolve ImportDecl nodes to modules
         import semantic.module_ : Module, ModulePhase;
         import semantic.module_registry : ModuleRegistry;
         import semantic.import_resolver : ImportResolver;
@@ -261,7 +241,7 @@ int compileFile(CompilerOptions options) {
             return b.parseSourceFile();
         };
 
-        // 2a. Register runtime/object.d as its own module (implicit `import object;`)
+        // Register runtime/object.d as its own module (implicit `import object;`)
         {
             string exeDir = dirName(thisExePath());
             string[] rtSearchPaths = [
@@ -327,55 +307,30 @@ int compileFile(CompilerOptions options) {
         auto importResolver = new ImportResolver(modRegistry, parseFn);
         importResolver.resolveImports(inputModule);
 
-        // ── Pass 1: Prepare all modules (mixin expand + symbol collect) ──
-        auto topoModules = modRegistry.topologicalOrder();
-        foreach (mod; topoModules) {
-            if (mod.phase >= ModulePhase.symbolsCollected)
-                continue;
+        // ── On-demand compilation: mixin expand + symbol collect + type check ──
+        import semantic.module_compiler : ModuleCompiler;
+        import semantic.mixin_expander : MixinError;
 
-            auto modExpander = new MixinExpander(options.backend);
-            try {
-                mod.ast = modExpander.expandMixins(mod.ast);
-            } catch (MixinError e) {
-                printError(e);
-                return 1;
-            }
+        auto compiler = new ModuleCompiler(
+            modRegistry, parseFn, options.backend, options.stackTrace,
+            inputModule);  // root module for CTFE symbol table
 
-            mod.symbolTable = new SymbolTable();
-            mod.symbolTable.targetPtrSize = 4;
-            mod.symbolTable.addBuiltinSymbols();
-            mod.symbolTable.setModulePath(mod.modulePath);
-            mod.symbolTable.initModuleScope(mod.modulePath);
-
-            auto collector = new SymbolCollector(mod.symbolTable);
-            collector.collectSymbols(mod.ast);
-            mod.phase = ModulePhase.symbolsCollected;
-            log(2, "Prepared module: ", mod.fullyQualifiedName());
+        try {
+            compiler.ensurePhase(inputModule, ModulePhase.typeChecked);
+        } catch (MixinError e) {
+            printError(e);
+            return 1;
         }
 
-        // ── Pass 2: Wire module scope imports ──
-        // Each module's imports get wired to the imported module's scope.
-        // Topo order guarantees dependencies are prepared before dependents.
-        foreach (mod; topoModules) {
-            if (mod.symbolTable is null || mod.symbolTable.moduleScope is null)
-                continue;
-            foreach (impDecl; mod.importDecls) {
-                auto dep = cast(Module)impDecl.resolvedModule;
-                if (dep is null || dep.symbolTable is null || dep.symbolTable.moduleScope is null)
-                    continue;
+        auto modulesCtx = compiler.getModulesContext();
+        import semantic.ctfe;
+        auto ctfeEvaluator = compiler.getCTFEEvaluator();
+        ast = inputModule.ast;
 
-                if (impDecl.moduleAlias.length > 0) {
-                    mod.symbolTable.moduleScope.addModuleAlias(
-                        impDecl.moduleAlias, dep.symbolTable.moduleScope);
-                } else if (impDecl.selectiveImports.length > 0) {
-                    foreach (ref sel; impDecl.selectiveImports) {
-                        mod.symbolTable.moduleScope.addSelectiveImport(
-                            sel.localName, dep.symbolTable.moduleScope, sel.remoteName);
-                    }
-                } else {
-                    mod.symbolTable.moduleScope.addImport(dep.symbolTable.moduleScope);
-                }
-            }
+        if (options.printAst) {
+            writeln("\n=== AST (after expansion) ===");
+            printAST(ast);
+            writeln();
         }
 
         // 3. Feature validation (input module only — imported modules are trusted)
@@ -390,46 +345,6 @@ int compileFile(CompilerOptions options) {
             writeln("Validation complete - no unsupported features found");
             return 0;
         }
-
-        // ── Build ModulesContext (indexed cross-module lookups) ──
-        auto modulesCtx = new ModulesContext(modRegistry);
-
-        // ── CTFE setup (lazy evaluation — must be before type checking) ──
-        log(2, "Setting up CTFE resolver...");
-
-        import semantic.ctfe;
-        auto ctfeEvaluator = new CTFEEvaluator(
-            inputModule.symbolTable, modulesCtx, options.backend, options.stackTrace);
-
-        // Register CTFE resolver on all module symbol tables
-        foreach (mod; topoModules) {
-            if (mod.symbolTable !is null) {
-                mod.symbolTable.ctfeResolver = &ctfeEvaluator.evaluateManifestConstant;
-                mod.symbolTable.constraintEvaluator = &ctfeEvaluator.evaluateTemplateConstraint;
-            }
-        }
-
-        log(2, "CTFE resolver ready");
-
-        // ── Pass 3: Type-check all modules ──
-        log(1, "Running type checking...");
-
-        foreach (mod; topoModules) {
-            if (mod.phase >= ModulePhase.typeChecked)
-                continue;
-            auto tc = new TypeChecker(mod.symbolTable);
-            tc.checkDeclarations(mod.ast);
-
-            // Collect template instantiations
-            foreach (inst; tc.templateInstantiator.allInstantiations()) {
-                mod.ast ~= inst;
-                modulesCtx.addDeclaration(inst);
-            }
-
-            mod.phase = ModulePhase.typeChecked;
-        }
-        // Local `ast` alias for the input module (used by later passes)
-        ast = inputModule.ast;
 
         log(1, "Type checking passed");
 

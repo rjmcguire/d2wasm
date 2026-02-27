@@ -52,57 +52,121 @@ class MixinExpander {
     private SymbolTable tempSymbolTable;
     private uint currentDepth = 0;
     private string backendName;
-    
+    private bool hasExternalSymbolTable;  // true when using caller's symbol table
+
     /// Maximum mixin expansion depth to prevent infinite recursion
     enum MAX_EXPANSION_DEPTH = 100;
-    
+
     this(string backendName = "wasm") {
         this.backendName = backendName;
         tempSymbolTable = new SymbolTable();
         tempSymbolTable.addBuiltinSymbols();
     }
+
+    /// Construct with an external symbol table (used by ModuleCompiler).
+    /// When provided, lookups use the scope chain instead of linear scans.
+    this(SymbolTable externalST, string backendName = "wasm") {
+        this.backendName = backendName;
+        this.tempSymbolTable = externalST;
+        this.hasExternalSymbolTable = true;
+    }
     
     /**
      * Expand all mixins and static ifs in the declaration list.
      * Returns a new list with mixins/static ifs replaced by their expansions.
+     *
+     * When using an external symbol table (ModuleCompiler path), this does
+     * interleaved symbol collection + expansion in one walk:
+     *   1. Pre-collect all plain declarations (order-independent in D)
+     *   2. Set up CTFE resolver
+     *   3. Walk: expand mixins/static-ifs, collect their results immediately
+     * This way mixin-produced symbols are visible to later static-ifs.
      */
     Declaration[] expandMixins(Declaration[] declarations) {
         allDeclarations = declarations;
-        
-        // First pass: collect manifest constants into temporary symbol table
-        // and evaluate them (needed for static if conditions that reference them)
+
+        if (hasExternalSymbolTable)
+            return expandMixinsInterleaved(declarations);
+
+        // Legacy path: batch collect into temp ST, then expand
         setupCTFE();
-        
-        // Second pass: expand module-level mixins and static ifs
+        return expandMixinsLegacy(declarations);
+    }
+
+    /// Interleaved collect + expand for external symbol table path.
+    private Declaration[] expandMixinsInterleaved(Declaration[] declarations) {
+        auto collector = new SymbolCollector(tempSymbolTable);
+
+        // 1. Pre-collect all plain declarations into the ST.
+        //    In D, all module-level symbols are visible regardless of order.
+        foreach (decl; declarations) {
+            if (auto modDecl = cast(ModuleDecl)decl) {
+                tempSymbolTable.setModulePath(modDecl.modulePath);
+            } else if (cast(MixinDecl)decl || cast(StaticIfDecl)decl
+                    || cast(StaticAssertDecl)decl || cast(ImportDecl)decl) {
+                // Skip — these are expanded/handled in the walk below
+            } else {
+                collector.collectSymbol(decl);
+            }
+        }
+
+        // 2. Set up CTFE resolver (symbols already in ST)
+        setupCTFE();
+
+        // 3. Walk: expand mixins/static-ifs, collect new declarations immediately
         Declaration[] result;
         foreach (decl; declarations) {
             if (auto mixinDecl = cast(MixinDecl)decl) {
-                // Expand this mixin
                 auto expanded = expandMixin(mixinDecl);
+                foreach (e; expanded)
+                    collector.collectSymbol(e);
                 result ~= expanded;
             } else if (auto staticIfDecl = cast(StaticIfDecl)decl) {
-                // Expand this static if
                 auto expanded = expandStaticIf(staticIfDecl);
+                foreach (e; expanded)
+                    collector.collectSymbol(e);
                 result ~= expanded;
             } else if (auto staticAssertDecl = cast(StaticAssertDecl)decl) {
-                // Evaluate this static assert
                 evaluateStaticAssert(staticAssertDecl);
-                // Static asserts don't produce declarations, just validate
             } else {
-                // Keep other declarations as-is
+                result ~= decl;  // already collected in step 1
+            }
+        }
+
+        // 4. Expand function-level mixins
+        foreach (decl; result) {
+            if (auto funcDecl = cast(FunctionDecl)decl) {
+                if (funcDecl.body_)
+                    funcDecl.body_ = expandMixinsInStatement(funcDecl.body_);
+            }
+        }
+
+        return result;
+    }
+
+    /// Legacy path: setupCTFE already collected, just expand.
+    private Declaration[] expandMixinsLegacy(Declaration[] declarations) {
+        Declaration[] result;
+        foreach (decl; declarations) {
+            if (auto mixinDecl = cast(MixinDecl)decl) {
+                result ~= expandMixin(mixinDecl);
+            } else if (auto staticIfDecl = cast(StaticIfDecl)decl) {
+                result ~= expandStaticIf(staticIfDecl);
+            } else if (auto staticAssertDecl = cast(StaticAssertDecl)decl) {
+                evaluateStaticAssert(staticAssertDecl);
+            } else {
                 result ~= decl;
             }
         }
-        
-        // Third pass: expand function-level mixins
+
+        // Expand function-level mixins
         foreach (decl; result) {
             if (auto funcDecl = cast(FunctionDecl)decl) {
-                if (funcDecl.body_) {
+                if (funcDecl.body_)
                     funcDecl.body_ = expandMixinsInStatement(funcDecl.body_);
-                }
             }
         }
-        
+
         return result;
     }
     
@@ -234,12 +298,20 @@ class MixinExpander {
      * Actual evaluation happens on-demand when values are accessed.
      */
     private void setupCTFE() {
+        if (hasExternalSymbolTable) {
+            // External ST already has symbols collected and scope wired.
+            // Only create CTFE evaluator if one isn't already registered.
+            if (tempSymbolTable.ctfeResolver is null)
+                new CTFEEvaluator(tempSymbolTable, allDeclarations, backendName);
+            return;
+        }
+
         // Collect all declarations into symbol table for CTFE
         // (structs, functions, manifest constants - everything CTFE might reference)
         // Use collectSymbols to handle ModuleDecl and set module path for mangling
         auto collector = new SymbolCollector(tempSymbolTable);
         collector.collectSymbols(allDeclarations);
-        
+
         // Create evaluator - this registers the lazy resolver with the symbol table
         // Actual evaluation happens when resolveManifestValue() is called
         new CTFEEvaluator(tempSymbolTable, allDeclarations, backendName);
@@ -446,13 +518,23 @@ class MixinExpander {
 
         // Handle identifier (reference to manifest constant)
         if (auto ident = cast(IdentifierExpression)expr) {
-            // Look up the manifest constant
-            foreach (decl; allDeclarations) {
-                if (auto manifest = cast(ManifestConstantDecl)decl) {
-                    if (manifest.name == ident.name) {
-                        // Lazy evaluation: resolve triggers CTFE if not yet evaluated
+            if (hasExternalSymbolTable) {
+                // Scope chain lookup (includes own module + imported modules)
+                auto sym = tempSymbolTable.lookupSymbol(ident.name);
+                if (sym !is null) {
+                    if (auto manifest = cast(ManifestConstantDecl)sym.declaration) {
                         long value = tempSymbolTable.resolveManifestValue(manifest);
                         return value != 0;
+                    }
+                }
+            } else {
+                // Legacy: linear scan of allDeclarations
+                foreach (decl; allDeclarations) {
+                    if (auto manifest = cast(ManifestConstantDecl)decl) {
+                        if (manifest.name == ident.name) {
+                            long value = tempSymbolTable.resolveManifestValue(manifest);
+                            return value != 0;
+                        }
                     }
                 }
             }
@@ -508,21 +590,11 @@ class MixinExpander {
      * Evaluate a __traits expression to a boolean result.
      */
     private bool evaluateTraitsBool(TraitsExpression traits, SourceLocation loc) {
-        // Resolve UserType.declaration from allDeclarations before evaluating.
-        // Can't use ensureResolved(tempSymbolTable) because struct/class declarations
-        // may not be registered in the temp symbol table during mixin expansion.
+        // Resolve UserType.declaration before evaluating.
         if (traits.typeArguments.length > 0 && traits.typeArguments[0] !is null) {
             if (auto ut = cast(UserType)traits.typeArguments[0]) {
-                if (ut.declaration is null) {
-                    foreach (decl; allDeclarations) {
-                        if (decl.name == ut.name) {
-                            if (cast(StructDecl)decl || cast(ClassDecl)decl || cast(InterfaceDecl)decl) {
-                                ut.declaration = decl;
-                                break;
-                            }
-                        }
-                    }
-                }
+                if (ut.declaration is null)
+                    resolveUserTypeDecl(ut);
             }
         }
 
@@ -534,38 +606,35 @@ class MixinExpander {
      * Evaluate an is(...) expression to a boolean result.
      */
     private bool evaluateIsBool(IsExpression isExpr, SourceLocation loc) {
-        // Resolve UserType.declaration from allDeclarations before evaluating.
-        if (auto ut = cast(UserType)isExpr.checkedType) {
-            if (ut.declaration is null) {
-                foreach (decl; allDeclarations) {
-                    if (decl.name == ut.name) {
-                        if (cast(StructDecl)decl || cast(ClassDecl)decl || cast(InterfaceDecl)decl) {
-                            ut.declaration = decl;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        if (isExpr.specType !is null) {
-            if (auto ut = cast(UserType)isExpr.specType) {
-                if (ut.declaration is null) {
-                    foreach (decl; allDeclarations) {
-                        if (decl.name == ut.name) {
-                            if (cast(StructDecl)decl || cast(ClassDecl)decl || cast(InterfaceDecl)decl) {
-                                ut.declaration = decl;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Resolve UserType.declaration before evaluating.
+        resolveUserTypeDecl(cast(UserType)isExpr.checkedType);
+        if (isExpr.specType !is null)
+            resolveUserTypeDecl(cast(UserType)isExpr.specType);
 
         import semantic.type_checker : TypeChecker;
         auto tc = new TypeChecker(tempSymbolTable);
         tc.checkIsExpression(isExpr);
         return isExpr.boolResult;
+    }
+
+    /// Resolve a UserType's declaration via scope chain or allDeclarations.
+    private void resolveUserTypeDecl(UserType ut) {
+        if (ut is null || ut.declaration !is null)
+            return;
+        if (hasExternalSymbolTable) {
+            auto sym = tempSymbolTable.lookupGlobalSymbol(ut.name);
+            if (sym !is null)
+                ut.declaration = sym.declaration;
+        } else {
+            foreach (decl; allDeclarations) {
+                if (decl.name == ut.name) {
+                    if (cast(StructDecl)decl || cast(ClassDecl)decl || cast(InterfaceDecl)decl) {
+                        ut.declaration = decl;
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -585,18 +654,23 @@ class MixinExpander {
         
         // Handle identifier (reference to manifest constant)
         if (auto ident = cast(IdentifierExpression)expr) {
-            // Look up the manifest constant
-            foreach (decl; allDeclarations) {
-                if (auto manifest = cast(ManifestConstantDecl)decl) {
-                    if (manifest.name == ident.name) {
-                        // Lazy evaluation: resolve triggers CTFE if not yet evaluated
+            if (hasExternalSymbolTable) {
+                auto sym = tempSymbolTable.lookupSymbol(ident.name);
+                if (sym !is null) {
+                    if (auto manifest = cast(ManifestConstantDecl)sym.declaration)
                         return tempSymbolTable.resolveManifestValue(manifest);
+                }
+            } else {
+                foreach (decl; allDeclarations) {
+                    if (auto manifest = cast(ManifestConstantDecl)decl) {
+                        if (manifest.name == ident.name)
+                            return tempSymbolTable.resolveManifestValue(manifest);
                     }
                 }
             }
             throw new MixinError("Undefined identifier '" ~ ident.name ~ "' in static if condition", loc);
         }
-        
+
         throw new MixinError(
             "Unsupported expression type in static if integer evaluation: " ~ typeid(expr).toString(),
             loc
@@ -640,21 +714,30 @@ class MixinExpander {
     private string evaluateMixinExpression(Expression expr, SourceLocation loc) {
         // Handle identifier (reference to manifest constant)
         if (auto ident = cast(IdentifierExpression)expr) {
-            // Look up the manifest constant
-            foreach (decl; allDeclarations) {
-                if (auto manifest = cast(ManifestConstantDecl)decl) {
-                    if (manifest.name == ident.name) {
-                        // Lazy evaluation via resolver
-                        string value = tempSymbolTable.resolveManifestStringValue(manifest);
-                        if (!manifest.isStringType) {
-                            throw new MixinError(
-                                "Mixin argument '" ~ ident.name ~ "' is not a string",
-                                loc
-                            );
+            ManifestConstantDecl manifest;
+            if (hasExternalSymbolTable) {
+                auto sym = tempSymbolTable.lookupSymbol(ident.name);
+                if (sym !is null)
+                    manifest = cast(ManifestConstantDecl)sym.declaration;
+            } else {
+                foreach (decl; allDeclarations) {
+                    if (auto md = cast(ManifestConstantDecl)decl) {
+                        if (md.name == ident.name) {
+                            manifest = md;
+                            break;
                         }
-                        return value;
                     }
                 }
+            }
+            if (manifest !is null) {
+                string value = tempSymbolTable.resolveManifestStringValue(manifest);
+                if (!manifest.isStringType) {
+                    throw new MixinError(
+                        "Mixin argument '" ~ ident.name ~ "' is not a string",
+                        loc
+                    );
+                }
+                return value;
             }
             throw new MixinError("Undefined identifier '" ~ ident.name ~ "' in mixin", loc);
         }
