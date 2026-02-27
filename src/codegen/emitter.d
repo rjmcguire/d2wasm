@@ -25,6 +25,7 @@ import ast.nodes;
 import ast.statements;
 import ast.expressions;
 import semantic.symbol_table;
+import semantic.modules_context : ModulesContext;
 import cache.entry : SourceHash, CacheEntry;
 
 import std.array : Appender, array;
@@ -320,81 +321,12 @@ class BinaryEmitter {
      * Emit binary WASM from declarations
      * Returns null on error (check lastError)
      */
-    ubyte[] emit(Declaration[] decls) {
+    ubyte[] emit(ModulesContext ctx) {
         try {
             phase = EmitPhase.collecting;
-            collect(decls);
-            
-            // Pre-allocate exception slot array in data section (must be before finalizeHeapPtr)
-            allocateExceptionSlotArray();
+            collectFromModules(ctx);
 
-            // If array/heap operations are needed, add built-ins
-            if (needsArraySupport) {
-                addArrayBuiltins();
-                addArenaBuiltins();
-                finalizeHeapPtr();
-                finalizeArenaBase();
-            }
-
-            // Always add shadow stack for struct locals
-            addShadowStackGlobal();
-
-            // Exception handling globals (always allocated — needed for scope guards too)
-            addExceptionGlobals();
-
-            // Add call stack tracking global if enabled
-            if (enableStackTrace) {
-                addCallStackGlobal();
-            }
-            
-            // Add imports for CTFE-only functions that are called
-            addCTFEImports();
-            
-            // Stabilize indices for incremental compilation
-            stabilizeIndices();
-            
-            // Build function table for virtual dispatch (must be after stabilization)
-            buildVtables();
-
-            // Collect lifted lambda functions and add them to the function table
-            collectLiftedLambdas();
-            
-            phase = EmitPhase.init;
-            emitHeader();
-            
-            phase = EmitPhase.emittingTypes;
-            emitTypeSection();
-            
-            // Import section must come before function section
-            emitImportSection();
-            
-            phase = EmitPhase.emittingFunctions;
-            emitFunctionSection();
-            
-            // Table section (for call_indirect / virtual dispatch)
-            emitTableSection();
-            
-            phase = EmitPhase.emittingMemory;
-            emitMemorySection();
-            
-            // Emit globals section (for heap_ptr)
-            emitGlobalSection();
-            
-            phase = EmitPhase.emittingExports;
-            emitExportSection();
-            
-            // Element section (populates function table) - must come after export
-            emitElementSection();
-            
-            phase = EmitPhase.emittingCode;
-            emitCodeSection();
-            
-            phase = EmitPhase.emittingData;
-            emitDataSection();
-            
-            phase = EmitPhase.done;
-            return output.data.dup;
-            
+            return emitAfterCollect();
         } catch (EmitError e) {
             phase = EmitPhase.error;
             lastError = e.msg;
@@ -405,6 +337,97 @@ class BinaryEmitter {
             lastError = "Internal error: " ~ e.msg;
             return null;
         }
+    }
+
+    ubyte[] emit(Declaration[] decls) {
+        try {
+            phase = EmitPhase.collecting;
+            collect(decls);
+
+            return emitAfterCollect();
+        } catch (EmitError e) {
+            phase = EmitPhase.error;
+            lastError = e.msg;
+            lastErrorLocation = e.location;
+            return null;
+        } catch (Exception e) {
+            phase = EmitPhase.error;
+            lastError = "Internal error: " ~ e.msg;
+            return null;
+        }
+    }
+
+    /// Shared post-collection emission pipeline (used by both emit overloads).
+    private ubyte[] emitAfterCollect() {
+        // Pre-allocate exception slot array in data section (must be before finalizeHeapPtr)
+        allocateExceptionSlotArray();
+
+        // If array/heap operations are needed, add built-ins
+        if (needsArraySupport) {
+            addArrayBuiltins();
+            addArenaBuiltins();
+            finalizeHeapPtr();
+            finalizeArenaBase();
+        }
+
+        // Always add shadow stack for struct locals
+        addShadowStackGlobal();
+
+        // Exception handling globals (always allocated — needed for scope guards too)
+        addExceptionGlobals();
+
+        // Add call stack tracking global if enabled
+        if (enableStackTrace) {
+            addCallStackGlobal();
+        }
+
+        // Add imports for CTFE-only functions that are called
+        addCTFEImports();
+
+        // Stabilize indices for incremental compilation
+        stabilizeIndices();
+
+        // Build function table for virtual dispatch (must be after stabilization)
+        buildVtables();
+
+        // Collect lifted lambda functions and add them to the function table
+        collectLiftedLambdas();
+
+        phase = EmitPhase.init;
+        emitHeader();
+
+        phase = EmitPhase.emittingTypes;
+        emitTypeSection();
+
+        // Import section must come before function section
+        emitImportSection();
+
+        phase = EmitPhase.emittingFunctions;
+        emitFunctionSection();
+
+        // Table section (for call_indirect / virtual dispatch)
+        emitTableSection();
+
+        phase = EmitPhase.emittingMemory;
+        emitMemorySection();
+
+        // Emit globals section (for heap_ptr)
+        emitGlobalSection();
+
+        phase = EmitPhase.emittingExports;
+        emitExportSection();
+
+        // Element section (populates function table) - must come after export
+        emitElementSection();
+
+        phase = EmitPhase.emittingCode;
+        emitCodeSection();
+
+        phase = EmitPhase.emittingData;
+        emitDataSection();
+
+        phase = EmitPhase.done;
+        return output.data.dup;
     }
     
     /**
@@ -737,7 +760,41 @@ class BinaryEmitter {
             }
         }
     }
-    
+
+    /// Collect declarations from ModulesContext — each module processed once, no duplicates.
+    private void collectFromModules(ModulesContext ctx) {
+        // First pass: collect imported functions across all modules
+        foreach (mod; ctx.modulesInOrder()) {
+            foreach (decl; mod.ast) {
+                if (auto importedFunc = cast(ImportedFunctionDecl)decl) {
+                    collectImportedFunction(importedFunc);
+                }
+            }
+        }
+
+        // Second pass: collect local functions, globals, struct/class methods per module
+        foreach (mod; ctx.modulesInOrder()) {
+            symbolTable.setModulePath(mod.modulePath);
+            foreach (decl; mod.ast) {
+                if (cast(ModuleDecl)decl)
+                    continue;
+                if (cast(ImportDecl)decl)
+                    continue;
+                if (cast(TemplateDecl)decl) {
+                    continue;
+                } else if (auto funcDecl = cast(FunctionDecl)decl) {
+                    collectFunction(funcDecl);
+                } else if (auto varDecl = cast(VariableDecl)decl) {
+                    collectGlobalVariable(varDecl);
+                } else if (auto structDecl = cast(StructDecl)decl) {
+                    collectStructMethods(structDecl);
+                } else if (auto classDecl = cast(ClassDecl)decl) {
+                    collectClassMethods(classDecl);
+                }
+            }
+        }
+    }
+
     /**
      * Collect methods from a struct declaration.
      * Methods are registered with mangled names: StructName_methodName

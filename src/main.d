@@ -218,46 +218,15 @@ int compileFile(CompilerOptions options) {
         
         log(2, "Parsed ", ast.length, " top-level declarations");
 
-        // 2a. Auto-import runtime/object.d (prepend runtime declarations)
-        //     runtime/object.d has "module object;" so its symbols get module ["object"].
-        //     Insert a synthetic module decl between runtime and user code to reset
-        //     the module path for user declarations (default from filename).
-        {
-            // Try relative to executable, then relative to CWD
-            string exeDir = dirName(thisExePath());
-            string[] searchPaths = [
-                buildPath(exeDir, "..", "runtime", "object.d"),
-                buildPath(exeDir, "runtime", "object.d"),
-                "runtime/object.d",
-            ];
-            foreach (runtimePath; searchPaths) {
-                if (exists(runtimePath)) {
-                    try {
-                        auto rtSource = readText(runtimePath);
-                        auto rtBridge = new TreeSitterBridge(runtimePath, rtSource);
-                        Declaration[] rtDecls = rtBridge.parseSourceFile();
-                        // Insert synthetic module decl for user code default
-                        auto defaultModName = baseName(stripExtension(options.inputFile));
-                        auto userModuleDecl = new ModuleDecl(SourceLocation.init, [defaultModName]);
-                        ast = rtDecls ~ [cast(Declaration)userModuleDecl] ~ ast;
-                        log(2, "Auto-imported ", rtDecls.length, " declarations from ", runtimePath);
-                    } catch (Exception e) {
-                        log(1, "Warning: failed to parse runtime/object.d: ", e.msg);
-                    }
-                    break;
-                }
-            }
-        }
-
         if (options.printAst) {
             writeln("\n=== AST (before mixin expansion) ===");
             printAST(ast);
             writeln();
         }
-        
+
         // 2b. Mixin expansion - must happen before symbol collection
         log(1, "Expanding mixins...");
-        
+
         import semantic.mixin_expander;
         auto mixinExpander = new MixinExpander(options.backend);
         try {
@@ -266,92 +235,150 @@ int compileFile(CompilerOptions options) {
             printError(e);
             return 1;
         }
-        
+
         log(2, "Mixin expansion complete. ", ast.length, " declarations after expansion");
-        
+
         if (options.printAst) {
             writeln("\n=== AST (after mixin expansion) ===");
             printAST(ast);
             writeln();
         }
-        
+
         // 2c. Import resolution — resolve ImportDecl nodes to modules
         import semantic.module_ : Module, ModulePhase;
         import semantic.module_registry : ModuleRegistry;
         import semantic.import_resolver : ImportResolver;
+        import semantic.modules_context : ModulesContext;
 
         auto modRegistry = new ModuleRegistry();
         modRegistry.searchPaths = options.importPaths.dup;
         // Also search relative to the input file's directory
         modRegistry.searchPaths ~= dirName(absolutePath(options.inputFile));
 
-        // Determine root module path
-        string[] rootModulePath;
+        // Parse-on-demand factory shared by import resolver and runtime loading
+        auto parseFn = delegate Declaration[](string filename, string src) {
+            auto b = new TreeSitterBridge(filename, src);
+            return b.parseSourceFile();
+        };
+
+        // 2a. Register runtime/object.d as its own module (implicit `import object;`)
+        {
+            string exeDir = dirName(thisExePath());
+            string[] rtSearchPaths = [
+                buildPath(exeDir, "..", "runtime", "object.d"),
+                buildPath(exeDir, "runtime", "object.d"),
+                "runtime/object.d",
+            ];
+            foreach (runtimePath; rtSearchPaths) {
+                if (exists(runtimePath)) {
+                    try {
+                        auto rtSource = readText(runtimePath);
+                        auto rtDecls = parseFn(runtimePath, rtSource);
+
+                        auto objectMod = new Module();
+                        objectMod.modulePath = ["object"];
+                        objectMod.sourceFilePath = absolutePath(runtimePath);
+                        objectMod.sourceText = rtSource;
+                        objectMod.ast = rtDecls;
+                        objectMod.phase = ModulePhase.parsed;
+                        objectMod.isSynthetic = true;
+                        modRegistry.registerModule(objectMod);
+
+                        // Add synthetic `import object;` to the user's AST
+                        auto objectImport = new ImportDecl(SourceLocation.init, ["object"]);
+                        objectImport.resolvedModule = objectMod;
+                        ast = [cast(Declaration)objectImport] ~ ast;
+
+                        log(2, "Registered runtime module 'object' from ", runtimePath);
+                    } catch (Exception e) {
+                        log(1, "Warning: failed to parse runtime/object.d: ", e.msg);
+                    }
+                    break;
+                }
+            }
+        }
+
+        // Determine input module path from its AST
+        string[] inputModulePath;
         foreach (decl; ast) {
             if (auto modDecl = cast(ModuleDecl)decl) {
-                rootModulePath = modDecl.modulePath;
+                inputModulePath = modDecl.modulePath;
                 break;
             }
         }
-        if (rootModulePath.length == 0)
-            rootModulePath = [baseName(stripExtension(options.inputFile))];
+        if (inputModulePath.length == 0)
+            inputModulePath = [baseName(stripExtension(options.inputFile))];
 
-        auto rootModule = new Module();
-        rootModule.modulePath = rootModulePath;
-        rootModule.sourceFilePath = absolutePath(options.inputFile);
-        rootModule.sourceText = sourceCode;
-        rootModule.ast = ast;
-        rootModule.phase = ModulePhase.parsed;
-        modRegistry.registerModule(rootModule);
+        auto inputModule = new Module();
+        inputModule.modulePath = inputModulePath;
+        inputModule.sourceFilePath = absolutePath(options.inputFile);
+        inputModule.sourceText = sourceCode;
+        inputModule.ast = ast;
+        inputModule.phase = ModulePhase.parsed;
+        modRegistry.registerModule(inputModule);
 
-        // Scan root AST for ImportDecls
+        // Scan AST for ImportDecls
         foreach (decl; ast) {
             if (auto imp = cast(ImportDecl)decl)
-                rootModule.importDecls ~= imp;
+                inputModule.importDecls ~= imp;
         }
 
         // Resolve imports recursively (parse-on-demand)
-        auto importResolver = new ImportResolver(modRegistry,
-            delegate Declaration[](string filename, string src) {
-                auto b = new TreeSitterBridge(filename, src);
-                return b.parseSourceFile();
-            });
-        importResolver.resolveImports(rootModule);
+        auto importResolver = new ImportResolver(modRegistry, parseFn);
+        importResolver.resolveImports(inputModule);
 
-        // Process imported modules: mixin expand, collect symbols
-        Declaration[] allImportedDecls;  // for CTFE augmentation
+        // ── Pass 1: Prepare all modules (mixin expand + symbol collect) ──
         auto topoModules = modRegistry.topologicalOrder();
-        foreach (depMod; topoModules) {
-            if (depMod is rootModule)
-                continue;  // root module handled by main pipeline
+        foreach (mod; topoModules) {
+            if (mod.phase >= ModulePhase.symbolsCollected)
+                continue;
 
-            // Mixin expand imported module
-            if (depMod.phase < ModulePhase.symbolsCollected) {
-                auto depExpander = new MixinExpander(options.backend);
-                try {
-                    depMod.ast = depExpander.expandMixins(depMod.ast);
-                } catch (MixinError e) {
-                    printError(e);
-                    return 1;
-                }
-
-                // Create per-module symbol table with ModuleScope
-                depMod.symbolTable = new SymbolTable();
-                depMod.symbolTable.targetPtrSize = 4;
-                depMod.symbolTable.addBuiltinSymbols();
-                depMod.symbolTable.setModulePath(depMod.modulePath);
-                depMod.symbolTable.initModuleScope(depMod.modulePath);
-
-                auto depCollector = new SymbolCollector(depMod.symbolTable);
-                depCollector.collectSymbols(depMod.ast);
-                depMod.phase = ModulePhase.symbolsCollected;
+            auto modExpander = new MixinExpander(options.backend);
+            try {
+                mod.ast = modExpander.expandMixins(mod.ast);
+            } catch (MixinError e) {
+                printError(e);
+                return 1;
             }
 
-            allImportedDecls ~= depMod.ast;
-            log(2, "Processed imported module: ", depMod.fullyQualifiedName());
+            mod.symbolTable = new SymbolTable();
+            mod.symbolTable.targetPtrSize = 4;
+            mod.symbolTable.addBuiltinSymbols();
+            mod.symbolTable.setModulePath(mod.modulePath);
+            mod.symbolTable.initModuleScope(mod.modulePath);
+
+            auto collector = new SymbolCollector(mod.symbolTable);
+            collector.collectSymbols(mod.ast);
+            mod.phase = ModulePhase.symbolsCollected;
+            log(2, "Prepared module: ", mod.fullyQualifiedName());
         }
 
-        // 3. Feature validation
+        // ── Pass 2: Wire module scope imports ──
+        // Each module's imports get wired to the imported module's scope.
+        // Topo order guarantees dependencies are prepared before dependents.
+        foreach (mod; topoModules) {
+            if (mod.symbolTable is null || mod.symbolTable.moduleScope is null)
+                continue;
+            foreach (impDecl; mod.importDecls) {
+                auto dep = cast(Module)impDecl.resolvedModule;
+                if (dep is null || dep.symbolTable is null || dep.symbolTable.moduleScope is null)
+                    continue;
+
+                if (impDecl.moduleAlias.length > 0) {
+                    mod.symbolTable.moduleScope.addModuleAlias(
+                        impDecl.moduleAlias, dep.symbolTable.moduleScope);
+                } else if (impDecl.selectiveImports.length > 0) {
+                    foreach (ref sel; impDecl.selectiveImports) {
+                        mod.symbolTable.moduleScope.addSelectiveImport(
+                            sel.localName, dep.symbolTable.moduleScope, sel.remoteName);
+                    }
+                } else {
+                    mod.symbolTable.moduleScope.addImport(dep.symbolTable.moduleScope);
+                }
+            }
+        }
+
+        // 3. Feature validation (input module only — imported modules are trusted)
         log(1, "Running feature validation...");
 
         auto validator = new FeatureValidator();
@@ -364,84 +391,45 @@ int compileFile(CompilerOptions options) {
             return 0;
         }
 
-        // 4. Symbol table construction
-        log(1, "Building symbol table...");
+        // ── Build ModulesContext (indexed cross-module lookups) ──
+        auto modulesCtx = new ModulesContext(modRegistry);
 
-        auto symbolTable = new SymbolTable();
-        // Output target is always WASM32 (ptrSize=4).
-        // options.backend controls the CTFE backend, not the output format.
-        symbolTable.targetPtrSize = 4;
-        // Set default module path from filename immediately — before anything can trigger CTFE.
-        // An explicit `module` declaration in the source will override this during collectSymbols.
-        {
-            import std.path : baseName, stripExtension;
-            symbolTable.setModulePath([baseName(stripExtension(options.inputFile))]);
-        }
-        symbolTable.addBuiltinSymbols();
-        symbolTable.initModuleScope(rootModulePath);
+        // ── CTFE setup (lazy evaluation — must be before type checking) ──
+        log(2, "Setting up CTFE resolver...");
 
-        // Wire imported ModuleScopes into root module's ModuleScope
-        foreach (depMod; topoModules) {
-            if (depMod is rootModule || depMod.symbolTable is null)
-                continue;
-            if (depMod.symbolTable.moduleScope is null || symbolTable.moduleScope is null)
-                continue;
+        import semantic.ctfe;
+        auto ctfeEvaluator = new CTFEEvaluator(
+            inputModule.symbolTable, modulesCtx, options.backend, options.stackTrace);
 
-            // For each ImportDecl that resolved to this dep module, wire appropriately
-            foreach (impDecl; rootModule.importDecls) {
-                if (impDecl.resolvedModule !is depMod)
-                    continue;
-
-                if (impDecl.moduleAlias.length > 0) {
-                    // Module alias: `import io = std.stdio;` — namespace only, no wildcard
-                    symbolTable.moduleScope.addModuleAlias(
-                        impDecl.moduleAlias, depMod.symbolTable.moduleScope);
-                } else if (impDecl.selectiveImports.length > 0) {
-                    // Selective: `import foo : bar;` — only named symbols, no wildcard
-                    foreach (ref sel; impDecl.selectiveImports) {
-                        symbolTable.moduleScope.addSelectiveImport(
-                            sel.localName, depMod.symbolTable.moduleScope, sel.remoteName);
-                    }
-                } else {
-                    // Plain wildcard import
-                    symbolTable.moduleScope.addImport(depMod.symbolTable.moduleScope);
-                }
+        // Register CTFE resolver on all module symbol tables
+        foreach (mod; topoModules) {
+            if (mod.symbolTable !is null) {
+                mod.symbolTable.ctfeResolver = &ctfeEvaluator.evaluateManifestConstant;
+                mod.symbolTable.constraintEvaluator = &ctfeEvaluator.evaluateTemplateConstraint;
             }
         }
-        rootModule.symbolTable = symbolTable;
-        
-        // Collect symbols — handles ModuleDecl inline, infers default module from filename
-        auto symbolCollector = new SymbolCollector(symbolTable);
-        symbolCollector.collectSymbols(ast, options.inputFile);
 
-        if (symbolTable.modulePath.length > 0)
-            log(2, "Module: ", symbolTable.moduleFullyQualifiedName());
-        
-        log(2, "Symbol table built with ", symbolTable.getGlobalScope().getAllSymbols().length, " global symbols");
-        
-        // 5. CTFE setup (lazy evaluation - must be before type checking)
-        // Type checking may need to resolve manifest constant types
-        log(2, "Setting up CTFE resolver...");
-        
-        import semantic.ctfe;
-        // Create evaluator - registers lazy resolver with symbol table
-        // Actual evaluation happens when manifest constant values are accessed
-        // Prepend imported module declarations so CTFE can find cross-module functions
-        auto ctfeDecls = allImportedDecls ~ ast;
-        auto ctfeEvaluator = new CTFEEvaluator(symbolTable, ctfeDecls, options.backend, options.stackTrace);
-        
         log(2, "CTFE resolver ready");
-        
-        // 6. Type checking
-        log(1, "Running type checking...");
-        
-        auto typeChecker = new TypeChecker(symbolTable);
-        typeChecker.checkDeclarations(ast);
 
-        // Append template instantiations to AST so the emitter collects them
-        foreach (inst; typeChecker.templateInstantiator.allInstantiations()) {
-            ast ~= inst;
+        // ── Pass 3: Type-check all modules ──
+        log(1, "Running type checking...");
+
+        foreach (mod; topoModules) {
+            if (mod.phase >= ModulePhase.typeChecked)
+                continue;
+            auto tc = new TypeChecker(mod.symbolTable);
+            tc.checkDeclarations(mod.ast);
+
+            // Collect template instantiations
+            foreach (inst; tc.templateInstantiator.allInstantiations()) {
+                mod.ast ~= inst;
+                modulesCtx.addDeclaration(inst);
+            }
+
+            mod.phase = ModulePhase.typeChecked;
         }
+        // Local `ast` alias for the input module (used by later passes)
+        ast = inputModule.ast;
 
         log(1, "Type checking passed");
 
@@ -464,7 +452,7 @@ int compileFile(CompilerOptions options) {
         if (options.escapeAnalysis) {
             import semantic.escape_analyzer : analyzeEscapes;
             log(2, "Analyzing pointer escapes...");
-            analyzeEscapes(ast, symbolTable);
+            analyzeEscapes(ast, inputModule.symbolTable);
         }
 
         // 7. Code generation (binary WASM emission)
@@ -474,10 +462,10 @@ int compileFile(CompilerOptions options) {
             // Set target slice layout before codegen
             {
                 import codegen.target : sliceInfo, SliceInfo;
-                sliceInfo = SliceInfo(symbolTable.targetPtrSize);
+                sliceInfo = SliceInfo(inputModule.symbolTable.targetPtrSize);
             }
 
-            auto emitter = new BinaryEmitter(symbolTable, options.stackTrace);
+            auto emitter = new BinaryEmitter(inputModule.symbolTable, options.stackTrace);
             
             // Load cache if enabled
             import cache.compiler_cache : CompilerCache;
@@ -498,7 +486,7 @@ int compileFile(CompilerOptions options) {
                 }
             }
             
-            ubyte[] wasm = emitter.emit(allImportedDecls ~ ast);
+            ubyte[] wasm = emitter.emit(modulesCtx);
             
             if (wasm is null) {
                 import diagnostic.error_format : formatError;

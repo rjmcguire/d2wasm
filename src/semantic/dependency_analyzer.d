@@ -10,6 +10,7 @@ import ast.nodes;
 import ast.statements;
 import ast.expressions;
 import semantic.symbol_table;
+import semantic.modules_context : ModulesContext;
 
 import std.algorithm;
 import std.array;
@@ -20,6 +21,7 @@ import std.array;
 class DependencyAnalyzer {
     private SymbolTable symbolTable;
     private Declaration[] allDeclarations;
+    private ModulesContext modulesCtx;
 
     // Track visited functions to handle cycles
     private bool[string] visited;
@@ -32,6 +34,11 @@ class DependencyAnalyzer {
     this(SymbolTable symbolTable, Declaration[] declarations) {
         this.symbolTable = symbolTable;
         this.allDeclarations = declarations;
+    }
+
+    this(SymbolTable symbolTable, ModulesContext ctx) {
+        this.symbolTable = symbolTable;
+        this.modulesCtx = ctx;
     }
 
     /**
@@ -431,20 +438,27 @@ class DependencyAnalyzer {
                 return null;
             }
 
-            // Look up in declarations — prefer definition with body over forward declaration
-            FunctionDecl forwardDecl;
-            foreach (decl; allDeclarations) {
-                if (auto funcDecl = cast(FunctionDecl)decl) {
-                    if (funcDecl.name == funcName) {
-                        if (funcDecl.body_ !is null)
-                            return funcDecl;
-                        if (forwardDecl is null)
-                            forwardDecl = funcDecl;
+            // Use ModulesContext O(1) lookup when available
+            if (modulesCtx !is null) {
+                auto found = modulesCtx.findFunction(funcName);
+                if (found !is null)
+                    return found;
+            } else {
+                // Legacy: linear scan of flat declaration array
+                FunctionDecl forwardDecl;
+                foreach (decl; allDeclarations) {
+                    if (auto funcDecl = cast(FunctionDecl)decl) {
+                        if (funcDecl.name == funcName) {
+                            if (funcDecl.body_ !is null)
+                                return funcDecl;
+                            if (forwardDecl is null)
+                                forwardDecl = funcDecl;
+                        }
                     }
                 }
+                if (forwardDecl !is null)
+                    return forwardDecl;
             }
-            if (forwardDecl !is null)
-                return forwardDecl;
 
             // Also check symbol table
             auto symbol = symbolTable.lookupSymbol(funcName);
@@ -459,36 +473,47 @@ class DependencyAnalyzer {
         if (auto member = cast(MemberExpression)call.function_) {
             string methodName = member.memberName;
 
-            // Search struct and class declarations for a matching method
-            foreach (decl; allDeclarations) {
-                if (auto sd = cast(StructDecl)decl) {
-                    foreach (m; sd.members) {
-                        if (auto fd = cast(FunctionDecl)m) {
-                            if (fd.name == methodName && fd.isMethod) {
-                                return fd;
-                            }
-                        }
+            if (modulesCtx !is null) {
+                // Use indexed lookup: search struct/class methods
+                auto funcs = modulesCtx.findFunctions(methodName);
+                if (funcs !is null) {
+                    foreach (fd; funcs) {
+                        if (fd.isMethod)
+                            return fd;
                     }
                 }
-                if (auto cd = cast(ClassDecl)decl) {
-                    foreach (m; cd.members) {
-                        if (auto fd = cast(FunctionDecl)m) {
-                            if (fd.name == methodName && fd.isMethod) {
-                                return fd;
-                            }
-                        }
-                    }
-                    // Also search base classes
-                    auto base = cd.baseClassDecl;
-                    while (base !is null) {
-                        foreach (m; base.members) {
+            } else {
+                // Legacy: search struct and class declarations for a matching method
+                foreach (decl; allDeclarations) {
+                    if (auto sd = cast(StructDecl)decl) {
+                        foreach (m; sd.members) {
                             if (auto fd = cast(FunctionDecl)m) {
                                 if (fd.name == methodName && fd.isMethod) {
                                     return fd;
                                 }
                             }
                         }
-                        base = base.baseClassDecl;
+                    }
+                    if (auto cd = cast(ClassDecl)decl) {
+                        foreach (m; cd.members) {
+                            if (auto fd = cast(FunctionDecl)m) {
+                                if (fd.name == methodName && fd.isMethod) {
+                                    return fd;
+                                }
+                            }
+                        }
+                        // Also search base classes
+                        auto base = cd.baseClassDecl;
+                        while (base !is null) {
+                            foreach (m; base.members) {
+                                if (auto fd = cast(FunctionDecl)m) {
+                                    if (fd.name == methodName && fd.isMethod) {
+                                        return fd;
+                                    }
+                                }
+                            }
+                            base = base.baseClassDecl;
+                        }
                     }
                 }
             }

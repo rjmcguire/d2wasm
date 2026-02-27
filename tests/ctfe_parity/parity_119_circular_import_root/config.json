@@ -1,0 +1,8 @@
+{
+  "name": "circular_import_root",
+  "description": "Circular import where root module is in the cycle (root->helper->root); must not duplicate exports",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 42,
+  "compiler_args": ["--import-path", "tests/ctfe_parity/parity_119_circular_import_root"]
+}

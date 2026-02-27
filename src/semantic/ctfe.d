@@ -18,6 +18,7 @@ import codegen.wasm.types;
 import codegen.backend;
 import codegen.type_marshal;
 import codegen.target : sliceInfo;
+import semantic.modules_context : ModulesContext;
 import diagnostic.log : log;
 
 import std.stdio;
@@ -208,15 +209,16 @@ private static string exportName(FunctionDecl f) {
 class CTFEEvaluator {
     private SymbolTable symbolTable;
     private Declaration[] allDeclarations;
+    private ModulesContext modulesCtx;
     private Backend backend;  // Code generation backend (WASM or Native)
     private bool enableStackTrace;
     private TypeReader reader;  // Target-parameterized type reader
-    
+
     // Persistent CTFE context - accumulates compiled functions
     private bool[string] compiledFunctions;  // functions already in context
     private CompiledFunction cachedContext;  // reusable compiled module
     private FunctionDecl[] contextFunctions; // functions in current context
-    
+
     // CTFE statistics
     private uint statFunctionsCompiled;   // total functions compiled
     private uint statCacheHits;           // times we reused cached context
@@ -227,7 +229,7 @@ class CTFEEvaluator {
     private Duration statCompileTime;     // total time spent compiling
     private Duration statExecTime;        // total time spent executing
     private Duration statAnalysisTime;    // total time in dependency analysis
-    
+
     this(SymbolTable symbolTable, Declaration[] declarations, string backendName = "wasm", bool enableStackTrace = true) {
         this.symbolTable = symbolTable;
         this.allDeclarations = declarations;
@@ -236,11 +238,24 @@ class CTFEEvaluator {
         this.reader = (backendName == "native" || backendName == "native-arm64")
             ? TypeReader.forNative()
             : TypeReader.forWasm();
-        
+
         // Register lazy resolver with symbol table
         symbolTable.ctfeResolver = &this.evaluateManifestConstant;
 
         // Register template constraint evaluator
+        symbolTable.constraintEvaluator = &this.evaluateTemplateConstraint;
+    }
+
+    this(SymbolTable symbolTable, ModulesContext ctx, string backendName = "wasm", bool enableStackTrace = true) {
+        this.symbolTable = symbolTable;
+        this.modulesCtx = ctx;
+        this.enableStackTrace = enableStackTrace;
+        this.backend = createBackend(backendName, symbolTable, enableStackTrace);
+        this.reader = (backendName == "native" || backendName == "native-arm64")
+            ? TypeReader.forNative()
+            : TypeReader.forWasm();
+
+        symbolTable.ctfeResolver = &this.evaluateManifestConstant;
         symbolTable.constraintEvaluator = &this.evaluateTemplateConstraint;
     }
     
@@ -322,9 +337,15 @@ class CTFEEvaluator {
 
     /** Evaluate all manifest constants in the declarations. */
     void evaluateManifestConstants() {
-        foreach (decl; allDeclarations) {
-            if (auto manifest = cast(ManifestConstantDecl)decl) {
+        if (modulesCtx !is null) {
+            foreach (manifest; modulesCtx.allManifests()) {
                 evaluateManifestConstant(manifest);
+            }
+        } else {
+            foreach (decl; allDeclarations) {
+                if (auto manifest = cast(ManifestConstantDecl)decl) {
+                    evaluateManifestConstant(manifest);
+                }
             }
         }
     }
@@ -598,14 +619,9 @@ class CTFEEvaluator {
                 if (result.returnType !is null) {
                     manifest.inferredType = result.returnType;
                 } else if (auto funcIdent = cast(IdentifierExpression)callExpr.function_) {
-                    foreach (decl; allDeclarations) {
-                        if (auto fd = cast(FunctionDecl)decl) {
-                            if (fd.name == funcIdent.name) {
-                                manifest.inferredType = fd.returnType;
-                                break;
-                            }
-                        }
-                    }
+                    auto fd = findFunctionByName(funcIdent.name);
+                    if (fd !is null)
+                        manifest.inferredType = fd.returnType;
                 }
 
                 log(3, "CTFE: ", manifest.name, " = ", result.arrayValues, " (array from function, ",
@@ -719,12 +735,9 @@ class CTFEEvaluator {
      */
     private void ensureDependenciesEvaluated(Expression expr) {
         if (auto ident = cast(IdentifierExpression)expr) {
-            foreach (decl; allDeclarations) {
-                if (auto manifest = cast(ManifestConstantDecl)decl) {
-                    if (manifest.name == ident.name && !manifest.ctfeComplete) {
-                        evaluateManifestConstant(manifest);
-                    }
-                }
+            auto manifest = findManifestByName(ident.name);
+            if (manifest !is null && !manifest.ctfeComplete) {
+                evaluateManifestConstant(manifest);
             }
         } else if (auto unary = cast(UnaryExpression)expr) {
             ensureDependenciesEvaluated(unary.operand);
@@ -848,18 +861,14 @@ class CTFEEvaluator {
         
         // Manifest constant reference - check if it's an array
         if (auto ident = cast(IdentifierExpression)expr) {
-            foreach (decl; allDeclarations) {
-                if (auto manifest = cast(ManifestConstantDecl)decl) {
-                    if (manifest.name == ident.name) {
-                        if (!manifest.ctfeComplete) {
-                            evaluateManifestConstant(manifest);
-                        }
-                        return manifest.isArrayType;
-                    }
-                }
+            auto manifest = findManifestByName(ident.name);
+            if (manifest !is null) {
+                if (!manifest.ctfeComplete)
+                    evaluateManifestConstant(manifest);
+                return manifest.isArrayType;
             }
         }
-        
+
         // Nested concat - check recursively
         if (auto binary = cast(BinaryExpression)expr) {
             if (binary.operator == BinaryExpression.Operator.Concat) {
@@ -927,15 +936,12 @@ class CTFEEvaluator {
         
         // Manifest constant reference
         if (auto ident = cast(IdentifierExpression)expr) {
-            foreach (decl; allDeclarations) {
-                if (auto manifest = cast(ManifestConstantDecl)decl) {
-                    if (manifest.name == ident.name && manifest.ctfeComplete && manifest.isArrayType) {
-                        return manifest.ctfeArrayBytes;
-                    }
-                }
+            auto manifest = findManifestByName(ident.name);
+            if (manifest !is null && manifest.ctfeComplete && manifest.isArrayType) {
+                return manifest.ctfeArrayBytes;
             }
         }
-        
+
         // Nested concat
         if (auto binary = cast(BinaryExpression)expr) {
             if (binary.operator == BinaryExpression.Operator.Concat) {
@@ -944,7 +950,7 @@ class CTFEEvaluator {
                 return left ~ right;
             }
         }
-        
+
         throw new CTFEError("Cannot get array bytes from expression", expr.location);
     }
     
@@ -963,22 +969,19 @@ class CTFEEvaluator {
         
         // Manifest constant reference
         if (auto ident = cast(IdentifierExpression)expr) {
-            foreach (decl; allDeclarations) {
-                if (auto manifest = cast(ManifestConstantDecl)decl) {
-                    if (manifest.name == ident.name && manifest.ctfeComplete && manifest.isArrayType) {
-                        return manifest.ctfeArrayValue;
-                    }
-                }
+            auto manifest = findManifestByName(ident.name);
+            if (manifest !is null && manifest.ctfeComplete && manifest.isArrayType) {
+                return manifest.ctfeArrayValue;
             }
         }
-        
+
         // Nested concat
         if (auto binary = cast(BinaryExpression)expr) {
             if (binary.operator == BinaryExpression.Operator.Concat) {
                 return getArrayValues(binary.left) ~ getArrayValues(binary.right);
             }
         }
-        
+
         return [];
     }
     
@@ -1011,33 +1014,17 @@ class CTFEEvaluator {
                 funcDecl = cast(FunctionDecl)sym.declaration;
         }
 
-        // Fallback: linear scan of all declarations (for functions not yet in scope)
+        // Fallback: scan declarations (for functions not yet in scope)
         if (!funcDecl) {
-            foreach (decl; allDeclarations) {
-                if (auto fd = cast(FunctionDecl)decl) {
-                    if (fd.name == funcName) {
-                        funcDecl = fd;
-                        break;
-                    }
-                }
-            }
+            funcDecl = findFunctionByName(funcName);
         }
 
         // IFTI: if no direct FunctionDecl found, check for TemplateDecl
         if (!funcDecl) {
             import semantic.template_instantiation : TemplateInstantiator;
 
-            TemplateDecl tmplDecl = null;
-            FunctionDecl tmplFunc = null;
-            foreach (decl; allDeclarations) {
-                if (auto td = cast(TemplateDecl)decl) {
-                    if (td.name == funcName) {
-                        tmplDecl = td;
-                        tmplFunc = cast(FunctionDecl)td.eponymousMember();
-                        break;
-                    }
-                }
-            }
+            TemplateDecl tmplDecl = findTemplateByName(funcName);
+            FunctionDecl tmplFunc = tmplDecl !is null ? cast(FunctionDecl)tmplDecl.eponymousMember() : null;
 
             if (tmplDecl !is null && tmplFunc !is null) {
                 // Deduce types from arguments
@@ -1230,15 +1217,7 @@ class CTFEEvaluator {
         import semantic.template_instantiation : TemplateInstantiator;
 
         // Find the template declaration
-        TemplateDecl tmplDecl = null;
-        foreach (decl; allDeclarations) {
-            if (auto td = cast(TemplateDecl)decl) {
-                if (td.name == tmplInst.templateName) {
-                    tmplDecl = td;
-                    break;
-                }
-            }
-        }
+        TemplateDecl tmplDecl = findTemplateByName(tmplInst.templateName);
         if (!tmplDecl)
             throw new CTFEError("CTFE: Template '" ~ tmplInst.templateName ~ "' not found", tmplInst.location);
 
@@ -1312,13 +1291,12 @@ class CTFEEvaluator {
      * Execute a function that returns a static array via CTFE backend.
      */
     CTFEResult executeStaticArrayViaBackend(FunctionDecl funcDecl, long[] args, uint elemCount, uint elemSize) {
-        import semantic.dependency_analyzer : DependencyAnalyzer;
         import std.algorithm : map, filter, canFind;
         import std.array : array, join;
         
         // Find all functions this one depends on (transitive closure)
         auto t0 = MonoTime.currTime;
-        auto analyzer = new DependencyAnalyzer(symbolTable, allDeclarations);
+        auto analyzer = makeDependencyAnalyzer();
         auto dependencies = analyzer.findDependencies(funcDecl);
         statAnalysisTime += MonoTime.currTime - t0;
 
@@ -1399,7 +1377,6 @@ class CTFEEvaluator {
      * Evaluate a function that returns a struct via hidden result pointer.
      */
     CTFEResult evaluateStructReturningFunction(FunctionDecl funcDecl, Expression[] argExprs, StructDecl structDecl) {
-        import semantic.dependency_analyzer : DependencyAnalyzer;
         import std.algorithm : filter;
         import std.array : array;
         
@@ -1414,7 +1391,7 @@ class CTFEEvaluator {
         
         // Find dependencies and compile if needed
         auto t0 = MonoTime.currTime;
-        auto analyzer = new DependencyAnalyzer(symbolTable, allDeclarations);
+        auto analyzer = makeDependencyAnalyzer();
         auto dependencies = analyzer.findDependencies(funcDecl);
         statAnalysisTime += MonoTime.currTime - t0;
         auto newFuncs = dependencies.filter!(f => ctfeFuncKey(f) !in compiledFunctions).array;
@@ -1530,15 +1507,12 @@ class CTFEEvaluator {
         }
         // For identifier references to manifest constants
         if (auto ident = cast(IdentifierExpression)expr) {
-            foreach (decl; allDeclarations) {
-                if (auto manifest = cast(ManifestConstantDecl)decl) {
-                    if (manifest.name == ident.name) {
-                        if (!manifest.ctfeComplete)
-                            evaluateManifestConstant(manifest);
-                        if (manifest.ctfeComplete && !manifest.isStringType && !manifest.isArrayType)
-                            return manifest.ctfeValue;
-                    }
-                }
+            auto manifest = findManifestByName(ident.name);
+            if (manifest !is null) {
+                if (!manifest.ctfeComplete)
+                    evaluateManifestConstant(manifest);
+                if (manifest.ctfeComplete && !manifest.isStringType && !manifest.isArrayType)
+                    return manifest.ctfeValue;
             }
         }
         // Non-literal: evaluate through the backend
@@ -1585,14 +1559,11 @@ class CTFEEvaluator {
             return literal.value.type == typeid(double);
         }
         if (auto ident = cast(IdentifierExpression)expr) {
-            foreach (decl; allDeclarations) {
-                if (auto manifest = cast(ManifestConstantDecl)decl) {
-                    if (manifest.name == ident.name) {
-                        if (!manifest.ctfeComplete)
-                            evaluateManifestConstant(manifest);
-                        return manifest.isFloatType;
-                    }
-                }
+            auto manifest = findManifestByName(ident.name);
+            if (manifest !is null) {
+                if (!manifest.ctfeComplete)
+                    evaluateManifestConstant(manifest);
+                return manifest.isFloatType;
             }
             return false;
         }
@@ -1645,7 +1616,6 @@ class CTFEEvaluator {
      * Shared compilation step used by all CTFE execution paths.
      */
     private void ensureCompiledForFunction(FunctionDecl funcDecl) {
-        import semantic.dependency_analyzer : DependencyAnalyzer;
         import std.algorithm : map, filter;
         import std.array : array, join;
 
@@ -1654,7 +1624,7 @@ class CTFEEvaluator {
 
         // Find all functions this one depends on (transitive closure)
         auto t0 = MonoTime.currTime;
-        auto analyzer = new DependencyAnalyzer(symbolTable, allDeclarations);
+        auto analyzer = makeDependencyAnalyzer();
         auto dependencies = analyzer.findDependencies(funcDecl);
         statAnalysisTime += MonoTime.currTime - t0;
 
@@ -1826,12 +1796,9 @@ class CTFEEvaluator {
         }
 
         if (auto ident = cast(IdentifierExpression)expr) {
-            foreach (decl; allDeclarations) {
-                if (auto manifest = cast(ManifestConstantDecl)decl) {
-                    if (manifest.name == ident.name && manifest.ctfeComplete && manifest.isStringType) {
-                        return manifest.ctfeStringValue;
-                    }
-                }
+            auto manifest = findManifestByName(ident.name);
+            if (manifest !is null && manifest.ctfeComplete && manifest.isStringType) {
+                return manifest.ctfeStringValue;
             }
             throw new CTFEError("CTFE: Cannot evaluate mixin expression identifier '" ~ ident.name ~ "'", expr.location);
         }
@@ -1914,5 +1881,50 @@ class CTFEEvaluator {
                 msg = msg[prefix.length..$];
             throw new CTFEError(msg, SourceLocation.init);
         }
+    }
+
+    // ── Private helpers: indexed lookup with fallback to linear scan ──
+
+    private FunctionDecl findFunctionByName(string name) {
+        if (modulesCtx !is null)
+            return modulesCtx.findFunction(name);
+        foreach (decl; allDeclarations) {
+            if (auto fd = cast(FunctionDecl)decl) {
+                if (fd.name == name)
+                    return fd;
+            }
+        }
+        return null;
+    }
+
+    private ManifestConstantDecl findManifestByName(string name) {
+        if (modulesCtx !is null)
+            return modulesCtx.findManifest(name);
+        foreach (decl; allDeclarations) {
+            if (auto md = cast(ManifestConstantDecl)decl) {
+                if (md.name == name)
+                    return md;
+            }
+        }
+        return null;
+    }
+
+    private TemplateDecl findTemplateByName(string name) {
+        if (modulesCtx !is null)
+            return modulesCtx.findTemplate(name);
+        foreach (decl; allDeclarations) {
+            if (auto td = cast(TemplateDecl)decl) {
+                if (td.name == name)
+                    return td;
+            }
+        }
+        return null;
+    }
+
+    private auto makeDependencyAnalyzer() {
+        import semantic.dependency_analyzer : DependencyAnalyzer;
+        if (modulesCtx !is null)
+            return new DependencyAnalyzer(symbolTable, modulesCtx);
+        return new DependencyAnalyzer(symbolTable, allDeclarations);
     }
 }
