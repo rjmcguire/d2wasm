@@ -1,0 +1,8 @@
+{
+  "name": "diamond_dependency",
+  "description": "CTFE parity: diamond import A->B->D, A->C->D with topological ordering",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 42,
+  "compiler_args": ["--import-path", "tests/ctfe_parity/parity_114_diamond_dependency"]
+}

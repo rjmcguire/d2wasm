@@ -1,0 +1,8 @@
+{
+  "name": "circular_import",
+  "description": "CTFE parity: circular imports A->B->A are legal in D and must not crash",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 42,
+  "compiler_args": ["--import-path", "tests/ctfe_parity/parity_116_circular_import"]
+}

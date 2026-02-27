@@ -1,0 +1,7 @@
+{
+  "name": "private_visibility",
+  "description": "CTFE parity: private symbols from imported module are not visible",
+  "type": "compile_error",
+  "expected_error": "Undefined identifier 'secret'",
+  "compiler_args": ["--import-path", "tests/ctfe_parity/parity_117_private_visibility"]
+}

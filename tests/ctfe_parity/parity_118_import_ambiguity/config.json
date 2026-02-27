@@ -1,0 +1,7 @@
+{
+  "name": "import_ambiguity",
+  "description": "CTFE parity: same symbol from two wildcard imports is ambiguous",
+  "type": "compile_error",
+  "expected_error": "Ambiguous symbol 'compute'",
+  "compiler_args": ["--import-path", "tests/ctfe_parity/parity_118_import_ambiguity"]
+}

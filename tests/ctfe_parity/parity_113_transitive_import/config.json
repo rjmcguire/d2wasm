@@ -1,0 +1,8 @@
+{
+  "name": "transitive_import",
+  "description": "CTFE parity: recursive parse-on-demand resolves transitive A->B->C imports",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 42,
+  "compiler_args": ["--import-path", "tests/ctfe_parity/parity_113_transitive_import"]
+}
