@@ -1,0 +1,8 @@
+{
+  "name": "ctfe_chain_modules",
+  "description": "CTFE parity: module B's manifest constant calls function from module C; root uses B's constant",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 89,
+  "compiler_args": ["--import-path", "tests/ctfe_parity/parity_122_ctfe_chain_modules"]
+}

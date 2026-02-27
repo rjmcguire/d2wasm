@@ -1,0 +1,8 @@
+{
+  "name": "cross_module_ctfe",
+  "description": "CTFE parity: manifest constant calls function from imported module (per-module evaluator)",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 55,
+  "compiler_args": ["--import-path", "tests/ctfe_parity/parity_120_cross_module_ctfe"]
+}

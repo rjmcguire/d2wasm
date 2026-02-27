@@ -399,6 +399,13 @@ class NativeCompiledFunction : CompiledFunction {
             if (auto fd = cast(FunctionDecl)sym.declaration)
                 return getMangledName(fd);
         }
+        // Fallback: search compiled functions by plain name.
+        // Needed for cross-module CTFE where the symbol table's scope chain
+        // may not have the imported function visible during native codegen.
+        foreach (mangledName, decl; functionDecls) {
+            if (decl.name == funcIdent.name)
+                return mangledName;
+        }
         return funcIdent.name;  // fallback for builtins etc.
     }
 
@@ -1793,6 +1800,36 @@ class NativeCompiledFunction : CompiledFunction {
         }
     }
 
+    /// Compile pre/post increment/decrement (++i, i++, --i, i--)
+    private void compileIncDec(UnaryExpression expr) {
+        auto ident = cast(IdentifierExpression)expr.operand;
+        if (!ident)
+            throw new Exception("Increment/decrement requires identifier");
+
+        auto info = ident.name in localVars;
+        if (info is null)
+            throw new Exception("Increment/decrement on unknown variable: " ~ ident.name);
+        if (info.kind != VarKind.scalar)
+            throw new Exception("Increment/decrement requires scalar variable");
+
+        bool isInc = (expr.operator == UnaryExpression.Operator.PreIncrement
+                   || expr.operator == UnaryExpression.Operator.PostIncrement);
+        bool isPost = (expr.operator == UnaryExpression.Operator.PostIncrement
+                    || expr.operator == UnaryExpression.Operator.PostDecrement);
+
+        // Load old value, compute new = old ± 1, store back.
+        // stencil_add_i32: w0 = w1 + w0.  Use +1 for inc, +(-1) for dec.
+        gen.emitLoadLocal32(info.offset);                   // w0 = old
+        gen.emitMoveX0ToX1();                               // x1 = old (preserved across add+store)
+        gen.emitImm32(stencil_load_imm32, isInc ? 1 : -1); // w0 = ±1
+        gen.emit(stencil_add_i32);                          // w0 = old ± 1
+        gen.emitStoreLocal32(info.offset);                  // store new value
+
+        if (isPost)
+            gen.emit(stencil_move_arg1_to_result);          // x0 = x1 = old (return old)
+        // else: x0 already has new value
+    }
+
     /// Check if an expression contains a function call (which would clobber registers)
     private bool containsFunctionCall(Expression expr) {
         if (expr is null) return false;
@@ -2077,6 +2114,13 @@ class NativeCompiledFunction : CompiledFunction {
                 compileExpression(unaryOp.operand);
                 // ~x
                 gen.emit(stencil_not_i32);
+            } else if (unaryOp.operator == UnaryExpression.Operator.PreIncrement
+                    || unaryOp.operator == UnaryExpression.Operator.PostIncrement
+                    || unaryOp.operator == UnaryExpression.Operator.PreDecrement
+                    || unaryOp.operator == UnaryExpression.Operator.PostDecrement) {
+                compileIncDec(unaryOp);
+            } else {
+                assert(0, "Unsupported unary operator: " ~ to!string(unaryOp.operator));
             }
         } else if (auto ident = cast(IdentifierExpression)expr) {
             import std.stdio : writeln;

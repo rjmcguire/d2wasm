@@ -1,0 +1,8 @@
+{
+  "name": "independent_module_ctfe",
+  "description": "CTFE parity: two imported modules each evaluate their own manifest constants independently",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 30,
+  "compiler_args": ["--import-path", "tests/ctfe_parity/parity_121_independent_module_ctfe"]
+}
