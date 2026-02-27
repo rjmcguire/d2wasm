@@ -239,9 +239,6 @@ class CTFEEvaluator {
             ? TypeReader.forNative()
             : TypeReader.forWasm();
 
-        // Register lazy resolver with symbol table
-        symbolTable.ctfeResolver = &this.evaluateManifestConstant;
-
         // Register template constraint evaluator
         symbolTable.constraintEvaluator = &this.evaluateTemplateConstraint;
     }
@@ -255,7 +252,6 @@ class CTFEEvaluator {
             ? TypeReader.forNative()
             : TypeReader.forWasm();
 
-        symbolTable.ctfeResolver = &this.evaluateManifestConstant;
         symbolTable.constraintEvaluator = &this.evaluateTemplateConstraint;
     }
     

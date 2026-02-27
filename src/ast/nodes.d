@@ -643,6 +643,16 @@ class ManifestConstantDecl : Declaration {
     bool isNestedArrayType;         // True if this is a nested array constant (T[][])
     void delegate(ManifestConstantDecl) ownModuleResolver; // Owning module's CTFE evaluator
 
+    void ensureEvaluated() {
+        if (ctfeComplete)
+            return;
+        assert(ownModuleResolver !is null,
+            "ManifestConstantDecl '" ~ name ~ "' has no resolver stamped");
+        ownModuleResolver(this);
+        assert(ctfeComplete,
+            "CTFE resolver returned without completing evaluation of '" ~ name ~ "'");
+    }
+
     this(SourceLocation loc, string name, Expression initializer) {
         super(loc, name, true);  // Manifest constants are always "public" in their scope
         this.initializer = initializer;

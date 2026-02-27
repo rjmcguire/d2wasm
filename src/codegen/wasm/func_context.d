@@ -2571,8 +2571,7 @@ class FuncContext {
             if (symbol && symbol.isConstant) {
                 if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
                     if (manifest.isArrayType || manifest.isNestedArrayType) {
-                        if (!manifest.ctfeComplete)
-                            emitter.symbolTable.ensureManifestEvaluated(manifest);
+                        manifest.ensureEvaluated();
                         uint structAddr = manifest.isNestedArrayType
                             ? emitter.registerManifestNestedArray(manifest)
                             : emitter.registerManifestArray(manifest);
@@ -4876,24 +4875,20 @@ class FuncContext {
         // Check if it's a manifest constant (CTFE-evaluated lazily)
         if (symbol && symbol.isConstant) {
             if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
-                // Trigger lazy evaluation if needed, then emit
+                assert(manifest.ownModuleResolver !is null,
+                    "Manifest '" ~ manifest.name ~ "' reached codegen without resolver stamp");
+                manifest.ensureEvaluated();
                 if (manifest.isStringType) {
-                    if (!manifest.ctfeComplete) {
-                        emitter.symbolTable.resolveManifestValue(manifest);
-                    }
                     uint structAddr = emitter.registerArrayLiteral(manifest.ctfeStringValue);
                     out_ ~= Op.i32_const;
                     leb128s(out_, structAddr);
                 } else if (manifest.isFloatType) {
-                    if (!manifest.ctfeComplete) {
-                        emitter.symbolTable.resolveManifestValue(manifest);
-                    }
                     out_ ~= Op.f64_const;
                     double val = manifest.ctfeFloatValue;
                     out_ ~= (cast(ubyte*)&val)[0 .. 8];
                 } else {
                     out_ ~= Op.i32_const;
-                    leb128s(out_, emitter.symbolTable.resolveManifestValue(manifest));
+                    leb128s(out_, manifest.ctfeValue);
                 }
                 return;
             }
@@ -6127,8 +6122,7 @@ class FuncContext {
             }
             else if (auto manifestStr = getStringManifest(arg)) {
                 // String manifest constant — resolve value and emit like string literal
-                if (!manifestStr.ctfeComplete)
-                    emitter.symbolTable.resolveManifestValue(manifestStr);
+                manifestStr.ensureEvaluated();
                 uint structAddr = emitter.registerArrayLiteral(manifestStr.ctfeStringValue);
 
                 // Load ptr from struct (offset 0)
@@ -6152,8 +6146,7 @@ class FuncContext {
             }
             else if (auto manifestFloat = getFloatManifest(arg)) {
                 // Float manifest constant — emit f64_const + __ctfe_write_f64
-                if (!manifestFloat.ctfeComplete)
-                    emitter.symbolTable.resolveManifestValue(manifestFloat);
+                manifestFloat.ensureEvaluated();
                 double val = manifestFloat.ctfeFloatValue;
                 out_ ~= Op.f64_const;
                 out_ ~= (cast(ubyte*)&val)[0 .. 8];

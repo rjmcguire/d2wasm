@@ -652,13 +652,13 @@ class BinaryEmitter {
             if (symbol && symbol.isConstant) {
                 if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
                     if (!manifest.isStringType) {
-                        // Lazy evaluation via resolver
-                        return symbolTable.resolveManifestValue(manifest);
+                        manifest.ensureEvaluated();
+                        return manifest.ctfeValue;
                     }
                 }
             }
         }
-        
+
         if (auto binary = cast(BinaryExpression)expr) {
             long left = evaluateConstantIntExpr(binary.left);
             long right = evaluateConstantIntExpr(binary.right);
@@ -3368,8 +3368,8 @@ private class EvalContext {
             if (symbol && symbol.isConstant) {
                 if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
                     if (!manifest.isStringType) {
-                        // Lazy evaluation via resolver
-                        return emitter.symbolTable.resolveManifestValue(manifest);
+                        manifest.ensureEvaluated();
+                        return manifest.ctfeValue;
                     }
                 }
             }
@@ -3432,24 +3432,20 @@ private class EvalContext {
         auto symbol = emitter.symbolTable.lookupSymbol(expr.name);
         if (symbol && symbol.isConstant) {
             if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
-                // Trigger lazy evaluation if needed
+                assert(manifest.ownModuleResolver !is null,
+                    "Manifest '" ~ manifest.name ~ "' reached codegen without resolver stamp");
+                manifest.ensureEvaluated();
                 if (manifest.isStringType) {
-                    if (!manifest.ctfeComplete) {
-                        emitter.symbolTable.resolveManifestValue(manifest);
-                    }
                     uint structAddr = emitter.registerArrayLiteral(manifest.ctfeStringValue);
                     out_ ~= Op.i32_const;
                     leb128s(out_, structAddr);
                 } else if (manifest.isFloatType) {
-                    if (!manifest.ctfeComplete) {
-                        emitter.symbolTable.resolveManifestValue(manifest);
-                    }
                     out_ ~= Op.f64_const;
                     double val = manifest.ctfeFloatValue;
                     out_ ~= (cast(ubyte*)&val)[0 .. 8];
                 } else {
                     out_ ~= Op.i32_const;
-                    leb128s(out_, emitter.symbolTable.resolveManifestValue(manifest));
+                    leb128s(out_, manifest.ctfeValue);
                 }
                 return;
             }

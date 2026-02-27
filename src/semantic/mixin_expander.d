@@ -53,6 +53,7 @@ class MixinExpander {
     private uint currentDepth = 0;
     private string backendName;
     private bool hasExternalSymbolTable;  // true when using caller's symbol table
+    private CTFEEvaluator ctfeEvaluator;  // owned evaluator instance
 
     /// Maximum mixin expansion depth to prevent infinite recursion
     enum MAX_EXPANSION_DEPTH = 100;
@@ -294,27 +295,27 @@ class MixinExpander {
     }
     
     /**
-     * Set up symbol table and lazy CTFE resolver.
+     * Set up symbol table and CTFE evaluator.
      * Actual evaluation happens on-demand when values are accessed.
      */
     private void setupCTFE() {
         if (hasExternalSymbolTable) {
             // External ST already has symbols collected and scope wired.
-            // Only create CTFE evaluator if one isn't already registered.
-            if (tempSymbolTable.ctfeResolver is null)
-                new CTFEEvaluator(tempSymbolTable, allDeclarations, backendName);
-            return;
+            if (ctfeEvaluator is null)
+                ctfeEvaluator = new CTFEEvaluator(tempSymbolTable, allDeclarations, backendName);
+        } else {
+            // Collect all declarations into symbol table for CTFE
+            auto collector = new SymbolCollector(tempSymbolTable);
+            collector.collectSymbols(allDeclarations);
+
+            ctfeEvaluator = new CTFEEvaluator(tempSymbolTable, allDeclarations, backendName);
         }
-
-        // Collect all declarations into symbol table for CTFE
-        // (structs, functions, manifest constants - everything CTFE might reference)
-        // Use collectSymbols to handle ModuleDecl and set module path for mangling
-        auto collector = new SymbolCollector(tempSymbolTable);
-        collector.collectSymbols(allDeclarations);
-
-        // Create evaluator - this registers the lazy resolver with the symbol table
-        // Actual evaluation happens when resolveManifestValue() is called
-        new CTFEEvaluator(tempSymbolTable, allDeclarations, backendName);
+        // Stamp only unstamped manifests (don't overwrite imported modules' stamps)
+        foreach (decl; allDeclarations) {
+            if (auto manifest = cast(ManifestConstantDecl)decl)
+                if (manifest.ownModuleResolver is null)
+                    manifest.ownModuleResolver = &ctfeEvaluator.evaluateManifestConstant;
+        }
     }
     
     /**
@@ -523,8 +524,8 @@ class MixinExpander {
                 auto sym = tempSymbolTable.lookupSymbol(ident.name);
                 if (sym !is null) {
                     if (auto manifest = cast(ManifestConstantDecl)sym.declaration) {
-                        long value = tempSymbolTable.resolveManifestValue(manifest);
-                        return value != 0;
+                        manifest.ensureEvaluated();
+                        return manifest.ctfeValue != 0;
                     }
                 }
             } else {
@@ -532,8 +533,8 @@ class MixinExpander {
                 foreach (decl; allDeclarations) {
                     if (auto manifest = cast(ManifestConstantDecl)decl) {
                         if (manifest.name == ident.name) {
-                            long value = tempSymbolTable.resolveManifestValue(manifest);
-                            return value != 0;
+                            manifest.ensureEvaluated();
+                            return manifest.ctfeValue != 0;
                         }
                     }
                 }
@@ -657,14 +658,18 @@ class MixinExpander {
             if (hasExternalSymbolTable) {
                 auto sym = tempSymbolTable.lookupSymbol(ident.name);
                 if (sym !is null) {
-                    if (auto manifest = cast(ManifestConstantDecl)sym.declaration)
-                        return tempSymbolTable.resolveManifestValue(manifest);
+                    if (auto manifest = cast(ManifestConstantDecl)sym.declaration) {
+                        manifest.ensureEvaluated();
+                        return manifest.ctfeValue;
+                    }
                 }
             } else {
                 foreach (decl; allDeclarations) {
                     if (auto manifest = cast(ManifestConstantDecl)decl) {
-                        if (manifest.name == ident.name)
-                            return tempSymbolTable.resolveManifestValue(manifest);
+                        if (manifest.name == ident.name) {
+                            manifest.ensureEvaluated();
+                            return manifest.ctfeValue;
+                        }
                     }
                 }
             }
@@ -730,7 +735,8 @@ class MixinExpander {
                 }
             }
             if (manifest !is null) {
-                string value = tempSymbolTable.resolveManifestStringValue(manifest);
+                manifest.ensureEvaluated();
+                string value = manifest.ctfeStringValue;
                 if (!manifest.isStringType) {
                     throw new MixinError(
                         "Mixin argument '" ~ ident.name ~ "' is not a string",

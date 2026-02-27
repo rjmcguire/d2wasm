@@ -209,33 +209,40 @@ class ModuleCompiler {
             controller.ensureDepPhase(dep, ModulePhase.typeChecked);
         }
 
-        // 2. Create per-module CTFE evaluator with this module's own ST
+        // 2. Create per-module CTFE evaluator
         if (ctfeEvaluator_ is null) {
             auto mctx = controller.getModulesContext();
             ctfeEvaluator_ = new CTFEEvaluator(
                 module_.symbolTable, mctx, controller.backend,
                 controller.enableStackTrace);
-
-            // Stamp per-module resolver so cross-module lazy evaluation uses the right scope
-            foreach (decl; module_.ast) {
-                if (auto manifest = cast(ManifestConstantDecl)decl)
-                    manifest.ownModuleResolver = &ctfeEvaluator_.evaluateManifestConstant;
-            }
         }
 
-        // 3. Type-check
+        // 3. Stamp manifest constants BEFORE type checking so lazy evaluation works
+        stampManifests();
+
+        // 4. Type-check
         auto tc = new TypeChecker(module_.symbolTable);
         tc.checkDeclarations(module_.ast);
 
-        // 4. Collect template instantiations
+        // 5. Collect template instantiations
         auto mctx = controller.getModulesContext();
         foreach (inst; tc.templateInstantiator.allInstantiations()) {
             module_.ast ~= inst;
             mctx.addDeclaration(inst);
         }
 
+        // 6. Re-stamp to catch any manifests produced by template instantiation
+        stampManifests();
+
         module_.phase = ModulePhase.typeChecked;
         log(2, "ModuleCompiler: type-checked ", module_.fullyQualifiedName());
+    }
+
+    private void stampManifests() {
+        foreach (decl; module_.ast) {
+            if (auto manifest = cast(ManifestConstantDecl)decl)
+                manifest.ownModuleResolver = &ctfeEvaluator_.evaluateManifestConstant;
+        }
     }
 
     /**

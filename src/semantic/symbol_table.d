@@ -318,9 +318,6 @@ class SymbolTable {
     // Set from ModuleDecl during compilation, empty if no module declaration
     private string[] _modulePath;
     
-    // Lazy CTFE evaluation - callback set by CTFEEvaluator
-    void delegate(ManifestConstantDecl) ctfeResolver;
-
     // Template constraint evaluation - callback set by CTFEEvaluator
     // Throws TypeError if constraint not satisfied, or on evaluation error.
     void delegate(Expression, SourceLocation, string, string[]) constraintEvaluator;
@@ -376,46 +373,6 @@ class SymbolTable {
     string moduleFullyQualifiedName() const {
         import std.array : join;
         return _modulePath.join(".");
-    }
-    
-    /**
-     * Lazily resolve a manifest constant's integer value via CTFE.
-     * Call this instead of accessing ctfeValue directly.
-     */
-    long resolveManifestValue(ManifestConstantDecl manifest) {
-        if (!manifest.ctfeComplete) {
-            if (ctfeResolver is null) {
-                throw new SemanticError("CTFE not configured - cannot resolve '" ~ manifest.name ~ "'", manifest.location);
-            }
-            ctfeResolver(manifest);
-        }
-        return manifest.ctfeValue;
-    }
-    
-    /**
-     * Lazily resolve a manifest constant's string value via CTFE.
-     * Use for string enum constants.
-     */
-    string resolveManifestStringValue(ManifestConstantDecl manifest) {
-        if (!manifest.ctfeComplete) {
-            if (ctfeResolver is null) {
-                throw new SemanticError("CTFE not configured - cannot resolve '" ~ manifest.name ~ "'", manifest.location);
-            }
-            ctfeResolver(manifest);
-        }
-        return manifest.ctfeStringValue;
-    }
-    
-    /**
-     * Ensure a manifest constant is evaluated (for either type).
-     */
-    void ensureManifestEvaluated(ManifestConstantDecl manifest) {
-        if (!manifest.ctfeComplete) {
-            if (ctfeResolver is null) {
-                throw new SemanticError("CTFE not configured - cannot resolve '" ~ manifest.name ~ "'", manifest.location);
-            }
-            ctfeResolver(manifest);
-        }
     }
     
     /**
@@ -588,15 +545,9 @@ class SymbolTable {
         if (symbol && symbol.isConstant) {
             if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
                 if (!manifest.ctfeComplete) {
-                    // Prefer the owning module's resolver for cross-module correctness
-                    if (manifest.ownModuleResolver !is null)
-                        manifest.ownModuleResolver(manifest);
-                    else if (ctfeResolver !is null)
-                        ctfeResolver(manifest);
-                    // Update symbol type from inferred type
-                    if (manifest.inferredType !is null) {
+                    manifest.ensureEvaluated();
+                    if (manifest.inferredType !is null)
                         symbol.type = manifest.inferredType;
-                    }
                 }
             }
         }

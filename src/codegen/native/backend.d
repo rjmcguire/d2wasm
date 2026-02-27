@@ -1534,8 +1534,7 @@ class NativeCompiledFunction : CompiledFunction {
                         auto sym = symbolTable.lookupSymbol(identInit.name);
                         if (sym && sym.isConstant) {
                             if (auto manifest = cast(ManifestConstantDecl)sym.declaration) {
-                                if (!manifest.ctfeComplete)
-                                    symbolTable.ensureManifestEvaluated(manifest);
+                                manifest.ensureEvaluated();
                                 if (manifest.isNestedArrayType) {
                                     // Build nested array data in native data section
                                     uint outerCount = cast(uint)manifest.ctfeNestedElements.length;
@@ -2140,9 +2139,10 @@ class NativeCompiledFunction : CompiledFunction {
                 writeln("Native Backend: lookupSymbol(", ident.name, ") = ", symbol ? symbol.name : "null");
                 if (symbol && symbol.isConstant) {
                     if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
-                        if (!manifest.ctfeComplete)
-                            symbolTable.resolveManifestValue(manifest);
-                        
+                        assert(manifest.ownModuleResolver !is null,
+                            "Manifest '" ~ manifest.name ~ "' reached codegen without resolver stamp");
+                        manifest.ensureEvaluated();
+
                         if (manifest.isStringType) {
                             // String literal: allocate temp slice and return pointer
                             size_t tempOffset = (nextLocalOffset + 7) & ~7;
@@ -2155,8 +2155,7 @@ class NativeCompiledFunction : CompiledFunction {
                             gen.emitLoadImm64(cast(ulong)bits);
                             gen.emitMoveX0ToD0();
                         } else {
-                            long val = symbolTable.resolveManifestValue(manifest);
-                            gen.emitImm32(stencil_load_imm32, cast(int)val);
+                            gen.emitImm32(stencil_load_imm32, cast(int)manifest.ctfeValue);
                         }
                         return;
                     }
