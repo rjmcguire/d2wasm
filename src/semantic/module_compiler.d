@@ -1,10 +1,9 @@
 /**
- * Module Compiler — lazy on-demand module compilation.
+ * Module Compiler — per-module compilers with a central controller.
  *
- * Replaces the eager 3-pass pipeline in main.d with on-demand phase
- * advancement where each module compiles only when needed, and
- * mixin/static-if resolution is interleaved with symbol collection
- * using the real symbol table (with cross-module scope access).
+ * CompilationController coordinates across modules (shared state, phase ordering,
+ * circular-import detection). Each ModuleCompiler owns a single module's compilation
+ * and requests cross-module information from the controller.
  */
 module semantic.module_compiler;
 
@@ -22,18 +21,27 @@ import diagnostic.log : log;
 /// Parser factory: takes (filename, sourceText), returns Declaration[].
 alias ParseFn = Declaration[] delegate(string filename, string sourceText);
 
-class ModuleCompiler {
+/**
+ * Central coordinator for multi-module compilation.
+ *
+ * Owns shared state (CTFE evaluator, modules context, circular-import set)
+ * and creates per-module compilers on demand.
+ */
+class CompilationController {
     private ModuleRegistry registry;
     private string backendName;
     private bool enableStackTrace;
     private ParseFn parseFn;
     private Module rootModule;  // compilation entry point — its ST is used for CTFE
 
-    // Lazy-initialized
+    // Per-module compilers, keyed by FQN
+    private ModuleCompiler[string] compilers;
+
+    // Lazy-initialized shared state
     private CTFEEvaluator ctfeEvaluator_;
     private ModulesContext modulesCtx_;
 
-    // Circular import protection
+    // Circular import protection (lives here, not per-module)
     private bool[string] advancing;
 
     this(ModuleRegistry registry, ParseFn parseFn, string backendName,
@@ -59,109 +67,52 @@ class ModuleCompiler {
         // Circular import protection: if we're already advancing this module,
         // its scope exists (created at the start of symbolsCollected) — just return.
         if (fqn in advancing) {
-            log(2, "ModuleCompiler: circular import detected for ", fqn, ", proceeding");
+            log(2, "CompilationController: circular import detected for ", fqn, ", proceeding");
             return;
         }
 
         advancing[fqn] = true;
         scope(exit) advancing.remove(fqn);
 
-        // Advance through phases in order
-        if (mod.phase < ModulePhase.symbolsCollected && target >= ModulePhase.symbolsCollected)
-            advanceToSymbolsCollected(mod);
-        if (mod.phase < ModulePhase.typeChecked && target >= ModulePhase.typeChecked)
-            advanceToTypeChecked(mod);
+        auto mc = getCompiler(mod);
+        mc.advanceTo(target);
     }
 
-    /// Accessors for the lazy-initialized objects
+    /// Get or create a per-module compiler
+    ModuleCompiler getCompiler(Module mod) {
+        string fqn = mod.fullyQualifiedName();
+        if (auto existing = fqn in compilers)
+            return *existing;
+        auto mc = new ModuleCompiler(mod, this);
+        compilers[fqn] = mc;
+        return mc;
+    }
+
+    /// Cross-module request: ensure a dependency reaches a phase
+    void ensureDepPhase(Module dep, ModulePhase target) {
+        ensurePhase(dep, target);
+    }
+
+    /// Shared ModulesContext (lazy)
     ModulesContext getModulesContext() {
         if (modulesCtx_ is null)
             modulesCtx_ = new ModulesContext(registry);
         return modulesCtx_;
     }
 
+    /// Shared CTFE evaluator (lazy init on first type-check)
     CTFEEvaluator getCTFEEvaluator() {
         return ctfeEvaluator_;
-    }
-
-    // ── Phase transitions ──────────────────────────────────────────────
-
-    /**
-     * Advance a module to symbolsCollected.
-     * Interleaves mixin expansion with symbol collection using the real ST.
-     */
-    private void advanceToSymbolsCollected(Module mod) {
-        log(2, "ModuleCompiler: collecting symbols for ", mod.fullyQualifiedName());
-
-        // 1. Create symbol table + module scope + builtins
-        mod.symbolTable = new SymbolTable();
-        mod.symbolTable.targetPtrSize = 4;
-        mod.symbolTable.addBuiltinSymbols();
-        mod.symbolTable.setModulePath(mod.modulePath);
-        mod.symbolTable.initModuleScope(mod.modulePath);
-
-        // 2. For each import dep: cascade to symbolsCollected, then wire scope
-        foreach (impDecl; mod.importDecls) {
-            auto dep = cast(Module)impDecl.resolvedModule;
-            if (dep is null)
-                continue;
-            ensurePhase(dep, ModulePhase.symbolsCollected);
-            wireImport(mod, impDecl, dep);
-        }
-
-        // 3. Interleaved symbol collection + mixin expansion.
-        //    expandMixins with external ST pre-collects plain declarations
-        //    (order-independent in D), then expands mixins/static-ifs and
-        //    collects their results incrementally. No separate collectSymbols needed.
-        auto mixinExpander = new MixinExpander(mod.symbolTable, backendName);
-        mod.ast = mixinExpander.expandMixins(mod.ast);
-
-        mod.phase = ModulePhase.symbolsCollected;
-        log(2, "ModuleCompiler: symbols collected for ", mod.fullyQualifiedName());
-    }
-
-    /**
-     * Advance a module to typeChecked.
-     */
-    private void advanceToTypeChecked(Module mod) {
-        log(2, "ModuleCompiler: type-checking ", mod.fullyQualifiedName());
-
-        // 1. Ensure all deps are type-checked
-        foreach (impDecl; mod.importDecls) {
-            auto dep = cast(Module)impDecl.resolvedModule;
-            if (dep is null)
-                continue;
-            ensurePhase(dep, ModulePhase.typeChecked);
-        }
-
-        // 2. Lazy CTFE init (once, before first type-check)
-        ensureCTFEReady(mod);
-
-        // 3. Type-check
-        auto tc = new TypeChecker(mod.symbolTable);
-        tc.checkDeclarations(mod.ast);
-
-        // 4. Collect template instantiations
-        auto mctx = getModulesContext();
-        foreach (inst; tc.templateInstantiator.allInstantiations()) {
-            mod.ast ~= inst;
-            mctx.addDeclaration(inst);
-        }
-
-        mod.phase = ModulePhase.typeChecked;
-        log(2, "ModuleCompiler: type-checked ", mod.fullyQualifiedName());
     }
 
     /**
      * Lazy CTFE initialization. Called once before the first type-check.
      * All reachable modules are at symbolsCollected at this point.
      */
-    private void ensureCTFEReady(Module mod) {
+    void ensureCTFEReady(Module mod) {
         if (ctfeEvaluator_ !is null)
             return;
 
-        // Ensure the input module has its ST ready (it's at symbolsCollected
-        // by the time any module reaches type-checking)
         auto mctx = getModulesContext();
 
         ctfeEvaluator_ = new CTFEEvaluator(
@@ -176,25 +127,113 @@ class ModuleCompiler {
         }
     }
 
+    /// Accessors for shared state (used by main.d)
+    string backend() const { return backendName; }
+}
+
+/**
+ * Per-module compiler. Owns one module's compilation and asks the
+ * controller for anything cross-module.
+ */
+class ModuleCompiler {
+    private Module module_;
+    private CompilationController controller;
+
+    this(Module mod, CompilationController controller) {
+        this.module_ = mod;
+        this.controller = controller;
+    }
+
+    /// Advance this module to the target phase
+    void advanceTo(ModulePhase target) {
+        if (module_.phase < ModulePhase.symbolsCollected && target >= ModulePhase.symbolsCollected)
+            advanceToSymbolsCollected();
+        if (module_.phase < ModulePhase.typeChecked && target >= ModulePhase.typeChecked)
+            advanceToTypeChecked();
+    }
+
     /**
-     * Wire an import's scope into the importing module's scope.
+     * Advance to symbolsCollected.
+     * Interleaves mixin expansion with symbol collection using the real ST.
      */
-    private void wireImport(Module mod, ImportDecl impDecl, Module dep) {
-        if (mod.symbolTable is null || mod.symbolTable.moduleScope is null)
+    private void advanceToSymbolsCollected() {
+        log(2, "ModuleCompiler: collecting symbols for ", module_.fullyQualifiedName());
+
+        // 1. Create symbol table + module scope + builtins
+        module_.symbolTable = new SymbolTable();
+        module_.symbolTable.targetPtrSize = 4;
+        module_.symbolTable.addBuiltinSymbols();
+        module_.symbolTable.setModulePath(module_.modulePath);
+        module_.symbolTable.initModuleScope(module_.modulePath);
+
+        // 2. For each import dep: cascade to symbolsCollected via controller, then wire scope
+        foreach (impDecl; module_.importDecls) {
+            auto dep = cast(Module)impDecl.resolvedModule;
+            if (dep is null)
+                continue;
+            controller.ensureDepPhase(dep, ModulePhase.symbolsCollected);
+            wireImport(impDecl, dep);
+        }
+
+        // 3. Interleaved symbol collection + mixin expansion.
+        auto mixinExpander = new MixinExpander(module_.symbolTable, controller.backend);
+        module_.ast = mixinExpander.expandMixins(module_.ast);
+
+        module_.phase = ModulePhase.symbolsCollected;
+        log(2, "ModuleCompiler: symbols collected for ", module_.fullyQualifiedName());
+    }
+
+    /**
+     * Advance to typeChecked.
+     */
+    private void advanceToTypeChecked() {
+        log(2, "ModuleCompiler: type-checking ", module_.fullyQualifiedName());
+
+        // 1. Ensure all deps are type-checked
+        foreach (impDecl; module_.importDecls) {
+            auto dep = cast(Module)impDecl.resolvedModule;
+            if (dep is null)
+                continue;
+            controller.ensureDepPhase(dep, ModulePhase.typeChecked);
+        }
+
+        // 2. Lazy CTFE init (once, before first type-check)
+        controller.ensureCTFEReady(module_);
+
+        // 3. Type-check
+        auto tc = new TypeChecker(module_.symbolTable);
+        tc.checkDeclarations(module_.ast);
+
+        // 4. Collect template instantiations
+        auto mctx = controller.getModulesContext();
+        foreach (inst; tc.templateInstantiator.allInstantiations()) {
+            module_.ast ~= inst;
+            mctx.addDeclaration(inst);
+        }
+
+        module_.phase = ModulePhase.typeChecked;
+        log(2, "ModuleCompiler: type-checked ", module_.fullyQualifiedName());
+    }
+
+    /**
+     * Wire an import's scope into this module's scope.
+     */
+    private void wireImport(ImportDecl impDecl, Module dep) {
+        if (module_.symbolTable is null || module_.symbolTable.moduleScope is null)
             return;
         if (dep.symbolTable is null || dep.symbolTable.moduleScope is null)
             return;
 
         if (impDecl.moduleAlias.length > 0) {
-            mod.symbolTable.moduleScope.addModuleAlias(
+            module_.symbolTable.moduleScope.addModuleAlias(
                 impDecl.moduleAlias, dep.symbolTable.moduleScope);
         } else if (impDecl.selectiveImports.length > 0) {
             foreach (ref sel; impDecl.selectiveImports) {
-                mod.symbolTable.moduleScope.addSelectiveImport(
+                module_.symbolTable.moduleScope.addSelectiveImport(
                     sel.localName, dep.symbolTable.moduleScope, sel.remoteName);
             }
         } else {
-            mod.symbolTable.moduleScope.addImport(dep.symbolTable.moduleScope);
+            module_.symbolTable.moduleScope.addImport(dep.symbolTable.moduleScope);
         }
     }
 }

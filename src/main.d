@@ -308,23 +308,23 @@ int compileFile(CompilerOptions options) {
         importResolver.resolveImports(inputModule);
 
         // ── On-demand compilation: mixin expand + symbol collect + type check ──
-        import semantic.module_compiler : ModuleCompiler;
+        import semantic.module_compiler : CompilationController;
         import semantic.mixin_expander : MixinError;
 
-        auto compiler = new ModuleCompiler(
+        auto controller = new CompilationController(
             modRegistry, parseFn, options.backend, options.stackTrace,
             inputModule);  // root module for CTFE symbol table
 
         try {
-            compiler.ensurePhase(inputModule, ModulePhase.typeChecked);
+            controller.ensurePhase(inputModule, ModulePhase.typeChecked);
         } catch (MixinError e) {
             printError(e);
             return 1;
         }
 
-        auto modulesCtx = compiler.getModulesContext();
+        auto modulesCtx = controller.getModulesContext();
         import semantic.ctfe;
-        auto ctfeEvaluator = compiler.getCTFEEvaluator();
+        auto ctfeEvaluator = controller.getCTFEEvaluator();
         ast = inputModule.ast;
 
         if (options.printAst) {
