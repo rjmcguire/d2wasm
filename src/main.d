@@ -312,8 +312,7 @@ int compileFile(CompilerOptions options) {
         import semantic.mixin_expander : MixinError;
 
         auto controller = new CompilationController(
-            modRegistry, parseFn, options.backend, options.stackTrace,
-            inputModule);  // root module for CTFE symbol table
+            modRegistry, parseFn, options.backend, options.stackTrace);
 
         try {
             controller.ensurePhase(inputModule, ModulePhase.typeChecked);
@@ -323,8 +322,6 @@ int compileFile(CompilerOptions options) {
         }
 
         auto modulesCtx = controller.getModulesContext();
-        import semantic.ctfe;
-        auto ctfeEvaluator = controller.getCTFEEvaluator();
         ast = inputModule.ast;
 
         if (options.printAst) {
@@ -351,7 +348,7 @@ int compileFile(CompilerOptions options) {
         // 6b. Evaluate remaining manifest constants (for side-effect-only CTFE like enum _ = ctfeMain())
         // Lazy evaluation only triggers when values are accessed; this ensures all CTFE runs
         log(2, "Evaluating manifest constants...");
-        ctfeEvaluator.evaluateManifestConstants();
+        controller.evaluateAllManifestConstants();
 
         // 6c. Arena allocation analysis
         // Determine which functions allocate (directly or transitively)
@@ -441,7 +438,7 @@ int compileFile(CompilerOptions options) {
                 
                 // Print CTFE stats at verbosity 2+
                 if (options.verbosity >= 2) {
-                    ctfeEvaluator.printStats();
+                    controller.printAllStats();
                 }
                 
                 return result;
@@ -483,7 +480,7 @@ int compileFile(CompilerOptions options) {
         
         // Print CTFE stats at verbosity 2+
         if (options.verbosity >= 2) {
-            ctfeEvaluator.printStats();
+            controller.printAllStats();
         }
         
         return 0;

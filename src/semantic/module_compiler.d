@@ -3,7 +3,8 @@
  *
  * CompilationController coordinates across modules (shared state, phase ordering,
  * circular-import detection). Each ModuleCompiler owns a single module's compilation
- * and requests cross-module information from the controller.
+ * — including its own CTFE evaluator — and requests cross-module information from
+ * the controller.
  */
 module semantic.module_compiler;
 
@@ -24,33 +25,30 @@ alias ParseFn = Declaration[] delegate(string filename, string sourceText);
 /**
  * Central coordinator for multi-module compilation.
  *
- * Owns shared state (CTFE evaluator, modules context, circular-import set)
+ * Owns shared cross-module state (modules context, circular-import set)
  * and creates per-module compilers on demand.
  */
 class CompilationController {
     private ModuleRegistry registry;
     private string backendName;
-    private bool enableStackTrace;
+    package bool enableStackTrace;
     private ParseFn parseFn;
-    private Module rootModule;  // compilation entry point — its ST is used for CTFE
 
     // Per-module compilers, keyed by FQN
     private ModuleCompiler[string] compilers;
 
     // Lazy-initialized shared state
-    private CTFEEvaluator ctfeEvaluator_;
     private ModulesContext modulesCtx_;
 
     // Circular import protection (lives here, not per-module)
     private bool[string] advancing;
 
     this(ModuleRegistry registry, ParseFn parseFn, string backendName,
-         bool enableStackTrace, Module rootModule) {
+         bool enableStackTrace) {
         this.registry = registry;
         this.parseFn = parseFn;
         this.backendName = backendName;
         this.enableStackTrace = enableStackTrace;
-        this.rootModule = rootModule;
     }
 
     /**
@@ -100,44 +98,39 @@ class CompilationController {
         return modulesCtx_;
     }
 
-    /// Shared CTFE evaluator (lazy init on first type-check)
-    CTFEEvaluator getCTFEEvaluator() {
-        return ctfeEvaluator_;
-    }
-
     /**
-     * Lazy CTFE initialization. Called once before the first type-check.
-     * All reachable modules are at symbolsCollected at this point.
+     * Evaluate remaining manifest constants across all modules.
+     * Called after all modules are type-checked, to trigger side-effect-only
+     * CTFE (e.g., `enum _ = ctfeMain()`).
      */
-    void ensureCTFEReady(Module mod) {
-        if (ctfeEvaluator_ !is null)
-            return;
-
-        auto mctx = getModulesContext();
-
-        ctfeEvaluator_ = new CTFEEvaluator(
-            rootModule.symbolTable, mctx, backendName, enableStackTrace);
-
-        // Register CTFE resolver on ALL module symbol tables
-        foreach (m; registry.allModules()) {
-            if (m.symbolTable !is null) {
-                m.symbolTable.ctfeResolver = &ctfeEvaluator_.evaluateManifestConstant;
-                m.symbolTable.constraintEvaluator = &ctfeEvaluator_.evaluateTemplateConstraint;
-            }
+    void evaluateAllManifestConstants() {
+        foreach (fqn, mc; compilers) {
+            mc.evaluateManifestConstants();
         }
     }
 
-    /// Accessors for shared state (used by main.d)
+    /**
+     * Print CTFE statistics from all per-module evaluators.
+     */
+    void printAllStats() {
+        foreach (fqn, mc; compilers) {
+            mc.printStats();
+        }
+    }
+
+    /// Accessors for shared state
     string backend() const { return backendName; }
 }
 
 /**
- * Per-module compiler. Owns one module's compilation and asks the
- * controller for anything cross-module.
+ * Per-module compiler. Owns one module's compilation — including its own
+ * CTFE evaluator with its own symbol table — and asks the controller for
+ * anything cross-module.
  */
 class ModuleCompiler {
     private Module module_;
     private CompilationController controller;
+    private CTFEEvaluator ctfeEvaluator_;
 
     this(Module mod, CompilationController controller) {
         this.module_ = mod;
@@ -150,6 +143,25 @@ class ModuleCompiler {
             advanceToSymbolsCollected();
         if (module_.phase < ModulePhase.typeChecked && target >= ModulePhase.typeChecked)
             advanceToTypeChecked();
+    }
+
+    /**
+     * Evaluate this module's manifest constants.
+     * Called by the controller's final sweep.
+     */
+    void evaluateManifestConstants() {
+        if (ctfeEvaluator_ is null)
+            return;
+        foreach (decl; module_.ast) {
+            if (auto manifest = cast(ManifestConstantDecl)decl)
+                ctfeEvaluator_.evaluateManifestConstant(manifest);
+        }
+    }
+
+    /// Print CTFE stats for this module's evaluator
+    void printStats() {
+        if (ctfeEvaluator_ !is null)
+            ctfeEvaluator_.printStats();
     }
 
     /**
@@ -197,8 +209,13 @@ class ModuleCompiler {
             controller.ensureDepPhase(dep, ModulePhase.typeChecked);
         }
 
-        // 2. Lazy CTFE init (once, before first type-check)
-        controller.ensureCTFEReady(module_);
+        // 2. Create per-module CTFE evaluator with this module's own ST
+        if (ctfeEvaluator_ is null) {
+            auto mctx = controller.getModulesContext();
+            ctfeEvaluator_ = new CTFEEvaluator(
+                module_.symbolTable, mctx, controller.backend,
+                controller.enableStackTrace);
+        }
 
         // 3. Type-check
         auto tc = new TypeChecker(module_.symbolTable);
