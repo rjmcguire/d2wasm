@@ -278,6 +278,17 @@ class BinaryEmitter {
     }
     
     /**
+     * Evict entries from the code cache by mangled name.
+     * Used by dep-graph invalidation to remove transitively dirty functions.
+     */
+    void evictFromCache(const(string[]) dirtyNames) {
+        foreach (name; dirtyNames) {
+            codeCache.remove(name);
+            sourceHashes.remove(name);
+        }
+    }
+
+    /**
      * Compute source hash for a function by extracting its source text.
      */
     private SourceHash computeFunctionHash(FuncInfo f) {

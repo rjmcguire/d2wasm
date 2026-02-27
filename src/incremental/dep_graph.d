@@ -35,6 +35,7 @@ struct DeclNode {
     string kind;          /// "function", "struct", "class", "manifest", "template", "global"
     ulong signatureHash;  /// hash of signature (params+return for func, fields for struct)
     ulong sourceHash;     /// hash of full source text
+    string mangledName;   /// D ABI mangled name (functions only; empty for structs/etc.)
 }
 
 /// A directed edge: `from` depends on `to`.
@@ -77,9 +78,10 @@ class DeclDependencyGraph {
      * Register a declaration node. Returns its unique ID.
      */
     uint addNode(string filename, uint startByte, uint endByte,
-                 string name, string kind, ulong sigHash, ulong srcHash) {
+                 string name, string kind, ulong sigHash, ulong srcHash,
+                 string mangledName = "") {
         uint id = nextId++;
-        nodes ~= DeclNode(id, filename, startByte, endByte, name, kind, sigHash, srcHash);
+        nodes ~= DeclNode(id, filename, startByte, endByte, name, kind, sigHash, srcHash, mangledName);
 
         // Spatial index
         if (filename !in nodesByFile)
@@ -222,14 +224,14 @@ class DeclDependencyGraph {
 
     /// Magic bytes for dep graph binary format
     private static immutable ubyte[4] MAGIC = ['D', '2', 'D', 'G'];
-    private static immutable uint FORMAT_VERSION = 1;
+    private static immutable uint FORMAT_VERSION = 2;
 
     /**
      * Serialize graph to binary format with string-table deduplication.
      *
      * Layout:
      *   [4]  magic: 'D','2','D','G'
-     *   [4]  version: u32 LE = 1
+     *   [4]  version: u32 LE = 2
      *   --- string table ---
      *   [4]  string_count: u32
      *   for each string: [4] len + [N] bytes
@@ -237,7 +239,8 @@ class DeclDependencyGraph {
      *   [4]  node_count: u32
      *   for each node:
      *     [4] id, [4] filename_idx, [4] startByte, [4] endByte,
-     *     [4] name_idx, [4] kind_idx, [8] signatureHash, [8] sourceHash
+     *     [4] name_idx, [4] kind_idx, [4] mangledName_idx,
+     *     [8] signatureHash, [8] sourceHash
      *   --- edges ---
      *   [4]  edge_count: u32
      *   for each edge: [4] from, [4] to, [1] kind
@@ -267,7 +270,7 @@ class DeclDependencyGraph {
         // Pre-intern all strings (determines table contents)
         uint[][] nodeStringIds = new uint[][](nodes.length);
         foreach (i, ref n; nodes) {
-            nodeStringIds[i] = [intern(n.filename), intern(n.name), intern(n.kind)];
+            nodeStringIds[i] = [intern(n.filename), intern(n.name), intern(n.kind), intern(n.mangledName)];
         }
 
         // Write string table
@@ -286,6 +289,7 @@ class DeclDependencyGraph {
             putU32(buf, n.endByte);
             putU32(buf, nodeStringIds[i][1]); // name_idx
             putU32(buf, nodeStringIds[i][2]); // kind_idx
+            putU32(buf, nodeStringIds[i][3]); // mangledName_idx
             putU64(buf, n.signatureHash);
             putU64(buf, n.sourceHash);
         }
@@ -358,26 +362,30 @@ class DeclDependencyGraph {
 
         foreach (_; 0 .. nodeCount) {
             // Each node: id(4) + filename_idx(4) + startByte(4) + endByte(4) +
-            //            name_idx(4) + kind_idx(4) + sigHash(8) + srcHash(8) = 40
-            if (pos + 40 > contentData.length) return null;
+            //            name_idx(4) + kind_idx(4) + mangledName_idx(4) +
+            //            sigHash(8) + srcHash(8) = 44
+            if (pos + 44 > contentData.length) return null;
 
-            uint id         = getU32(data, pos); pos += 4;
-            uint fnameIdx   = getU32(data, pos); pos += 4;
-            uint startByte  = getU32(data, pos); pos += 4;
-            uint endByte    = getU32(data, pos); pos += 4;
-            uint nameIdx    = getU32(data, pos); pos += 4;
-            uint kindIdx    = getU32(data, pos); pos += 4;
-            ulong sigHash   = getU64(data, pos); pos += 8;
-            ulong srcHash   = getU64(data, pos); pos += 8;
+            uint id             = getU32(data, pos); pos += 4;
+            uint fnameIdx       = getU32(data, pos); pos += 4;
+            uint startByte      = getU32(data, pos); pos += 4;
+            uint endByte        = getU32(data, pos); pos += 4;
+            uint nameIdx        = getU32(data, pos); pos += 4;
+            uint kindIdx        = getU32(data, pos); pos += 4;
+            uint mangledNameIdx = getU32(data, pos); pos += 4;
+            ulong sigHash       = getU64(data, pos); pos += 8;
+            ulong srcHash       = getU64(data, pos); pos += 8;
 
-            if (fnameIdx >= stringCount || nameIdx >= stringCount || kindIdx >= stringCount)
+            if (fnameIdx >= stringCount || nameIdx >= stringCount
+                || kindIdx >= stringCount || mangledNameIdx >= stringCount)
                 return null;
 
-            string filename = stringTable[fnameIdx];
-            string name     = stringTable[nameIdx];
-            string kind     = stringTable[kindIdx];
+            string filename    = stringTable[fnameIdx];
+            string name        = stringTable[nameIdx];
+            string kind        = stringTable[kindIdx];
+            string mangledName = stringTable[mangledNameIdx];
 
-            graph.nodes ~= DeclNode(id, filename, startByte, endByte, name, kind, sigHash, srcHash);
+            graph.nodes ~= DeclNode(id, filename, startByte, endByte, name, kind, sigHash, srcHash, mangledName);
 
             // Rebuild spatial index
             if (filename !in graph.nodesByFile)

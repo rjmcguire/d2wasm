@@ -15,6 +15,7 @@ module incremental.graph_builder;
 
 import incremental.dep_graph;
 import incremental.hasher;
+import codegen.mangle : computeMangledName;
 import ast.nodes;
 import ast.expressions;
 import ast.statements;
@@ -32,6 +33,12 @@ class GraphBuilder {
     /// Map from Declaration identity (cast to void*) to node ID, for dedup.
     private uint[void*] declToNode;
 
+    /// Current module path, used for computing mangled names.
+    private const(string)[] currentModulePath;
+
+    /// Module path keyed by filename, for cross-module lazy registration.
+    private const(string)[][string] modulePathsByFile;
+
 
     this() {
         graph = new DeclDependencyGraph();
@@ -44,9 +51,14 @@ class GraphBuilder {
      *   filename = source file path (used as spatial-index key)
      *   sourceText = full source text of the file (for source hashing)
      *   ast = top-level declarations (after type checking + mixin expansion)
+     *   modulePath = module path for D ABI name mangling (e.g. ["test"])
      */
-    void build(string filename, string sourceText, Declaration[] ast) {
+    void build(string filename, string sourceText, Declaration[] ast,
+               const(string)[] modulePath = null) {
         sourceTexts[filename] = sourceText;
+        currentModulePath = modulePath;
+        if (modulePath !is null)
+            modulePathsByFile[filename] = modulePath;
 
         // Pass 1: register all declarations as nodes
         foreach (decl; ast)
@@ -77,7 +89,12 @@ class GraphBuilder {
             if (func.isTemplate) return uint.max; // uninstantiated templates: skip
             ulong sigHash = hashFunctionSignature(func);
             ulong srcHash = hashSourceText(source, startByte, endByte);
-            id = graph.addNode(filename, startByte, endByte, func.name, "function", sigHash, srcHash);
+            // Compute mangled name for cache key correlation
+            string mname = "";
+            auto modPath = filename in modulePathsByFile ? modulePathsByFile[filename] : currentModulePath;
+            if (modPath !is null)
+                mname = computeMangledName(modPath, func);
+            id = graph.addNode(filename, startByte, endByte, func.name, "function", sigHash, srcHash, mname);
         }
         else if (auto sd = cast(StructDecl)decl) {
             ulong sigHash = hashStructSignature(sd);

@@ -355,26 +355,22 @@ int compileFile(CompilerOptions options) {
         log(2, "Evaluating manifest constants...");
         controller.evaluateAllManifestConstants();
 
-        // 6c. Dependency graph (diagnostic)
-        if (options.depGraph) {
-            import incremental.graph_builder : GraphBuilder;
+        // 6c. Dependency graph — built when --cache or --dep-graph is active
+        import incremental.graph_builder : GraphBuilder;
+        import incremental.dep_graph : DeclDependencyGraph;
+        GraphBuilder graphBuilder;
+        if (options.depGraph || options.cacheDir.length > 0) {
             log(1, "Building dependency graph...");
-            auto graphBuilder = new GraphBuilder();
+            graphBuilder = new GraphBuilder();
 
-            // Build from all modules in compilation order
+            // Build from all modules in compilation order (pass modulePath for mangled names)
             foreach (mod; modulesCtx.modulesInOrder()) {
                 if (mod.sourceText.length > 0 && mod.ast.length > 0)
-                    graphBuilder.build(mod.sourceFilePath, mod.sourceText, mod.ast);
+                    graphBuilder.build(mod.sourceFilePath, mod.sourceText, mod.ast, mod.modulePath);
             }
 
-            graphBuilder.graph.printStats();
-
-            // Persist to cache dir when available
-            if (options.cacheDir.length > 0) {
-                string graphPath = buildPath(options.cacheDir, "dep_graph.bin");
-                graphBuilder.graph.saveToFile(graphPath);
-                log(1, "Saved dep_graph.bin (", graphBuilder.graph.serialize().length, " bytes)");
-            }
+            if (options.depGraph)
+                graphBuilder.graph.printStats();
         }
 
         // 6d. Arena allocation analysis
@@ -413,18 +409,78 @@ int compileFile(CompilerOptions options) {
             if (options.cacheDir.length > 0) {
                 string moduleName = baseName(stripExtension(options.inputFile));
                 cache = new CompilerCache(options.cacheDir, moduleName);
-                
+
                 // Set source text for hash computation
                 emitter.setSourceText(sourceCode);
-                
+
                 // Load cached entries
                 auto cachedEntries = cache.getEntries();
                 if (cachedEntries.length > 0) {
                     emitter.setCodeCache(cachedEntries);
                     log(2, "Loaded ", cachedEntries.length, " cached function(s)");
                 }
+
+                // Dep-graph-based cache invalidation:
+                // Compare new graph against old graph to find transitively dirty
+                // functions, then evict them from the emitter's code cache.
+                if (graphBuilder !is null) {
+                    string graphPath = buildPath(options.cacheDir, "dep_graph.bin");
+                    auto oldGraph = DeclDependencyGraph.loadFromFile(graphPath);
+                    if (oldGraph !is null) {
+                        // Build lookup from old graph: mangledName → old node (for functions)
+                        //                              (name, kind) → old node (for others)
+                        ulong[string] oldMangledHash;      // mangledName → sourceHash
+                        ulong[string] oldNameKindHash;     // "name\0kind" → sourceHash
+                        foreach (ref n; oldGraph.nodes) {
+                            if (n.mangledName.length > 0)
+                                oldMangledHash[n.mangledName] = n.sourceHash;
+                            else
+                                oldNameKindHash[n.name ~ "\0" ~ n.kind] = n.sourceHash;
+                        }
+
+                        // Find changed nodes in new graph
+                        auto changedIds = appender!(uint[]);
+                        auto newGraph = graphBuilder.graph;
+                        foreach (ref n; newGraph.nodes) {
+                            bool changed = false;
+                            if (n.mangledName.length > 0) {
+                                auto p = n.mangledName in oldMangledHash;
+                                changed = (p is null || *p != n.sourceHash);
+                            } else {
+                                auto key = n.name ~ "\0" ~ n.kind;
+                                auto p = key in oldNameKindHash;
+                                changed = (p is null || *p != n.sourceHash);
+                            }
+                            if (changed)
+                                changedIds ~= n.id;
+                        }
+
+                        if (changedIds[].length > 0) {
+                            // Compute transitive closure of dirty nodes
+                            auto dirtyIds = newGraph.invalidate(changedIds[]);
+
+                            // Collect mangled names of dirty function nodes
+                            auto dirtyNames = appender!(string[]);
+                            foreach (did; dirtyIds) {
+                                auto node = newGraph.getNode(did);
+                                if (node !is null && node.mangledName.length > 0)
+                                    dirtyNames ~= node.mangledName;
+                            }
+
+                            if (dirtyNames[].length > 0) {
+                                emitter.evictFromCache(dirtyNames[]);
+                                log(2, "Dep-graph invalidation: evicted ",
+                                    dirtyNames[].length, " function(s) from cache");
+                            }
+                        }
+                    }
+
+                    // Save new graph for next run
+                    graphBuilder.graph.saveToFile(graphPath);
+                    log(2, "Saved dep_graph.bin (", graphBuilder.graph.serialize().length, " bytes)");
+                }
             }
-            
+
             ubyte[] wasm = emitter.emit(modulesCtx);
             
             if (wasm is null) {
