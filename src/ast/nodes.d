@@ -641,7 +641,8 @@ class ManifestConstantDecl : Declaration {
     ubyte[][] ctfeNestedElements;   // For nested array constants (T[][] where T is any element type)
     uint ctfeInnerElementSize;      // Element size within each inner array
     bool isNestedArrayType;         // True if this is a nested array constant (T[][])
-    
+    void delegate(ManifestConstantDecl) ownModuleResolver; // Owning module's CTFE evaluator
+
     this(SourceLocation loc, string name, Expression initializer) {
         super(loc, name, true);  // Manifest constants are always "public" in their scope
         this.initializer = initializer;

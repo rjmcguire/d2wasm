@@ -399,13 +399,6 @@ class NativeCompiledFunction : CompiledFunction {
             if (auto fd = cast(FunctionDecl)sym.declaration)
                 return getMangledName(fd);
         }
-        // Fallback: search compiled functions by plain name.
-        // Needed for cross-module CTFE where the symbol table's scope chain
-        // may not have the imported function visible during native codegen.
-        foreach (mangledName, decl; functionDecls) {
-            if (decl.name == funcIdent.name)
-                return mangledName;
-        }
         return funcIdent.name;  // fallback for builtins etc.
     }
 

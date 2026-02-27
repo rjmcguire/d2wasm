@@ -215,6 +215,12 @@ class ModuleCompiler {
             ctfeEvaluator_ = new CTFEEvaluator(
                 module_.symbolTable, mctx, controller.backend,
                 controller.enableStackTrace);
+
+            // Stamp per-module resolver so cross-module lazy evaluation uses the right scope
+            foreach (decl; module_.ast) {
+                if (auto manifest = cast(ManifestConstantDecl)decl)
+                    manifest.ownModuleResolver = &ctfeEvaluator_.evaluateManifestConstant;
+            }
         }
 
         // 3. Type-check

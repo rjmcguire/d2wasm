@@ -587,9 +587,12 @@ class SymbolTable {
         // For manifest constants, ensure CTFE has run so type is correct
         if (symbol && symbol.isConstant) {
             if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
-                if (!manifest.ctfeComplete && ctfeResolver !is null) {
-                    // Trigger lazy evaluation
-                    ctfeResolver(manifest);
+                if (!manifest.ctfeComplete) {
+                    // Prefer the owning module's resolver for cross-module correctness
+                    if (manifest.ownModuleResolver !is null)
+                        manifest.ownModuleResolver(manifest);
+                    else if (ctfeResolver !is null)
+                        ctfeResolver(manifest);
                     // Update symbol type from inferred type
                     if (manifest.inferredType !is null) {
                         symbol.type = manifest.inferredType;
