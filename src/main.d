@@ -368,6 +368,13 @@ int compileFile(CompilerOptions options) {
             }
 
             graphBuilder.graph.printStats();
+
+            // Persist to cache dir when available
+            if (options.cacheDir.length > 0) {
+                string graphPath = buildPath(options.cacheDir, "dep_graph.bin");
+                graphBuilder.graph.saveToFile(graphPath);
+                log(1, "Saved dep_graph.bin (", graphBuilder.graph.serialize().length, " bytes)");
+            }
         }
 
         // 6d. Arena allocation analysis
