@@ -1,0 +1,8 @@
+{
+  "name": "import_c",
+  "description": "importC: D file imports a C source file with functions",
+  "type": "wasm_exec",
+  "expected_result": 7,
+  "mangled_entry": "_D4test4mainFZi",
+  "compiler_args": ["--import-path", "tests/milestones/milestone_206_import_c"]
+}

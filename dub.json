@@ -13,7 +13,7 @@
     },
     
     "libs": ["tree-sitter"],
-    "lflags": ["-L/opt/homebrew/lib", "./grammar/tree-sitter-d/libtree-sitter-d.a", "-framework", "CoreServices"],
+    "lflags": ["-L/opt/homebrew/lib", "./grammar/tree-sitter-d/libtree-sitter-d.a", "./grammar/tree-sitter-c/libtree-sitter-c.a", "-framework", "CoreServices"],
     
     "configurations": [
         {
@@ -49,7 +49,7 @@
             "buildOptions": ["unittests"],
             "excludedSourceFiles": ["tests/examples/*.d", "src/main.d"],
             "libs": ["tree-sitter"],
-            "lflags": ["-L/opt/homebrew/lib", "./grammar/tree-sitter-d/libtree-sitter-d.a", "-framework", "CoreServices"]
+            "lflags": ["-L/opt/homebrew/lib", "./grammar/tree-sitter-d/libtree-sitter-d.a", "./grammar/tree-sitter-c/libtree-sitter-c.a", "-framework", "CoreServices"]
         }
     ]
 }

@@ -1,3 +1,6 @@
 [submodule "grammar/tree-sitter-d"]
 	path = grammar/tree-sitter-d
 	url = https://github.com/gdamore/tree-sitter-d
+[submodule "grammar/tree-sitter-c"]
+	path = grammar/tree-sitter-c
+	url = https://github.com/tree-sitter/tree-sitter-c

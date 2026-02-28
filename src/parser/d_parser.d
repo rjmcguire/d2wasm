@@ -8,6 +8,15 @@ import ast.nodes : Declaration;
 
 class DParser : SourceParser {
     Declaration[] parseSourceFile(string filename, string sourceText) {
+        import std.string : endsWith;
+
+        // Dispatch to C parser for .c files (importC support)
+        if (filename.endsWith(".c")) {
+            import parser.c_tree_sitter_bridge : CTreeSitterBridge;
+            auto bridge = new CTreeSitterBridge(filename, sourceText);
+            return bridge.parseSourceFile();
+        }
+
         import parser.tree_sitter_bridge : TreeSitterBridge;
         auto bridge = new TreeSitterBridge(filename, sourceText);
         return bridge.parseSourceFile();

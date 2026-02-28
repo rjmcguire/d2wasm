@@ -64,21 +64,25 @@ class ModuleRegistry {
      * Returns the resolved file path, or null if not found.
      */
     string resolveImportPath(string[] importPath, string importingFilePath) {
-        // Convert ["animals", "dog"] to "animals/dog.d"
-        string relPath = buildModuleFilePath(importPath);
+        // Try .d first, then .c (importC support)
+        static immutable extensions = [".d", ".c"];
 
-        // 1. Relative to importing file's directory
-        if (importingFilePath.length > 0) {
-            string candidate = buildPath(dirName(importingFilePath), relPath);
-            if (exists(candidate))
-                return candidate;
-        }
+        foreach (ext; extensions) {
+            string relPath = buildModuleFilePath(importPath, ext);
 
-        // 2. Search paths
-        foreach (sp; searchPaths) {
-            string candidate = buildPath(sp, relPath);
-            if (exists(candidate))
-                return candidate;
+            // 1. Relative to importing file's directory
+            if (importingFilePath.length > 0) {
+                string candidate = buildPath(dirName(importingFilePath), relPath);
+                if (exists(candidate))
+                    return candidate;
+            }
+
+            // 2. Search paths
+            foreach (sp; searchPaths) {
+                string candidate = buildPath(sp, relPath);
+                if (exists(candidate))
+                    return candidate;
+            }
         }
 
         return null;
@@ -140,19 +144,19 @@ class ModuleRegistry {
 
     /**
      * Convert a module path to a relative file path.
-     * ["animals", "dog"] → "animals/dog.d"
+     * ["animals", "dog"] → "animals/dog.d" (or ".c" with extension override)
      */
-    private static string buildModuleFilePath(string[] path) {
+    private static string buildModuleFilePath(string[] path, string ext = ".d") {
         import std.path : buildPath;
         if (path.length == 0)
             return "";
         if (path.length == 1)
-            return path[0] ~ ".d";
-        // Join all components with path separator, append .d to the last
+            return path[0] ~ ext;
+        // Join all components with path separator, append extension to the last
         string dir = "";
         foreach (i, component; path[0 .. $ - 1]) {
             dir = dir.length == 0 ? component : buildPath(dir, component);
         }
-        return buildPath(dir, path[$ - 1] ~ ".d");
+        return buildPath(dir, path[$ - 1] ~ ext);
     }
 }

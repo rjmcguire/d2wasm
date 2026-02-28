@@ -80,6 +80,7 @@ extern (C) {
 
     // Language function - statically linked
     TSLanguage* tree_sitter_d();
+    TSLanguage* tree_sitter_c();
 }
 
 /**
