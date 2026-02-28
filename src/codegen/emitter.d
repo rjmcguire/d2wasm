@@ -1156,6 +1156,16 @@ class BinaryEmitter {
         functions ~= info;
     }
 
+    /// Resolve a bare function name to its WASM export name (mangled).
+    /// Throws if no matching entry point is found.
+    string resolveExportName(string bareName) const {
+        foreach (ref f; functions) {
+            if (f.exportName == bareName)
+                return f.name;
+        }
+        throw new Exception("Entry point not found: " ~ bareName);
+    }
+
     /**
      * Check if a type can be emitted to WASM (basic types only for now)
      */

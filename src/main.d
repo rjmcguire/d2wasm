@@ -532,7 +532,8 @@ int compileFile(CompilerOptions options) {
                 auto runner = new CTFERuntime();
                 runner.loadModule(wasmFromFile);
                 
-                int result = runner.callI32(options.runFunc).asInt();
+                string runTarget = emitter.resolveExportName(options.runFunc);
+                int result = runner.callI32(runTarget).asInt();
                 log(1, "Exit code: ", result);
                 
                 // Print CTFE stats at verbosity 2+
