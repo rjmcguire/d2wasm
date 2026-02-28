@@ -2,5 +2,5 @@
 import math_utils;
 
 int main() {
-    return add(3, 4);  // 7
+    return mul(add(2, 2), 3).square();  // 144
 }
