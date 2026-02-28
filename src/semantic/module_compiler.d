@@ -21,8 +21,7 @@ import diagnostic.log : log;
 import cache.manifest_cache : ManifestCache, ManifestCacheEntry, restoreManifest,
     stampInitializerDeclarations;
 
-/// Parser factory: takes (filename, sourceText), returns Declaration[].
-alias ParseFn = Declaration[] delegate(string filename, string sourceText);
+import parser.source_parser : ParseFn;
 
 /**
  * Central coordinator for multi-module compilation.
@@ -178,6 +177,7 @@ class ModuleCompiler {
         // 1. Create symbol table + module scope + builtins
         module_.symbolTable = new SymbolTable();
         module_.symbolTable.targetPtrSize = 4;
+        module_.symbolTable.parseFn = controller.parseFn;
         module_.symbolTable.addBuiltinSymbols();
         module_.symbolTable.setModulePath(module_.modulePath);
         module_.symbolTable.initModuleScope(module_.modulePath);

@@ -35,6 +35,10 @@ class TemplateInstantiator {
     /// Throws on failure (TypeError if constraint not satisfied, or CTFE error).
     void delegate(Expression, SourceLocation, string, string[]) constraintEvaluator;
 
+    /// Language-agnostic parse delegate — set by TypeChecker from SymbolTable.
+    import parser.source_parser : ParseFn;
+    ParseFn parseFn;
+
     /// Instantiate a template for given arguments (unified type + value).
     /// Returns the eponymous member Declaration (FunctionDecl, StructDecl, etc.).
     Declaration instantiate(TemplateDecl tmpl, TemplateArg[] args) {
@@ -62,16 +66,21 @@ class TemplateInstantiator {
 
     /// Re-parse the template source text and substitute concrete types/values.
     private Declaration reparseAndSubstitute(TemplateDecl tmpl, TemplateArg[] args, string mangledName) {
-        import parser.tree_sitter_bridge : TreeSitterBridge;
-
         // Extract source text from the template
         string src = tmpl.getSourceText();
         if (src is null)
             throw new Exception(format("Template '%s' has no stored source text", tmpl.name));
 
         // Re-parse to get fresh, independent AST
-        auto bridge = new TreeSitterBridge("<template:" ~ mangledName ~ ">", src);
-        Declaration[] parsed = bridge.parseSourceFile();
+        string syntheticName = "<template:" ~ mangledName ~ ">";
+        Declaration[] parsed;
+        if (parseFn !is null) {
+            parsed = parseFn(syntheticName, src);
+        } else {
+            import parser.tree_sitter_bridge : TreeSitterBridge;
+            auto bridge = new TreeSitterBridge(syntheticName, src);
+            parsed = bridge.parseSourceFile();
+        }
 
         // Find the TemplateDecl in the re-parsed result (re-parsing a template produces a TemplateDecl)
         TemplateDecl freshTmpl = null;

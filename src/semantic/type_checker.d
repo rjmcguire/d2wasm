@@ -81,6 +81,7 @@ class TypeChecker {
         this.symbolTable = symbolTable;
         this.templateInstantiator = new TemplateInstantiator();
         this.templateInstantiator.constraintEvaluator = symbolTable.constraintEvaluator;
+        this.templateInstantiator.parseFn = symbolTable.parseFn;
     }
     
     /**

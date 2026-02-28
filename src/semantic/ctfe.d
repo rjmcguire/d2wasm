@@ -1753,8 +1753,6 @@ class CTFEEvaluator {
         }
         if (!hasMixins) return;
 
-        import parser.tree_sitter_bridge : TreeSitterBridge;
-
         // Expand mixin statements, replacing them with parsed statements
         Statement[] expanded;
         foreach (stmt; compound.statements) {
@@ -1765,8 +1763,14 @@ class CTFEEvaluator {
 
                 // Parse the string as statements
                 string wrappedCode = "void __mixin_wrapper() { " ~ code ~ " }";
-                auto bridge = new TreeSitterBridge("(ctfe-mixin)", wrappedCode);
-                Declaration[] parsed = bridge.parseSourceFile();
+                Declaration[] parsed;
+                if (symbolTable.parseFn !is null) {
+                    parsed = symbolTable.parseFn("(ctfe-mixin)", wrappedCode);
+                } else {
+                    import parser.tree_sitter_bridge : TreeSitterBridge;
+                    auto bridge = new TreeSitterBridge("(ctfe-mixin)", wrappedCode);
+                    parsed = bridge.parseSourceFile();
+                }
 
                 if (parsed.length > 0) {
                     if (auto fd = cast(FunctionDecl)parsed[0]) {

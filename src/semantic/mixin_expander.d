@@ -14,7 +14,8 @@ module semantic.mixin_expander;
 import ast.nodes;
 import ast.statements;
 import ast.expressions;
-import parser.tree_sitter_bridge;
+import parser.source_parser : ParseFn;
+import parser.tree_sitter_bridge : ParseError;
 import semantic.symbol_table;
 import semantic.ctfe;
 
@@ -71,7 +72,17 @@ class MixinExpander {
         this.tempSymbolTable = externalST;
         this.hasExternalSymbolTable = true;
     }
-    
+
+    /// Parse source text via the pluggable parseFn (if available),
+    /// falling back to TreeSitterBridge for backward compatibility.
+    private Declaration[] invokeParse(string filename, string source) {
+        if (tempSymbolTable.parseFn !is null)
+            return tempSymbolTable.parseFn(filename, source);
+        import parser.tree_sitter_bridge : TreeSitterBridge;
+        auto bridge = new TreeSitterBridge(filename, source);
+        return bridge.parseSourceFile();
+    }
+
     /**
      * Expand all mixins and static ifs in the declaration list.
      * Returns a new list with mixins/static ifs replaced by their expansions.
@@ -265,8 +276,7 @@ class MixinExpander {
         string wrappedCode = "void __mixin_wrapper() { " ~ code ~ " }";
         
         try {
-            auto bridge = new TreeSitterBridge(filename, wrappedCode);
-            Declaration[] parsed = bridge.parseSourceFile();
+            Declaration[] parsed = invokeParse(filename, wrappedCode);
             
             // Extract the statements from the wrapper function
             if (parsed.length > 0) {
@@ -772,8 +782,7 @@ class MixinExpander {
         string filename = mixinLoc.filename ~ "(mixin)";
         
         try {
-            auto bridge = new TreeSitterBridge(filename, code);
-            Declaration[] parsed = bridge.parseSourceFile();
+            Declaration[] parsed = invokeParse(filename, code);
             return parsed;
         } catch (ParseError e) {
             throw new MixinError(

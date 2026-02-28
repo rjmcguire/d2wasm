@@ -322,6 +322,11 @@ class SymbolTable {
     // Throws TypeError if constraint not satisfied, or on evaluation error.
     void delegate(Expression, SourceLocation, string, string[]) constraintEvaluator;
 
+    // Language-agnostic parse delegate — set by main.d / ModuleCompiler.
+    // Used by mixin expansion, CTFE, and template instantiation.
+    import parser.source_parser : ParseFn;
+    ParseFn parseFn;
+
     /// Target pointer size in bytes (4 for WASM32, 8 for ARM64).
     /// Set by main.d before type checking. Used by computeFieldLayout for slice fields.
     uint targetPtrSize = 4;

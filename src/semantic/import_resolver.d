@@ -38,9 +38,7 @@ class ImportResolver {
     private ModuleRegistry registry;
     private bool[string] resolving;  // cycle detection set
 
-    /// Parser factory — takes (filename, sourceText), returns Declaration[].
-    /// Injected by caller to avoid circular dependency on tree_sitter_bridge.
-    alias ParseFn = Declaration[] delegate(string filename, string sourceText);
+    import parser.source_parser : ParseFn;
     private ParseFn parseFn;
 
     this(ModuleRegistry registry, ParseFn parseFn) {

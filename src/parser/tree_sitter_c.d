@@ -89,10 +89,10 @@ class TreeSitterParser {
     private TSParser* parser;
     private TSTree* currentTree;
 
-    this() {
+    this(TSLanguage* lang = null) {
         try {
             log(3, "TreeSitterParser constructor started");
-            
+
             log(3, "Creating ts_parser...");
             parser = ts_parser_new();
             if (!parser) {
@@ -100,17 +100,17 @@ class TreeSitterParser {
             }
             log(3, "ts_parser created successfully");
 
-            log(3, "Getting D language...");
-            auto language = tree_sitter_d();
+            log(3, "Getting language...");
+            auto language = lang ? lang : tree_sitter_d();
             if (!language) {
-                throw new Exception("Failed to get tree-sitter-d language");
+                throw new Exception("Failed to get tree-sitter language");
             }
-            log(3, "D language obtained successfully");
+            log(3, "Language obtained successfully");
 
             log(3, "Setting language...");
             if (!ts_parser_set_language(parser, language)) {
                 ts_parser_delete(parser);
-                throw new Exception("Failed to set D language for parser");
+                throw new Exception("Failed to set language for parser");
             }
             log(3, "Language set successfully");
         } catch (Exception e) {

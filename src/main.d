@@ -21,8 +21,10 @@ import std.range;
 import ast.nodes;
 import ast.statements;
 import ast.expressions;
-import parser.tree_sitter_bridge : TreeSitterBridge, ParseError;
+import parser.tree_sitter_bridge : ParseError;
 import parser.tree_sitter_c;
+import parser.d_parser : DParser;
+import parser.source_parser : ParseFn;
 import semantic.feature_validator;
 import semantic.symbol_table;
 import semantic.type_checker;
@@ -202,16 +204,14 @@ int compileFile(CompilerOptions options) {
         string sourceCode = readText(options.inputFile);
         log(2, "Read ", sourceCode.length, " characters from ", options.inputFile);
         
-        // 2. Parse with real tree-sitter
-        log(1, "Parsing with tree-sitter-d...");
-        log(3, "About to create TreeSitterBridge...");
-        auto bridge = new TreeSitterBridge(options.inputFile, sourceCode);
-        log(3, "TreeSitterBridge created successfully.");
+        // 2. Parse with pluggable parser
+        log(1, "Parsing source...");
+        auto sourceParser = new DParser();
         Declaration[] ast;
-        
+
         try {
-            ast = bridge.parseSourceFile();
-            log(2, "Tree-sitter parsing successful!");
+            ast = sourceParser.parseSourceFile(options.inputFile, sourceCode);
+            log(2, "Parsing successful!");
         } catch (ParseError e) {
             printError(e);
             return 1;
@@ -241,9 +241,8 @@ int compileFile(CompilerOptions options) {
         modRegistry.searchPaths ~= dirName(absolutePath(options.inputFile));
 
         // Parse-on-demand factory shared by import resolver and runtime loading
-        auto parseFn = delegate Declaration[](string filename, string src) {
-            auto b = new TreeSitterBridge(filename, src);
-            return b.parseSourceFile();
+        ParseFn parseFn = (string filename, string src) {
+            return sourceParser.parseSourceFile(filename, src);
         };
 
         // Register runtime/object.d as its own module (implicit `import object;`)
