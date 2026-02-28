@@ -317,7 +317,7 @@ int compileFile(CompilerOptions options) {
         import semantic.mixin_expander : MixinError;
 
         auto controller = new CompilationController(
-            modRegistry, parseFn, options.backend, options.stackTrace);
+            modRegistry, parseFn, options.backend, options.stackTrace, options.cacheDir);
 
         try {
             controller.ensurePhase(inputModule, ModulePhase.typeChecked);
@@ -354,6 +354,23 @@ int compileFile(CompilerOptions options) {
         // Lazy evaluation only triggers when values are accessed; this ensures all CTFE runs
         log(2, "Evaluating manifest constants...");
         controller.evaluateAllManifestConstants();
+
+        // 6b2. Save manifest cache (after all CTFE is done, values are final)
+        if (options.cacheDir.length > 0) {
+            import cache.manifest_cache : buildManifestCache;
+            foreach (mod; modulesCtx.modulesInOrder()) {
+                if (mod.isSynthetic) continue;
+                auto mfCache = buildManifestCache(mod.ast);
+                if (mfCache.entries.length > 0) {
+                    string modName = mod.modulePath.length > 0
+                        ? mod.modulePath[$ - 1] : "unknown";
+                    mfCache.saveToFile(
+                        buildPath(options.cacheDir, modName ~ "_ctfe_cache.bin"));
+                    log(2, "Saved ", mfCache.entries.length, " manifest(s) to ",
+                        modName, "_ctfe_cache.bin");
+                }
+            }
+        }
 
         // 6c. Dependency graph — built when --cache or --dep-graph is active
         import incremental.graph_builder : GraphBuilder;

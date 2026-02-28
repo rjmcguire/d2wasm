@@ -174,6 +174,51 @@ class DeclDependencyGraph {
     }
 
     // ------------------------------------------------------------------
+    //  Forward transitive closure
+    // ------------------------------------------------------------------
+
+    /**
+     * Compute the transitive closure of all nodes that `nodeId` depends on
+     * (forward edges). Returns a sorted, deduplicated array of dependency
+     * node IDs (NOT including nodeId itself).
+     *
+     * This walks `dependsOn` (forward edges), unlike `invalidate()` which
+     * walks `dependedOnBy` (reverse edges).
+     */
+    uint[] transitiveDeps(uint nodeId) {
+        bool[uint] visited;
+        auto queue = appender!(uint[]);
+
+        // Seed with direct dependencies
+        if (auto fwd = nodeId in dependsOn) {
+            foreach (dep; *fwd) {
+                if (dep !in visited) {
+                    visited[dep] = true;
+                    queue ~= dep;
+                }
+            }
+        }
+
+        // BFS over forward edges
+        size_t head = 0;
+        while (head < queue[].length) {
+            uint current = queue[][head++];
+            if (auto fwd = current in dependsOn) {
+                foreach (dep; *fwd) {
+                    if (dep !in visited) {
+                        visited[dep] = true;
+                        queue ~= dep;
+                    }
+                }
+            }
+        }
+
+        auto result = visited.keys;
+        result.sort();
+        return result;
+    }
+
+    // ------------------------------------------------------------------
     //  Diagnostics
     // ------------------------------------------------------------------
 
@@ -669,5 +714,36 @@ unittest {
         assert(g2.edges[3].kind == EdgeKind.methodOf);
 
         writefln("  ok: all EdgeKind values round-trip");
+    }
+
+    // Test 6: transitiveDeps
+    {
+        auto g = new DeclDependencyGraph();
+        // Chain: 0 -> 1 -> 2 -> 3, plus 0 -> 4 (standalone)
+        foreach (i; 0 .. 5)
+            g.addNode("t.d", 0, 10, "n" ~ format("%d", i), "function", 0, 0);
+        g.addEdge(0, 1, EdgeKind.calls);
+        g.addEdge(1, 2, EdgeKind.calls);
+        g.addEdge(2, 3, EdgeKind.usesType);
+        g.addEdge(0, 4, EdgeKind.readsManifest);
+
+        // transitiveDeps(0) should return {1, 2, 3, 4} (sorted)
+        auto deps0 = g.transitiveDeps(0);
+        assert(deps0.length == 4, format("Expected 4 deps, got %d", deps0.length));
+        assert(deps0 == [1, 2, 3, 4], "transitiveDeps(0) wrong");
+
+        // transitiveDeps(1) should return {2, 3}
+        auto deps1 = g.transitiveDeps(1);
+        assert(deps1 == [2, 3], "transitiveDeps(1) wrong");
+
+        // transitiveDeps(3) should return {} (leaf)
+        auto deps3 = g.transitiveDeps(3);
+        assert(deps3.length == 0, "transitiveDeps(3) should be empty");
+
+        // transitiveDeps(4) should return {} (leaf)
+        auto deps4 = g.transitiveDeps(4);
+        assert(deps4.length == 0, "transitiveDeps(4) should be empty");
+
+        writefln("  ok: transitiveDeps");
     }
 }

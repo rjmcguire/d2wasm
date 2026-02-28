@@ -1,0 +1,6 @@
+{
+  "name": "ctfe_manifest_cache",
+  "description": "CTFE manifest results cached across compilations — skip re-evaluation when dependencies unchanged",
+  "type": "shell",
+  "script": "run_test.sh"
+}

@@ -18,6 +18,8 @@ import semantic.type_checker : TypeChecker;
 import semantic.mixin_expander : MixinExpander, MixinError;
 
 import diagnostic.log : log;
+import cache.manifest_cache : ManifestCache, ManifestCacheEntry, restoreManifest,
+    stampInitializerDeclarations;
 
 /// Parser factory: takes (filename, sourceText), returns Declaration[].
 alias ParseFn = Declaration[] delegate(string filename, string sourceText);
@@ -33,6 +35,7 @@ class CompilationController {
     private string backendName;
     package bool enableStackTrace;
     private ParseFn parseFn;
+    package string cacheDir;
 
     // Per-module compilers, keyed by FQN
     private ModuleCompiler[string] compilers;
@@ -44,11 +47,12 @@ class CompilationController {
     private bool[string] advancing;
 
     this(ModuleRegistry registry, ParseFn parseFn, string backendName,
-         bool enableStackTrace) {
+         bool enableStackTrace, string cacheDir = "") {
         this.registry = registry;
         this.parseFn = parseFn;
         this.backendName = backendName;
         this.enableStackTrace = enableStackTrace;
+        this.cacheDir = cacheDir;
     }
 
     /**
@@ -220,6 +224,11 @@ class ModuleCompiler {
         // 3. Stamp manifest constants BEFORE type checking so lazy evaluation works
         stampManifests();
 
+        // 3b. Try to restore cached CTFE results (replaces ownModuleResolver delegate
+        //     for cache hits — when ensureEvaluated() fires, values are restored from
+        //     cache and ident.declaration is stamped for the graph builder)
+        tryRestoreManifestCache();
+
         // 4. Type-check
         auto tc = new TypeChecker(module_.symbolTable);
         tc.checkDeclarations(module_.ast);
@@ -242,6 +251,163 @@ class ModuleCompiler {
         foreach (decl; module_.ast) {
             if (auto manifest = cast(ManifestConstantDecl)decl)
                 manifest.ownModuleResolver = &ctfeEvaluator_.evaluateManifestConstant;
+        }
+    }
+
+    /**
+     * Try to restore manifest values from cache via delegate replacement.
+     * Called after stampManifests() but before type checking.
+     *
+     * Uses the old dep graph's transitiveDeps() for per-manifest validation:
+     * each manifest's transitive dependencies' source hashes are checked
+     * against the current compilation. If all match, the manifest's
+     * ownModuleResolver delegate is replaced with one that restores from
+     * cache AND stamps ident.declaration on the initializer — so the
+     * graph builder records correct edges even for cache hits.
+     */
+    private void tryRestoreManifestCache() {
+        import std.path : buildPath;
+        import incremental.dep_graph : DeclDependencyGraph;
+        import incremental.hasher : hashSourceText;
+
+        if (controller.cacheDir.length == 0)
+            return;
+
+        string moduleName = module_.modulePath.length > 0
+            ? module_.modulePath[$ - 1] : "unknown";
+
+        // 1. Load old dep graph and manifest cache
+        auto oldGraph = DeclDependencyGraph.loadFromFile(
+            buildPath(controller.cacheDir, moduleName ~ "_dep_graph.bin"));
+        auto manifestCache = ManifestCache.loadFromFile(
+            buildPath(controller.cacheDir, moduleName ~ "_ctfe_cache.bin"));
+        if (oldGraph is null || manifestCache is null)
+            return;
+
+        // 2. Build current source hash map for all declarations across all modules
+        //    Key: "filename\0name\0kind" → current sourceHash
+        auto modulesCtx = controller.getModulesContext();
+        ulong[string] currentHashes;
+        foreach (mod; modulesCtx.modulesInOrder()) {
+            if (mod.sourceText.length == 0 || mod.ast.length == 0)
+                continue;
+            foreach (decl; mod.ast)
+                collectDeclHashes(decl, mod.sourceFilePath, mod.sourceText, currentHashes);
+        }
+
+        // 3. Build old graph lookups
+        ManifestCacheEntry[string] cacheByName;
+        foreach (ref entry; manifestCache.entries)
+            cacheByName[entry.name] = entry;
+
+        // Map "name\0kind" → node ID in old graph
+        uint[string] oldNodeByKey;
+        foreach (ref n; oldGraph.nodes)
+            oldNodeByKey[n.name ~ "\0" ~ n.kind] = n.id;
+
+        // 4. For each manifest: validate transitive deps, install delegate on hit
+        auto st = module_.symbolTable;
+        uint restored = 0;
+        foreach (decl; module_.ast) {
+            auto manifest = cast(ManifestConstantDecl) decl;
+            if (manifest is null || manifest.ctfeComplete)
+                continue;
+
+            // 4a. Find in cache
+            auto cached = manifest.name in cacheByName;
+            if (cached is null)
+                continue;
+
+            // 4b. Find manifest node in old graph
+            auto oldNodeId = (manifest.name ~ "\0manifest") in oldNodeByKey;
+            if (oldNodeId is null)
+                continue;
+
+            // 4c. Check manifest's own source hash
+            auto oldNode = oldGraph.getNode(*oldNodeId);
+            if (oldNode is null)
+                continue;
+
+            string mkey = oldNode.filename ~ "\0" ~ manifest.name ~ "\0manifest";
+            auto currentHash = mkey in currentHashes;
+            if (currentHash is null || *currentHash != oldNode.sourceHash)
+                continue;
+
+            // 4d. Check all transitive dependencies
+            auto deps = oldGraph.transitiveDeps(*oldNodeId);
+            bool allMatch = true;
+            foreach (depId; deps) {
+                auto depNode = oldGraph.getNode(depId);
+                if (depNode is null) { allMatch = false; break; }
+                string dkey = depNode.filename ~ "\0" ~ depNode.name ~ "\0" ~ depNode.kind;
+                auto depCurrent = dkey in currentHashes;
+                if (depCurrent is null || *depCurrent != depNode.sourceHash) {
+                    allMatch = false;
+                    break;
+                }
+            }
+            if (!allMatch)
+                continue;
+
+            // 4e. Cache hit — replace delegate with cache-restoring one
+            //     The delegate restores values AND stamps ident.declaration
+            //     so the graph builder sees correct edges.
+            auto entry = *cached;  // copy for closure capture
+            manifest.ownModuleResolver = (ManifestConstantDecl m) {
+                restoreManifest(m, entry);
+                stampInitializerDeclarations(m.initializer, st);
+            };
+            restored++;
+        }
+
+        if (restored > 0)
+            log(2, "ModuleCompiler: prepared ", restored, " manifest(s) for cache restore in ",
+                module_.fullyQualifiedName());
+    }
+
+    /**
+     * Collect source hashes for all trackable declarations in an AST.
+     * Key format: "filename\0name\0kind"
+     */
+    private static void collectDeclHashes(Declaration decl, string filename,
+            string sourceText, ref ulong[string] hashes) {
+        import incremental.hasher : hashSourceText;
+
+        uint startByte = decl.location.startOffset;
+        uint endByte = decl.location.endOffset;
+
+        if (auto func = cast(FunctionDecl) decl) {
+            if (func.isTemplate) return;
+            string key = filename ~ "\0" ~ func.name ~ "\0function";
+            hashes[key] = hashSourceText(sourceText, startByte, endByte);
+        }
+        else if (auto sd = cast(StructDecl) decl) {
+            string key = filename ~ "\0" ~ sd.name ~ "\0struct";
+            hashes[key] = hashSourceText(sourceText, startByte, endByte);
+            foreach (member; sd.members) {
+                if (auto mfunc = cast(FunctionDecl) member)
+                    collectDeclHashes(mfunc, filename, sourceText, hashes);
+            }
+        }
+        else if (auto cd = cast(ClassDecl) decl) {
+            string key = filename ~ "\0" ~ cd.name ~ "\0class";
+            hashes[key] = hashSourceText(sourceText, startByte, endByte);
+            foreach (member; cd.members) {
+                if (auto mfunc = cast(FunctionDecl) member)
+                    collectDeclHashes(mfunc, filename, sourceText, hashes);
+            }
+        }
+        else if (auto mc = cast(ManifestConstantDecl) decl) {
+            string key = filename ~ "\0" ~ mc.name ~ "\0manifest";
+            hashes[key] = hashSourceText(sourceText, startByte, endByte);
+        }
+        else if (auto td = cast(TemplateDecl) decl) {
+            string key = filename ~ "\0" ~ td.name ~ "\0template";
+            hashes[key] = hashSourceText(sourceText, startByte, endByte);
+        }
+        else if (auto vd = cast(VariableDecl) decl) {
+            string key = filename ~ "\0" ~ vd.name ~ "\0global";
+            hashes[key] = hashSourceText(sourceText, startByte, endByte);
         }
     }
 

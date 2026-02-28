@@ -1015,6 +1015,11 @@ class CTFEEvaluator {
             funcDecl = findFunctionByName(funcName);
         }
 
+        // Stamp the resolved declaration back onto the AST node so downstream
+        // passes (dep graph builder) can follow it.
+        if (funcDecl && !identExpr.declaration)
+            identExpr.declaration = funcDecl;
+
         // IFTI: if no direct FunctionDecl found, check for TemplateDecl
         if (!funcDecl) {
             import semantic.template_instantiation : TemplateInstantiator;

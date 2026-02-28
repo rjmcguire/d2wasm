@@ -1,0 +1,6 @@
+{
+  "name": "dep_graph_cache_invalidation",
+  "description": "Dep graph transitively invalidates cached functions when dependencies change (CTFE manifest, call chains)",
+  "type": "shell",
+  "script": "run_test.sh"
+}
