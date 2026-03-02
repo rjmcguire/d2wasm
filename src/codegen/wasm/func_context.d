@@ -4524,6 +4524,30 @@ class FuncContext {
             }
         }
 
+        // Handle string literal member access: "hello".ptr, "hello".length
+        if (auto lit = cast(LiteralExpression)expr.object) {
+            if (lit.value.type == typeid(string)) {
+                string strValue = lit.value.get!string();
+                uint structAddr = emitter.registerArrayLiteral(strValue);
+
+                if (expr.memberName == "ptr") {
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, structAddr);
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                    return;
+                } else if (expr.memberName == "length") {
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, structAddr + 4);
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                    return;
+                }
+            }
+        }
+
         // Handle chained member access (o.i.a where object is MemberExpression)
         if (auto innerMember = cast(MemberExpression)expr.object) {
             // Get the type of the inner member to find the field
@@ -4573,7 +4597,56 @@ class FuncContext {
             }
         }
 
-        throw new EmitError("Member access not yet fully implemented", expr.location);
+        // Generic fallback: emit the object expression, then access the member
+        // based on the type-checked type. This handles string literals, call results,
+        // and any other expression that produces a typed value.
+        if (expr.object.type !is null) {
+            auto objType = expr.object.type.resolve();
+
+            // Slice/array: object emits address of {ptr, length, capacity} struct
+            if (auto arrType = cast(ArrayType) objType) {
+                if (!arrType.isStaticArray) {
+                    emitExpression(out_, expr.object);
+                    if (expr.memberName == "ptr") {
+                        // ptr is at offset 0
+                    } else if (expr.memberName == "length") {
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, sliceLayout.lengthOffset);
+                        out_ ~= Op.i32_add;
+                    } else if (expr.memberName == "capacity") {
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, sliceLayout.capacityOffset);
+                        out_ ~= Op.i32_add;
+                    } else {
+                        throw new EmitError("Array/slice has no member '" ~ expr.memberName ~ "'", expr.location);
+                    }
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                    return;
+                }
+            }
+
+            // Struct: object emits address of struct
+            if (auto structDecl = objType.asStruct()) {
+                auto field = structDecl.getField(expr.memberName);
+                if (field) {
+                    emitExpression(out_, expr.object);
+                    if (field.offset > 0) {
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, cast(int) field.offset);
+                        out_ ~= Op.i32_add;
+                    }
+                    out_ ~= Op.i32_load;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                    return;
+                }
+            }
+        }
+
+        throw new EmitError("Member access not yet fully implemented for "
+            ~ typeid(expr.object).name ~ " object", expr.location);
     }
     
     /**

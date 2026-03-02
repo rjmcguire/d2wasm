@@ -1,0 +1,7 @@
+{
+  "name": "string_literal_ptr",
+  "description": "String literal .ptr returns a char* to the string data",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 104
+}
