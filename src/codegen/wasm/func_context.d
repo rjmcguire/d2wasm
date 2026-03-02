@@ -1897,8 +1897,15 @@ class FuncContext {
         if (stmt.initializer) {
             emitExpression(out_, stmt.initializer);
         } else {
-            out_ ~= Op.i32_const;
-            leb128s(out_, 0);
+            // Default-initialize based on local type
+            if (info.wasmLocalIdx < localTypes.length &&
+                localTypes[info.wasmLocalIdx] == ValType.i64) {
+                out_ ~= Op.i64_const;
+                leb128s(out_, 0);
+            } else {
+                out_ ~= Op.i32_const;
+                leb128s(out_, 0);
+            }
         }
 
         out_ ~= Op.local_set;
@@ -4788,14 +4795,32 @@ class FuncContext {
         return false;
     }
 
+    /// Check if an expression produces an i64 (long/ulong) value on the WASM stack.
+    private bool isI64Expression(Expression expr) {
+        if (expr.type) {
+            auto bt = cast(BasicType)expr.type.resolve();
+            if (bt)
+                return bt.kind == BasicType.Kind.Int64 || bt.kind == BasicType.Kind.UInt64;
+        }
+        return false;
+    }
+
     /// Emit a load instruction appropriate for the given element size.
     void emitLoadForSize(ref Appender!(ubyte[]) out_, uint elemSize, bool isFloat = false) {
         if (elemSize == 1) {
             out_ ~= Op.i32_load8_u;
             out_ ~= cast(ubyte)0x00;
             leb128u(out_, 0);
+        } else if (elemSize == 2) {
+            out_ ~= Op.i32_load16_u;
+            out_ ~= cast(ubyte)0x01;  // alignment log2(2)
+            leb128u(out_, 0);
         } else if (elemSize == 8 && isFloat) {
             out_ ~= Op.f64_load;
+            out_ ~= cast(ubyte)0x03;  // alignment log2(8)
+            leb128u(out_, 0);
+        } else if (elemSize == 8) {
+            out_ ~= Op.i64_load;
             out_ ~= cast(ubyte)0x03;  // alignment log2(8)
             leb128u(out_, 0);
         } else {
@@ -4823,6 +4848,20 @@ class FuncContext {
     }
 
     void emitLiteral(ref Appender!(ubyte[]) out_, LiteralExpression expr) {
+        // If expression type indicates i64, emit i64_const regardless of variant type
+        if (isI64Expression(expr)) {
+            long value;
+            if (expr.value.type == typeid(long))
+                value = expr.value.get!long();
+            else if (expr.value.type == typeid(int))
+                value = expr.value.get!int();
+            else
+                value = 0;
+            out_ ~= Op.i64_const;
+            leb128s(out_, value);
+            return;
+        }
+
         if (expr.value.type == typeid(long)) {
             long value = expr.value.get!long();
             // Handle 32-bit values: allow both signed i32 and unsigned u32 range
@@ -5034,6 +5073,40 @@ class FuncContext {
             return;
         }
 
+        // i64 path: emit operands with inline i32→i64 promotion
+        bool isLong = !isF64Expression(expr.left) &&
+                      (isI64Expression(expr.left) || isI64Expression(expr.right));
+        if (isLong) {
+            emitExpression(out_, expr.left);
+            if (!isI64Expression(expr.left))
+                out_ ~= Op.i64_extend_i32_s;
+            emitExpression(out_, expr.right);
+            if (!isI64Expression(expr.right))
+                out_ ~= Op.i64_extend_i32_s;
+
+            Op op;
+            switch (expr.operator) {
+                case BinaryExpression.Operator.Add: op = Op.i64_add; break;
+                case BinaryExpression.Operator.Subtract: op = Op.i64_sub; break;
+                case BinaryExpression.Operator.Multiply: op = Op.i64_mul; break;
+                case BinaryExpression.Operator.Divide: op = Op.i64_div_s; break;
+                case BinaryExpression.Operator.Modulo: op = Op.i64_rem_s; break;
+                case BinaryExpression.Operator.Equal: op = Op.i64_eq; break;
+                case BinaryExpression.Operator.NotEqual: op = Op.i64_ne; break;
+                case BinaryExpression.Operator.Less: op = Op.i64_lt_s; break;
+                case BinaryExpression.Operator.LessEqual: op = Op.i64_le_s; break;
+                case BinaryExpression.Operator.Greater: op = Op.i64_gt_s; break;
+                case BinaryExpression.Operator.GreaterEqual: op = Op.i64_ge_s; break;
+                case BinaryExpression.Operator.BitwiseAnd: op = Op.i64_and; break;
+                case BinaryExpression.Operator.BitwiseOr: op = Op.i64_or; break;
+                case BinaryExpression.Operator.BitwiseXor: op = Op.i64_xor; break;
+                default:
+                    assert(0, "i64 binary operator not supported: " ~ to!string(expr.operator));
+            }
+            out_ ~= op;
+            return;
+        }
+
         // Emit operands
         emitExpression(out_, expr.left);
         emitExpression(out_, expr.right);
@@ -5183,10 +5256,19 @@ class FuncContext {
             // Struct/aggregate pointer: the pointer value IS the struct address — no load needed
             return;
         }
-        // Scalar deref: load value from address
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;  // align = 4
-        leb128u(out_, 0);          // offset = 0
+        // Scalar deref: load value from address using size-appropriate instruction
+        if (ptrType) {
+            uint elemSize = wasmElementSize(ptrType.pointeeType);
+            bool isFloat = false;
+            if (auto bt = cast(BasicType)ptrType.pointeeType)
+                isFloat = bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32;
+            emitLoadForSize(out_, elemSize, isFloat);
+        } else {
+            // Fallback: assume i32
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;  // align = 4
+            leb128u(out_, 0);          // offset = 0
+        }
     }
 
     /// Resolve the PointerType of an expression by checking variable info or expr.type.

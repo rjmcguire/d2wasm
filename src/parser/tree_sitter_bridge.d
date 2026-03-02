@@ -413,7 +413,7 @@ class TreeSitterBridge {
             }
         }
 
-        // Check for WASM import linkage or extern(C) FFI
+        // Check for WASM import linkage
         if (TreeSitterParser.isValid(linkageNode)) {
             string moduleName = parseWasmLinkage(linkageNode);
             if (moduleName !is null) {
@@ -421,20 +421,24 @@ class TreeSitterBridge {
                 log(3, "Parsed WASM import: ", moduleName, ".", name);
                 return new ImportedFunctionDecl(loc, name, returnType, parameters, moduleName);
             }
-            // extern(C) with no body → FFI import
-            if (isCLinkage(linkageNode) && !TreeSitterParser.isValid(bodyNode)) {
-                log(3, "Parsed extern(C) FFI import: ", name);
-                return new ImportedFunctionDecl(loc, name, returnType, parameters, "ffi");
-            }
         }
 
-        // Regular function - parse body
+        // Parse body first — tree-sitter produces a valid function_body node
+        // even for ";" declarations, but parseFunctionBody returns null for those
         Statement body_;
         if (TreeSitterParser.isValid(bodyNode)) {
             body_ = parseFunctionBody(bodyNode);
         } else {
             // Abstract function or declaration
             body_ = null;
+        }
+
+        // extern(C) with no real body → FFI import
+        // Must check AFTER body parsing because tree-sitter produces a valid
+        // function_body node for ";" — parseFunctionBody returns null in that case
+        if (TreeSitterParser.isValid(linkageNode) && isCLinkage(linkageNode) && body_ is null) {
+            log(3, "Parsed extern(C) FFI import: ", name);
+            return new ImportedFunctionDecl(loc, name, returnType, parameters, "ffi");
         }
 
         // Replace template type refs in function body

@@ -2111,6 +2111,21 @@ class NativeCompiledFunction : CompiledFunction {
                     || unaryOp.operator == UnaryExpression.Operator.PreDecrement
                     || unaryOp.operator == UnaryExpression.Operator.PostDecrement) {
                 compileIncDec(unaryOp);
+            } else if (unaryOp.operator == UnaryExpression.Operator.Dereference) {
+                // *ptr — dereference a pointer
+                compileExpression(unaryOp.operand);
+                // Result is pointer address in x0; load the pointed-to value
+                if (auto pt = cast(PointerType)unaryOp.operand.type) {
+                    auto pointeeSize = pt.pointeeType.size();
+                    if (pointeeSize == 1)
+                        gen.emitLoadByteFromPointer(0);
+                    else if (!pt.pointeeType.isBasicType()) {
+                        // Struct/aggregate: pointer value IS the address, no load needed
+                    } else
+                        gen.emitLoadFromPointer(0);
+                } else {
+                    gen.emitLoadFromPointer(0);
+                }
             } else {
                 assert(0, "Unsupported unary operator: " ~ to!string(unaryOp.operator));
             }
