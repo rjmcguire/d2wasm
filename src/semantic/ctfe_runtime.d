@@ -309,25 +309,28 @@ class CTFERuntime {
         if (runtime is null) {
             throw new CTFERuntimeError("Failed to create wasm3 runtime");
         }
-        
+
         // Parse module
         auto result = m3_ParseModule(env, &mod, cast(ubyte*)wasmBytes.ptr, cast(uint)wasmBytes.length);
         if (result !is null) {
             throw new CTFERuntimeError("Failed to parse WASM: " ~ fromStringz(result).idup);
         }
-        
+
         // Load module into runtime
         result = m3_LoadModule(runtime, mod);
         if (result !is null) {
             throw new CTFERuntimeError("Failed to load WASM: " ~ fromStringz(result).idup);
         }
-        
+
         // Reset __ctfe_runtime arena state for each new module
         g_arenaOffset = 2048;
         g_arenaSaveStack = [];
 
         // Link CTFE host functions
         linkCTFEHostFunctions();
+
+        // Link extern(C) FFI functions (if ffi_meta custom section is present)
+        linkFFIFunctions(wasmBytes);
 
         initialized = true;
     }
@@ -395,7 +398,194 @@ class CTFERuntime {
             throw new CTFERuntimeError("Failed to link __ctfe_runtime_remaining: " ~ fromStringz(result).idup);
         }
     }
-    
+
+    /**
+     * Link extern(C) FFI functions by reading the ffi_meta custom section
+     * from the WASM binary, dlsym-ing each function, and linking via libffi.
+     */
+    private void linkFFIFunctions(const(ubyte)[] wasmBytes) {
+        import runtime.ffi_bindings;
+        import core.sys.posix.dlfcn : dlsym;
+        version (OSX) {
+            import core.sys.darwin.dlfcn : RTLD_DEFAULT;
+        } else {
+            import core.sys.posix.dlfcn : RTLD_DEFAULT;
+        }
+
+        // Parse ffi_meta entries from WASM binary
+        auto entries = parseFFIMetaSection(wasmBytes);
+        if (entries.length == 0)
+            return;
+
+        foreach (ref entry; entries) {
+            // Resolve native function via dlsym(RTLD_DEFAULT, ...)
+            void* fnPtr = dlsym(RTLD_DEFAULT, entry.name.toStringz);
+            if (fnPtr is null) {
+                stderr.writeln("FFI warning: dlsym failed for '", entry.name, "' — skipping");
+                continue;
+            }
+
+            // Build arg_kinds array for C
+            int[] argKinds;
+            foreach (k; entry.paramKinds) {
+                argKinds ~= cast(int)k;
+            }
+
+            // Create FFI descriptor via C trampoline library
+            auto desc = ffi_make_descriptor(
+                entry.name.toStringz,
+                fnPtr,
+                cast(int)entry.retKind,
+                cast(int)entry.paramKinds.length,
+                argKinds.length > 0 ? argKinds.ptr : null
+            );
+
+            if (desc is null) {
+                stderr.writeln("FFI warning: ffi_make_descriptor failed for '", entry.name, "'");
+                continue;
+            }
+
+            // Build wasm3 signature string: "ret(params)"
+            string sig = buildWasm3Sig(entry.retKind, entry.paramKinds);
+
+            // Link using m3_LinkRawFunctionEx with the generic trampoline
+            auto result = m3_LinkRawFunctionEx(
+                mod,
+                "ffi".ptr,
+                entry.name.toStringz,
+                sig.toStringz,
+                cast(typeof(&hostPrintI32)) &ffi_generic_trampoline,
+                cast(const(void)*) desc
+            );
+
+            if (result !is null && result != m3Err_functionLookupFailed) {
+                stderr.writeln("FFI warning: link failed for '", entry.name, "': ",
+                    fromStringz(result).idup);
+            }
+        }
+    }
+
+    /// Parsed FFI metadata entry
+    private struct FFIMetaEntry {
+        string name;
+        ubyte retKind;
+        ubyte[] paramKinds;
+    }
+
+    /**
+     * Parse the ffi_meta custom section from raw WASM bytes.
+     * Returns empty array if no such section exists.
+     */
+    private static FFIMetaEntry[] parseFFIMetaSection(const(ubyte)[] bytes) {
+        if (bytes.length < 8)
+            return [];
+
+        // Skip WASM header (magic + version = 8 bytes)
+        size_t pos = 8;
+
+        while (pos < bytes.length) {
+            ubyte sectionId = bytes[pos++];
+            uint sectionLen = readLEB128(bytes, pos);
+            size_t sectionEnd = pos + sectionLen;
+
+            if (sectionId == 0) {  // Custom section
+                // Read section name
+                uint nameLen = readLEB128(bytes, pos);
+                if (pos + nameLen <= sectionEnd) {
+                    string sectionName = cast(string) bytes[pos .. pos + nameLen];
+                    pos += nameLen;
+
+                    if (sectionName == "ffi_meta") {
+                        return parseFFIMetaBody(bytes[pos .. sectionEnd]);
+                    }
+                }
+            }
+
+            pos = sectionEnd;
+        }
+
+        return [];
+    }
+
+    /// Parse the body of an ffi_meta section
+    private static FFIMetaEntry[] parseFFIMetaBody(const(ubyte)[] data) {
+        size_t pos = 0;
+        uint count = readLEB128(data, pos);
+
+        FFIMetaEntry[] entries;
+        entries.reserve(count);
+
+        for (uint i = 0; i < count && pos < data.length; i++) {
+            FFIMetaEntry entry;
+
+            // Function name
+            uint nameLen = readLEB128(data, pos);
+            if (pos + nameLen > data.length) break;
+            entry.name = (cast(string) data[pos .. pos + nameLen]).idup;
+            pos += nameLen;
+
+            // Return kind
+            if (pos >= data.length) break;
+            entry.retKind = data[pos++];
+
+            // Parameter count and kinds
+            if (pos >= data.length) break;
+            ubyte paramCount = data[pos++];
+            if (pos + paramCount > data.length) break;
+            entry.paramKinds = data[pos .. pos + paramCount].dup;
+            pos += paramCount;
+
+            entries ~= entry;
+        }
+
+        return entries;
+    }
+
+    /// Read a LEB128-encoded unsigned integer, advancing pos
+    private static uint readLEB128(const(ubyte)[] data, ref size_t pos) {
+        uint result = 0;
+        uint shift = 0;
+        while (pos < data.length) {
+            ubyte b = data[pos++];
+            result |= cast(uint)(b & 0x7F) << shift;
+            if ((b & 0x80) == 0) break;
+            shift += 7;
+        }
+        return result;
+    }
+
+    /// Build wasm3 signature string from ArgKinds.
+    /// Format: "ret(params)" where i=i32, I=i64, f=f32, F=f64, v=void
+    private static string buildWasm3Sig(ubyte retKind, const(ubyte)[] paramKinds) {
+        char[] sig;
+
+        // Return type
+        sig ~= argKindToSigChar(retKind, true);
+        sig ~= '(';
+
+        // Parameters
+        foreach (k; paramKinds) {
+            sig ~= argKindToSigChar(k, false);
+        }
+
+        sig ~= ')';
+        return cast(string) sig;
+    }
+
+    private static char argKindToSigChar(ubyte kind, bool isReturn) {
+        // ArgKind enum values matching emitter
+        enum : ubyte { ARG_I32=0, ARG_I64=1, ARG_F32=2, ARG_F64=3, ARG_PTR=4, RET_VOID=5 }
+        switch (kind) {
+            case ARG_I32: return 'i';
+            case ARG_I64: return 'I';
+            case ARG_F32: return 'f';
+            case ARG_F64: return 'F';
+            case ARG_PTR: return 'i';  // Pointers are i32 in WASM
+            case RET_VOID: return 'v';
+            default: return 'i';
+        }
+    }
+
     /**
      * Call a function that returns i32
      */

@@ -12,8 +12,11 @@
         "wasm3-d": "~>0.3.0"
     },
     
-    "libs": ["tree-sitter"],
-    "lflags": ["-L/opt/homebrew/lib", "./grammar/tree-sitter-d/libtree-sitter-d.a", "./grammar/tree-sitter-c/libtree-sitter-c.a", "-framework", "CoreServices"],
+    "libs": ["tree-sitter", "ffi"],
+    "lflags": ["-L/opt/homebrew/lib", "./grammar/tree-sitter-d/libtree-sitter-d.a", "./grammar/tree-sitter-c/libtree-sitter-c.a", "./runtime/ffi_trampoline.o", "-framework", "CoreServices"],
+    "preBuildCommands": [
+        "sh runtime/build_ffi.sh"
+    ],
     
     "configurations": [
         {
@@ -48,8 +51,8 @@
             "mainSourceFile": "tests/main.d",
             "buildOptions": ["unittests"],
             "excludedSourceFiles": ["tests/examples/*.d", "src/main.d"],
-            "libs": ["tree-sitter"],
-            "lflags": ["-L/opt/homebrew/lib", "./grammar/tree-sitter-d/libtree-sitter-d.a", "./grammar/tree-sitter-c/libtree-sitter-c.a", "-framework", "CoreServices"]
+            "libs": ["tree-sitter", "ffi"],
+            "lflags": ["-L/opt/homebrew/lib", "./grammar/tree-sitter-d/libtree-sitter-d.a", "./grammar/tree-sitter-c/libtree-sitter-c.a", "./runtime/ffi_trampoline.o", "-framework", "CoreServices"]
         }
     ]
 }

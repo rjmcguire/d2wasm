@@ -1,0 +1,9 @@
+{
+    "name": "ffi_basic",
+    "description": "extern(C) FFI call via libffi — calls objc_getClass from WASM",
+    "type": "ffi_exec",
+    "expected_result": 42,
+    "entry": "main",
+    "link_frameworks": ["Foundation"],
+    "capability": "extern(C) FFI declaration, ffi_meta section, libffi trampoline"
+}

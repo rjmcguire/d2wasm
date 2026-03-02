@@ -128,16 +128,36 @@ class BinaryEmitter {
         uint exceptionArrayOffset;    // Memory offset of pre-allocated exception slot array
     }
     
+    /// FFI ArgKind — matches the C enum in ffi_trampoline.c
+    package enum ArgKind : ubyte {
+        ARG_I32  = 0,
+        ARG_I64  = 1,
+        ARG_F32  = 2,
+        ARG_F64  = 3,
+        ARG_PTR  = 4,
+        RET_VOID = 5,
+    }
+
+    /// FFI metadata for one imported function
+    package struct FFIMeta {
+        string name;
+        ArgKind retKind;
+        ArgKind[] paramKinds;
+    }
+
     private {
         // Output buffer
         Appender!(ubyte[]) output;
-        
+
         // Type index mapping
         uint[FuncSig] typeIndex;
-        
+
         // Built-in functions
         bool hasBuiltins = false;
         uint allocFuncIndex;
+
+        // FFI metadata (for extern(C) imports)
+        FFIMeta[] ffiMetas;
 
         // State
         EmitPhase phase = EmitPhase.init;
@@ -436,6 +456,11 @@ class BinaryEmitter {
 
         phase = EmitPhase.emittingData;
         emitDataSection();
+
+        // Custom FFI metadata section (only when extern(C) imports exist)
+        if (ffiMetas.length > 0) {
+            emitFFIMetaSection();
+        }
 
         phase = EmitPhase.done;
         return output.data.dup;
@@ -1066,11 +1091,11 @@ class BinaryEmitter {
         // Build signature
         FuncSig sig;
         sig.params = decl.parameters.map!(p => dTypeToValType(p.type)).array;
-        
+
         if (!isVoidType(decl.returnType)) {
             sig.results = [dTypeToValType(decl.returnType)];
         }
-        
+
         // Get or create type index
         uint tIdx;
         if (auto existing = sig in typeIndex) {
@@ -1080,16 +1105,63 @@ class BinaryEmitter {
             types ~= sig;
             typeIndex[sig] = tIdx;
         }
-        
+
         // Add import
         ImportInfo info;
         info.moduleName = decl.moduleName;
         info.fieldName = decl.name;
         info.typeIndex = tIdx;
-        
+
         // Imported functions occupy the first N function indices
         importIndex[decl.name] = cast(uint)imports.length;
         imports ~= info;
+
+        // Track FFI metadata for extern(C) imports
+        if (decl.moduleName == "ffi") {
+            FFIMeta meta;
+            meta.name = decl.name;
+            meta.retKind = isVoidType(decl.returnType) ? ArgKind.RET_VOID : dTypeToArgKind(decl.returnType);
+            meta.paramKinds = decl.parameters.map!(p => dTypeToArgKind(p.type)).array;
+            ffiMetas ~= meta;
+        }
+    }
+
+    /// Map a D Type to FFI ArgKind for marshaling metadata
+    private static ArgKind dTypeToArgKind(Type t) {
+        t = t.resolve();
+
+        if (cast(PointerType) t)
+            return ArgKind.ARG_PTR;
+
+        if (cast(ArrayType) t)
+            return ArgKind.ARG_PTR;
+
+        if (cast(UserType) t)
+            return ArgKind.ARG_PTR;
+
+        auto basic = cast(BasicType) t;
+        if (!basic)
+            return ArgKind.ARG_I32;
+
+        final switch (basic.kind) {
+            case BasicType.Kind.Int64:
+            case BasicType.Kind.UInt64:
+                return ArgKind.ARG_I64;
+            case BasicType.Kind.Float32:
+                return ArgKind.ARG_F32;
+            case BasicType.Kind.Float64:
+                return ArgKind.ARG_F64;
+            case BasicType.Kind.Bool:
+            case BasicType.Kind.Int8:
+            case BasicType.Kind.Int16:
+            case BasicType.Kind.Int32:
+            case BasicType.Kind.UInt8:
+            case BasicType.Kind.UInt16:
+            case BasicType.Kind.UInt32:
+            case BasicType.Kind.Char:
+            case BasicType.Kind.Void:
+                return ArgKind.ARG_I32;
+        }
     }
     
     private void collectFunction(FunctionDecl decl) {
@@ -3078,15 +3150,58 @@ class BinaryEmitter {
     
     private void emitDataSection() {
         if (dataEntries.length == 0) return;
-        
+
         // Convert to section builder's DataEntry format
         import codegen.wasm.sections.data : DataEntry_ = DataEntry;
         auto sectionEntries = dataEntries.map!(e => DataEntry_(e.offset, e.data)).array;
-        
+
         if (auto content = buildDataSection(sectionEntries))
             emitSection(Section.data, content);
     }
-    
+
+    /**
+     * Emit a custom "ffi_meta" section describing extern(C) FFI imports.
+     * Format:
+     *   section_id: 0 (custom)
+     *   name: "ffi_meta" (LEB128 length-prefixed)
+     *   body:
+     *     count: LEB128 u32
+     *     per entry:
+     *       name_len: LEB128 u32
+     *       name_bytes: UTF-8
+     *       ret_kind: u8
+     *       param_count: u8
+     *       param_kinds: u8[param_count]
+     */
+    private void emitFFIMetaSection() {
+        Appender!(ubyte[]) body_;
+
+        // Section name "ffi_meta"
+        enum sectionName = "ffi_meta";
+        leb128u(body_, sectionName.length);
+        body_ ~= cast(const(ubyte)[])sectionName;
+
+        // Number of FFI imports
+        leb128u(body_, ffiMetas.length);
+
+        foreach (ref meta; ffiMetas) {
+            // Function name
+            leb128u(body_, meta.name.length);
+            body_ ~= cast(const(ubyte)[])meta.name;
+
+            // Return kind
+            body_ ~= cast(ubyte)meta.retKind;
+
+            // Parameter count and kinds
+            body_ ~= cast(ubyte)meta.paramKinds.length;
+            foreach (k; meta.paramKinds) {
+                body_ ~= cast(ubyte)k;
+            }
+        }
+
+        emitSection(Section.custom, body_.data);
+    }
+
     /**
      * Add a data entry (string literal, etc.)
      * Returns the memory offset

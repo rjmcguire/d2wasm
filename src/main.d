@@ -69,6 +69,9 @@ struct CompilerOptions {
 
     // Dependency graph (diagnostic)
     bool depGraph = false;        // --dep-graph: build and print dependency graph after type checking
+
+    // FFI options
+    string[] linkFrameworks;      // --link-framework: macOS frameworks to dlopen for FFI
 }
 
 int main(string[] args) {
@@ -125,7 +128,9 @@ int main(string[] args) {
             // Import paths
             "import-path", "Add import search path (can be specified multiple times)", &options.importPaths,
             // Dependency graph
-            "dep-graph", "Build and print dependency graph after type checking", &options.depGraph
+            "dep-graph", "Build and print dependency graph after type checking", &options.depGraph,
+            // FFI options
+            "link-framework", "macOS framework to load for FFI (can be repeated)", &options.linkFrameworks
         );
         
         log(3, "main() started");
@@ -525,10 +530,24 @@ int compileFile(CompilerOptions options) {
             // Do NOT "optimize" this to use the in-memory bytes directly!
             if (options.run) {
                 log(1, "Running ", options.runFunc, " from ", options.outputFile, "...");
-                
+
+                // Load frameworks for FFI (makes their symbols visible to dlsym)
+                if (options.linkFrameworks.length > 0) {
+                    import core.sys.posix.dlfcn : dlopen, RTLD_LAZY, RTLD_GLOBAL;
+                    foreach (fw; options.linkFrameworks) {
+                        string path = "/System/Library/Frameworks/" ~ fw ~ ".framework/" ~ fw;
+                        auto handle = dlopen((path ~ "\0").ptr, RTLD_LAZY | RTLD_GLOBAL);
+                        if (handle is null) {
+                            log(1, "Warning: could not load framework '", fw, "'");
+                        } else {
+                            log(2, "Loaded framework: ", fw);
+                        }
+                    }
+                }
+
                 import semantic.ctfe_runtime : CTFERuntime;
                 auto wasmFromFile = cast(ubyte[])std.file.read(options.outputFile);
-                
+
                 auto runner = new CTFERuntime();
                 runner.loadModule(wasmFromFile);
                 

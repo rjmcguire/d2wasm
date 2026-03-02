@@ -413,13 +413,18 @@ class TreeSitterBridge {
             }
         }
 
-        // Check for WASM import linkage
+        // Check for WASM import linkage or extern(C) FFI
         if (TreeSitterParser.isValid(linkageNode)) {
             string moduleName = parseWasmLinkage(linkageNode);
             if (moduleName !is null) {
                 // This is a WASM import declaration
                 log(3, "Parsed WASM import: ", moduleName, ".", name);
                 return new ImportedFunctionDecl(loc, name, returnType, parameters, moduleName);
+            }
+            // extern(C) with no body → FFI import
+            if (isCLinkage(linkageNode) && !TreeSitterParser.isValid(bodyNode)) {
+                log(3, "Parsed extern(C) FFI import: ", name);
+                return new ImportedFunctionDecl(loc, name, returnType, parameters, "ffi");
             }
         }
 
@@ -496,7 +501,22 @@ class TreeSitterBridge {
         
         return hasWasm ? moduleName : null;
     }
-    
+
+    /**
+     * Check if a linkage_attribute specifies extern(C).
+     */
+    private bool isCLinkage(TSNode linkageNode) {
+        uint childCount = TreeSitterParser.getChildCount(linkageNode);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(linkageNode, i);
+            string text = TreeSitterParser.getNodeText(child, sourceText);
+            if (text == "C") {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /**
      * Extract the string content from a string_literal node (handles quoted_string child)
      */
@@ -1896,11 +1916,18 @@ class TreeSitterBridge {
             {
                 string typeText = TreeSitterParser.getNodeText(node, sourceText);
                 if (typeText.length > 1 && typeText[$ - 1] == '*') {
-                    // Parse the base type (first non-ctor child)
+                    // Parse the base type — look for a "type" child (skip type_ctor,
+                    // anonymous parens, and the * itself)
                     for (uint i = 0; i < childCount; i++) {
                         TSNode child = TreeSitterParser.getChild(node, i);
                         string childType = TreeSitterParser.getNodeType(child);
-                        if (childType != "type_ctor" && childType != "*") {
+                        if (childType == "type") {
+                            Type baseType = parseType(child);
+                            return new PointerType(loc, baseType);
+                        }
+                        // Also accept bare type keywords (e.g. "int*" where "int" is direct child)
+                        if (childType != "type_ctor" && childType != "*"
+                            && childType != "(" && childType != ")") {
                             Type baseType = parseType(child);
                             return new PointerType(loc, baseType);
                         }
@@ -2055,7 +2082,7 @@ class TreeSitterBridge {
             case "double": return new BasicType(loc, BasicType.Kind.Float64);
             case "char": return new BasicType(loc, BasicType.Kind.Char);
             default:
-                return new BasicType(loc, BasicType.Kind.Int32);  // Default to int
+                assert(0, "parseBasicTypeByText: unsupported type name '" ~ typeName ~ "'");
         }
     }
     
