@@ -1,0 +1,7 @@
+{
+  "name": "ffi_extern_c",
+  "description": "extern(C) FFI call — objc_getClass returns non-null for NSObject",
+  "type": "ffi_exec",
+  "expected_result": 42,
+  "link_frameworks": ["Foundation"]
+}

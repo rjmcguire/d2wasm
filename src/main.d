@@ -316,6 +316,20 @@ int compileFile(CompilerOptions options) {
         auto importResolver = new ImportResolver(modRegistry, parseFn);
         importResolver.resolveImports(inputModule);
 
+        // Load frameworks for FFI early — before CTFE, so dlsym can find symbols
+        if (options.linkFrameworks.length > 0) {
+            import core.sys.posix.dlfcn : dlopen, RTLD_LAZY, RTLD_GLOBAL;
+            foreach (fw; options.linkFrameworks) {
+                string path = "/System/Library/Frameworks/" ~ fw ~ ".framework/" ~ fw;
+                auto handle = dlopen((path ~ "\0").ptr, RTLD_LAZY | RTLD_GLOBAL);
+                if (handle is null) {
+                    log(1, "Warning: could not load framework '", fw, "'");
+                } else {
+                    log(2, "Loaded framework: ", fw);
+                }
+            }
+        }
+
         // ── On-demand compilation: mixin expand + symbol collect + type check ──
         import semantic.module_compiler : CompilationController;
         import semantic.mixin_expander : MixinError;
@@ -531,19 +545,7 @@ int compileFile(CompilerOptions options) {
             if (options.run) {
                 log(1, "Running ", options.runFunc, " from ", options.outputFile, "...");
 
-                // Load frameworks for FFI (makes their symbols visible to dlsym)
-                if (options.linkFrameworks.length > 0) {
-                    import core.sys.posix.dlfcn : dlopen, RTLD_LAZY, RTLD_GLOBAL;
-                    foreach (fw; options.linkFrameworks) {
-                        string path = "/System/Library/Frameworks/" ~ fw ~ ".framework/" ~ fw;
-                        auto handle = dlopen((path ~ "\0").ptr, RTLD_LAZY | RTLD_GLOBAL);
-                        if (handle is null) {
-                            log(1, "Warning: could not load framework '", fw, "'");
-                        } else {
-                            log(2, "Loaded framework: ", fw);
-                        }
-                    }
-                }
+                // Frameworks already loaded earlier (before CTFE) via dlopen
 
                 import semantic.ctfe_runtime : CTFERuntime;
                 auto wasmFromFile = cast(ubyte[])std.file.read(options.outputFile);

@@ -11,7 +11,7 @@
  */
 module codegen.backend;
 
-import ast.nodes : Declaration, FunctionDecl, StructDecl, SourceLocation;
+import ast.nodes : Declaration, FunctionDecl, ImportedFunctionDecl, StructDecl, SourceLocation;
 import ast.expressions;
 import semantic.symbol_table;
 
@@ -123,7 +123,8 @@ interface Backend {
      * Used for CTFE where a function may call other D functions.
      * Returns a callable for the entry function.
      */
-    CompiledFunction compileWithDependencies(FunctionDecl[] funcs, string entryFuncName);
+    CompiledFunction compileWithDependencies(FunctionDecl[] funcs, string entryFuncName,
+        ImportedFunctionDecl[] imports = null);
     
     /**
      * Compile multiple declarations (for full module compilation).

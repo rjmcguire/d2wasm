@@ -31,6 +31,10 @@ class DependencyAnalyzer {
     private bool[string] neededStructs;
     private StructDecl[] structDeps;
 
+    // Imported function declarations (extern(C) FFI)
+    private bool[string] importedSet;
+    private ImportedFunctionDecl[] importDeps;
+
     this(SymbolTable symbolTable, Declaration[] declarations) {
         this.symbolTable = symbolTable;
         this.allDeclarations = declarations;
@@ -50,6 +54,8 @@ class DependencyAnalyzer {
         inProgress.clear();
         neededStructs.clear();
         structDeps = null;
+        importedSet.clear();
+        importDeps = null;
 
         FunctionDecl[] result;
         collectDependencies(entryFunc, result);
@@ -62,6 +68,14 @@ class DependencyAnalyzer {
      */
     StructDecl[] getStructDependencies() {
         return structDeps;
+    }
+
+    /**
+     * Get imported function declarations (extern(C) FFI) found during analysis.
+     * Call after findDependencies().
+     */
+    ImportedFunctionDecl[] getImportDependencies() {
+        return importDeps;
     }
 
     /// Compute a unique key for a function (D ABI mangled name for methods).
@@ -465,6 +479,14 @@ class DependencyAnalyzer {
             if (symbol && symbol.kind == SymbolKind.Function) {
                 if (auto funcDecl = cast(FunctionDecl)symbol.declaration) {
                     return funcDecl;
+                }
+                // Track extern(C) FFI imports — not a FunctionDecl, no body to traverse
+                if (auto importedFunc = cast(ImportedFunctionDecl)symbol.declaration) {
+                    if (importedFunc.name !in importedSet) {
+                        importedSet[importedFunc.name] = true;
+                        importDeps ~= importedFunc;
+                    }
+                    return null;
                 }
             }
         }

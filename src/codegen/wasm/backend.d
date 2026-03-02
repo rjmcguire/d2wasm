@@ -41,12 +41,17 @@ class WASMBackend : Backend {
             emitter.getArenaBaseValue(), emitter.exceptionArrayOffset, buildNeedsArenaMap([func]));
     }
 
-    override CompiledFunction compileWithDependencies(FunctionDecl[] funcs, string entryFuncName) {
+    override CompiledFunction compileWithDependencies(FunctionDecl[] funcs, string entryFuncName,
+            ImportedFunctionDecl[] imports = null) {
         import std.algorithm : map;
         import std.array : array;
 
         // Convert FunctionDecl[] to Declaration[] for the emitter
         Declaration[] decls = funcs.map!(f => cast(Declaration)f).array;
+
+        // Include imported function declarations (extern(C) FFI)
+        foreach (imp; imports)
+            decls ~= cast(Declaration)imp;
 
         // Include parent struct declarations for method dependencies
         // (emitter needs StructDecl to register methods with mangled names)

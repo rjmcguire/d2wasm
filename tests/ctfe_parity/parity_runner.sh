@@ -71,13 +71,53 @@ run_test_with_backend() {
 
     # Only handle CTFE-relevant test types
     case "$test_type" in
-        compile_output|wasm_exec|compile_error) ;;
+        compile_output|wasm_exec|compile_error|ffi_exec) ;;
         *)
             echo -e "${YELLOW}SKIP${NC} $test_name [$backend] (not a CTFE test type: $test_type)"
             return 0
             ;;
     esac
-    
+
+    # Handle ffi_exec — compile+run with --run and --link-framework
+    if [ "$test_type" = "ffi_exec" ]; then
+        if [ "$(uname)" != "Darwin" ]; then
+            echo -e "${YELLOW}SKIP${NC} $test_name [$backend] (ffi_exec requires macOS)"
+            return 0
+        fi
+
+        local fw_args=""
+        local frameworks=$(jq -r '.link_frameworks // [] | .[]' "$config_file")
+        for fw in $frameworks; do
+            fw_args="$fw_args --link-framework $fw"
+        done
+
+        local expected_result=$(jq -r '.expected_result // "null"' "$config_file")
+        local compiler_args=$(jq -r '.compiler_args // [] | join(" ")' "$config_file")
+
+        if [ $VERBOSE -eq 1 ]; then
+            echo "  Running FFI: $COMPILER --run --backend=$backend $fw_args $compiler_args $test_file"
+        fi
+
+        local run_output
+        run_output=$("$COMPILER" --run --backend="$backend" $fw_args $compiler_args "$test_file" 2>&1)
+        local run_exit=$?
+
+        if [ "$expected_result" != "null" ] && [ "$run_exit" -eq "$expected_result" ]; then
+            echo -e "${GREEN}PASS${NC} $test_name [$backend] (ffi exit: $run_exit)"
+            return 0
+        elif [ "$expected_result" = "null" ] && [ "$run_exit" -eq 0 ]; then
+            echo -e "${GREEN}PASS${NC} $test_name [$backend] (ffi exit: 0)"
+            return 0
+        else
+            echo -e "${RED}FAIL${NC} $test_name [$backend]"
+            echo "  Expected exit code: ${expected_result:-0}"
+            echo "  Actual exit code: $run_exit"
+            echo "  Output:"
+            echo "$run_output" | sed 's/^/    /'
+            return 1
+        fi
+    fi
+
     # Build with specified backend
     local wasm_file="$test_dir/test.wasm"
     rm -f "$wasm_file"

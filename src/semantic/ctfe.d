@@ -218,6 +218,7 @@ class CTFEEvaluator {
     private bool[string] compiledFunctions;  // functions already in context
     private CompiledFunction cachedContext;  // reusable compiled module
     private FunctionDecl[] contextFunctions; // functions in current context
+    private ImportedFunctionDecl[] contextImports; // FFI imports in current context
 
     // CTFE statistics
     private uint statFunctionsCompiled;   // total functions compiled
@@ -1299,13 +1300,15 @@ class CTFEEvaluator {
         auto t0 = MonoTime.currTime;
         auto analyzer = makeDependencyAnalyzer();
         auto dependencies = analyzer.findDependencies(funcDecl);
+        auto newImports = analyzer.getImportDependencies();
         statAnalysisTime += MonoTime.currTime - t0;
 
         // Check which functions are new (not yet in context)
         auto newFuncs = dependencies.filter!(f => ctfeFuncKey(f) !in compiledFunctions).array;
+        bool hasNewImports = newImports.length > 0 && newImports.length > contextImports.length;
 
-        // Recompile if we have new functions
-        if (!newFuncs.empty) {
+        // Recompile if we have new functions or imports
+        if (!newFuncs.empty || hasNewImports) {
             statCacheMisses++;
             statFunctionsCompiled += cast(uint)newFuncs.length;
             log(3, "CTFE: Compiling ", newFuncs.length, " new functions for ", funcDecl.name);
@@ -1329,9 +1332,11 @@ class CTFEEvaluator {
                 cachedContext = null;
             }
 
+            auto allImports = mergeImports(contextImports, newImports);
+
             auto t1 = MonoTime.currTime;
             auto allFuncs = contextFunctions ~ newFuncs;
-            cachedContext = backend.compileWithDependencies(allFuncs, exportName(funcDecl));
+            cachedContext = backend.compileWithDependencies(allFuncs, exportName(funcDecl), allImports);
             statCompileTime += MonoTime.currTime - t1;
             if (cachedContext is null) {
                 auto errLoc = backend.errorLocation();
@@ -1340,6 +1345,7 @@ class CTFEEvaluator {
             }
 
             contextFunctions = allFuncs;
+            contextImports = allImports;
             foreach (f; newFuncs) {
                 compiledFunctions[ctfeFuncKey(f)] = true;
             }
@@ -1394,10 +1400,12 @@ class CTFEEvaluator {
         auto t0 = MonoTime.currTime;
         auto analyzer = makeDependencyAnalyzer();
         auto dependencies = analyzer.findDependencies(funcDecl);
+        auto newImports = analyzer.getImportDependencies();
         statAnalysisTime += MonoTime.currTime - t0;
         auto newFuncs = dependencies.filter!(f => ctfeFuncKey(f) !in compiledFunctions).array;
+        bool hasNewImports = newImports.length > 0 && newImports.length > contextImports.length;
 
-        if (!newFuncs.empty) {
+        if (!newFuncs.empty || hasNewImports) {
             statCacheMisses++;
             statFunctionsCompiled += cast(uint)newFuncs.length;
             log(3, "CTFE: Compiling ", newFuncs.length, " new functions for ", funcDecl.name);
@@ -1421,9 +1429,11 @@ class CTFEEvaluator {
                 cachedContext = null;
             }
 
+            auto allImports = mergeImports(contextImports, newImports);
+
             auto t1 = MonoTime.currTime;
             auto allFuncs = contextFunctions ~ newFuncs;
-            cachedContext = backend.compileWithDependencies(allFuncs, exportName(funcDecl));
+            cachedContext = backend.compileWithDependencies(allFuncs, exportName(funcDecl), allImports);
             statCompileTime += MonoTime.currTime - t1;
             if (cachedContext is null) {
                 auto errLoc = backend.errorLocation();
@@ -1432,6 +1442,7 @@ class CTFEEvaluator {
             }
 
             contextFunctions = allFuncs;
+            contextImports = allImports;
             foreach (f; newFuncs) {
                 compiledFunctions[ctfeFuncKey(f)] = true;
             }
@@ -1627,6 +1638,7 @@ class CTFEEvaluator {
         auto t0 = MonoTime.currTime;
         auto analyzer = makeDependencyAnalyzer();
         auto dependencies = analyzer.findDependencies(funcDecl);
+        auto newImports = analyzer.getImportDependencies();
         statAnalysisTime += MonoTime.currTime - t0;
 
         // Track call count
@@ -1634,8 +1646,9 @@ class CTFEEvaluator {
 
         // Check which functions are new (not yet in context)
         auto newFuncs = dependencies.filter!(f => ctfeFuncKey(f) !in compiledFunctions).array;
+        bool hasNewImports = newImports.length > 0 && newImports.length > contextImports.length;
 
-        if (newFuncs.length > 0) {
+        if (newFuncs.length > 0 || hasNewImports) {
             statCacheMisses++;
             statFunctionsCompiled += cast(uint)newFuncs.length;
             log(3, "CTFE: ", funcDecl.name, " needs: [",
@@ -1663,9 +1676,12 @@ class CTFEEvaluator {
                 cachedContext = null;
             }
 
+            // Merge imports (deduplicated by dependency analyzer)
+            auto allImports = mergeImports(contextImports, newImports);
+
             auto t1 = MonoTime.currTime;
             auto allFuncs = contextFunctions ~ newFuncs;
-            cachedContext = backend.compileWithDependencies(allFuncs, exportName(funcDecl));
+            cachedContext = backend.compileWithDependencies(allFuncs, exportName(funcDecl), allImports);
             statCompileTime += MonoTime.currTime - t1;
             if (cachedContext is null) {
                 auto errLoc = backend.errorLocation();
@@ -1675,6 +1691,7 @@ class CTFEEvaluator {
 
             // Only mark as compiled after successful compilation
             contextFunctions = allFuncs;
+            contextImports = allImports;
             foreach (f; newFuncs) {
                 compiledFunctions[ctfeFuncKey(f)] = true;
             }
@@ -1682,6 +1699,25 @@ class CTFEEvaluator {
             statCacheHits++;
             log(3, "CTFE: Reusing cached context for ", funcDecl.name);
         }
+    }
+
+    /// Merge new imports into existing context imports (deduplicate by name).
+    private static ImportedFunctionDecl[] mergeImports(
+            ImportedFunctionDecl[] existing, ImportedFunctionDecl[] newOnes) {
+        if (newOnes.length == 0) return existing;
+        bool[string] seen;
+        ImportedFunctionDecl[] result;
+        foreach (imp; existing) {
+            seen[imp.name] = true;
+            result ~= imp;
+        }
+        foreach (imp; newOnes) {
+            if (imp.name !in seen) {
+                seen[imp.name] = true;
+                result ~= imp;
+            }
+        }
+        return result;
     }
 
     /// Build a CTFEError from a failed ExecutionResult with structured location and call chain.

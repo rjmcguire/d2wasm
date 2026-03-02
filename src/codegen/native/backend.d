@@ -67,7 +67,8 @@ class NativeBackend : Backend {
         }
     }
 
-    override CompiledFunction compileWithDependencies(FunctionDecl[] funcs, string entryFuncName) {
+    override CompiledFunction compileWithDependencies(FunctionDecl[] funcs, string entryFuncName,
+            ImportedFunctionDecl[] imports = null) {
         // Type-check all functions first
         auto typeChecker = new TypeChecker(symbolTable);
         foreach (func; funcs) {
@@ -80,7 +81,7 @@ class NativeBackend : Backend {
         }
 
         try {
-            return new NativeCompiledFunction(funcs, entryFuncName, symbolTable, enableStackTrace);
+            return new NativeCompiledFunction(funcs, entryFuncName, symbolTable, enableStackTrace, imports);
         } catch (NativeCompileError e) {
             lastError = "Native compile error: " ~ e.msg;
             lastErrorLoc = e.location;
@@ -262,6 +263,9 @@ class NativeCompiledFunction : CompiledFunction {
     
     // Host function table for CTFE intrinsics - Milestone 87/88
     private HostFunctionTable hostFunctions;
+
+    // FFI function pointer slots (extern(C) imports resolved via dlsym)
+    private ulong[string] ffiSlots;
     
     // Stack trace option
     private bool enableStackTrace;
@@ -306,7 +310,8 @@ class NativeCompiledFunction : CompiledFunction {
     }
     
     /// Multi-function constructor for CTFE with dependencies
-    this(FunctionDecl[] funcs, string entryFuncName, SymbolTable st, bool enableStackTrace = true) {
+    this(FunctionDecl[] funcs, string entryFuncName, SymbolTable st, bool enableStackTrace = true,
+            ImportedFunctionDecl[] imports = null) {
         import std.stdio : writeln;
         
         this.funcName = entryFuncName;
@@ -330,6 +335,9 @@ class NativeCompiledFunction : CompiledFunction {
 
         // Allocate exception globals in data section
         allocateExceptionGlobals();
+
+        // Resolve extern(C) FFI imports via dlsym
+        resolveFFIImports(imports);
 
         // Store all function decls for call resolution
         // Methods use mangled names: StructName_methodName
@@ -738,6 +746,31 @@ class NativeCompiledFunction : CompiledFunction {
         // Pre-allocate 100 exception slots (24 bytes each)
         auto slotBytes = new ubyte[](2400);
         exceptionSlotsAddr = dataSection.addData(slotBytes);
+    }
+
+    /// Resolve extern(C) FFI imports via dlsym and store function pointers in the data section.
+    private void resolveFFIImports(ImportedFunctionDecl[] imports) {
+        if (imports is null) return;
+        import core.sys.posix.dlfcn : dlsym;
+        version (OSX) {
+            import core.sys.darwin.dlfcn : RTLD_DEFAULT;
+        } else {
+            import core.sys.posix.dlfcn : RTLD_DEFAULT;
+        }
+
+        foreach (imp; imports) {
+            if (imp.moduleName != "ffi") continue;
+
+            // dlsym to find the native function pointer
+            auto ptr = dlsym(RTLD_DEFAULT, (imp.name ~ "\0").ptr);
+            if (ptr is null) continue;  // symbol not found — skip silently
+
+            // Store the function pointer in the data section (8 bytes, aligned)
+            ulong fnAddr = cast(ulong)cast(size_t)ptr;
+            ubyte[8] addrBytes = (cast(ubyte*)&fnAddr)[0..8];
+            ubyte* slot = dataSection.addData(addrBytes[]);
+            ffiSlots[imp.name] = cast(ulong)cast(size_t)slot;
+        }
     }
 
     /// Emit exception check after a function call (void context — result already consumed or discarded).
@@ -2482,6 +2515,60 @@ class NativeCompiledFunction : CompiledFunction {
                     // Emit host call with context injection
                     ulong contextSlot = hostFunctions.getContextSlotAddress();
                     gen.emitHostCall(hostSlot, contextSlot);
+                    // Result is in x0
+                    return;
+                }
+
+                // Check if this is an FFI call (extern(C) import resolved via dlsym)
+                if (auto ffiSlot = funcIdent.name in ffiSlots) {
+                    if (call.arguments.length > 4) {
+                        throw new Exception("Native backend: FFI calls support max 4 arguments");
+                    }
+
+                    // Compile arguments into x0-x3 (standard C calling convention, no context shift)
+                    bool hasNestedCalls = false;
+                    foreach (arg; call.arguments) {
+                        if (containsCall(arg)) {
+                            hasNestedCalls = true;
+                            break;
+                        }
+                    }
+
+                    if (hasNestedCalls && call.arguments.length > 1) {
+                        auto mark = temps.save();
+                        size_t[] argSlots;
+                        foreach (i, arg; call.arguments) {
+                            compileExpression(arg);
+                            size_t slot = temps.alloc(8);
+                            gen.emitStorePtr(slot);
+                            argSlots ~= slot;
+                        }
+                        for (long i = cast(long)argSlots.length - 1; i >= 0; i--) {
+                            gen.emitLoadPtr(argSlots[cast(size_t)i]);
+                            switch (cast(int)i) {
+                                case 0: break;
+                                case 1: gen.emitMoveX0ToX1(); break;
+                                case 2: gen.emitMoveX0ToX2(); break;
+                                case 3: gen.emitMoveX0ToX3(); break;
+                                default: assert(0, "FFI argument register > 3");
+                            }
+                        }
+                        temps.restore(mark);
+                    } else {
+                        for (long i = cast(long)call.arguments.length - 1; i >= 0; i--) {
+                            compileExpression(call.arguments[i]);
+                            switch (cast(int)i) {
+                                case 0: break;
+                                case 1: gen.emitMoveX0ToX1(); break;
+                                case 2: gen.emitMoveX0ToX2(); break;
+                                case 3: gen.emitMoveX0ToX3(); break;
+                                default: assert(0, "FFI argument register > 3");
+                            }
+                        }
+                    }
+
+                    // Call through the function pointer slot (no context injection)
+                    gen.emitIndirectCall(*ffiSlot);
                     // Result is in x0
                     return;
                 }
