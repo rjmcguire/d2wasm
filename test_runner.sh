@@ -74,7 +74,64 @@ run_test() {
             return 1
         fi
     fi
-    
+
+    # Handle ffi_exec type — compile+run with --run and --link-framework
+    if [ "$test_type" = "ffi_exec" ]; then
+        # Only supported on macOS
+        if [ "$(uname)" != "Darwin" ]; then
+            echo -e "${YELLOW}SKIP${NC} $test_name (ffi_exec requires macOS)"
+            return 0
+        fi
+
+        # Build --link-framework flags from config
+        local fw_args=""
+        local frameworks=$(jq -r '.link_frameworks // [] | .[]' "$config_file")
+        for fw in $frameworks; do
+            fw_args="$fw_args --link-framework $fw"
+        done
+
+        local expected_result=$(jq -r '.expected_result // "null"' "$config_file")
+
+        if [ $VERBOSE -eq 1 ]; then
+            echo "Running FFI test: $COMPILER --run $fw_args $compiler_args $test_file"
+        fi
+
+        local run_output
+        run_output=$("$COMPILER" --run $fw_args $compiler_args "$test_file" 2>&1)
+        local run_exit=$?
+
+        if [ "$expected_result" != "null" ]; then
+            if [ "$run_exit" -eq "$expected_result" ]; then
+                echo -e "${GREEN}PASS${NC} $test_name (ffi exit: $run_exit)"
+                return 0
+            else
+                echo -e "${RED}FAIL${NC} $test_name"
+                echo "  Expected exit code: $expected_result"
+                echo "  Actual exit code: $run_exit"
+                if [ $VERBOSE -eq 1 ]; then
+                    echo "  Output:"
+                    echo "$run_output" | sed 's/^/    /'
+                fi
+                return 1
+            fi
+        else
+            # No expected_result — just check it runs successfully
+            if [ "$run_exit" -eq "$expected_exit" ]; then
+                echo -e "${GREEN}PASS${NC} $test_name (ffi exit: $run_exit)"
+                return 0
+            else
+                echo -e "${RED}FAIL${NC} $test_name"
+                echo "  Expected exit code: $expected_exit"
+                echo "  Actual exit code: $run_exit"
+                if [ $VERBOSE -eq 1 ]; then
+                    echo "  Output:"
+                    echo "$run_output" | sed 's/^/    /'
+                fi
+                return 1
+            fi
+        fi
+    fi
+
     # Build
     local wasm_file="$test_dir/test.wasm"
     rm -f "$wasm_file"

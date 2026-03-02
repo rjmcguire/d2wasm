@@ -140,6 +140,7 @@ class FuncContext {
     uint fpLocal;              // Local index for frame pointer (stable, never changes)
     uint tempLocalA;           // Temp local for aggregate copy (dst addr)
     uint tempLocalB;           // Temp local for aggregate copy (src addr)
+    uint tempLocalI64;         // Temp local for i64 values (e.g., i64-returning call exception check)
     
     // Block depth for br instructions
     uint blockDepth = 0;
@@ -667,6 +668,8 @@ class FuncContext {
         localTypes ~= ValType.i32;
         tempLocalB = cast(uint)localTypes.length;
         localTypes ~= ValType.i32;
+        tempLocalI64 = cast(uint)localTypes.length;
+        localTypes ~= ValType.i64;
 
         if (frameSize > 0) {
             // Need locals for saved SP (epilogue restore) and FP (stable frame access)
@@ -1366,12 +1369,13 @@ class FuncContext {
 
     /**
      * Emit exception check when a call result value is on the WASM stack.
-     * Saves the result to tempLocalA, checks, restores on normal path.
+     * Saves the result to tempLocalA (or tempLocalI64 for i64), checks, restores on normal path.
      */
-    void emitExceptionCheckWithValue(ref Appender!(ubyte[]) out_, SourceLocation callSite = SourceLocation.init) {
-        // Save the call result off the stack
+    void emitExceptionCheckWithValue(ref Appender!(ubyte[]) out_, SourceLocation callSite = SourceLocation.init, bool isI64Value = false) {
+        // Save the call result off the stack — use i64 temp for i64 values
+        uint tempLocal = isI64Value ? tempLocalI64 : tempLocalA;
         out_ ~= Op.local_set;
-        leb128u(out_, tempLocalA);
+        leb128u(out_, tempLocal);
         // Check exception flag
         out_ ~= Op.global_get;
         leb128u(out_, emitter.exceptionPendingGlobal);
@@ -1395,7 +1399,7 @@ class FuncContext {
         }
         // Restore the call result to the stack for normal execution
         out_ ~= Op.local_get;
-        leb128u(out_, tempLocalA);
+        leb128u(out_, tempLocal);
     }
 
     /**
@@ -2798,7 +2802,7 @@ class FuncContext {
             // Check for exception after real function calls (not struct/class construction)
             if (!isConstructionCall(call)) {
                 if (expressionHasValue(call))
-                    emitExceptionCheckWithValue(out_, call.location);
+                    emitExceptionCheckWithValue(out_, call.location, isI64Expression(call));
                 else
                     emitExceptionCheck(out_, call.location);
             }
@@ -2824,7 +2828,7 @@ class FuncContext {
             // Check for exception after real template function calls (not struct construction)
             if (!tmplInst.resolvedStructInstantiation) {
                 if (expressionHasValue(tmplInst))
-                    emitExceptionCheckWithValue(out_, tmplInst.location);
+                    emitExceptionCheckWithValue(out_, tmplInst.location, isI64Expression(tmplInst));
                 else
                     emitExceptionCheck(out_, tmplInst.location);
             }
