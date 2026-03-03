@@ -72,6 +72,7 @@ struct CompilerOptions {
 
     // FFI options
     string[] linkFrameworks;      // --link-framework: macOS frameworks to dlopen for FFI
+    string[] linkDylibs;          // --link-dylib: shared libraries to dlopen for FFI
 }
 
 int main(string[] args) {
@@ -130,7 +131,8 @@ int main(string[] args) {
             // Dependency graph
             "dep-graph", "Build and print dependency graph after type checking", &options.depGraph,
             // FFI options
-            "link-framework", "macOS framework to load for FFI (can be repeated)", &options.linkFrameworks
+            "link-framework", "macOS framework to load for FFI (can be repeated)", &options.linkFrameworks,
+            "link-dylib", "Shared library (.dylib) to load for FFI (can be repeated)", &options.linkDylibs
         );
         
         log(3, "main() started");
@@ -326,6 +328,19 @@ int compileFile(CompilerOptions options) {
                     log(1, "Warning: could not load framework '", fw, "'");
                 } else {
                     log(2, "Loaded framework: ", fw);
+                }
+            }
+        }
+
+        // Load shared libraries for FFI — before CTFE, so dlsym can find symbols
+        if (options.linkDylibs.length > 0) {
+            import core.sys.posix.dlfcn : dlopen, RTLD_LAZY, RTLD_GLOBAL;
+            foreach (lib; options.linkDylibs) {
+                auto handle = dlopen((lib ~ "\0").ptr, RTLD_LAZY | RTLD_GLOBAL);
+                if (handle is null) {
+                    log(1, "Warning: could not load dylib '", lib, "'");
+                } else {
+                    log(2, "Loaded dylib: ", lib);
                 }
             }
         }
