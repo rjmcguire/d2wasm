@@ -141,6 +141,7 @@ class FuncContext {
     uint tempLocalA;           // Temp local for aggregate copy (dst addr)
     uint tempLocalB;           // Temp local for aggregate copy (src addr)
     uint tempLocalI64;         // Temp local for i64 values (e.g., i64-returning call exception check)
+    uint tempLocalF64;         // Temp local for f64 values (e.g., f64-returning call exception check)
     
     // Block depth for br instructions
     uint blockDepth = 0;
@@ -670,6 +671,8 @@ class FuncContext {
         localTypes ~= ValType.i32;
         tempLocalI64 = cast(uint)localTypes.length;
         localTypes ~= ValType.i64;
+        tempLocalF64 = cast(uint)localTypes.length;
+        localTypes ~= ValType.f64;
 
         if (frameSize > 0) {
             // Need locals for saved SP (epilogue restore) and FP (stable frame access)
@@ -985,6 +988,10 @@ class FuncContext {
     void emitCheckedDivOrMod(ref Appender!(ubyte[]) out_, Op divOp, SourceLocation loc) {
         import codegen.error_kind : ErrorKind;
 
+        // This function uses i32 locals (tempLocalB) and i32_eqz — only valid for i32 operands
+        assert(divOp == Op.i32_div_s || divOp == Op.i32_rem_s || divOp == Op.i32_rem_u,
+            "emitCheckedDivOrMod: only i32 div/mod ops supported, got f64/i64 — caller must handle float division directly");
+
         // Save divisor, test for zero
         //   Stack: [..., dividend, divisor]
         out_ ~= Op.local_tee;
@@ -1017,10 +1024,7 @@ class FuncContext {
             // Don't call emitCallStackOverwrite here — the error originates in THIS
             // function, so the call stack frame should keep the function-definition
             // location. The precise error location is already in the exception slot.
-            if (!emitter.isVoidType(func.decl.returnType) && !hasLargeReturn) {
-                out_ ~= Op.i32_const;
-                leb128s(out_, 0);
-            }
+            emitDummyReturnValue(out_);
             emitEpilogue(out_);
             out_ ~= Op.return_;
         }
@@ -1356,10 +1360,7 @@ class FuncContext {
             out_ ~= cast(ubyte)BlockType.void_;
             blockDepth++;
             // Push dummy return value if function returns non-void on WASM stack
-            if (!emitter.isVoidType(func.decl.returnType) && !hasLargeReturn) {
-                out_ ~= Op.i32_const;
-                leb128s(out_, 0);
-            }
+            emitDummyReturnValue(out_);
             emitEpilogue(out_);
             out_ ~= Op.return_;
             blockDepth--;
@@ -1369,11 +1370,12 @@ class FuncContext {
 
     /**
      * Emit exception check when a call result value is on the WASM stack.
-     * Saves the result to tempLocalA (or tempLocalI64 for i64), checks, restores on normal path.
+     * Saves the result to a type-appropriate temp local, checks, restores on normal path.
      */
-    void emitExceptionCheckWithValue(ref Appender!(ubyte[]) out_, SourceLocation callSite = SourceLocation.init, bool isI64Value = false) {
-        // Save the call result off the stack — use i64 temp for i64 values
-        uint tempLocal = isI64Value ? tempLocalI64 : tempLocalA;
+    void emitExceptionCheckWithValue(ref Appender!(ubyte[]) out_, SourceLocation callSite, bool isI64Value, bool isF64Value = false) {
+        // Save the call result off the stack — use typed temp to match the value on the stack
+        assert(!(isI64Value && isF64Value), "emitExceptionCheckWithValue: value cannot be both i64 and f64");
+        uint tempLocal = isF64Value ? tempLocalF64 : (isI64Value ? tempLocalI64 : tempLocalA);
         out_ ~= Op.local_set;
         leb128u(out_, tempLocal);
         // Check exception flag
@@ -1388,10 +1390,7 @@ class FuncContext {
             out_ ~= Op.if_;
             out_ ~= cast(ubyte)BlockType.void_;
             blockDepth++;
-            if (!emitter.isVoidType(func.decl.returnType) && !hasLargeReturn) {
-                out_ ~= Op.i32_const;
-                leb128s(out_, 0);
-            }
+            emitDummyReturnValue(out_);
             emitEpilogue(out_);
             out_ ~= Op.return_;
             blockDepth--;
@@ -1400,6 +1399,31 @@ class FuncContext {
         // Restore the call result to the stack for normal execution
         out_ ~= Op.local_get;
         leb128u(out_, tempLocal);
+    }
+
+    /**
+     * Push a dummy zero return value matching the current function's return type.
+     * Used during exception propagation where we need to return early with a placeholder.
+     */
+    private void emitDummyReturnValue(ref Appender!(ubyte[]) out_) {
+        if (emitter.isVoidType(func.decl.returnType) || hasLargeReturn)
+            return;
+        auto retVt = emitter.dTypeToValType(func.decl.returnType);
+        if (retVt == ValType.f64) {
+            out_ ~= Op.f64_const;
+            double zero = 0.0;
+            out_ ~= (cast(ubyte*)&zero)[0..8];
+        } else if (retVt == ValType.f32) {
+            out_ ~= Op.f32_const;
+            float zero = 0.0f;
+            out_ ~= (cast(ubyte*)&zero)[0..4];
+        } else if (retVt == ValType.i64) {
+            out_ ~= Op.i64_const;
+            leb128s(out_, 0);
+        } else {
+            out_ ~= Op.i32_const;
+            leb128s(out_, 0);
+        }
     }
 
     /**
@@ -1470,10 +1494,7 @@ class FuncContext {
             leb128u(out_, blockDepth - tryStack[$ - 1].catchBlockDepth);
         } else {
             // Not in a try block: propagate by returning
-            if (!emitter.isVoidType(func.decl.returnType) && !hasLargeReturn) {
-                out_ ~= Op.i32_const;
-                leb128s(out_, 0);
-            }
+            emitDummyReturnValue(out_);
             emitEpilogue(out_);
             out_ ~= Op.return_;
         }
@@ -2802,7 +2823,7 @@ class FuncContext {
             // Check for exception after real function calls (not struct/class construction)
             if (!isConstructionCall(call)) {
                 if (expressionHasValue(call))
-                    emitExceptionCheckWithValue(out_, call.location, isI64Expression(call));
+                    emitExceptionCheckWithValue(out_, call.location, isI64Expression(call), isF64Expression(call));
                 else
                     emitExceptionCheck(out_, call.location);
             }
@@ -2828,7 +2849,7 @@ class FuncContext {
             // Check for exception after real template function calls (not struct construction)
             if (!tmplInst.resolvedStructInstantiation) {
                 if (expressionHasValue(tmplInst))
-                    emitExceptionCheckWithValue(out_, tmplInst.location, isI64Expression(tmplInst));
+                    emitExceptionCheckWithValue(out_, tmplInst.location, isI64Expression(tmplInst), isF64Expression(tmplInst));
                 else
                     emitExceptionCheck(out_, tmplInst.location);
             }
@@ -4777,35 +4798,23 @@ class FuncContext {
         return false;
     }
 
-    /// Check if an expression produces f64 on the WASM stack.
+    /// Check if an expression produces f64/f32 on the WASM stack.
     private bool isF64Expression(Expression expr) {
-        if (auto lit = cast(LiteralExpression)expr)
-            return lit.value.type == typeid(double);
-        if (auto idx = cast(IndexExpression)expr) {
-            if (auto ident = cast(IdentifierExpression)idx.array)
-                if (auto info = resolveVar(ident.resolvedLocalId, ident.name))
-                    return isF64ElementType(info.elementType);
-            return false;
-        }
-        if (auto bin = cast(BinaryExpression)expr)
-            return isF64Expression(bin.left);
-        if (auto unary = cast(UnaryExpression)expr)
-            return isF64Expression(unary.operand);
-        if (auto castExpr = cast(CastExpression)expr) {
-            if (auto bt = cast(BasicType)castExpr.targetType)
-                return bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32;
-            return false;
-        }
+        assert(expr.type !is null,
+            "isF64Expression: expr.type not set — type checker must set type on all expressions before codegen");
+        auto bt = cast(BasicType)expr.type.resolve();
+        if (bt)
+            return bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32;
         return false;
     }
 
     /// Check if an expression produces an i64 (long/ulong) value on the WASM stack.
     private bool isI64Expression(Expression expr) {
-        if (expr.type) {
-            auto bt = cast(BasicType)expr.type.resolve();
-            if (bt)
-                return bt.kind == BasicType.Kind.Int64 || bt.kind == BasicType.Kind.UInt64;
-        }
+        assert(expr.type !is null,
+            "isI64Expression: expr.type not set — type checker must set type on all expressions before codegen");
+        auto bt = cast(BasicType)expr.type.resolve();
+        if (bt)
+            return bt.kind == BasicType.Kind.Int64 || bt.kind == BasicType.Kind.UInt64;
         return false;
     }
 
@@ -5133,7 +5142,12 @@ class FuncContext {
                 default:
                     assert(0, "Float binary operator not supported: " ~ to!string(expr.operator));
             }
-        } else final switch (expr.operator) {
+        } else {
+            // Safety: if either operand is f64, isFloat should have been true.
+            // This assert catches bugs in isF64Expression that would silently emit i32 ops on f64 values.
+            assert(!isF64Expression(expr.right),
+                "emitBinary: right operand is f64 but left was not detected as f64 — type mismatch in binary expression");
+            final switch (expr.operator) {
             case BinaryExpression.Operator.Add: op = Op.i32_add; break;
             case BinaryExpression.Operator.Subtract: op = Op.i32_sub; break;
             case BinaryExpression.Operator.Multiply: op = Op.i32_mul; break;
@@ -5170,6 +5184,7 @@ class FuncContext {
                 assert(0, "UnsignedShiftRight should be lowered to opUnsignedShiftRight call");
             case BinaryExpression.Operator.Concat:
                 assert(false, "Concat should be handled above");
+        }
         }
         out_ ~= op;
     }

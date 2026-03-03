@@ -959,6 +959,7 @@ class TypeChecker {
                 new IdentifierExpression(expr.location, funcName),
                 [expr.left, expr.right]);
             Type resultType = checkCallExpression(callExpr);
+            callExpr.type = resultType;
             expr.loweredCall = callExpr;
             return resultType;
         }
@@ -2568,6 +2569,7 @@ class TypeChecker {
      */
     private Expression synthesizeStructEquals(BinaryExpression expr, StructDecl structDecl) {
         auto loc = expr.location;
+        auto boolType = new BasicType(loc, BasicType.Kind.Bool);
 
         // Check for user-defined opEquals first
         auto opEquals = getStructMethod(structDecl, "opEquals");
@@ -2575,8 +2577,11 @@ class TypeChecker {
             auto memberExpr = new MemberExpression(loc, expr.left, "opEquals");
             auto callExpr = new CallExpression(loc, memberExpr, [expr.right]);
             checkExpression(callExpr);
-            if (expr.operator == BinaryExpression.Operator.NotEqual)
-                return new UnaryExpression(loc, UnaryExpression.Operator.LogicalNot, callExpr);
+            if (expr.operator == BinaryExpression.Operator.NotEqual) {
+                auto neg = new UnaryExpression(loc, UnaryExpression.Operator.LogicalNot, callExpr);
+                neg.type = boolType;
+                return neg;
+            }
             return callExpr;
         }
 
@@ -2590,16 +2595,24 @@ class TypeChecker {
             checkExpression(fieldCmp);  // type-check synthesized comparison
             if (synthesized is null)
                 synthesized = fieldCmp;
-            else
-                synthesized = new BinaryExpression(loc, synthesized, BinaryExpression.Operator.LogicalAnd, fieldCmp);
+            else {
+                auto andExpr = new BinaryExpression(loc, synthesized, BinaryExpression.Operator.LogicalAnd, fieldCmp);
+                andExpr.type = boolType;
+                synthesized = andExpr;
+            }
         }
 
         // No fields: always equal
-        if (synthesized is null)
+        if (synthesized is null) {
             synthesized = LiteralExpression.integer(loc, 1);
+            synthesized.type = boolType;
+        }
 
-        if (expr.operator == BinaryExpression.Operator.NotEqual)
-            synthesized = new UnaryExpression(loc, UnaryExpression.Operator.LogicalNot, synthesized);
+        if (expr.operator == BinaryExpression.Operator.NotEqual) {
+            auto neg = new UnaryExpression(loc, UnaryExpression.Operator.LogicalNot, synthesized);
+            neg.type = boolType;
+            synthesized = neg;
+        }
 
         return synthesized;
     }
@@ -2631,6 +2644,7 @@ class TypeChecker {
         auto memberExpr = new MemberExpression(loc, expr.left, method.name);
         auto callExpr = new CallExpression(loc, memberExpr, [expr.right]);
         auto resultType = checkCallExpression(callExpr);
+        callExpr.type = resultType;
         expr.loweredCall = callExpr;
         return resultType;
     }
@@ -2719,6 +2733,7 @@ class TypeChecker {
         auto memberExpr = new MemberExpression(loc, expr.operand, method.name);
         auto callExpr = new CallExpression(loc, memberExpr, null);
         auto resultType = checkCallExpression(callExpr);
+        callExpr.type = resultType;
         expr.loweredCall = callExpr;
         return resultType;
     }
@@ -2745,6 +2760,7 @@ class TypeChecker {
                 auto memberExpr = new MemberExpression(loc, expr.left, method.name);
                 auto callExpr = new CallExpression(loc, memberExpr, [expr.right]);
                 auto resultType = checkCallExpression(callExpr);
+                callExpr.type = resultType;
                 expr.loweredCall = callExpr;
                 return resultType;
             }
@@ -3096,7 +3112,8 @@ class TypeChecker {
             auto callExpr = new CallExpression(expr.location,
                 new IdentifierExpression(expr.location, funcName),
                 [expr.left, expr.right]);
-            checkCallExpression(callExpr);
+            auto resultType = checkCallExpression(callExpr);
+            callExpr.type = resultType;
             expr.loweredCall = callExpr;
             return leftType;
         }

@@ -4,12 +4,11 @@
 // vertices to Metal via extern(C) FFI.
 
 extern(C) int metal_init(int w, int h);
-extern(C) void metal_add_vertex(float x, float y, float r, float g, float b, float a);
+extern(C) void metal_add_vertex(double x, double y, double r, double g, double b, double a);
 extern(C) void metal_render_and_run();
 
 // Taylor-series sin/cos — good enough for generating geometry
 double sin_approx(double x) {
-    // Normalize x to [-pi, pi]
     double pi = 3.14159265;
     double two_pi = 6.28318530;
 
@@ -51,14 +50,11 @@ int main() {
         double b = sin_approx(a1 + 4.189) * 0.5 + 0.5;
 
         // Center vertex (dark)
-        metal_add_vertex(cast(float) 0.0, cast(float) 0.0,
-                         cast(float) 0.1, cast(float) 0.1, cast(float) 0.1, cast(float) 1.0);
+        metal_add_vertex(0.0, 0.0, 0.1, 0.1, 0.1, 1.0);
 
         // Two outer vertices (rainbow colored)
-        metal_add_vertex(cast(float)(cos_approx(a1) * 0.8), cast(float)(sin_approx(a1) * 0.8),
-                         cast(float) r, cast(float) g, cast(float) b, cast(float) 1.0);
-        metal_add_vertex(cast(float)(cos_approx(a2) * 0.8), cast(float)(sin_approx(a2) * 0.8),
-                         cast(float) r, cast(float) g, cast(float) b, cast(float) 1.0);
+        metal_add_vertex(cos_approx(a1) * 0.8, sin_approx(a1) * 0.8, r, g, b, 1.0);
+        metal_add_vertex(cos_approx(a2) * 0.8, sin_approx(a2) * 0.8, r, g, b, 1.0);
 
         i = i + 1;
     }
