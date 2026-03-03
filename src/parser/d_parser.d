@@ -17,6 +17,13 @@ class DParser : SourceParser {
             return bridge.parseSourceFile();
         }
 
+        // Dispatch to JS parser for .js files (importJS support)
+        if (filename.endsWith(".js")) {
+            import parser.js_tree_sitter_bridge : JSTreeSitterBridge;
+            auto bridge = new JSTreeSitterBridge(filename, sourceText);
+            return bridge.parseSourceFile();
+        }
+
         import parser.tree_sitter_bridge : TreeSitterBridge;
         auto bridge = new TreeSitterBridge(filename, sourceText);
         return bridge.parseSourceFile();

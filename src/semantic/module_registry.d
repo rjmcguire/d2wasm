@@ -64,8 +64,8 @@ class ModuleRegistry {
      * Returns the resolved file path, or null if not found.
      */
     string resolveImportPath(string[] importPath, string importingFilePath) {
-        // Try .d first, then .c (importC support)
-        static immutable extensions = [".d", ".c"];
+        // Try .d first, then .c (importC), then .js (importJS)
+        static immutable extensions = [".d", ".c", ".js"];
 
         foreach (ext; extensions) {
             string relPath = buildModuleFilePath(importPath, ext);

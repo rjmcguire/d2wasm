@@ -1,0 +1,8 @@
+{
+  "name": "import_js",
+  "description": "importJS: D file imports a JavaScript source file with functions",
+  "type": "wasm_exec",
+  "expected_result": 25,
+  "mangled_entry": "_D4test4mainFZi",
+  "compiler_args": ["--import-path", "tests/milestones/milestone_208_import_js"]
+}
