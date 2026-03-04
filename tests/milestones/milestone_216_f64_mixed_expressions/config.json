@@ -1,0 +1,6 @@
+{
+  "type": "wasm_exec",
+  "expected_result": 46,
+  "description": "Complex nested double expressions with function calls",
+  "mangled_entry": "_D4test4mainFZi"
+}

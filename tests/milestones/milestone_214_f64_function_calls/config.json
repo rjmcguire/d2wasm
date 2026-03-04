@@ -1,0 +1,6 @@
+{
+  "type": "wasm_exec",
+  "expected_result": 38,
+  "description": "Double params and return values in function calls",
+  "mangled_entry": "_D4test4mainFZi"
+}

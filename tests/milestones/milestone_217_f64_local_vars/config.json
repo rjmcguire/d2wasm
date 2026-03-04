@@ -1,0 +1,6 @@
+{
+  "type": "wasm_exec",
+  "expected_result": 59,
+  "description": "Many double locals to stress shadow stack layout",
+  "mangled_entry": "_D4test4mainFZi"
+}

@@ -7245,7 +7245,7 @@ class FuncContext {
                     out_ ~= Op.local_get;
                     leb128u(out_, wasmIdx);
                     emitExpression(out_, expr.right);
-                    emitCompoundOp(out_, expr.operator, expr.location);
+                    emitCompoundOp(out_, expr.operator, isF64Expression(expr.left), expr.location);
                 } else {
                     emitExpression(out_, expr.right);
                 }
@@ -7271,7 +7271,7 @@ class FuncContext {
                     out_ ~= cast(ubyte)0x02;
                     leb128u(out_, 0);
                     emitExpression(out_, expr.right);
-                    emitCompoundOp(out_, expr.operator, expr.location);
+                    emitCompoundOp(out_, expr.operator, isF64Expression(expr.left), expr.location);
                 } else {
                     emitExpression(out_, expr.right);
                 }
@@ -7343,7 +7343,7 @@ class FuncContext {
                         out_ ~= Op.global_get;
                         leb128u(out_, varDecl.wasmGlobalIndex);
                         emitExpression(out_, expr.right);
-                        emitCompoundOp(out_, expr.operator, expr.location);
+                        emitCompoundOp(out_, expr.operator, isF64Expression(expr.left), expr.location);
                     } else {
                         emitExpression(out_, expr.right);
                     }
@@ -7364,34 +7364,57 @@ class FuncContext {
 
     /// Emit the compound operation for compound assignment operators.
     private void emitCompoundOp(ref Appender!(ubyte[]) out_, AssignmentExpression.Operator op,
-            SourceLocation loc = SourceLocation.init) {
-        final switch (op) {
-            case AssignmentExpression.Operator.Assign:
-                assert(0, "emitCompoundOp called with Assign");
-            case AssignmentExpression.Operator.AddAssign: out_ ~= Op.i32_add; break;
-            case AssignmentExpression.Operator.SubtractAssign: out_ ~= Op.i32_sub; break;
-            case AssignmentExpression.Operator.MultiplyAssign: out_ ~= Op.i32_mul; break;
-            case AssignmentExpression.Operator.DivideAssign:
-                if (enableStackTrace) {
-                    emitCheckedDivOrMod(out_, Op.i32_div_s, loc);
-                    break;
-                }
-                out_ ~= Op.i32_div_s; break;
-            case AssignmentExpression.Operator.ModuloAssign:
-                if (enableStackTrace) {
-                    emitCheckedDivOrMod(out_, Op.i32_rem_s, loc);
-                    break;
-                }
-                out_ ~= Op.i32_rem_s; break;
-            case AssignmentExpression.Operator.AndAssign: out_ ~= Op.i32_and; break;
-            case AssignmentExpression.Operator.OrAssign: out_ ~= Op.i32_or; break;
-            case AssignmentExpression.Operator.XorAssign: out_ ~= Op.i32_xor; break;
-            case AssignmentExpression.Operator.ShiftLeftAssign:
-                assert(0, "<<= should be lowered to opShiftLeft call");
-            case AssignmentExpression.Operator.ShiftRightAssign:
-                assert(0, ">>= should be lowered to opShiftRight call");
-            case AssignmentExpression.Operator.ConcatAssign:
-                throw new EmitError("~= should use slice path", SourceLocation.init);
+            bool isFloat, SourceLocation loc = SourceLocation.init) {
+        if (isFloat) {
+            final switch (op) {
+                case AssignmentExpression.Operator.Assign:
+                    assert(0, "emitCompoundOp called with Assign");
+                case AssignmentExpression.Operator.AddAssign: out_ ~= Op.f64_add; break;
+                case AssignmentExpression.Operator.SubtractAssign: out_ ~= Op.f64_sub; break;
+                case AssignmentExpression.Operator.MultiplyAssign: out_ ~= Op.f64_mul; break;
+                case AssignmentExpression.Operator.DivideAssign: out_ ~= Op.f64_div; break;
+                case AssignmentExpression.Operator.ModuloAssign:
+                    throw new EmitError("%= not supported for floating-point types", loc);
+                case AssignmentExpression.Operator.AndAssign:
+                case AssignmentExpression.Operator.OrAssign:
+                case AssignmentExpression.Operator.XorAssign:
+                    throw new EmitError("bitwise compound assignment not supported for floating-point types", loc);
+                case AssignmentExpression.Operator.ShiftLeftAssign:
+                    assert(0, "<<= should be lowered to opShiftLeft call");
+                case AssignmentExpression.Operator.ShiftRightAssign:
+                    assert(0, ">>= should be lowered to opShiftRight call");
+                case AssignmentExpression.Operator.ConcatAssign:
+                    throw new EmitError("~= should use slice path", SourceLocation.init);
+            }
+        } else {
+            final switch (op) {
+                case AssignmentExpression.Operator.Assign:
+                    assert(0, "emitCompoundOp called with Assign");
+                case AssignmentExpression.Operator.AddAssign: out_ ~= Op.i32_add; break;
+                case AssignmentExpression.Operator.SubtractAssign: out_ ~= Op.i32_sub; break;
+                case AssignmentExpression.Operator.MultiplyAssign: out_ ~= Op.i32_mul; break;
+                case AssignmentExpression.Operator.DivideAssign:
+                    if (enableStackTrace) {
+                        emitCheckedDivOrMod(out_, Op.i32_div_s, loc);
+                        break;
+                    }
+                    out_ ~= Op.i32_div_s; break;
+                case AssignmentExpression.Operator.ModuloAssign:
+                    if (enableStackTrace) {
+                        emitCheckedDivOrMod(out_, Op.i32_rem_s, loc);
+                        break;
+                    }
+                    out_ ~= Op.i32_rem_s; break;
+                case AssignmentExpression.Operator.AndAssign: out_ ~= Op.i32_and; break;
+                case AssignmentExpression.Operator.OrAssign: out_ ~= Op.i32_or; break;
+                case AssignmentExpression.Operator.XorAssign: out_ ~= Op.i32_xor; break;
+                case AssignmentExpression.Operator.ShiftLeftAssign:
+                    assert(0, "<<= should be lowered to opShiftLeft call");
+                case AssignmentExpression.Operator.ShiftRightAssign:
+                    assert(0, ">>= should be lowered to opShiftRight call");
+                case AssignmentExpression.Operator.ConcatAssign:
+                    throw new EmitError("~= should use slice path", SourceLocation.init);
+            }
         }
     }
     

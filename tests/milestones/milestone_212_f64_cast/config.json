@@ -1,0 +1,6 @@
+{
+  "type": "wasm_exec",
+  "expected_result": 65,
+  "description": "int-to-double and double-to-int casts",
+  "mangled_entry": "_D4test4mainFZi"
+}

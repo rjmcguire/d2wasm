@@ -1,0 +1,6 @@
+{
+  "type": "wasm_exec",
+  "expected_result": 49,
+  "description": "Compound assignment operators on doubles",
+  "mangled_entry": "_D4test4mainFZi"
+}
