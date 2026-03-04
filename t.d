@@ -1,19 +1,10 @@
-int r = 10;
-struct A {
-  ~this() { r--; }
+int apply(int delegate(int) dg, int x) {
+    return dg(x);
 }
-int test() {
-  int x;
-//  struct A {
-//  ~this() { x = x-1; }
-//}
-  for (int i=0; i<10; i++) {
-//    A b;
-A b;
-  }
-  return r;
+
+int main() {
+    int y = 10;
+    auto dg = (int x) => x + y;
+    y = 20;
+    return apply(dg, 5);
 }
-enum RESULT = test();
-
-int main() { return RESULT; }
-

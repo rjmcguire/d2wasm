@@ -4277,9 +4277,18 @@ class FuncContext {
             }
         }
 
-        // Emit the expression being cast
+        // Check for i32→f64 promotion (e.g., cast(double)(intExpr))
+        if (auto targetBt = cast(BasicType)expr.targetType) {
+            if ((targetBt.kind == BasicType.Kind.Float64 || targetBt.kind == BasicType.Kind.Float32)
+                    && !isF64Expression(expr.expression)) {
+                emitExpression(out_, expr.expression);
+                out_ ~= Op.f64_convert_i32_s;
+                return;
+            }
+        }
+
+        // Emit the expression being cast (no-op casts like int→uint, widening, etc.)
         emitExpression(out_, expr.expression);
-        // For now, most casts are no-ops at WASM level (everything is i32)
     }
     
     /**
@@ -5209,10 +5218,20 @@ class FuncContext {
                 break;
                 
             case UnaryExpression.Operator.Minus:
-                out_ ~= Op.i32_const;
-                leb128s(out_, 0);
-                emitExpression(out_, expr.operand);
-                out_ ~= Op.i32_sub;
+                if (isF64Expression(expr)) {
+                    emitExpression(out_, expr.operand);
+                    out_ ~= Op.f64_neg;
+                } else if (isI64Expression(expr)) {
+                    out_ ~= Op.i64_const;
+                    leb128s(out_, 0);
+                    emitExpression(out_, expr.operand);
+                    out_ ~= Op.i64_sub;
+                } else {
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, 0);
+                    emitExpression(out_, expr.operand);
+                    out_ ~= Op.i32_sub;
+                }
                 break;
                 
             case UnaryExpression.Operator.LogicalNot:
