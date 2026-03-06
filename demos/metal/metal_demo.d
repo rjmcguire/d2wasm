@@ -1,11 +1,18 @@
 // Metal Render Demo — D computes geometry, Metal renders it
 //
 // Generates a rainbow color wheel (triangle fan) and passes
-// vertices to Metal via extern(C) FFI.
+// vertices to Metal via extern(C) FFI. Handles mouse clicks
+// to change background color.
 
 extern(C) int metal_init(int w, int h);
 extern(C) void metal_add_vertex(double x, double y, double r, double g, double b, double a);
-extern(C) void metal_render_and_run();
+extern(C) void metal_create_buffers();
+extern(C) int metal_process_events();
+extern(C) int metal_has_click();
+extern(C) double metal_get_click_x();
+extern(C) double metal_get_click_y();
+extern(C) void metal_set_clear_color(double r, double g, double b);
+extern(C) void metal_render_frame();
 
 // Taylor-series sin/cos — good enough for generating geometry
 double sin_approx(double x) {
@@ -26,6 +33,14 @@ double sin_approx(double x) {
 
 double cos_approx(double x) {
     return sin_approx(x + 1.5707963);
+}
+
+void on_click(double x, double y) {
+    // Map click position to a color
+    double r = x * 0.5 + 0.5;
+    double g = y * 0.5 + 0.5;
+    double b = 1.0 - r;
+    metal_set_clear_color(r, g, b);
 }
 
 int main() {
@@ -59,6 +74,18 @@ int main() {
         i = i + 1;
     }
 
-    metal_render_and_run();
+    // Create Metal buffers and show window
+    metal_create_buffers();
+
+    // Game loop: poll events, handle clicks, render frames
+    while (metal_process_events() != 0) {
+        if (metal_has_click() != 0) {
+            double cx = metal_get_click_x();
+            double cy = metal_get_click_y();
+            on_click(cx, cy);
+        }
+        metal_render_frame();
+    }
+
     return 0;
 }

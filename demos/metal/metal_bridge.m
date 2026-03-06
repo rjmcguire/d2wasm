@@ -27,18 +27,61 @@ static id<MTLRenderPipelineState> g_pipelineState;
 static NSWindow                  *g_window;
 static CAMetalLayer              *g_metalLayer;
 
-// ── Window delegate (terminate on close) ────────────────────────────
+// ── Click state ────────────────────────────────────────────────────
+
+static double g_clickX = 0.0;
+static double g_clickY = 0.0;
+static int    g_hasClick = 0;
+static BOOL   g_windowClosed = NO;
+
+// ── Mutable clear color ────────────────────────────────────────────
+
+static double g_clearR = 0.05;
+static double g_clearG = 0.05;
+static double g_clearB = 0.10;
+
+// ── Pre-built Metal buffers (for game loop rendering) ──────────────
+
+static id<MTLBuffer> g_posBuf = nil;
+static id<MTLBuffer> g_colBuf = nil;
+static int           g_bufVertexCount = 0;
+
+// ── Window delegate ─────────────────────────────────────────────────
 
 @interface BridgeWindowDelegate : NSObject <NSWindowDelegate>
 @end
 
 @implementation BridgeWindowDelegate
 - (void)windowWillClose:(NSNotification *)notification {
-    [NSApp terminate:nil];
+    g_windowClosed = YES;
 }
 @end
 
 static BridgeWindowDelegate *g_windowDelegate;
+
+// ── Custom NSView for mouse event handling ─────────────────────────
+
+@interface MetalView : NSView
+@end
+
+@implementation MetalView
+
+- (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
+
+- (void)mouseDown:(NSEvent *)event {
+    NSPoint loc = [self convertPoint:[event locationInWindow] fromView:nil];
+    NSSize size = self.bounds.size;
+
+    // Convert to NDC: (-1,-1) bottom-left to (1,1) top-right
+    g_clickX = (loc.x / size.width)  * 2.0 - 1.0;
+    g_clickY = (loc.y / size.height) * 2.0 - 1.0;
+    g_hasClick = 1;
+}
+
+@end
+
+static MetalView *g_metalView = nil;
 
 // ── Embedded MSL shaders ────────────────────────────────────────────
 
@@ -123,8 +166,11 @@ int metal_init(int w, int h) {
     g_metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
     g_metalLayer.framebufferOnly = YES;
     g_metalLayer.drawableSize = CGSizeMake(w, h);
-    [g_window.contentView setWantsLayer:YES];
-    [g_window.contentView setLayer:g_metalLayer];
+    g_metalView = [[MetalView alloc] initWithFrame:g_window.contentView.bounds];
+    [g_metalView setWantsLayer:YES];
+    [g_metalView setLayer:g_metalLayer];
+    g_metalView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [g_window.contentView addSubview:g_metalView];
 
     g_vertexCount = 0;
     return 1;
@@ -140,6 +186,101 @@ void metal_add_vertex(double x, double y, double r, double g, double b, double a
         g_vertices[g_vertexCount++] = (Vertex){(float)x, (float)y, (float)r, (float)g, (float)b, (float)a};
     }
 }
+
+// ── Game-loop API ──────────────────────────────────────────────────
+
+void metal_create_buffers(void) {
+    if (g_vertexCount == 0) return;
+
+    int n = g_vertexCount;
+    float positions[n * 2];
+    float colors[n * 4];
+    for (int i = 0; i < n; i++) {
+        positions[i * 2 + 0] = g_vertices[i].x;
+        positions[i * 2 + 1] = g_vertices[i].y;
+        colors[i * 4 + 0] = g_vertices[i].r;
+        colors[i * 4 + 1] = g_vertices[i].g;
+        colors[i * 4 + 2] = g_vertices[i].b;
+        colors[i * 4 + 3] = g_vertices[i].a;
+    }
+
+    g_posBuf = [g_device newBufferWithBytes:positions
+                                     length:n * 2 * sizeof(float)
+                                    options:MTLResourceStorageModeShared];
+    g_colBuf = [g_device newBufferWithBytes:colors
+                                     length:n * 4 * sizeof(float)
+                                    options:MTLResourceStorageModeShared];
+    g_bufVertexCount = n;
+
+    // Show window
+    [g_window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+}
+
+int metal_process_events(void) {
+    if (g_windowClosed) return 0;
+
+    @autoreleasepool {
+        NSEvent *event;
+        while ((event = [NSApp nextEventMatchingMask:NSEventMaskAny
+                                           untilDate:[NSDate dateWithTimeIntervalSinceNow:0.016]
+                                              inMode:NSDefaultRunLoopMode
+                                             dequeue:YES])) {
+            [NSApp sendEvent:event];
+            [NSApp updateWindows];
+            if (g_windowClosed) return 0;
+        }
+    }
+    return 1;
+}
+
+int metal_has_click(void) {
+    int result = g_hasClick;
+    g_hasClick = 0;
+    return result;
+}
+
+double metal_get_click_x(void) {
+    return g_clickX;
+}
+
+double metal_get_click_y(void) {
+    return g_clickY;
+}
+
+void metal_set_clear_color(double r, double g, double b) {
+    g_clearR = r;
+    g_clearG = g;
+    g_clearB = b;
+}
+
+void metal_render_frame(void) {
+    if (g_bufVertexCount == 0 || !g_posBuf || !g_colBuf) return;
+
+    id<CAMetalDrawable> drawable = [g_metalLayer nextDrawable];
+    if (!drawable) return;
+
+    MTLRenderPassDescriptor *rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+    rpd.colorAttachments[0].texture    = drawable.texture;
+    rpd.colorAttachments[0].loadAction = MTLLoadActionClear;
+    rpd.colorAttachments[0].clearColor = MTLClearColorMake(g_clearR, g_clearG, g_clearB, 1.0);
+    rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+    id<MTLCommandBuffer> cmdBuf = [g_commandQueue commandBuffer];
+    id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:rpd];
+
+    [enc setRenderPipelineState:g_pipelineState];
+    [enc setVertexBuffer:g_posBuf offset:0 atIndex:0];
+    [enc setVertexBuffer:g_colBuf offset:0 atIndex:1];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:g_bufVertexCount];
+    [enc endEncoding];
+
+    [cmdBuf presentDrawable:drawable];
+    [cmdBuf commit];
+    [cmdBuf waitUntilCompleted];
+}
+
+// ── Legacy one-shot API ────────────────────────────────────────────
 
 void metal_render_and_run(void) {
     if (g_vertexCount == 0) return;
