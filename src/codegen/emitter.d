@@ -1195,6 +1195,8 @@ class BinaryEmitter {
                 }
                 if (auto structDecl = resolved.asStruct()) {
                     // Flatten HFA: push one ValType per field
+                    assert(structDecl.layoutComputed, "ObjC struct param " ~ p.name ~ ": layout not computed");
+                    assert(structDecl.fields.length > 0, "ObjC struct param " ~ p.name ~ ": no fields");
                     foreach (field; structDecl.fields)
                         sig.params ~= dTypeToValType(field.type);
                 } else {
@@ -1244,6 +1246,9 @@ class BinaryEmitter {
                     meta.paramKinds ~= dTypeToArgKind(p.type);
                 }
             }
+            assert(sig.params.length == meta.paramKinds.length,
+                format("ObjC %s: WASM sig has %d params but FFI meta has %d paramKinds",
+                       importName, sig.params.length, meta.paramKinds.length));
             ffiMetas ~= meta;
 
             // Store import name on the method for codegen lookup

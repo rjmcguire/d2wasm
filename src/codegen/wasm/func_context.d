@@ -4490,9 +4490,9 @@ class FuncContext {
                             leb128s(out_, cast(int)field.offset);
                             out_ ~= Op.i32_add;
                         }
-                        out_ ~= Op.i32_load;
-                        out_ ~= cast(ubyte)0x02;
-                        leb128u(out_, 0);
+                        auto bt = cast(BasicType)field.type;
+                        bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
+                        emitLoadForSize(out_, cast(uint)field.size, isFloat);
                         return;
                     }
                 } else if (info.isSlice) {
@@ -6729,6 +6729,8 @@ class FuncContext {
                 auto paramType = method.parameters[i].type.resolve();
                 if (auto structDecl = paramType.asStruct()) {
                     // Struct arg: emit address, save to temp, load each field individually
+                    assert(structDecl.fields.length > 0,
+                        "ObjC call: struct " ~ structDecl.name ~ " has no fields at emission time");
                     emitExpression(out_, arg);  // pushes i32 address
                     out_ ~= Op.local_set;
                     leb128u(out_, tempLocalA);
@@ -7595,7 +7597,10 @@ class FuncContext {
                                               member.memberName, aggr.name), member.location);
                 }
 
-                // Store: addr + value
+                // Store: addr + value (type-appropriate for field type)
+                auto bt = cast(BasicType)field.type;
+                bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
+
                 emitVarAddress(out_, info);
                 if (field.offset > 0) {
                     out_ ~= Op.i32_const;
@@ -7603,9 +7608,7 @@ class FuncContext {
                     out_ ~= Op.i32_add;
                 }
                 emitExpression(out_, value);
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitStoreForSize(out_, cast(uint)field.size, isFloat);
 
                 // Re-load for expression value
                 emitVarAddress(out_, info);
@@ -7614,9 +7617,7 @@ class FuncContext {
                     leb128s(out_, cast(int)field.offset);
                     out_ ~= Op.i32_add;
                 }
-                out_ ~= Op.i32_load;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitLoadForSize(out_, cast(uint)field.size, isFloat);
                 return;
             }
 

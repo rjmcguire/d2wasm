@@ -154,12 +154,31 @@ const void *ffi_generic_trampoline(IM3Runtime runtime, IM3ImportContext _ctx,
         }
     }
 
+    /* Debug: print args for ObjC calls */
+    if (strncmp(desc->name, "__objc_send_", 12) == 0) {
+        fprintf(stderr, "[FFI] %s nargs=%d:", desc->name, desc->nargs);
+        for (int i = 0; i < desc->nargs; i++) {
+            switch (desc->arg_kinds[i]) {
+                case ARG_I32:  fprintf(stderr, " i32=%d",    arg_storage[i].i32); break;
+                case ARG_I64:  fprintf(stderr, " i64=0x%llx", (long long)arg_storage[i].i64); break;
+                case ARG_F64:  fprintf(stderr, " f64=%f",    arg_storage[i].f64); break;
+                case ARG_F32:  fprintf(stderr, " f32=%f",    (double)arg_storage[i].f32); break;
+                case ARG_PTR:  fprintf(stderr, " ptr=%p",    arg_storage[i].ptr); break;
+                default: break;
+            }
+        }
+        fprintf(stderr, "\n");
+    }
+
     /* Call via libffi */
     uint64_t ret_val = 0;
     ffi_call(&desc->cif, FFI_FN(desc->fn_ptr), &ret_val, arg_values);
 
     /* Write return value to _sp[0] */
     if (has_return) {
+        if (strncmp(desc->name, "__objc_send_", 12) == 0) {
+            fprintf(stderr, "[FFI] %s -> 0x%llx\n", desc->name, (long long)ret_val);
+        }
         *((uint64_t *)_sp) = ret_val;
     }
 
