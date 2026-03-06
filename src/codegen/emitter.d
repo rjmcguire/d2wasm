@@ -1144,7 +1144,26 @@ class BinaryEmitter {
     private void collectObjCInterface(InterfaceDecl ifaceDecl) {
         ensureObjCHelpers();
 
+        // Register early so self-referencing return types (e.g., static NSObject alloc())
+        // can resolve their UserType.declaration for dTypeToValType/dTypeToArgKind
+        objcInterfaces[ifaceDecl.name] = ifaceDecl;
+
         foreach (method; ifaceDecl.methods) {
+            // Resolve ObjC interface types in return type and parameters
+            if (auto ut = cast(UserType)method.returnType) {
+                if (!ut.declaration) {
+                    if (auto iface = ut.name in objcInterfaces)
+                        ut.declaration = *iface;
+                }
+            }
+            foreach (p; method.parameters) {
+                if (auto ut = cast(UserType)p.type) {
+                    if (!ut.declaration) {
+                        if (auto iface = ut.name in objcInterfaces)
+                            ut.declaration = *iface;
+                    }
+                }
+            }
             string selector = method.objcSelector;
             if (selector is null) selector = method.name;
 
@@ -1196,9 +1215,6 @@ class BinaryEmitter {
             // Store import name on the method for codegen lookup
             method.mangledName = importName;
         }
-
-        // Register for codegen lookup
-        objcInterfaces[ifaceDecl.name] = ifaceDecl;
     }
 
     /// Ensure objc_getClass and sel_registerName are registered as FFI imports
@@ -1264,8 +1280,12 @@ class BinaryEmitter {
         if (cast(ArrayType) t)
             return ArgKind.ARG_PTR;
 
-        if (cast(UserType) t)
+        if (auto ut = cast(UserType) t) {
+            if (auto ifaceDecl = cast(InterfaceDecl)ut.declaration) {
+                if (ifaceDecl.isObjC) return ArgKind.ARG_I64;
+            }
             return ArgKind.ARG_PTR;
+        }
 
         auto basic = cast(BasicType) t;
         if (!basic)
@@ -1711,9 +1731,12 @@ class BinaryEmitter {
         // Unwrap TemplateParamType to the concrete bound type
         t = t.resolve();
 
-        // Struct types are passed as i32 pointers
+        // Struct/class types are passed as i32 pointers; ObjC interfaces as i64
         if (auto userType = cast(UserType)t) {
-            return ValType.i32;  // Pointer to struct
+            if (auto ifaceDecl = cast(InterfaceDecl)userType.declaration) {
+                if (ifaceDecl.isObjC) return ValType.i64;  // ObjC pointer = i64
+            }
+            return ValType.i32;  // Pointer to struct/class
         }
         
         // Array/slice types are also passed as i32 pointers (to the slice struct)

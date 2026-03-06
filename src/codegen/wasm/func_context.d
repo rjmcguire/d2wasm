@@ -430,8 +430,24 @@ class FuncContext {
                     return;
                 }
 
-                // Interface local - allocate fat pointer on shadow stack (8 bytes)
+                // Interface local
                 if (auto ifaceDecl = userType.asInterface()) {
+                    if (ifaceDecl.isObjC) {
+                        // ObjC interface: simple i64 WASM local (opaque native pointer)
+                        VarInfo vi;
+                        vi.kind = VarKind.interface_;
+                        vi.addrMode = AddrMode.wasmLocal;
+                        vi.wasmLocalIdx = cast(uint)localTypes.length;
+                        localTypes ~= ValType.i64;
+                        vi.type = varDecl.type;
+                        vi.ifaceDecl = ifaceDecl;
+                        if (varDecl.uniqueLocalId != uint.max)
+                            varsByLocalId[varDecl.uniqueLocalId] = vi;
+                        varsByName[varDecl.name] = vi;
+                        return;
+                    }
+
+                    // Regular D interface: fat pointer on shadow stack (8 bytes)
                     frameSize = (frameSize + 3) & ~3;  // Align to 4 bytes
 
                     VarInfo vi;
@@ -1162,7 +1178,12 @@ class FuncContext {
                         else
                             emitClassVarDecl(out_, varDecl);  // stack-allocated class
                         break;
-                    case VarKind.interface_:  emitInterfaceVarDecl(out_, varDecl); break;
+                    case VarKind.interface_:
+                        if (info.addrMode == AddrMode.wasmLocal)
+                            emitVarDecl(out_, varDecl);           // ObjC interface: scalar i64 init
+                        else
+                            emitInterfaceVarDecl(out_, varDecl);  // Regular interface: fat pointer init
+                        break;
                     case VarKind.staticArray: emitStaticArrayVarDecl(out_, varDecl); break;
                     case VarKind.slice:       emitSliceVarDecl(out_, varDecl); break;
                     case VarKind.scalar:      emitVarDecl(out_, varDecl); break;
@@ -4821,9 +4842,16 @@ class FuncContext {
     private bool isI64Expression(Expression expr) {
         assert(expr.type !is null,
             "isI64Expression: expr.type not set — type checker must set type on all expressions before codegen");
-        auto bt = cast(BasicType)expr.type.resolve();
+        auto resolved = expr.type.resolve();
+        auto bt = cast(BasicType)resolved;
         if (bt)
             return bt.kind == BasicType.Kind.Int64 || bt.kind == BasicType.Kind.UInt64;
+        // ObjC interface types are i64 (opaque native pointers)
+        if (auto ut = cast(UserType)resolved) {
+            if (auto ifaceDecl = cast(InterfaceDecl)ut.declaration) {
+                if (ifaceDecl.isObjC) return true;
+            }
+        }
         return false;
     }
 
@@ -6471,7 +6499,11 @@ class FuncContext {
             }
             // Interface method call (unified: handles both local and param)
             if (objInfo.isInterface) {
-                emitInterfaceMethodCall(out_, objInfo, memberExpr.memberName, args);
+                if (objInfo.ifaceDecl.isObjC) {
+                    emitObjCMethodCall(out_, objInfo.ifaceDecl, memberExpr.object, memberExpr.memberName, args, false);
+                } else {
+                    emitInterfaceMethodCall(out_, objInfo, memberExpr.memberName, args);
+                }
                 return;
             }
         }
@@ -8007,6 +8039,15 @@ class FuncContext {
                             || memberExpr.memberName == "remaining";
                     }
 
+                    // ObjC static method call: NSApplication.sharedApplication()
+                    if (auto ifaceDecl = objIdent.name in emitter.objcInterfaces) {
+                        foreach (m; (*ifaceDecl).methods) {
+                            if (m.name == memberExpr.memberName) {
+                                return !isVoidType(m.returnType);
+                            }
+                        }
+                    }
+
                     // Check unified locals/params
                     StructDecl structDecl = null;
                     auto objInfo = resolveVar(objIdent.resolvedLocalId, objIdent.name);
@@ -8017,6 +8058,15 @@ class FuncContext {
                             structDecl = objInfo.structDecl;
                     }
                     
+                    // ObjC interface method: check if method returns void
+                    if (objInfo && objInfo.isInterface && objInfo.ifaceDecl.isObjC) {
+                        foreach (m; objInfo.ifaceDecl.methods) {
+                            if (m.name == memberExpr.memberName) {
+                                return !isVoidType(m.returnType);
+                            }
+                        }
+                    }
+
                     if (structDecl) {
                         // Find the method
                         foreach (member; structDecl.members) {

@@ -568,13 +568,23 @@ class TreeSitterBridge {
             if (childType == "identifier" && text == "selector") {
                 foundSelector = true;
             } else if (foundSelector && childType == "arguments") {
-                // Find string_literal inside arguments
+                // Find string_literal inside arguments → expression → string_literal
                 uint argCount = TreeSitterParser.getChildCount(child);
                 for (uint j = 0; j < argCount; j++) {
                     TSNode arg = TreeSitterParser.getChild(child, j);
                     string argType = TreeSitterParser.getNodeType(arg);
                     if (argType == "string_literal") {
                         return extractStringLiteral(arg);
+                    }
+                    // tree-sitter wraps in expression node
+                    if (argType == "expression") {
+                        uint exprCount = TreeSitterParser.getChildCount(arg);
+                        for (uint k = 0; k < exprCount; k++) {
+                            TSNode exprChild = TreeSitterParser.getChild(arg, k);
+                            if (TreeSitterParser.getNodeType(exprChild) == "string_literal") {
+                                return extractStringLiteral(exprChild);
+                            }
+                        }
                     }
                 }
             }
