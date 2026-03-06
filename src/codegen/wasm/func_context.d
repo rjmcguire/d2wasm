@@ -2052,28 +2052,26 @@ class FuncContext {
                 // Copy field by field from source to destination
                 for (size_t i = 0; i < structDecl.fields.length; i++) {
                     auto field = structDecl.fields[i];
-                    
+                    auto bt = cast(BasicType)field.type;
+                    bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
+
                     // Destination address: FP + destOffset + fieldOffset
                     out_ ~= Op.local_get;
                     leb128u(out_, fpLocal);
                     out_ ~= Op.i32_const;
                     leb128s(out_, info.frameOffset + cast(int)field.offset);
                     out_ ~= Op.i32_add;
-                    
+
                     // Source value: load from FP + srcOffset + fieldOffset
                     out_ ~= Op.local_get;
                     leb128u(out_, fpLocal);
                     out_ ~= Op.i32_const;
                     leb128s(out_, srcInfo.frameOffset + cast(int)field.offset);
                     out_ ~= Op.i32_add;
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
-                    
+                    emitLoadForSize(out_, cast(uint)field.size, isFloat);
+
                     // Store to destination
-                    out_ ~= Op.i32_store;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitStoreForSize(out_, cast(uint)field.size, isFloat);
                 }
                 return;
             }
@@ -2113,18 +2111,21 @@ class FuncContext {
         leb128u(out_, 0);
         
         if (!stmt.initializer) {
-            // Zero-initialize all fields
+            // Zero-initialize all fields (handle multi-word fields like doubles)
             foreach (field; classDecl.fields) {
-                out_ ~= Op.local_get;
-                leb128u(out_, fpLocal);
-                out_ ~= Op.i32_const;
-                leb128s(out_, info.frameOffset + cast(int)field.offset);
-                out_ ~= Op.i32_add;
-                out_ ~= Op.i32_const;
-                leb128s(out_, 0);
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                uint fieldBytes = cast(uint)field.size;
+                for (uint off = 0; off < fieldBytes; off += 4) {
+                    out_ ~= Op.local_get;
+                    leb128u(out_, fpLocal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, info.frameOffset + cast(int)field.offset + cast(int)off);
+                    out_ ~= Op.i32_add;
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, 0);
+                    out_ ~= Op.i32_store;
+                    out_ ~= cast(ubyte)0x02;
+                    leb128u(out_, 0);
+                }
             }
             return;
         }
@@ -2140,9 +2141,9 @@ class FuncContext {
                 leb128s(out_, info.frameOffset + cast(int)field.offset);
                 out_ ~= Op.i32_add;
                 emitExpression(out_, callExpr.arguments[i]);
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                auto bt = cast(BasicType)field.type;
+                bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
+                emitStoreForSize(out_, cast(uint)field.size, isFloat);
             }
             return;
         }
@@ -5393,9 +5394,9 @@ class FuncContext {
             leb128s(out_, cast(int)field.offset);
             out_ ~= Op.i32_add;
         }
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;  // align = 4
-        leb128u(out_, 0);          // offset = 0
+        auto bt = cast(BasicType)field.type;
+        bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
+        emitLoadForSize(out_, cast(uint)field.size, isFloat);
     }
 
     /// Emit ptr.field = value — auto-deref pointer to struct/class, assign field
@@ -5408,7 +5409,7 @@ class FuncContext {
         if (!field)
             throw new EmitError(format("'%s' has no field '%s'", aggDecl.name, member.memberName), member.location);
 
-        // Store: [ptr + offset, value] → i32.store
+        // Store: [ptr + offset, value] → store
         emitExpression(out_, member.object);
         if (field.offset > 0) {
             out_ ~= Op.i32_const;
@@ -5416,9 +5417,9 @@ class FuncContext {
             out_ ~= Op.i32_add;
         }
         emitExpression(out_, value);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        auto bt = cast(BasicType)field.type;
+        bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
+        emitStoreForSize(out_, cast(uint)field.size, isFloat);
 
         // Re-emit value for expression result
         emitExpression(out_, value);
@@ -5437,14 +5438,17 @@ class FuncContext {
                 out_ ~= Op.i32_add;
             }
             emitExpression(out_, fieldArgs[i]);
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte)0x02;  // align = 4
-            leb128u(out_, 0);          // offset = 0
+            auto bt = cast(BasicType)field.type;
+            bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
+            emitStoreForSize(out_, cast(uint)field.size, isFloat);
         }
 
         // Zero-init remaining fields
         for (size_t i = fieldArgs.length; i < aggDecl.fields.length; i++) {
             auto field = aggDecl.fields[i];
+            auto bt = cast(BasicType)field.type;
+            bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
+            uint fieldSize = cast(uint)field.size;
             out_ ~= Op.local_get;
             leb128u(out_, tempLocalA);
             if (field.offset > 0) {
@@ -5452,11 +5456,25 @@ class FuncContext {
                 leb128s(out_, cast(int)field.offset);
                 out_ ~= Op.i32_add;
             }
-            out_ ~= Op.i32_const;
-            leb128s(out_, 0);
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            if (isFloat) {
+                out_ ~= Op.f64_const;
+                foreach (_; 0 .. 8) out_ ~= cast(ubyte)0;  // f64 0.0
+                out_ ~= Op.f64_store;
+                out_ ~= cast(ubyte)0x03;  // align = 8
+                leb128u(out_, 0);
+            } else if (fieldSize == 8) {
+                out_ ~= Op.i64_const;
+                leb128s(out_, 0);
+                out_ ~= Op.i64_store;
+                out_ ~= cast(ubyte)0x03;  // align = 8
+                leb128u(out_, 0);
+            } else {
+                out_ ~= Op.i32_const;
+                leb128s(out_, 0);
+                out_ ~= Op.i32_store;
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
+            }
         }
     }
 
@@ -7221,14 +7239,14 @@ class FuncContext {
             
             // Emit value
             emitExpression(out_, args[i]);
-            
+
             // Store
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            auto bt = cast(BasicType)field.type;
+            bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
+            emitStoreForSize(out_, cast(uint)field.size, isFloat);
         }
     }
-    
+
     void emitAssignment(ref Appender!(ubyte[]) out_, AssignmentExpression expr) {
         // Check for slice append (arr ~= value)
         if (expr.operator == AssignmentExpression.Operator.ConcatAssign) {
@@ -7571,9 +7589,9 @@ class FuncContext {
                         out_ ~= Op.i32_add;
                     }
                     emitExpression(out_, value);
-                    out_ ~= Op.i32_store;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    auto bt = cast(BasicType)field.type;
+                    bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
+                    emitStoreForSize(out_, cast(uint)field.size, isFloat);
                     // Re-emit value for expression result
                     emitExpression(out_, value);
                     return;
