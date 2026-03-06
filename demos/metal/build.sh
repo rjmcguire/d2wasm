@@ -10,4 +10,6 @@ echo "=== Compiling D and running ==="
 ../../d2wasm metal_demo.d -r \
     --link-framework Metal \
     --link-framework Foundation \
+    --link-framework Cocoa \
+    --link-framework QuartzCore \
     --link-dylib ./libmetal_bridge.dylib

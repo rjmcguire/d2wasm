@@ -1,31 +1,16 @@
 /**
- * Metal C Bridge — thin C-linkage wrappers around Metal/AppKit
+ * Metal C Bridge — slim residual that requires Objective-C class definitions
  *
- * D (WASM) calls these via FFI trampolines to set up a window,
- * accumulate vertices, and render a single frame with Metal.
+ * Handles: MetalView (NSView subclass), BridgeWindowDelegate,
+ * event loop (@autoreleasepool), click state, window/view setup,
+ * and render pass setup (indexed ObjC properties can't be done from D yet).
+ *
+ * D handles: Metal device, command queue, shader compilation, pipeline,
+ * buffer creation, and the game loop orchestration.
  */
 #import <Metal/Metal.h>
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
-
-// ── Vertex accumulator ──────────────────────────────────────────────
-
-typedef struct {
-    float x, y;
-    float r, g, b, a;
-} Vertex;
-
-#define MAX_VERTICES 8192
-static Vertex g_vertices[MAX_VERTICES];
-static int g_vertexCount = 0;
-
-// ── Metal state ─────────────────────────────────────────────────────
-
-static id<MTLDevice>              g_device;
-static id<MTLCommandQueue>        g_commandQueue;
-static id<MTLRenderPipelineState> g_pipelineState;
-static NSWindow                  *g_window;
-static CAMetalLayer              *g_metalLayer;
 
 // ── Click state ────────────────────────────────────────────────────
 
@@ -33,18 +18,6 @@ static double g_clickX = 0.0;
 static double g_clickY = 0.0;
 static int    g_hasClick = 0;
 static BOOL   g_windowClosed = NO;
-
-// ── Mutable clear color ────────────────────────────────────────────
-
-static double g_clearR = 0.05;
-static double g_clearG = 0.05;
-static double g_clearB = 0.10;
-
-// ── Pre-built Metal buffers (for game loop rendering) ──────────────
-
-static id<MTLBuffer> g_posBuf = nil;
-static id<MTLBuffer> g_colBuf = nil;
-static int           g_bufVertexCount = 0;
 
 // ── Window delegate ─────────────────────────────────────────────────
 
@@ -81,142 +54,47 @@ static BridgeWindowDelegate *g_windowDelegate;
 
 @end
 
-static MetalView *g_metalView = nil;
-
-// ── Embedded MSL shaders ────────────────────────────────────────────
-
-static NSString *g_shaderSource = @R"(
-#include <metal_stdlib>
-using namespace metal;
-
-struct VertexOut {
-    float4 position [[position]];
-    float4 color;
-};
-
-vertex VertexOut vertex_main(uint vid [[vertex_id]],
-                             const device float2 *pos [[buffer(0)]],
-                             const device float4 *col [[buffer(1)]]) {
-    VertexOut out;
-    out.position = float4(pos[vid], 0.0, 1.0);
-    out.color = col[vid];
-    return out;
-}
-
-fragment float4 fragment_main(VertexOut in [[stage_in]]) {
-    return in.color;
-}
-)";
-
 // ── C API ───────────────────────────────────────────────────────────
 
-int metal_init(int w, int h) {
-    // Ensure NSApplication exists
-    [NSApplication sharedApplication];
-    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-
-    // Metal device
-    g_device = MTLCreateSystemDefaultDevice();
-    if (!g_device) return 0;
-
-    g_commandQueue = [g_device newCommandQueue];
-
-    // Compile shaders
-    NSError *error = nil;
-    id<MTLLibrary> library = [g_device newLibraryWithSource:g_shaderSource
-                                                    options:nil
-                                                      error:&error];
-    if (!library) {
-        NSLog(@"Shader compile error: %@", error);
-        return 0;
-    }
-
-    id<MTLFunction> vertexFunc   = [library newFunctionWithName:@"vertex_main"];
-    id<MTLFunction> fragmentFunc = [library newFunctionWithName:@"fragment_main"];
-
-    // Pipeline
-    MTLRenderPipelineDescriptor *pipeDesc = [[MTLRenderPipelineDescriptor alloc] init];
-    pipeDesc.vertexFunction   = vertexFunc;
-    pipeDesc.fragmentFunction = fragmentFunc;
-    pipeDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
-
-    g_pipelineState = [g_device newRenderPipelineStateWithDescriptor:pipeDesc error:&error];
-    if (!g_pipelineState) {
-        NSLog(@"Pipeline error: %@", error);
-        return 0;
-    }
-
-    // Window
+/// Create window with NSRect (struct-by-value, can't do from D yet)
+long metal_init_window(int w, int h) {
     NSRect frame = NSMakeRect(100, 100, w, h);
-    g_window = [[NSWindow alloc]
+    NSWindow *window = [[NSWindow alloc]
         initWithContentRect:frame
                   styleMask:(NSWindowStyleMaskTitled |
                              NSWindowStyleMaskClosable |
                              NSWindowStyleMaskResizable)
                     backing:NSBackingStoreBuffered
                       defer:NO];
-    [g_window setTitle:@"D \u2192 Metal"];
+    return (long)window;
+}
 
+/// Attach MetalView with CAMetalLayer to window's content view
+void metal_setup_view(long window, long metalLayer) {
+    NSWindow *win = (NSWindow *)window;
+    CAMetalLayer *layer = (CAMetalLayer *)metalLayer;
+
+    MetalView *metalView = [[MetalView alloc] initWithFrame:win.contentView.bounds];
+    [metalView setWantsLayer:YES];
+    [metalView setLayer:layer];
+    metalView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [win.contentView addSubview:metalView];
+}
+
+/// Set CAMetalLayer drawable size (needs CGSize struct)
+void metal_set_drawable_size(long metalLayer, int w, int h) {
+    CAMetalLayer *layer = (CAMetalLayer *)metalLayer;
+    layer.drawableSize = CGSizeMake(w, h);
+}
+
+/// Install window delegate for close detection
+void metal_set_delegate(long window) {
+    NSWindow *win = (NSWindow *)window;
     g_windowDelegate = [[BridgeWindowDelegate alloc] init];
-    [g_window setDelegate:g_windowDelegate];
-
-    // Metal layer
-    g_metalLayer = [CAMetalLayer layer];
-    g_metalLayer.device = g_device;
-    g_metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    g_metalLayer.framebufferOnly = YES;
-    g_metalLayer.drawableSize = CGSizeMake(w, h);
-    g_metalView = [[MetalView alloc] initWithFrame:g_window.contentView.bounds];
-    [g_metalView setWantsLayer:YES];
-    [g_metalView setLayer:g_metalLayer];
-    g_metalView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    [g_window.contentView addSubview:g_metalView];
-
-    g_vertexCount = 0;
-    return 1;
+    [win setDelegate:g_windowDelegate];
 }
 
-long metal_device_name_ptr(void) {
-    if (!g_device) return 0;
-    return (long)[[g_device name] UTF8String];
-}
-
-void metal_add_vertex(double x, double y, double r, double g, double b, double a) {
-    if (g_vertexCount < MAX_VERTICES) {
-        g_vertices[g_vertexCount++] = (Vertex){(float)x, (float)y, (float)r, (float)g, (float)b, (float)a};
-    }
-}
-
-// ── Game-loop API ──────────────────────────────────────────────────
-
-void metal_create_buffers(void) {
-    if (g_vertexCount == 0) return;
-
-    int n = g_vertexCount;
-    float positions[n * 2];
-    float colors[n * 4];
-    for (int i = 0; i < n; i++) {
-        positions[i * 2 + 0] = g_vertices[i].x;
-        positions[i * 2 + 1] = g_vertices[i].y;
-        colors[i * 4 + 0] = g_vertices[i].r;
-        colors[i * 4 + 1] = g_vertices[i].g;
-        colors[i * 4 + 2] = g_vertices[i].b;
-        colors[i * 4 + 3] = g_vertices[i].a;
-    }
-
-    g_posBuf = [g_device newBufferWithBytes:positions
-                                     length:n * 2 * sizeof(float)
-                                    options:MTLResourceStorageModeShared];
-    g_colBuf = [g_device newBufferWithBytes:colors
-                                     length:n * 4 * sizeof(float)
-                                    options:MTLResourceStorageModeShared];
-    g_bufVertexCount = n;
-
-    // Show window
-    [g_window makeKeyAndOrderFront:nil];
-    [NSApp activateIgnoringOtherApps:YES];
-}
-
+/// Poll events; returns 0 when window closed
 int metal_process_events(void) {
     if (g_windowClosed) return 0;
 
@@ -240,52 +118,49 @@ int metal_has_click(void) {
     return result;
 }
 
-double metal_get_click_x(void) {
-    return g_clickX;
+double metal_get_click_x(void) { return g_clickX; }
+double metal_get_click_y(void) { return g_clickY; }
+
+/// Create render pipeline state (needs indexed ObjC property: colorAttachments[0])
+long metal_create_pipeline(long device, long vertexFunc, long fragmentFunc) {
+    MTLRenderPipelineDescriptor *pipeDesc = [[MTLRenderPipelineDescriptor alloc] init];
+    pipeDesc.vertexFunction   = (id<MTLFunction>)vertexFunc;
+    pipeDesc.fragmentFunction = (id<MTLFunction>)fragmentFunc;
+    pipeDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+
+    NSError *error = nil;
+    id<MTLRenderPipelineState> pipelineState =
+        [(id<MTLDevice>)device newRenderPipelineStateWithDescriptor:pipeDesc error:&error];
+    if (!pipelineState) {
+        NSLog(@"Pipeline error: %@", error);
+        return 0;
+    }
+    return (long)pipelineState;
 }
 
-double metal_get_click_y(void) {
-    return g_clickY;
+/// Vertex accumulator for D-computed geometry
+typedef struct {
+    float x, y;
+    float r, g, b, a;
+} Vertex;
+
+#define MAX_VERTICES 8192
+static Vertex g_vertices[MAX_VERTICES];
+static int g_vertexCount = 0;
+
+void metal_add_vertex(double x, double y, double r, double g, double b, double a) {
+    if (g_vertexCount < MAX_VERTICES) {
+        g_vertices[g_vertexCount++] = (Vertex){(float)x, (float)y, (float)r, (float)g, (float)b, (float)a};
+    }
 }
 
-void metal_set_clear_color(double r, double g, double b) {
-    g_clearR = r;
-    g_clearG = g;
-    g_clearB = b;
-}
+/// Create Metal buffers from accumulated vertices; stores results in globals
+static long g_posBuf = 0;
+static long g_colBuf = 0;
+static int  g_bufVertexCount = 0;
 
-void metal_render_frame(void) {
-    if (g_bufVertexCount == 0 || !g_posBuf || !g_colBuf) return;
-
-    id<CAMetalDrawable> drawable = [g_metalLayer nextDrawable];
-    if (!drawable) return;
-
-    MTLRenderPassDescriptor *rpd = [MTLRenderPassDescriptor renderPassDescriptor];
-    rpd.colorAttachments[0].texture    = drawable.texture;
-    rpd.colorAttachments[0].loadAction = MTLLoadActionClear;
-    rpd.colorAttachments[0].clearColor = MTLClearColorMake(g_clearR, g_clearG, g_clearB, 1.0);
-    rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
-
-    id<MTLCommandBuffer> cmdBuf = [g_commandQueue commandBuffer];
-    id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:rpd];
-
-    [enc setRenderPipelineState:g_pipelineState];
-    [enc setVertexBuffer:g_posBuf offset:0 atIndex:0];
-    [enc setVertexBuffer:g_colBuf offset:0 atIndex:1];
-    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:g_bufVertexCount];
-    [enc endEncoding];
-
-    [cmdBuf presentDrawable:drawable];
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
-}
-
-// ── Legacy one-shot API ────────────────────────────────────────────
-
-void metal_render_and_run(void) {
+void metal_create_buffers(long device) {
     if (g_vertexCount == 0) return;
-
-    // Build separate position and color buffers
     int n = g_vertexCount;
     float positions[n * 2];
     float colors[n * 4];
@@ -297,39 +172,71 @@ void metal_render_and_run(void) {
         colors[i * 4 + 2] = g_vertices[i].b;
         colors[i * 4 + 3] = g_vertices[i].a;
     }
+    g_posBuf = (long)[(id<MTLDevice>)device newBufferWithBytes:positions
+                                                        length:n * 2 * sizeof(float)
+                                                       options:MTLResourceStorageModeShared];
+    g_colBuf = (long)[(id<MTLDevice>)device newBufferWithBytes:colors
+                                                        length:n * 4 * sizeof(float)
+                                                       options:MTLResourceStorageModeShared];
+    g_bufVertexCount = n;
+}
 
-    id<MTLBuffer> posBuf = [g_device newBufferWithBytes:positions
-                                                 length:n * 2 * sizeof(float)
-                                                options:MTLResourceStorageModeShared];
-    id<MTLBuffer> colBuf = [g_device newBufferWithBytes:colors
-                                                 length:n * 4 * sizeof(float)
-                                                options:MTLResourceStorageModeShared];
+long metal_get_pos_buf(void)     { return g_posBuf; }
+long metal_get_col_buf(void)     { return g_colBuf; }
+int  metal_get_vertex_count(void) { return g_bufVertexCount; }
 
-    // Render
-    id<CAMetalDrawable> drawable = [g_metalLayer nextDrawable];
+// ── String Constants (native pointers for NSString creation) ────────
+
+static const char *g_shaderSource =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VertexOut { float4 position [[position]]; float4 color; };\n"
+    "vertex VertexOut vertex_main(uint vid [[vertex_id]],\n"
+    "    const device float2 *pos [[buffer(0)]],\n"
+    "    const device float4 *col [[buffer(1)]]) {\n"
+    "    VertexOut out; out.position = float4(pos[vid], 0.0, 1.0);\n"
+    "    out.color = col[vid]; return out; }\n"
+    "fragment float4 fragment_main(VertexOut in [[stage_in]]) {\n"
+    "    return in.color; }\n";
+
+long metal_get_shader_source(void)  { return (long)g_shaderSource; }
+long metal_get_cstr_vertex_main(void)  { return (long)"vertex_main"; }
+long metal_get_cstr_fragment_main(void) { return (long)"fragment_main"; }
+long metal_get_cstr_title(void)     { return (long)"D \xe2\x86\x92 Metal"; }
+
+/// Mutable clear color (set from D)
+static double g_clearR = 0.05;
+static double g_clearG = 0.05;
+static double g_clearB = 0.10;
+
+void metal_set_clear_color(double r, double g, double b) {
+    g_clearR = r;
+    g_clearG = g;
+    g_clearB = b;
+}
+
+/// Render one frame (needs indexed ObjC properties for render pass)
+void metal_render_frame(long cmdQueue, long metalLayer, long pipelineState,
+                        long posBuf, long colBuf, int vertexCount) {
+    id<CAMetalDrawable> drawable = [(CAMetalLayer *)metalLayer nextDrawable];
     if (!drawable) return;
 
     MTLRenderPassDescriptor *rpd = [MTLRenderPassDescriptor renderPassDescriptor];
     rpd.colorAttachments[0].texture    = drawable.texture;
     rpd.colorAttachments[0].loadAction = MTLLoadActionClear;
-    rpd.colorAttachments[0].clearColor = MTLClearColorMake(0.05, 0.05, 0.1, 1.0);
+    rpd.colorAttachments[0].clearColor = MTLClearColorMake(g_clearR, g_clearG, g_clearB, 1.0);
     rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
 
-    id<MTLCommandBuffer> cmdBuf = [g_commandQueue commandBuffer];
+    id<MTLCommandBuffer> cmdBuf = [(id<MTLCommandQueue>)cmdQueue commandBuffer];
     id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:rpd];
 
-    [enc setRenderPipelineState:g_pipelineState];
-    [enc setVertexBuffer:posBuf offset:0 atIndex:0];
-    [enc setVertexBuffer:colBuf offset:0 atIndex:1];
-    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:n];
+    [enc setRenderPipelineState:(id<MTLRenderPipelineState>)pipelineState];
+    [enc setVertexBuffer:(id<MTLBuffer>)posBuf offset:0 atIndex:0];
+    [enc setVertexBuffer:(id<MTLBuffer>)colBuf offset:0 atIndex:1];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:vertexCount];
     [enc endEncoding];
 
     [cmdBuf presentDrawable:drawable];
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
-
-    // Show window and run event loop
-    [g_window makeKeyAndOrderFront:nil];
-    [NSApp activateIgnoringOtherApps:YES];
-    [NSApp run];
 }

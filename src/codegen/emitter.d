@@ -774,12 +774,22 @@ class BinaryEmitter {
     //==========================================================================
     
     private void collect(Declaration[] decls) {
-        // First pass: collect imported functions and ObjC interfaces (they generate imports)
+        // Pass 0a: Register all ObjC interfaces in map (names only)
+        foreach (decl; decls) {
+            if (auto ifaceDecl = cast(InterfaceDecl)decl) {
+                if (ifaceDecl.isObjC) objcInterfaces[ifaceDecl.name] = ifaceDecl;
+            }
+        }
+        // Pass 0b: Process ObjC interface methods (can now resolve cross-refs)
+        foreach (decl; decls) {
+            if (auto ifaceDecl = cast(InterfaceDecl)decl) {
+                if (ifaceDecl.isObjC) collectObjCInterface(ifaceDecl);
+            }
+        }
+        // Pass 1: Imported functions (can reference ObjC interface types)
         foreach (decl; decls) {
             if (auto importedFunc = cast(ImportedFunctionDecl)decl) {
                 collectImportedFunction(importedFunc);
-            } else if (auto ifaceDecl = cast(InterfaceDecl)decl) {
-                if (ifaceDecl.isObjC) collectObjCInterface(ifaceDecl);
             }
         }
 
@@ -811,13 +821,27 @@ class BinaryEmitter {
 
     /// Collect declarations from ModulesContext — each module processed once, no duplicates.
     private void collectFromModules(ModulesContext ctx) {
-        // First pass: collect imported functions and ObjC interfaces across all modules
+        // Pass 0a: Register all ObjC interfaces in map (names only) across all modules
+        foreach (mod; ctx.modulesInOrder()) {
+            foreach (decl; mod.ast) {
+                if (auto ifaceDecl = cast(InterfaceDecl)decl) {
+                    if (ifaceDecl.isObjC) objcInterfaces[ifaceDecl.name] = ifaceDecl;
+                }
+            }
+        }
+        // Pass 0b: Process ObjC interface methods (can now resolve cross-refs)
+        foreach (mod; ctx.modulesInOrder()) {
+            foreach (decl; mod.ast) {
+                if (auto ifaceDecl = cast(InterfaceDecl)decl) {
+                    if (ifaceDecl.isObjC) collectObjCInterface(ifaceDecl);
+                }
+            }
+        }
+        // Pass 1: Imported functions (can reference ObjC interface types)
         foreach (mod; ctx.modulesInOrder()) {
             foreach (decl; mod.ast) {
                 if (auto importedFunc = cast(ImportedFunctionDecl)decl) {
                     collectImportedFunction(importedFunc);
-                } else if (auto ifaceDecl = cast(InterfaceDecl)decl) {
-                    if (ifaceDecl.isObjC) collectObjCInterface(ifaceDecl);
                 }
             }
         }
@@ -1102,6 +1126,12 @@ class BinaryEmitter {
     }
     
     private void collectImportedFunction(ImportedFunctionDecl decl) {
+        // Resolve ObjC interface types in return type and parameters
+        resolveObjCUserType(cast(UserType)decl.returnType);
+        foreach (p; decl.parameters) {
+            resolveObjCUserType(cast(UserType)p.type);
+        }
+
         // Build signature
         FuncSig sig;
         sig.params = decl.parameters.map!(p => dTypeToValType(p.type)).array;
@@ -1144,25 +1174,11 @@ class BinaryEmitter {
     private void collectObjCInterface(InterfaceDecl ifaceDecl) {
         ensureObjCHelpers();
 
-        // Register early so self-referencing return types (e.g., static NSObject alloc())
-        // can resolve their UserType.declaration for dTypeToValType/dTypeToArgKind
-        objcInterfaces[ifaceDecl.name] = ifaceDecl;
-
         foreach (method; ifaceDecl.methods) {
             // Resolve ObjC interface types in return type and parameters
-            if (auto ut = cast(UserType)method.returnType) {
-                if (!ut.declaration) {
-                    if (auto iface = ut.name in objcInterfaces)
-                        ut.declaration = *iface;
-                }
-            }
+            resolveObjCUserType(cast(UserType)method.returnType);
             foreach (p; method.parameters) {
-                if (auto ut = cast(UserType)p.type) {
-                    if (!ut.declaration) {
-                        if (auto iface = ut.name in objcInterfaces)
-                            ut.declaration = *iface;
-                    }
-                }
+                resolveObjCUserType(cast(UserType)p.type);
             }
             string selector = method.objcSelector;
             if (selector is null) selector = method.name;
@@ -1268,6 +1284,17 @@ class BinaryEmitter {
         uint offset = addData(cast(ubyte[])key.dup);
         cStringOffsets[key] = offset;
         return offset;
+    }
+
+    /// Resolve a UserType to an ObjC interface declaration if possible.
+    /// Uses ensureResolved (symbol table) as primary, objcInterfaces map as fallback.
+    private void resolveObjCUserType(UserType ut) {
+        if (ut is null || ut.declaration !is null) return;
+        ut.ensureResolved(symbolTable);
+        if (!ut.declaration) {
+            if (auto iface = ut.name in objcInterfaces)
+                ut.declaration = *iface;
+        }
     }
 
     /// Map a D Type to FFI ArgKind for marshaling metadata

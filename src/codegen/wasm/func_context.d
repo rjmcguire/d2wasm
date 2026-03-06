@@ -6723,9 +6723,18 @@ class FuncContext {
         out_ ~= Op.call;
         leb128u(out_, selRegIdx);
 
-        // Arg 3..N: user arguments
-        foreach (arg; args) {
+        // Arg 3..N: user arguments (with i32→i64 promotion where needed)
+        foreach (i, arg; args) {
             emitExpression(out_, arg);
+            if (i < method.parameters.length) {
+                ValType expected = emitter.dTypeToValType(method.parameters[i].type);
+                if (expected == ValType.i64 && !isI64Expression(arg)) {
+                    out_ ~= Op.i64_extend_i32_s;
+                }
+                if (expected == ValType.f64 && !isF64Expression(arg)) {
+                    out_ ~= Op.f64_convert_i32_s;
+                }
+            }
         }
 
         // Call __objc_send_<Interface>_<method>
