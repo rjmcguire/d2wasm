@@ -143,6 +143,7 @@ class BinaryEmitter {
         string name;
         ArgKind retKind;
         ArgKind[] paramKinds;
+        string nativeName;  // if set, dlsym uses this instead of name (for objc_msgSend aliasing)
     }
 
     private {
@@ -156,8 +157,17 @@ class BinaryEmitter {
         bool hasBuiltins = false;
         uint allocFuncIndex;
 
-        // FFI metadata (for extern(C) imports)
+        // FFI metadata (for extern(C) imports and ObjC sends)
         FFIMeta[] ffiMetas;
+
+    }
+
+    // ObjC interface lookup (package-visible for codegen)
+    package InterfaceDecl[string] objcInterfaces;
+
+    private {
+        bool objcHelpersAdded = false;
+        uint[string] cStringOffsets;  // cached data section offsets for C strings
 
         // State
         EmitPhase phase = EmitPhase.init;
@@ -764,10 +774,12 @@ class BinaryEmitter {
     //==========================================================================
     
     private void collect(Declaration[] decls) {
-        // First pass: collect imported functions (they need to come first in indices)
+        // First pass: collect imported functions and ObjC interfaces (they generate imports)
         foreach (decl; decls) {
             if (auto importedFunc = cast(ImportedFunctionDecl)decl) {
                 collectImportedFunction(importedFunc);
+            } else if (auto ifaceDecl = cast(InterfaceDecl)decl) {
+                if (ifaceDecl.isObjC) collectObjCInterface(ifaceDecl);
             }
         }
 
@@ -799,11 +811,13 @@ class BinaryEmitter {
 
     /// Collect declarations from ModulesContext — each module processed once, no duplicates.
     private void collectFromModules(ModulesContext ctx) {
-        // First pass: collect imported functions across all modules
+        // First pass: collect imported functions and ObjC interfaces across all modules
         foreach (mod; ctx.modulesInOrder()) {
             foreach (decl; mod.ast) {
                 if (auto importedFunc = cast(ImportedFunctionDecl)decl) {
                     collectImportedFunction(importedFunc);
+                } else if (auto ifaceDecl = cast(InterfaceDecl)decl) {
+                    if (ifaceDecl.isObjC) collectObjCInterface(ifaceDecl);
                 }
             }
         }
@@ -1124,6 +1138,120 @@ class BinaryEmitter {
             meta.paramKinds = decl.parameters.map!(p => dTypeToArgKind(p.type)).array;
             ffiMetas ~= meta;
         }
+    }
+
+    /// Collect an extern(Objective-C) interface: generate FFI imports for each method
+    private void collectObjCInterface(InterfaceDecl ifaceDecl) {
+        ensureObjCHelpers();
+
+        foreach (method; ifaceDecl.methods) {
+            string selector = method.objcSelector;
+            if (selector is null) selector = method.name;
+
+            // WASM signature: [i64 receiver, i64 selector, ...user_params] -> return_type
+            FuncSig sig;
+            sig.params ~= ValType.i64;  // receiver (opaque native pointer)
+            sig.params ~= ValType.i64;  // selector (opaque native pointer)
+            foreach (p; method.parameters) {
+                sig.params ~= dTypeToValType(p.type);
+            }
+
+            bool isVoid = isVoidType(method.returnType);
+            if (!isVoid) {
+                sig.results = [dTypeToValType(method.returnType)];
+            }
+
+            // Unique import name per method
+            string importName = "__objc_send_" ~ ifaceDecl.name ~ "_" ~ method.name;
+
+            // Get or create type index
+            uint tIdx;
+            if (auto existing = sig in typeIndex) {
+                tIdx = *existing;
+            } else {
+                tIdx = cast(uint)types.length;
+                types ~= sig;
+                typeIndex[sig] = tIdx;
+            }
+
+            // Register as FFI import
+            ImportInfo info;
+            info.moduleName = "ffi";
+            info.fieldName = importName;
+            info.typeIndex = tIdx;
+            importIndex[importName] = cast(uint)imports.length;
+            imports ~= info;
+
+            // FFI meta with native name alias -> objc_msgSend
+            FFIMeta meta;
+            meta.name = importName;
+            meta.nativeName = "objc_msgSend";
+            meta.retKind = isVoid ? ArgKind.RET_VOID : dTypeToArgKind(method.returnType);
+            meta.paramKinds = [ArgKind.ARG_I64, ArgKind.ARG_I64];  // receiver + selector
+            foreach (p; method.parameters) {
+                meta.paramKinds ~= dTypeToArgKind(p.type);
+            }
+            ffiMetas ~= meta;
+
+            // Store import name on the method for codegen lookup
+            method.mangledName = importName;
+        }
+
+        // Register for codegen lookup
+        objcInterfaces[ifaceDecl.name] = ifaceDecl;
+    }
+
+    /// Ensure objc_getClass and sel_registerName are registered as FFI imports
+    private void ensureObjCHelpers() {
+        if (objcHelpersAdded) return;
+        objcHelpersAdded = true;
+
+        addObjCHelperImport("objc_getClass", [ValType.i32], [ValType.i64],
+                            [ArgKind.ARG_PTR], ArgKind.ARG_I64);
+        addObjCHelperImport("sel_registerName", [ValType.i32], [ValType.i64],
+                            [ArgKind.ARG_PTR], ArgKind.ARG_I64);
+    }
+
+    private void addObjCHelperImport(string name, ValType[] wasmParams, ValType[] wasmResults,
+                                     ArgKind[] ffiParams, ArgKind ffiRet) {
+        if (name in importIndex) return;
+
+        FuncSig sig;
+        sig.params = wasmParams;
+        sig.results = wasmResults;
+
+        uint tIdx;
+        if (auto existing = sig in typeIndex) {
+            tIdx = *existing;
+        } else {
+            tIdx = cast(uint)types.length;
+            types ~= sig;
+            typeIndex[sig] = tIdx;
+        }
+
+        ImportInfo info;
+        info.moduleName = "ffi";
+        info.fieldName = name;
+        info.typeIndex = tIdx;
+        importIndex[name] = cast(uint)imports.length;
+        imports ~= info;
+
+        FFIMeta meta;
+        meta.name = name;
+        meta.retKind = ffiRet;
+        meta.paramKinds = ffiParams.dup;
+        ffiMetas ~= meta;
+    }
+
+    /// Register a null-terminated C string in the data section, return its offset
+    package uint registerCString(string s) {
+        string key = s ~ "\0";
+        if (auto existing = key in cStringOffsets) {
+            return *existing;
+        }
+        uint offset = addData(cast(ubyte[])key.dup);
+        cStringOffsets[key] = offset;
+        return offset;
     }
 
     /// Map a D Type to FFI ArgKind for marshaling metadata
@@ -3196,6 +3324,15 @@ class BinaryEmitter {
             body_ ~= cast(ubyte)meta.paramKinds.length;
             foreach (k; meta.paramKinds) {
                 body_ ~= cast(ubyte)k;
+            }
+
+            // Optional native name alias (for objc_msgSend dispatch)
+            if (meta.nativeName.length > 0) {
+                body_ ~= cast(ubyte)1;
+                leb128u(body_, meta.nativeName.length);
+                body_ ~= cast(const(ubyte)[])meta.nativeName;
+            } else {
+                body_ ~= cast(ubyte)0;
             }
         }
 

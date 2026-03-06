@@ -418,10 +418,11 @@ class CTFERuntime {
             return;
 
         foreach (ref entry; entries) {
-            // Resolve native function via dlsym(RTLD_DEFAULT, ...)
-            void* fnPtr = dlsym(RTLD_DEFAULT, entry.name.toStringz);
+            // Resolve native function via dlsym — use nativeName alias if present
+            string lookupName = entry.nativeName.length > 0 ? entry.nativeName : entry.name;
+            void* fnPtr = dlsym(RTLD_DEFAULT, lookupName.toStringz);
             if (fnPtr is null) {
-                stderr.writeln("FFI warning: dlsym failed for '", entry.name, "' — skipping");
+                stderr.writeln("FFI warning: dlsym failed for '", lookupName, "' — skipping");
                 continue;
             }
 
@@ -470,6 +471,7 @@ class CTFERuntime {
         string name;
         ubyte retKind;
         ubyte[] paramKinds;
+        string nativeName;  // if set, dlsym uses this instead of name
     }
 
     /**
@@ -534,6 +536,18 @@ class CTFERuntime {
             if (pos + paramCount > data.length) break;
             entry.paramKinds = data[pos .. pos + paramCount].dup;
             pos += paramCount;
+
+            // Optional native name alias
+            if (pos < data.length) {
+                ubyte hasNative = data[pos++];
+                if (hasNative != 0 && pos < data.length) {
+                    uint nativeLen = readLEB128(data, pos);
+                    if (pos + nativeLen <= data.length) {
+                        entry.nativeName = (cast(string) data[pos .. pos + nativeLen]).idup;
+                        pos += nativeLen;
+                    }
+                }
+            }
 
             entries ~= entry;
         }

@@ -6416,6 +6416,14 @@ class FuncContext {
             }
         }
 
+        // Handle extern(Objective-C) static method calls: NSApplication.sharedApplication()
+        if (auto objIdent2 = cast(IdentifierExpression)memberExpr.object) {
+            if (auto ifaceDecl = objIdent2.name in emitter.objcInterfaces) {
+                emitObjCMethodCall(out_, *ifaceDecl, null, memberExpr.memberName, args, true);
+                return;
+            }
+        }
+
         // Handle nested MemberExpression objects (e.g., obj.field.method() from alias-this)
         if (auto objMember = cast(MemberExpression)memberExpr.object) {
             auto innerType = getMemberExpressionType(objMember);
@@ -6637,6 +6645,62 @@ class FuncContext {
             out_ ~= Op.global_get;
             leb128u(out_, emitter.spGlobal);
         }
+    }
+
+    /**
+     * Emit extern(Objective-C) method call.
+     * Lowers to: objc_msgSend(receiver, sel_registerName("selector"), args...)
+     */
+    void emitObjCMethodCall(ref Appender!(ubyte[]) out_, InterfaceDecl ifaceDecl,
+                            Expression receiverExpr, string methodName,
+                            Expression[] args, bool isStaticCall) {
+        // Find the method in the interface
+        FunctionDecl method = null;
+        foreach (m; ifaceDecl.methods) {
+            if (m.name == methodName) {
+                method = m;
+                break;
+            }
+        }
+        if (method is null)
+            throw new EmitError("ObjC interface " ~ ifaceDecl.name ~ " has no method " ~ methodName,
+                               SourceLocation.init);
+
+        string selector = method.objcSelector;
+        if (selector is null) selector = method.name;
+
+        // Arg 1: receiver (i64)
+        if (isStaticCall) {
+            // Push class name string pointer, call objc_getClass -> returns i64
+            uint classNameAddr = emitter.registerCString(ifaceDecl.name);
+            out_ ~= Op.i32_const;
+            leb128s(out_, classNameAddr);
+            uint getClassIdx = emitter.getFuncIndex("objc_getClass", method.location);
+            out_ ~= Op.call;
+            leb128u(out_, getClassIdx);
+        } else {
+            // Push the receiver expression (already an i64 value)
+            emitExpression(out_, receiverExpr);
+        }
+
+        // Arg 2: selector (i64)
+        uint selAddr = emitter.registerCString(selector);
+        out_ ~= Op.i32_const;
+        leb128s(out_, selAddr);
+        uint selRegIdx = emitter.getFuncIndex("sel_registerName", method.location);
+        out_ ~= Op.call;
+        leb128u(out_, selRegIdx);
+
+        // Arg 3..N: user arguments
+        foreach (arg; args) {
+            emitExpression(out_, arg);
+        }
+
+        // Call __objc_send_<Interface>_<method>
+        string importName = method.mangledName;
+        uint funcIdx = emitter.getFuncIndex(importName, method.location);
+        out_ ~= Op.call;
+        leb128u(out_, funcIdx);
     }
 
     /**

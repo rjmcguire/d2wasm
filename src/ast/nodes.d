@@ -308,6 +308,7 @@ class FunctionDecl : Declaration {
     Declaration parent;  // enclosing struct/class, null for free functions
     private string _mangledName;  // D ABI mangled name, set during symbol collection
     string gcStrategy;   // @gc(heap) etc. — null if not set
+    string objcSelector;  // ObjC selector string, e.g. "sharedApplication", "setTitle:"
 
     /// Get the mangled name.
     string mangledName() const { return _mangledName; }
@@ -538,7 +539,8 @@ class TemplateDecl : Declaration {
 class InterfaceDecl : Declaration {
     Type[] parentInterfaces;
     FunctionDecl[] methods;
-    
+    bool isObjC;  // true for extern(Objective-C) interfaces
+
     // Packed itable_ptr design (same as class vtable_ptr):
     // itable_ptr = (typeId << 16) | itableBase
     uint typeId = 0;       // Unique type ID for this interface (for RTTI/error messages)
