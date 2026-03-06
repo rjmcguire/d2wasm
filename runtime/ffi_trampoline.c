@@ -154,7 +154,7 @@ const void *ffi_generic_trampoline(IM3Runtime runtime, IM3ImportContext _ctx,
         }
     }
 
-    /* Debug: print args for ObjC calls */
+    /* Uncomment for FFI call tracing (ObjC calls):
     if (strncmp(desc->name, "__objc_send_", 12) == 0) {
         fprintf(stderr, "[FFI] %s nargs=%d:", desc->name, desc->nargs);
         for (int i = 0; i < desc->nargs; i++) {
@@ -169,16 +169,20 @@ const void *ffi_generic_trampoline(IM3Runtime runtime, IM3ImportContext _ctx,
         }
         fprintf(stderr, "\n");
     }
+    */
 
     /* Call via libffi */
     uint64_t ret_val = 0;
     ffi_call(&desc->cif, FFI_FN(desc->fn_ptr), &ret_val, arg_values);
 
+    /* Uncomment for FFI return value tracing:
+    if (has_return && strncmp(desc->name, "__objc_send_", 12) == 0) {
+        fprintf(stderr, "[FFI] %s -> 0x%llx\n", desc->name, (long long)ret_val);
+    }
+    */
+
     /* Write return value to _sp[0] */
     if (has_return) {
-        if (strncmp(desc->name, "__objc_send_", 12) == 0) {
-            fprintf(stderr, "[FFI] %s -> 0x%llx\n", desc->name, (long long)ret_val);
-        }
         *((uint64_t *)_sp) = ret_val;
     }
 

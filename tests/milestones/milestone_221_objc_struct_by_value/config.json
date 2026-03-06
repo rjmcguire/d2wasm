@@ -1,0 +1,5 @@
+{
+    "description": "ObjC interface methods accept struct params via HFA flattening",
+    "type": "compile_only",
+    "note": "Struct params are flattened to individual fields in WASM sig and FFI meta. Runtime verification via Metal demo."
+}

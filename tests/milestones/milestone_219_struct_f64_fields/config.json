@@ -1,0 +1,6 @@
+{
+    "description": "Struct fields with f64 type use f64.store/f64.load",
+    "expected_result": 7,
+    "type": "run",
+    "mangled_entry": "_D4test4mainFZi"
+}

@@ -1,0 +1,6 @@
+{
+    "description": "Struct f64 fields survive across function calls",
+    "expected_result": 100,
+    "type": "run",
+    "mangled_entry": "_D4test4mainFZi"
+}

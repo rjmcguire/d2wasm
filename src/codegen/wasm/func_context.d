@@ -4450,13 +4450,13 @@ class FuncContext {
                         if (auto structDecl = varDecl.type.asStruct()) {
                                 auto field = structDecl.getField(expr.memberName);
                                 if (field) {
-                                    // Load i32 from data section at struct address + field offset
+                                    // Load from data section at struct address + field offset
                                     uint address = varDecl.ctfeStructAddress + cast(uint)field.offset;
                                     out_ ~= Op.i32_const;
                                     leb128s(out_, address);
-                                    out_ ~= Op.i32_load;
-                                    out_ ~= cast(ubyte)0x02;  // alignment (log2 of 4 bytes)
-                                    leb128u(out_, 0);  // offset
+                                    auto bt = cast(BasicType)field.type;
+                                    bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
+                                    emitLoadForSize(out_, cast(uint)field.size, isFloat);
                                     return;
                                 }
                         }
@@ -4558,9 +4558,9 @@ class FuncContext {
                         leb128s(out_, cast(int)field.offset);
                         out_ ~= Op.i32_add;
                     }
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    auto bt = cast(BasicType)field.type;
+                    bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
+                    emitLoadForSize(out_, cast(uint)field.size, isFloat);
                     return;
                 }
             }
@@ -4628,9 +4628,9 @@ class FuncContext {
                         leb128s(out_, cast(int)field.offset);
                         out_ ~= Op.i32_add;
                     }
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    auto bt = cast(BasicType)field.type;
+                    bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
+                    emitLoadForSize(out_, cast(uint)field.size, isFloat);
                     return;
                 }
             }
@@ -4699,9 +4699,9 @@ class FuncContext {
                         leb128s(out_, cast(int) field.offset);
                         out_ ~= Op.i32_add;
                     }
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    auto bt = cast(BasicType)field.type;
+                    bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
+                    emitLoadForSize(out_, cast(uint)field.size, isFloat);
                     return;
                 }
             }
