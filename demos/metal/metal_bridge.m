@@ -2,11 +2,11 @@
  * Metal C Bridge — slim residual that requires Objective-C class definitions
  *
  * Handles: MetalView (NSView subclass), BridgeWindowDelegate,
- * event loop (@autoreleasepool), click state, window/view setup,
+ * event loop (@autoreleasepool), click state, view setup,
  * and render pass setup (indexed ObjC properties can't be done from D yet).
  *
  * D handles: Metal device, command queue, shader compilation, pipeline,
- * buffer creation, and the game loop orchestration.
+ * buffer creation, window creation, and the game loop orchestration.
  */
 #import <Metal/Metal.h>
 #import <Cocoa/Cocoa.h>
@@ -56,19 +56,6 @@ static BridgeWindowDelegate *g_windowDelegate;
 
 // ── C API ───────────────────────────────────────────────────────────
 
-/// Create window with NSRect (struct-by-value, can't do from D yet)
-long metal_init_window(int w, int h) {
-    NSRect frame = NSMakeRect(100, 100, w, h);
-    NSWindow *window = [[NSWindow alloc]
-        initWithContentRect:frame
-                  styleMask:(NSWindowStyleMaskTitled |
-                             NSWindowStyleMaskClosable |
-                             NSWindowStyleMaskResizable)
-                    backing:NSBackingStoreBuffered
-                      defer:NO];
-    return (long)window;
-}
-
 /// Attach MetalView with CAMetalLayer to window's content view
 void metal_setup_view(long window, long metalLayer) {
     NSWindow *win = (NSWindow *)window;
@@ -79,12 +66,6 @@ void metal_setup_view(long window, long metalLayer) {
     [metalView setLayer:layer];
     metalView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     [win.contentView addSubview:metalView];
-}
-
-/// Set CAMetalLayer drawable size (needs CGSize struct)
-void metal_set_drawable_size(long metalLayer, int w, int h) {
-    CAMetalLayer *layer = (CAMetalLayer *)metalLayer;
-    layer.drawableSize = CGSizeMake(w, h);
 }
 
 /// Install window delegate for close detection

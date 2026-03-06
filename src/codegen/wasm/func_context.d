@@ -6725,6 +6725,28 @@ class FuncContext {
 
         // Arg 3..N: user arguments (with i32→i64 promotion where needed)
         foreach (i, arg; args) {
+            if (i < method.parameters.length) {
+                auto paramType = method.parameters[i].type.resolve();
+                if (auto structDecl = paramType.asStruct()) {
+                    // Struct arg: emit address, save to temp, load each field individually
+                    emitExpression(out_, arg);  // pushes i32 address
+                    out_ ~= Op.local_set;
+                    leb128u(out_, tempLocalA);
+                    foreach (field; structDecl.fields) {
+                        out_ ~= Op.local_get;
+                        leb128u(out_, tempLocalA);
+                        if (field.offset > 0) {
+                            out_ ~= Op.i32_const;
+                            leb128s(out_, cast(int)field.offset);
+                            out_ ~= Op.i32_add;
+                        }
+                        auto bt = cast(BasicType)field.type;
+                        bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
+                        emitLoadForSize(out_, cast(uint)field.size, isFloat);
+                    }
+                    continue;  // skip normal emit path
+                }
+            }
             emitExpression(out_, arg);
             if (i < method.parameters.length) {
                 ValType expected = emitter.dTypeToValType(method.parameters[i].type);

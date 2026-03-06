@@ -1188,7 +1188,18 @@ class BinaryEmitter {
             sig.params ~= ValType.i64;  // receiver (opaque native pointer)
             sig.params ~= ValType.i64;  // selector (opaque native pointer)
             foreach (p; method.parameters) {
-                sig.params ~= dTypeToValType(p.type);
+                auto resolved = p.type.resolve();
+                // Resolve struct UserTypes for field access
+                if (auto ut = cast(UserType)resolved) {
+                    if (!ut.declaration) ut.ensureResolved(symbolTable);
+                }
+                if (auto structDecl = resolved.asStruct()) {
+                    // Flatten HFA: push one ValType per field
+                    foreach (field; structDecl.fields)
+                        sig.params ~= dTypeToValType(field.type);
+                } else {
+                    sig.params ~= dTypeToValType(p.type);
+                }
             }
 
             bool isVoid = isVoidType(method.returnType);
@@ -1224,7 +1235,14 @@ class BinaryEmitter {
             meta.retKind = isVoid ? ArgKind.RET_VOID : dTypeToArgKind(method.returnType);
             meta.paramKinds = [ArgKind.ARG_I64, ArgKind.ARG_I64];  // receiver + selector
             foreach (p; method.parameters) {
-                meta.paramKinds ~= dTypeToArgKind(p.type);
+                auto resolved = p.type.resolve();
+                if (auto structDecl = resolved.asStruct()) {
+                    // Flatten HFA: push one ArgKind per field
+                    foreach (field; structDecl.fields)
+                        meta.paramKinds ~= dTypeToArgKind(field.type);
+                } else {
+                    meta.paramKinds ~= dTypeToArgKind(p.type);
+                }
             }
             ffiMetas ~= meta;
 

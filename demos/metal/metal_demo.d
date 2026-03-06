@@ -4,6 +4,11 @@
 // buffer creation, window setup, and game loop orchestration.
 // Bridge handles: NSView subclass, window delegate, event loop, render pass.
 
+// ── Struct Types ───────────────────────────────────────────────────
+
+struct NSRect { double x; double y; double width; double height; }
+struct CGSize { double width; double height; }
+
 // ── ObjC Interfaces ────────────────────────────────────────────────
 
 extern(Objective-C)
@@ -28,6 +33,8 @@ interface NSString {
 extern(Objective-C)
 interface NSWindow {
     static NSWindow alloc() @selector("alloc");
+    NSWindow initWithContentRect(NSRect rect, long styleMask, long backing, int defer_)
+        @selector("initWithContentRect:styleMask:backing:defer:");
     void setTitle(NSString title) @selector("setTitle:");
     void makeKeyAndOrderFront(long sender) @selector("makeKeyAndOrderFront:");
 }
@@ -38,6 +45,7 @@ interface CAMetalLayer {
     void setDevice(long device) @selector("setDevice:");
     void setPixelFormat(long fmt) @selector("setPixelFormat:");
     void setFramebufferOnly(int flag) @selector("setFramebufferOnly:");
+    void setDrawableSize(CGSize size) @selector("setDrawableSize:");
 }
 
 extern(Objective-C)
@@ -60,10 +68,8 @@ interface MTLCommandQueue {
 
 extern(C) long MTLCreateSystemDefaultDevice();
 
-// Bridge: things that need ObjC class definitions or struct-by-value
-extern(C) long metal_init_window(int w, int h);
+// Bridge: things that need ObjC class definitions
 extern(C) void metal_setup_view(long window, long metalLayer);
-extern(C) void metal_set_drawable_size(long metalLayer, int w, int h);
 extern(C) void metal_set_delegate(long window);
 extern(C) int metal_process_events();
 extern(C) int metal_has_click();
@@ -149,15 +155,24 @@ int main() {
     metalLayer.setPixelFormat(80);  // MTLPixelFormatBGRA8Unorm
     metalLayer.setFramebufferOnly(1);
 
-    // Window (bridge: needs NSRect struct)
-    long windowPtr = metal_init_window(800, 600);
-    NSWindow window = cast(NSWindow)windowPtr;
+    // Window (pure D — struct-by-value via HFA flattening)
+    NSRect frame;
+    frame.x = 100.0;
+    frame.y = 100.0;
+    frame.width = 800.0;
+    frame.height = 600.0;
+    NSWindow window = NSWindow.alloc();
+    window = window.initWithContentRect(frame, 15, 2, 0);
     NSString title = NSString.stringWithUTF8String(metal_get_cstr_title());
     window.setTitle(title);
 
-    // Attach metal layer + delegate (bridge: needs NSView subclass, CGSize struct)
+    // Attach metal layer + delegate (bridge: needs NSView subclass)
+    long windowPtr = cast(long)window;
     long metalLayerPtr = cast(long)metalLayer;
-    metal_set_drawable_size(metalLayerPtr, 800, 600);
+    CGSize drawSize;
+    drawSize.width = 800.0;
+    drawSize.height = 600.0;
+    metalLayer.setDrawableSize(drawSize);
     metal_setup_view(windowPtr, metalLayerPtr);
     metal_set_delegate(windowPtr);
 
