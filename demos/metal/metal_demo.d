@@ -1,13 +1,14 @@
 // Metal Render Demo — D drives Metal via extern(Objective-C) interfaces
 //
 // D handles: device init, command queue, shader compilation, pipeline,
-// buffer creation, window setup, and game loop orchestration.
-// Bridge handles: NSView subclass, window delegate, event loop, render pass.
+// buffer creation, window setup, render pass, and game loop orchestration.
+// Bridge handles: NSView subclass, window delegate, event loop only.
 
 // ── Struct Types ───────────────────────────────────────────────────
 
 struct NSRect { double x; double y; double width; double height; }
 struct CGSize { double width; double height; }
+struct MTLClearColor { double red; double green; double blue; double alpha; }
 
 // ── ObjC Interfaces ────────────────────────────────────────────────
 
@@ -46,6 +47,7 @@ interface CAMetalLayer {
     void setPixelFormat(long fmt) @selector("setPixelFormat:");
     void setFramebufferOnly(int flag) @selector("setFramebufferOnly:");
     void setDrawableSize(CGSize size) @selector("setDrawableSize:");
+    CAMetalDrawable nextDrawable() @selector("nextDrawable");
 }
 
 extern(Objective-C)
@@ -53,6 +55,7 @@ interface MTLDevice {
     MTLCommandQueue newCommandQueue() @selector("newCommandQueue");
     MTLLibrary newLibraryWithSource(NSString source, long options, long errPtr) @selector("newLibraryWithSource:options:error:");
     NSString name() @selector("name");
+    long newRenderPipelineStateWithDescriptor(long desc, long error) @selector("newRenderPipelineStateWithDescriptor:error:");
 }
 
 extern(Objective-C)
@@ -62,6 +65,61 @@ interface MTLLibrary {
 
 extern(Objective-C)
 interface MTLCommandQueue {
+    MTLCommandBuffer commandBuffer() @selector("commandBuffer");
+}
+
+extern(Objective-C)
+interface CAMetalDrawable {
+    long texture() @selector("texture");
+}
+
+extern(Objective-C)
+interface MTLRenderPassColorAttachmentDescriptor {
+    void setTexture(long texture) @selector("setTexture:");
+    void setLoadAction(long action) @selector("setLoadAction:");
+    void setClearColor(MTLClearColor color) @selector("setClearColor:");
+    void setStoreAction(long action) @selector("setStoreAction:");
+    void setPixelFormat(long fmt) @selector("setPixelFormat:");
+}
+
+extern(Objective-C)
+interface MTLRenderPassColorAttachmentDescriptorArray {
+    MTLRenderPassColorAttachmentDescriptor objectAtIndexedSubscript(long idx)
+        @selector("objectAtIndexedSubscript:");
+}
+
+extern(Objective-C)
+interface MTLRenderPassDescriptor {
+    static MTLRenderPassDescriptor renderPassDescriptor() @selector("renderPassDescriptor");
+    MTLRenderPassColorAttachmentDescriptorArray colorAttachments() @selector("colorAttachments");
+}
+
+extern(Objective-C)
+interface MTLRenderPipelineDescriptor {
+    static MTLRenderPipelineDescriptor alloc() @selector("alloc");
+    MTLRenderPipelineDescriptor init_() @selector("init");
+    void setVertexFunction(long func) @selector("setVertexFunction:");
+    void setFragmentFunction(long func) @selector("setFragmentFunction:");
+    MTLRenderPassColorAttachmentDescriptorArray colorAttachments() @selector("colorAttachments");
+}
+
+extern(Objective-C)
+interface MTLCommandBuffer {
+    MTLRenderCommandEncoder renderCommandEncoderWithDescriptor(MTLRenderPassDescriptor desc)
+        @selector("renderCommandEncoderWithDescriptor:");
+    void presentDrawable(CAMetalDrawable drawable) @selector("presentDrawable:");
+    void commit() @selector("commit");
+    void waitUntilCompleted() @selector("waitUntilCompleted");
+}
+
+extern(Objective-C)
+interface MTLRenderCommandEncoder {
+    void setRenderPipelineState(long state) @selector("setRenderPipelineState:");
+    void setVertexBuffer(long buf, long offset, long atIndex)
+        @selector("setVertexBuffer:offset:atIndex:");
+    void drawPrimitives(long type, long start, long count)
+        @selector("drawPrimitives:vertexStart:vertexCount:");
+    void endEncoding() @selector("endEncoding");
 }
 
 // ── C/Bridge Functions ─────────────────────────────────────────────
@@ -82,12 +140,6 @@ extern(C) void metal_create_buffers(long device);
 extern(C) long metal_get_pos_buf();
 extern(C) long metal_get_col_buf();
 extern(C) int metal_get_vertex_count();
-
-// Bridge: render pass (needs indexed ObjC properties)
-extern(C) long metal_create_pipeline(long device, long vertexFunc, long fragmentFunc);
-extern(C) void metal_set_clear_color(double r, double g, double b);
-extern(C) void metal_render_frame(long cmdQueue, long metalLayer, long pipelineState,
-                                  long posBuf, long colBuf, int vertexCount);
 
 // Bridge: native C string pointers (WASM can't pass linear memory addrs to ObjC)
 extern(C) long metal_get_shader_source();
@@ -113,13 +165,21 @@ double cos_approx(double x) {
     return sin_approx(x + 1.5707963);
 }
 
+// ── Clear Color State ─────────────────────────────────────────────
+
+double g_clearR = 0.05;
+double g_clearG = 0.05;
+double g_clearB = 0.10;
+
 // ── Click Handler ──────────────────────────────────────────────────
 
 void on_click(double x, double y) {
     double r = x * 0.5 + 0.5;
     double g = y * 0.5 + 0.5;
     double b = 1.0 - r;
-    metal_set_clear_color(r, g, b);
+    g_clearR = r;
+    g_clearG = g;
+    g_clearB = b;
 }
 
 // ── Main ───────────────────────────────────────────────────────────
@@ -145,8 +205,13 @@ int main() {
     long vertexFunc = library.newFunctionWithName(vertName);
     long fragmentFunc = library.newFunctionWithName(fragName);
 
-    // Pipeline (bridge: needs indexed ObjC property)
-    long pipelineState = metal_create_pipeline(devicePtr, vertexFunc, fragmentFunc);
+    // Pipeline (D-side ObjC — expression receivers enable chained calls)
+    MTLRenderPipelineDescriptor pipeDesc = MTLRenderPipelineDescriptor.alloc();
+    pipeDesc = pipeDesc.init_();
+    pipeDesc.setVertexFunction(vertexFunc);
+    pipeDesc.setFragmentFunction(fragmentFunc);
+    pipeDesc.colorAttachments().objectAtIndexedSubscript(0).setPixelFormat(80);
+    long pipelineState = device.newRenderPipelineStateWithDescriptor(cast(long)pipeDesc, 0);
     if (pipelineState == 0) return 1;
 
     // Metal layer (D-side ObjC calls)
@@ -212,8 +277,36 @@ int main() {
         if (metal_has_click() != 0) {
             on_click(metal_get_click_x(), metal_get_click_y());
         }
-        metal_render_frame(cast(long)cmdQueue, cast(long)metalLayer,
-                          pipelineState, posBuf, colBuf, vertexCount);
+
+        // Render frame (D-side ObjC — chained calls via expression receivers)
+        CAMetalDrawable drawable = metalLayer.nextDrawable();
+        if (cast(long)drawable == 0) {
+            i = i;  // skip frame if no drawable
+        } else {
+            MTLRenderPassDescriptor rpd = MTLRenderPassDescriptor.renderPassDescriptor();
+            MTLRenderPassColorAttachmentDescriptor att =
+                rpd.colorAttachments().objectAtIndexedSubscript(0);
+            att.setTexture(drawable.texture());
+            att.setLoadAction(2);   // MTLLoadActionClear
+            MTLClearColor clearColor;
+            clearColor.red = g_clearR;
+            clearColor.green = g_clearG;
+            clearColor.blue = g_clearB;
+            clearColor.alpha = 1.0;
+            att.setClearColor(clearColor);
+            att.setStoreAction(1);  // MTLStoreActionStore
+
+            MTLCommandBuffer cmdBuf = cmdQueue.commandBuffer();
+            MTLRenderCommandEncoder enc = cmdBuf.renderCommandEncoderWithDescriptor(rpd);
+            enc.setRenderPipelineState(pipelineState);
+            enc.setVertexBuffer(posBuf, 0, 0);
+            enc.setVertexBuffer(colBuf, 0, 1);
+            enc.drawPrimitives(3, 0, cast(long)vertexCount);  // MTLPrimitiveTypeTriangle
+            enc.endEncoding();
+            cmdBuf.presentDrawable(drawable);
+            cmdBuf.commit();
+            cmdBuf.waitUntilCompleted();
+        }
     }
 
     return 0;

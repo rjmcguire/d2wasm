@@ -6504,6 +6504,16 @@ class FuncContext {
         // Get the struct type from the object
         auto objIdent = cast(IdentifierExpression)memberExpr.object;
         if (!objIdent) {
+            // Expression receiver: check type for method dispatch (enables chaining)
+            if (memberExpr.object.type !is null) {
+                auto resolved = memberExpr.object.type.resolve();
+                if (auto ifaceDecl = resolved.asInterface()) {
+                    if (ifaceDecl.isObjC) {
+                        emitObjCMethodCall(out_, ifaceDecl, memberExpr.object, memberExpr.memberName, args, false);
+                        return;
+                    }
+                }
+            }
             throw new EmitError("Method call on non-identifier object not yet supported", memberExpr.location);
         }
 
@@ -8129,8 +8139,21 @@ class FuncContext {
                         }
                     }
                 }
+
+                // Type-based check for expression receivers (chained calls)
+                if (memberExpr.object.type !is null) {
+                    auto resolved = memberExpr.object.type.resolve();
+                    if (auto ifaceDecl = resolved.asInterface()) {
+                        if (ifaceDecl.isObjC) {
+                            foreach (m; ifaceDecl.methods) {
+                                if (m.name == memberExpr.memberName)
+                                    return !isVoidType(m.returnType);
+                            }
+                        }
+                    }
+                }
             }
-            
+
             return true;  // Assume has value if unknown
         }
         return true;  // Most expressions have values

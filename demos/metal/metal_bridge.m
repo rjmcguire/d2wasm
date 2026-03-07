@@ -3,10 +3,10 @@
  *
  * Handles: MetalView (NSView subclass), BridgeWindowDelegate,
  * event loop (@autoreleasepool), click state, view setup,
- * and render pass setup (indexed ObjC properties can't be done from D yet).
+ * and vertex buffer accumulation (native memory needed for Metal).
  *
  * D handles: Metal device, command queue, shader compilation, pipeline,
- * buffer creation, window creation, and the game loop orchestration.
+ * buffer creation, window creation, render pass, and the game loop.
  */
 #import <Metal/Metal.h>
 #import <Cocoa/Cocoa.h>
@@ -102,23 +102,6 @@ int metal_has_click(void) {
 double metal_get_click_x(void) { return g_clickX; }
 double metal_get_click_y(void) { return g_clickY; }
 
-/// Create render pipeline state (needs indexed ObjC property: colorAttachments[0])
-long metal_create_pipeline(long device, long vertexFunc, long fragmentFunc) {
-    MTLRenderPipelineDescriptor *pipeDesc = [[MTLRenderPipelineDescriptor alloc] init];
-    pipeDesc.vertexFunction   = (id<MTLFunction>)vertexFunc;
-    pipeDesc.fragmentFunction = (id<MTLFunction>)fragmentFunc;
-    pipeDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
-
-    NSError *error = nil;
-    id<MTLRenderPipelineState> pipelineState =
-        [(id<MTLDevice>)device newRenderPipelineStateWithDescriptor:pipeDesc error:&error];
-    if (!pipelineState) {
-        NSLog(@"Pipeline error: %@", error);
-        return 0;
-    }
-    return (long)pipelineState;
-}
-
 /// Vertex accumulator for D-computed geometry
 typedef struct {
     float x, y;
@@ -184,40 +167,3 @@ long metal_get_shader_source(void)  { return (long)g_shaderSource; }
 long metal_get_cstr_vertex_main(void)  { return (long)"vertex_main"; }
 long metal_get_cstr_fragment_main(void) { return (long)"fragment_main"; }
 long metal_get_cstr_title(void)     { return (long)"D \xe2\x86\x92 Metal"; }
-
-/// Mutable clear color (set from D)
-static double g_clearR = 0.05;
-static double g_clearG = 0.05;
-static double g_clearB = 0.10;
-
-void metal_set_clear_color(double r, double g, double b) {
-    g_clearR = r;
-    g_clearG = g;
-    g_clearB = b;
-}
-
-/// Render one frame (needs indexed ObjC properties for render pass)
-void metal_render_frame(long cmdQueue, long metalLayer, long pipelineState,
-                        long posBuf, long colBuf, int vertexCount) {
-    id<CAMetalDrawable> drawable = [(CAMetalLayer *)metalLayer nextDrawable];
-    if (!drawable) return;
-
-    MTLRenderPassDescriptor *rpd = [MTLRenderPassDescriptor renderPassDescriptor];
-    rpd.colorAttachments[0].texture    = drawable.texture;
-    rpd.colorAttachments[0].loadAction = MTLLoadActionClear;
-    rpd.colorAttachments[0].clearColor = MTLClearColorMake(g_clearR, g_clearG, g_clearB, 1.0);
-    rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
-
-    id<MTLCommandBuffer> cmdBuf = [(id<MTLCommandQueue>)cmdQueue commandBuffer];
-    id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:rpd];
-
-    [enc setRenderPipelineState:(id<MTLRenderPipelineState>)pipelineState];
-    [enc setVertexBuffer:(id<MTLBuffer>)posBuf offset:0 atIndex:0];
-    [enc setVertexBuffer:(id<MTLBuffer>)colBuf offset:0 atIndex:1];
-    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:vertexCount];
-    [enc endEncoding];
-
-    [cmdBuf presentDrawable:drawable];
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
-}
