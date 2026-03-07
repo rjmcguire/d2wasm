@@ -4,6 +4,12 @@
 // buffer creation, window setup, render pass, and game loop orchestration.
 // Bridge handles: NSView subclass, window delegate, event loop only.
 
+pragma(lib, "/System/Library/Frameworks/Metal.framework/Metal");
+pragma(lib, "/System/Library/Frameworks/Foundation.framework/Foundation");
+pragma(lib, "/System/Library/Frameworks/Cocoa.framework/Cocoa");
+pragma(lib, "/System/Library/Frameworks/QuartzCore.framework/QuartzCore");
+pragma(lib, "./libmetal_bridge.dylib");
+
 // ── Struct Types ───────────────────────────────────────────────────
 
 struct NSRect { double x; double y; double width; double height; }

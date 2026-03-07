@@ -115,7 +115,8 @@ class MixinExpander {
             if (auto modDecl = cast(ModuleDecl)decl) {
                 tempSymbolTable.setModulePath(modDecl.modulePath);
             } else if (cast(MixinDecl)decl || cast(StaticIfDecl)decl
-                    || cast(StaticAssertDecl)decl || cast(ImportDecl)decl) {
+                    || cast(StaticAssertDecl)decl || cast(ImportDecl)decl
+                    || cast(PragmaDeclaration)decl) {
                 // Skip — these are expanded/handled in the walk below
             } else {
                 collector.collectSymbol(decl);

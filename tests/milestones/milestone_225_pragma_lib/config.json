@@ -1,0 +1,8 @@
+{
+    "name": "pragma_lib",
+    "description": "pragma(lib, ...) loads shared libraries without CLI flags",
+    "type": "ffi_exec",
+    "expected_result": 42,
+    "entry": "main",
+    "capability": "pragma(lib) declaration parsed and loaded at compile time"
+}

@@ -1077,3 +1077,18 @@ class StaticAssertDecl : Declaration {
         return format("StaticAssertDecl(%s)", condition.toString());
     }
 }
+
+class PragmaDeclaration : Declaration {
+    string pragmaName;     // e.g., "lib"
+    string[] arguments;    // e.g., ["Metal"]
+
+    this(SourceLocation loc, string pragmaName, string[] arguments) {
+        super(loc, "<pragma>");
+        this.pragmaName = pragmaName;
+        this.arguments = arguments;
+    }
+
+    override string toString() const {
+        return format("PragmaDeclaration(%s, %s)", pragmaName, arguments);
+    }
+}

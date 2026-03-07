@@ -7,9 +7,4 @@ clang -shared -o libmetal_bridge.dylib metal_bridge.m \
     -framework Metal -framework Foundation -framework Cocoa -framework QuartzCore
 
 echo "=== Compiling D and running ==="
-../../d2wasm metal_demo.d -r \
-    --link-framework Metal \
-    --link-framework Foundation \
-    --link-framework Cocoa \
-    --link-framework QuartzCore \
-    --link-dylib ./libmetal_bridge.dylib
+../../d2wasm metal_demo.d -r

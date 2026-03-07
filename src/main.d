@@ -318,6 +318,30 @@ int compileFile(CompilerOptions options) {
         auto importResolver = new ImportResolver(modRegistry, parseFn);
         importResolver.resolveImports(inputModule);
 
+        // Collect pragma(lib, ...) from AST — load libraries before CTFE
+        {
+            import core.sys.posix.dlfcn : dlopen, RTLD_LAZY, RTLD_GLOBAL;
+            string sourceDir = dirName(absolutePath(options.inputFile));
+            foreach (decl; ast) {
+                if (auto pragma_ = cast(PragmaDeclaration)decl) {
+                    if (pragma_.pragmaName == "lib") {
+                        foreach (arg; pragma_.arguments) {
+                            // Resolve relative paths against source file directory
+                            string libPath = arg;
+                            if (!isAbsolute(arg))
+                                libPath = buildPath(sourceDir, arg);
+                            auto handle = dlopen((libPath ~ "\0").ptr, RTLD_LAZY | RTLD_GLOBAL);
+                            if (handle is null) {
+                                log(1, "Warning: pragma(lib) could not load '", libPath, "'");
+                            } else {
+                                log(2, "Loaded pragma(lib): ", libPath);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Load frameworks for FFI early — before CTFE, so dlsym can find symbols
         if (options.linkFrameworks.length > 0) {
             import core.sys.posix.dlfcn : dlopen, RTLD_LAZY, RTLD_GLOBAL;

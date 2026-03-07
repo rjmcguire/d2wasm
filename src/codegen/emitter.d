@@ -801,8 +801,8 @@ class BinaryEmitter {
                 symbolTable.setModulePath(modDecl.modulePath);
                 continue;
             }
-            if (cast(ImportDecl)decl) {
-                continue;  // Import declarations handled during import resolution
+            if (cast(ImportDecl)decl || cast(PragmaDeclaration)decl) {
+                continue;  // Import/pragma declarations handled elsewhere
             }
             if (cast(TemplateDecl)decl) {
                 continue;  // Skip uninstantiated templates
@@ -853,7 +853,7 @@ class BinaryEmitter {
             foreach (decl; mod.ast) {
                 if (cast(ModuleDecl)decl)
                     continue;
-                if (cast(ImportDecl)decl)
+                if (cast(ImportDecl)decl || cast(PragmaDeclaration)decl)
                     continue;
                 if (cast(TemplateDecl)decl) {
                     continue;

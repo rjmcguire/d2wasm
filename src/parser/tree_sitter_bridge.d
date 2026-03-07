@@ -1894,7 +1894,55 @@ class TreeSitterBridge {
         
         return new StaticAssertDecl(loc, conditionExpr, messageExpr);
     }
-    
+
+    Declaration[] parsePragmaDeclaration(TSNode node) {
+        SourceLocation loc = makeSourceLocation(node);
+        string pragmaName;
+        string[] args;
+
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+
+            if (childType == "pragma_expression") {
+                // Walk pragma_expression children: pragma, (, identifier, [, expressions...], )
+                // Note: _argument_list is hidden in tree-sitter, so expression nodes
+                // appear as direct children of pragma_expression.
+                bool seenIdentifier = false;
+                uint peChildCount = TreeSitterParser.getChildCount(child);
+                for (uint j = 0; j < peChildCount; j++) {
+                    TSNode peChild = TreeSitterParser.getChild(child, j);
+                    string peChildType = TreeSitterParser.getNodeType(peChild);
+
+                    if (peChildType == "identifier" && !seenIdentifier) {
+                        pragmaName = TreeSitterParser.getNodeText(peChild, sourceText);
+                        seenIdentifier = true;
+                    } else if (peChildType == "string_literal") {
+                        args ~= extractStringLiteral(peChild);
+                    } else if (peChildType == "expression") {
+                        // tree-sitter may wrap string_literal in expression node
+                        uint exprCount = TreeSitterParser.getChildCount(peChild);
+                        for (uint m = 0; m < exprCount; m++) {
+                            TSNode exprChild = TreeSitterParser.getChild(peChild, m);
+                            if (TreeSitterParser.getNodeType(exprChild) == "string_literal") {
+                                args ~= extractStringLiteral(exprChild);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (pragmaName.length == 0) {
+            log(2, "Warning: pragma_declaration missing pragma name");
+            return [];
+        }
+
+        log(3, "Parsed pragma(", pragmaName, ", ", args, ")");
+        return [new PragmaDeclaration(loc, pragmaName, args)];
+    }
+
     /**
      * Parse the condition from a condition node (static if, version, or debug)
      */
@@ -2006,6 +2054,8 @@ class TreeSitterBridge {
             return [parseConditionalDeclaration(node)];
         } else if (nodeType == "static_assert") {
             return [parseStaticAssert(node)];
+        } else if (nodeType == "pragma_declaration") {
+            return parsePragmaDeclaration(node);
         } else if (nodeType == "alias_declaration") {
             return parseAliasDeclaration(node);
         } else if (nodeType == "declaration_or_statement") {
