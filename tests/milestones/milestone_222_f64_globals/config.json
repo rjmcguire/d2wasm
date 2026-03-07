@@ -1,0 +1,7 @@
+{
+  "description": "f64 scalar globals with proper WASM init expressions",
+  "type": "wasm_exec",
+  "expected_result": 0,
+  "entry": "test",
+  "mangled_entry": "_D4test4testFZi"
+}

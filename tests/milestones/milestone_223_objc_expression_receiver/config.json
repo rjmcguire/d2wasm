@@ -1,0 +1,8 @@
+{
+    "name": "objc_expression_receiver",
+    "description": "ObjC method calls on expression receivers enable chaining",
+    "type": "ffi_exec",
+    "expected_result": 42,
+    "link_frameworks": ["Foundation"],
+    "capability": "expression receiver dispatch for ObjC interface method calls"
+}

@@ -183,6 +183,7 @@ class BinaryEmitter {
             ValType type;
             bool mutable;
             long initValue;
+            double initF64 = 0.0;
             string name;
         }
         GlobalInfo[] globals;
@@ -1110,18 +1111,30 @@ class BinaryEmitter {
             return;
         }
 
-        // Scalar global variable (int, bool, etc.) — allocate a WASM global
-        long initValue = 0;
-        if (decl.initializer) {
-            initValue = evaluateConstantIntExpr(decl.initializer);
-        }
-
+        // Scalar global variable — allocate a WASM global
         decl.wasmGlobalIndex = cast(uint)globals.length;
         GlobalInfo g;
         g.type = dTypeToValType(decl.type);
         g.mutable = true;
-        g.initValue = initValue;
         g.name = decl.name;
+
+        if (g.type == ValType.f64 || g.type == ValType.f32) {
+            // Float/double global — evaluate initializer as f64
+            if (decl.initializer) {
+                if (auto literal = cast(LiteralExpression)decl.initializer) {
+                    if (literal.value.type == typeid(double))
+                        g.initF64 = literal.value.get!double();
+                    else if (literal.value.type == typeid(long))
+                        g.initF64 = cast(double)literal.value.get!long();
+                }
+            }
+        } else {
+            // Integer global
+            if (decl.initializer) {
+                g.initValue = evaluateConstantIntExpr(decl.initializer);
+            }
+        }
+
         globals ~= g;
     }
     
@@ -2752,7 +2765,7 @@ class BinaryEmitter {
         
         // Convert to section builder's GlobalInfo format
         import codegen.wasm.sections.global : GlobalInfo_ = GlobalInfo;
-        auto sectionGlobals = globals.map!(g => GlobalInfo_(g.type, g.mutable, g.initValue)).array;
+        auto sectionGlobals = globals.map!(g => GlobalInfo_(g.type, g.mutable, g.initValue, g.initF64)).array;
         
         if (auto content = buildGlobalSection(sectionGlobals))
             emitSection(Section.global, content);

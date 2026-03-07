@@ -1,0 +1,8 @@
+{
+    "name": "objc_chained_void_method",
+    "description": "Void methods on chained ObjC expression receivers don't corrupt stack",
+    "type": "ffi_exec",
+    "expected_result": 42,
+    "link_frameworks": ["Foundation"],
+    "capability": "expressionHasValue correctly identifies void returns on expression receivers"
+}
