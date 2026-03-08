@@ -22,31 +22,53 @@ import diagnostic.log : log;
  */
 private string unescapeString(string s) {
     import std.array : Appender;
-    
+
     Appender!string result;
-    bool inEscape = false;
-    
-    foreach (c; s) {
-        if (inEscape) {
-            switch (c) {
-                case 'n': result ~= '\n'; break;
-                case 't': result ~= '\t'; break;
-                case 'r': result ~= '\r'; break;
-                case '0': result ~= '\0'; break;
-                case '\\': result ~= '\\'; break;
-                case '"': result ~= '"'; break;
-                case '\'': result ~= '\''; break;
-                default: result ~= c; break;
+    size_t i = 0;
+
+    while (i < s.length) {
+        if (s[i] == '\\' && i + 1 < s.length) {
+            i++;
+            switch (s[i]) {
+                case 'n': result ~= '\n'; i++; break;
+                case 't': result ~= '\t'; i++; break;
+                case 'r': result ~= '\r'; i++; break;
+                case '0': result ~= '\0'; i++; break;
+                case '\\': result ~= '\\'; i++; break;
+                case '"': result ~= '"'; i++; break;
+                case '\'': result ~= '\''; i++; break;
+                case 'x':
+                    // \xNN — two hex digits → single byte
+                    i++;
+                    if (i + 2 <= s.length) {
+                        int hi = hexDigit(s[i]);
+                        int lo = hexDigit(s[i + 1]);
+                        if (hi >= 0 && lo >= 0) {
+                            result ~= cast(char)(hi * 16 + lo);
+                            i += 2;
+                        } else {
+                            result ~= 'x';
+                        }
+                    } else {
+                        result ~= 'x';
+                    }
+                    break;
+                default: result ~= s[i]; i++; break;
             }
-            inEscape = false;
-        } else if (c == '\\') {
-            inEscape = true;
         } else {
-            result ~= c;
+            result ~= s[i];
+            i++;
         }
     }
-    
+
     return result.data;
+}
+
+private int hexDigit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + c - 'a';
+    if (c >= 'A' && c <= 'F') return 10 + c - 'A';
+    return -1;
 }
 
 /**

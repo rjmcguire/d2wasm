@@ -2,7 +2,7 @@
  * Metal C Bridge — slim residual requiring Objective-C runtime features
  *
  * Handles: event loop (@autoreleasepool), vertex buffer accumulation
- * (native memory needed for Metal), string constants, and window close notification.
+ * (native memory needed for Metal), and window close notification.
  *
  * D handles: Metal device, command queue, shader compilation, pipeline,
  * buffer creation, window creation, render pass, game loop,
@@ -87,21 +87,3 @@ long metal_get_pos_buf(void)     { return g_posBuf; }
 long metal_get_col_buf(void)     { return g_colBuf; }
 int  metal_get_vertex_count(void) { return g_bufVertexCount; }
 
-// ── String Constants (native pointers for NSString creation) ────────
-
-static const char *g_shaderSource =
-    "#include <metal_stdlib>\n"
-    "using namespace metal;\n"
-    "struct VertexOut { float4 position [[position]]; float4 color; };\n"
-    "vertex VertexOut vertex_main(uint vid [[vertex_id]],\n"
-    "    const device float2 *pos [[buffer(0)]],\n"
-    "    const device float4 *col [[buffer(1)]]) {\n"
-    "    VertexOut out; out.position = float4(pos[vid], 0.0, 1.0);\n"
-    "    out.color = col[vid]; return out; }\n"
-    "fragment float4 fragment_main(VertexOut in [[stage_in]]) {\n"
-    "    return in.color; }\n";
-
-long metal_get_shader_source(void)  { return (long)g_shaderSource; }
-long metal_get_cstr_vertex_main(void)  { return (long)"vertex_main"; }
-long metal_get_cstr_fragment_main(void) { return (long)"fragment_main"; }
-long metal_get_cstr_title(void)     { return (long)"D \xe2\x86\x92 Metal"; }

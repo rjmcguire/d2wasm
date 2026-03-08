@@ -2220,6 +2220,17 @@ class FuncContext {
                                 }
                                 continue;
                             }
+                            // char* param + string literal → emit null-terminated CString address
+                            if (cast(PointerType)(paramType)) {
+                                if (auto lit = cast(LiteralExpression)arg) {
+                                    if (lit.value.type == typeid(string)) {
+                                        uint addr = emitter.registerCString(lit.value.get!string());
+                                        out_ ~= Op.i32_const;
+                                        leb128s(out_, addr);
+                                        continue;
+                                    }
+                                }
+                            }
                         }
                         emitExpression(out_, arg);
                         if (i < method.parameters.length) {
@@ -7044,6 +7055,17 @@ class FuncContext {
                         emitLoadForSize(out_, cast(uint)field.size, isFloat);
                     }
                     continue;  // skip normal emit path
+                }
+                // char* param + string literal → emit null-terminated CString address
+                if (cast(PointerType)(paramType)) {
+                    if (auto lit = cast(LiteralExpression)arg) {
+                        if (lit.value.type == typeid(string)) {
+                            uint addr = emitter.registerCString(lit.value.get!string());
+                            out_ ~= Op.i32_const;
+                            leb128s(out_, addr);
+                            continue;
+                        }
+                    }
                 }
             }
             emitExpression(out_, arg);

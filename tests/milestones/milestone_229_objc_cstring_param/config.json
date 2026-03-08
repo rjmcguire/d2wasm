@@ -1,0 +1,8 @@
+{
+    "name": "objc_cstring_param",
+    "description": "Pass D string literals directly to ObjC methods taking char* params",
+    "type": "ffi_exec",
+    "expected_result": 42,
+    "link_frameworks": ["Foundation"],
+    "capability": "String literals transparently convert to null-terminated C strings for char* ObjC parameters"
+}

@@ -3399,6 +3399,14 @@ class TypeChecker {
             return TypeCompatibility.compatible();
         }
 
+        // Array→pointer decay: T[] implicitly converts to T*
+        if (fromArray) {
+            if (auto toPtr = cast(PointerType)to) {
+                if (typesEqual(fromArray.elementType, toPtr.pointeeType))
+                    return TypeCompatibility.compatible();
+            }
+        }
+
         // FunctionType compatibility: function→delegate with same signature
         auto fromFunc = cast(FunctionType)from;
         auto toFunc = cast(FunctionType)to;

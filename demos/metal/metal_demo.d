@@ -2,7 +2,7 @@
 //
 // D handles: device init, command queue, shader compilation, pipeline,
 // buffer creation, window setup, render pass, game loop, view and delegate.
-// Bridge handles: event loop (@autoreleasepool), vertex buffers, string constants.
+// Bridge handles: event loop (@autoreleasepool), vertex buffers.
 
 pragma(lib, "/System/Library/Frameworks/Metal.framework/Metal");
 pragma(lib, "/System/Library/Frameworks/Foundation.framework/Foundation");
@@ -35,7 +35,7 @@ interface NSApplication {
 
 extern(Objective-C)
 interface NSString {
-    static NSString stringWithUTF8String(long cstr) @selector("stringWithUTF8String:");
+    static NSString stringWithUTF8String(char* cstr) @selector("stringWithUTF8String:");
 }
 
 extern(Objective-C)
@@ -162,12 +162,6 @@ extern(C) long metal_get_pos_buf();
 extern(C) long metal_get_col_buf();
 extern(C) int metal_get_vertex_count();
 
-// Bridge: native C string pointers (WASM can't pass linear memory addrs to ObjC)
-extern(C) long metal_get_shader_source();
-extern(C) long metal_get_cstr_vertex_main();
-extern(C) long metal_get_cstr_fragment_main();
-extern(C) long metal_get_cstr_title();
-
 // ── Math Helpers ───────────────────────────────────────────────────
 
 double sin_approx(double x) {
@@ -257,12 +251,12 @@ int main() {
     MTLCommandQueue cmdQueue = device.newCommandQueue();
 
     // Shader compilation (D-side ObjC calls)
-    NSString shaderSrc = NSString.stringWithUTF8String(metal_get_shader_source());
+    NSString shaderSrc = NSString.stringWithUTF8String("#include <metal_stdlib>\nusing namespace metal;\nstruct VertexOut { float4 position [[position]]; float4 color; };\nvertex VertexOut vertex_main(uint vid [[vertex_id]],\n    const device float2 *pos [[buffer(0)]],\n    const device float4 *col [[buffer(1)]]) {\n    VertexOut out; out.position = float4(pos[vid], 0.0, 1.0);\n    out.color = col[vid]; return out; }\nfragment float4 fragment_main(VertexOut in [[stage_in]]) {\n    return in.color; }\n");
     MTLLibrary library = device.newLibraryWithSource(shaderSrc, 0, 0);
     if (cast(long)library == 0) return 1;
 
-    NSString vertName = NSString.stringWithUTF8String(metal_get_cstr_vertex_main());
-    NSString fragName = NSString.stringWithUTF8String(metal_get_cstr_fragment_main());
+    NSString vertName = NSString.stringWithUTF8String("vertex_main");
+    NSString fragName = NSString.stringWithUTF8String("fragment_main");
     long vertexFunc = library.newFunctionWithName(vertName);
     long fragmentFunc = library.newFunctionWithName(fragName);
 
@@ -289,7 +283,7 @@ int main() {
     frame.height = 600.0;
     NSWindow window = NSWindow.alloc();
     window = window.initWithContentRect(frame, 15, 2, 0);
-    NSString title = NSString.stringWithUTF8String(metal_get_cstr_title());
+    NSString title = NSString.stringWithUTF8String("D \xe2\x86\x92 Metal");
     window.setTitle(title);
 
     // Attach metal layer + view (D-side ObjC classes)
