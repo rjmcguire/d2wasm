@@ -129,7 +129,7 @@ class FuncContext {
                 out_ ~= Op.local_get;
                 leb128u(out_, fpLocal);
                 out_ ~= Op.i32_const;
-                leb128u(out_, info.frameOffset);
+                leb128s(out_, info.frameOffset);
                 out_ ~= Op.i32_add;
                 break;
         }
@@ -1193,7 +1193,7 @@ class FuncContext {
         out_ ~= Op.local_get;
         leb128u(out_, fpLocal);
         out_ ~= Op.i32_const;
-        leb128u(out_, info.frameOffset);
+        leb128s(out_, info.frameOffset);
         out_ ~= Op.i32_add;
         
         // Call the destructor using its mangled name
@@ -2645,11 +2645,11 @@ class FuncContext {
                 out_ ~= Op.i32_add;
                 
                 out_ ~= Op.i32_const;
-                leb128u(out_, structAddr);
+                leb128s(out_, structAddr);
                 out_ ~= Op.i32_load;
                 out_ ~= cast(ubyte)0x02;
                 leb128u(out_, 0);
-                
+
                 out_ ~= Op.i32_store;
                 out_ ~= cast(ubyte)0x02;
                 leb128u(out_, 0);
@@ -6325,7 +6325,7 @@ class FuncContext {
                                 auto classDecl = classInfo.classDecl;
                                 if (auto itableBase = ifaceDecl.name in classDecl.itableBases) {
                                     out_ ~= Op.i32_const;
-                                    leb128u(out_, *itableBase);
+                                    leb128s(out_, *itableBase);
                                 } else {
                                     throw new EmitError("Class " ~ classDecl.name ~
                                         " does not implement interface " ~ ifaceDecl.name, arg.location);
@@ -6519,14 +6519,14 @@ class FuncContext {
                     
                     // Load ptr from struct (offset 0)
                     out_ ~= Op.i32_const;
-                    leb128u(out_, structAddr);
+                    leb128s(out_, structAddr);
                     out_ ~= Op.i32_load;
                     out_ ~= cast(ubyte)0x02;  // align=4
                     leb128u(out_, 0);         // offset=0
-                    
+
                     // Load length from struct (offset 4)
                     out_ ~= Op.i32_const;
-                    leb128u(out_, structAddr + 4);
+                    leb128s(out_, structAddr + 4);
                     out_ ~= Op.i32_load;
                     out_ ~= cast(ubyte)0x02;
                     leb128u(out_, 0);
@@ -6580,14 +6580,14 @@ class FuncContext {
 
                 // Load ptr from struct (offset 0)
                 out_ ~= Op.i32_const;
-                leb128u(out_, structAddr);
+                leb128s(out_, structAddr);
                 out_ ~= Op.i32_load;
                 out_ ~= cast(ubyte)0x02;  // align=4
                 leb128u(out_, 0);          // offset=0
 
                 // Load length from struct (offset 4)
                 out_ ~= Op.i32_const;
-                leb128u(out_, structAddr + 4);
+                leb128s(out_, structAddr + 4);
                 out_ ~= Op.i32_load;
                 out_ ~= cast(ubyte)0x02;
                 leb128u(out_, 0);
