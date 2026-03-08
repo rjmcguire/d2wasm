@@ -298,12 +298,9 @@ int main() {
     drawSize.height = 600.0;
     metalLayer.setDrawableSize(drawSize);
 
-    NSRect viewFrame;
-    viewFrame.x = 0.0;
-    viewFrame.y = 0.0;
-    viewFrame.width = 800.0;
-    viewFrame.height = 600.0;
-    MetalView metalView = MetalView.myAlloc().myInitWithFrame(viewFrame);
+    frame.x = 0.0;
+    frame.y = 0.0;
+    MetalView metalView = MetalView.myAlloc().myInitWithFrame(frame);
     metalView.setWantsLayer(1);
     metalView.setLayer(cast(long)metalLayer);
     metalView.setAutoresizingMask(18);

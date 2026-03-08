@@ -15,6 +15,8 @@
 
 #include "wasm3.h"
 #include "m3_env.h"
+#include <objc/runtime.h>   /* sel_getName for debug */
+#include <objc/message.h>   /* objc_msgSend for debug */
 
 /* ArgKind enum — must match emitter.d's ArgKind */
 typedef enum {
@@ -163,6 +165,7 @@ const void *ffi_generic_trampoline(IM3Runtime runtime, IM3ImportContext _ctx,
                                    uint64_t *_sp, void *_mem) {
     (void)runtime;
     FFIDescriptor *desc = (FFIDescriptor *)_ctx->userdata;
+    printf("[FFI] %s ret_kind=%d\n", desc->name, desc->ret_kind); fflush(stdout);
 
     /* Handle struct returns specially: WASM signature is void, but native returns struct */
     if (desc->ret_kind == RET_STRUCT) {
@@ -214,7 +217,26 @@ const void *ffi_generic_trampoline(IM3Runtime runtime, IM3ImportContext _ctx,
         }
 
         /* Call via libffi — struct result written directly to WASM memory */
-        ffi_call(&desc->cif, FFI_FN(desc->fn_ptr), result_ptr, arg_values);
+        printf("[RET_STRUCT] %s: receiver=0x%llx selector=%s result_offset=%u\n",
+                desc->name, (unsigned long long)arg_storage[0].i64,
+                sel_getName((SEL)(uintptr_t)arg_storage[1].i64), result_offset);
+        /* Verify receiver is a valid ObjC object */
+        id recv_obj = (id)(uintptr_t)arg_storage[0].i64;
+        printf("[RET_STRUCT] receiver class: %s\n",
+                class_getName(object_getClass(recv_obj)));
+        /* Check what's actually stored in the NSValue */
+        double stored[2] = {-1.0, -1.0};
+        typedef void (*GetValueFn)(id, SEL, void *);
+        GetValueFn gv = (GetValueFn)objc_msgSend;
+        gv(recv_obj, sel_registerName("getValue:"), stored);
+        printf("[RET_STRUCT] getValue: %.4f %.4f\n", stored[0], stored[1]);
+        /* Try typed direct call */
+        typedef struct { double x, y; } PointReturn;
+        PointReturn (*typed_send)(id, SEL) = (PointReturn (*)(id, SEL))desc->fn_ptr;
+        SEL the_sel = (SEL)(uintptr_t)arg_storage[1].i64;
+        PointReturn dbg = typed_send(recv_obj, the_sel);
+        printf("[RET_STRUCT] typed direct: %.4f %.4f\n", dbg.x, dbg.y);
+        fflush(stdout);
         return NULL;
     }
 

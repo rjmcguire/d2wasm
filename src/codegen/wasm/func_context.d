@@ -2157,40 +2157,85 @@ class FuncContext {
                     }
                 }
                 if (objcIface !is null) {
-                    // ObjC struct return: call writes to shadow stack, then copy to local
-                    emitObjCMethodCall(out_, objcIface, memberExpr.object,
-                                       memberExpr.memberName, callExpr.arguments, objcStaticCall);
-                    // Result address (i32) is on WASM stack — copy struct to local
-                    out_ ~= Op.local_set;
-                    leb128u(out_, tempLocalA);
-                    foreach (field; structDecl.fields) {
-                        auto bt = cast(BasicType)field.type;
-                        bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
-                        // Destination: FP + local offset + field offset
-                        out_ ~= Op.local_get;
-                        leb128u(out_, fpLocal);
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, info.frameOffset + cast(int)field.offset);
-                        out_ ~= Op.i32_add;
-                        // Source: tempLocalA + field offset
-                        out_ ~= Op.local_get;
-                        leb128u(out_, tempLocalA);
-                        if (field.offset > 0) {
-                            out_ ~= Op.i32_const;
-                            leb128s(out_, cast(int)field.offset);
-                            out_ ~= Op.i32_add;
-                        }
-                        emitLoadForSize(out_, cast(uint)field.size, isFloat);
-                        emitStoreForSize(out_, cast(uint)field.size, isFloat);
+                    // ObjC struct return: pass FP + frameOffset directly as result_ptr
+                    // so the FFI trampoline writes the struct straight to the local's frame slot.
+                    FunctionDecl method = null;
+                    foreach (m; objcIface.methods) {
+                        if (m.name == memberExpr.memberName) { method = m; break; }
                     }
-                    // Restore SP (free shadow stack temp)
-                    out_ ~= Op.global_get;
-                    leb128u(out_, emitter.spGlobal);
+                    if (method is null)
+                        throw new EmitError("No ObjC method '" ~ memberExpr.memberName ~ "' on " ~ objcIface.name, memberExpr.location);
+
+                    string selector = method.objcSelector;
+                    if (selector is null) selector = method.name;
+
+                    // Arg 1: receiver (i64)
+                    if (objcStaticCall) {
+                        uint classNameAddr = emitter.registerCString(objcIface.name);
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, classNameAddr);
+                        uint getClassIdx = emitter.getFuncIndex("objc_getClass", method.location);
+                        out_ ~= Op.call;
+                        leb128u(out_, getClassIdx);
+                    } else {
+                        emitExpression(out_, memberExpr.object);
+                    }
+
+                    // Arg 2: selector (i64)
+                    uint selAddr = emitter.registerCString(selector);
                     out_ ~= Op.i32_const;
-                    leb128s(out_, cast(int)structDecl.aggregateSize_);
-                    out_ ~= Op.i32_add;
-                    out_ ~= Op.global_set;
-                    leb128u(out_, emitter.spGlobal);
+                    leb128s(out_, selAddr);
+                    uint selRegIdx = emitter.getFuncIndex("sel_registerName", method.location);
+                    out_ ~= Op.call;
+                    leb128u(out_, selRegIdx);
+
+                    // Arg 3: result_ptr = FP + frameOffset (write directly to local)
+                    out_ ~= Op.local_get;
+                    leb128u(out_, fpLocal);
+                    if (info.frameOffset > 0) {
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, info.frameOffset);
+                        out_ ~= Op.i32_add;
+                    }
+
+                    // User args
+                    foreach (i, arg; callExpr.arguments) {
+                        if (i < method.parameters.length) {
+                            auto paramType = method.parameters[i].type.resolve();
+                            if (auto sd = paramType.asStruct()) {
+                                emitExpression(out_, arg);
+                                out_ ~= Op.local_set;
+                                leb128u(out_, tempLocalB);
+                                foreach (field; sd.fields) {
+                                    out_ ~= Op.local_get;
+                                    leb128u(out_, tempLocalB);
+                                    if (field.offset > 0) {
+                                        out_ ~= Op.i32_const;
+                                        leb128s(out_, cast(int)field.offset);
+                                        out_ ~= Op.i32_add;
+                                    }
+                                    auto bt = cast(BasicType)field.type;
+                                    bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
+                                    emitLoadForSize(out_, cast(uint)field.size, isFloat);
+                                }
+                                continue;
+                            }
+                        }
+                        emitExpression(out_, arg);
+                        if (i < method.parameters.length) {
+                            ValType expected = emitter.dTypeToValType(method.parameters[i].type);
+                            if (expected == ValType.i64 && !isI64Expression(arg))
+                                out_ ~= Op.i64_extend_i32_s;
+                            if (expected == ValType.f64 && !isF64Expression(arg))
+                                out_ ~= Op.f64_convert_i32_s;
+                        }
+                    }
+
+                    // Call — trampoline writes result directly to FP + frameOffset
+                    string importName = method.mangledName;
+                    uint funcIdx = emitter.getFuncIndex(importName, method.location);
+                    out_ ~= Op.call;
+                    leb128u(out_, funcIdx);
                     return;
                 }
                 emitStructReturnMethodCall(out_, memberExpr, callExpr.arguments, info.frameOffset);

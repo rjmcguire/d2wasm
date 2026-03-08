@@ -1,0 +1,8 @@
+{
+    "name": "objc_struct_return_with_locals",
+    "description": "ObjC struct return works when caller has multiple struct locals",
+    "type": "ffi_exec",
+    "expected_result": 42,
+    "link_frameworks": ["Foundation"],
+    "capability": "ObjC struct return via hidden result pointer with non-trivial caller frame"
+}
