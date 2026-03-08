@@ -251,12 +251,12 @@ int main() {
     MTLCommandQueue cmdQueue = device.newCommandQueue();
 
     // Shader compilation (D-side ObjC calls)
-    NSString shaderSrc = NSString.stringWithUTF8String("#include <metal_stdlib>\nusing namespace metal;\nstruct VertexOut { float4 position [[position]]; float4 color; };\nvertex VertexOut vertex_main(uint vid [[vertex_id]],\n    const device float2 *pos [[buffer(0)]],\n    const device float4 *col [[buffer(1)]]) {\n    VertexOut out; out.position = float4(pos[vid], 0.0, 1.0);\n    out.color = col[vid]; return out; }\nfragment float4 fragment_main(VertexOut in [[stage_in]]) {\n    return in.color; }\n");
+    NSString shaderSrc = NSString.stringWithUTF8String("#include <metal_stdlib>\nusing namespace metal;\nstruct VertexOut { float4 position [[position]]; float4 color; };\nvertex VertexOut vertex_main(uint vid [[vertex_id]],\n    const device float2 *pos [[buffer(0)]],\n    const device float4 *col [[buffer(1)]]) {\n    VertexOut out; out.position = float4(pos[vid], 0.0, 1.0);\n    out.color = col[vid]; return out; }\nfragment float4 fragment_main(VertexOut in [[stage_in]]) {\n    return in.color; }\n".toStringz());
     MTLLibrary library = device.newLibraryWithSource(shaderSrc, 0, 0);
     if (cast(long)library == 0) return 1;
 
-    NSString vertName = NSString.stringWithUTF8String("vertex_main");
-    NSString fragName = NSString.stringWithUTF8String("fragment_main");
+    NSString vertName = NSString.stringWithUTF8String("vertex_main".toStringz());
+    NSString fragName = NSString.stringWithUTF8String("fragment_main".toStringz());
     long vertexFunc = library.newFunctionWithName(vertName);
     long fragmentFunc = library.newFunctionWithName(fragName);
 
@@ -283,7 +283,7 @@ int main() {
     frame.height = 600.0;
     NSWindow window = NSWindow.alloc();
     window = window.initWithContentRect(frame, 15, 2, 0);
-    NSString title = NSString.stringWithUTF8String("D \xe2\x86\x92 Metal");
+    NSString title = NSString.stringWithUTF8String("D \xe2\x86\x92 Metal".toStringz());
     window.setTitle(title);
 
     // Attach metal layer + view (D-side ObjC classes)
