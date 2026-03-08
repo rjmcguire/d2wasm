@@ -1,0 +1,5 @@
+{
+  "type": "compile_output",
+  "expected_output": "3.5\n-2.5",
+  "description": "f32 values printed via __writeln (needs f64_promote_f32)"
+}

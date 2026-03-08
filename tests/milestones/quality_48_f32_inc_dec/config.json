@@ -1,0 +1,6 @@
+{
+  "type": "wasm_exec",
+  "expected_result": 6,
+  "description": "f32 increment/decrement (++/--)",
+  "mangled_entry": "_D4test4mainFZi"
+}

@@ -2063,6 +2063,13 @@ class FuncContext {
                 localTypes[info.wasmLocalIdx] == ValType.f32 &&
                 isF64Expression(stmt.initializer))
                 out_ ~= Op.f32_demote_f64;
+            // Implicit i32→i64 for long locals initialized with int expressions
+            if (info.wasmLocalIdx < localTypes.length &&
+                localTypes[info.wasmLocalIdx] == ValType.i64 &&
+                !isI64Expression(stmt.initializer) &&
+                !isF64Expression(stmt.initializer) &&
+                !isF32Expression(stmt.initializer))
+                out_ ~= Op.i64_extend_i32_s;
         } else {
             // Default-initialize based on local type
             if (info.wasmLocalIdx < localTypes.length &&
@@ -3320,8 +3327,14 @@ class FuncContext {
                     out_ ~= Op.i32_add;
                     // Store value
                     emitExpression(out_, value);
-                    emitStoreForSize(out_, elemSize);
+                    bool isFloatElem = isF64ElementType(arrType.elementType) || isF32ElementType(arrType.elementType);
+                    if (isF32ElementType(arrType.elementType) && isF64Expression(value))
+                        out_ ~= Op.f32_demote_f64;
+                    emitStoreForSize(out_, elemSize, isFloatElem);
+                    // Leave assigned value on stack (assignment is an expression)
                     emitExpression(out_, value);
+                    if (isF32ElementType(arrType.elementType) && isF64Expression(value))
+                        out_ ~= Op.f32_demote_f64;
                     return;
                 }
             }
@@ -3390,8 +3403,15 @@ class FuncContext {
                 } else {
                     // Scalar element: simple store
                     emitExpression(out_, value);
-                    emitStoreForSize(out_, info.elementSize);
+                    bool isFloatElem = isF64ElementType(info.elementType) || isF32ElementType(info.elementType);
+                    // Implicit f64→f32 demotion for float array elements
+                    if (isF32ElementType(info.elementType) && isF64Expression(value))
+                        out_ ~= Op.f32_demote_f64;
+                    emitStoreForSize(out_, info.elementSize, isFloatElem);
+                    // Leave assigned value on stack (assignment is an expression)
                     emitExpression(out_, value);
+                    if (isF32ElementType(info.elementType) && isF64Expression(value))
+                        out_ ~= Op.f32_demote_f64;
                 }
                 return;
             } else {
@@ -5336,9 +5356,19 @@ class FuncContext {
                     out_ ~= Op.i32_const;
                     leb128s(out_, structAddr);
                 } else if (manifest.isFloatType) {
-                    out_ ~= Op.f64_const;
-                    double val = manifest.ctfeFloatValue;
-                    out_ ~= (cast(ubyte*)&val)[0 .. 8];
+                    // Check if manifest is explicitly typed as Float32
+                    bool isF32Manifest = false;
+                    if (auto mbt = cast(BasicType)manifest.inferredType)
+                        isF32Manifest = mbt.kind == BasicType.Kind.Float32;
+                    if (isF32Manifest) {
+                        out_ ~= Op.f32_const;
+                        float val = cast(float)manifest.ctfeFloatValue;
+                        out_ ~= (cast(ubyte*)&val)[0 .. 4];
+                    } else {
+                        out_ ~= Op.f64_const;
+                        double val = manifest.ctfeFloatValue;
+                        out_ ~= (cast(ubyte*)&val)[0 .. 8];
+                    }
                 } else {
                     out_ ~= Op.i32_const;
                     leb128s(out_, manifest.ctfeValue);
@@ -6054,22 +6084,49 @@ class FuncContext {
                 throw new EmitError("Increment/decrement requires scalar variable", ident.location);
             auto idx = info.wasmLocalIdx;
 
+            bool isF32 = idx < localTypes.length && localTypes[idx] == ValType.f32;
+            bool isF64 = idx < localTypes.length && localTypes[idx] == ValType.f64;
+
             if (expr.isPostfix) {
                 out_ ~= Op.local_get;
                 leb128u(out_, idx);
                 out_ ~= Op.local_get;
                 leb128u(out_, idx);
-                out_ ~= Op.i32_const;
-                leb128s(out_, 1);
-                out_ ~= (inc ? Op.i32_add : Op.i32_sub);
+                if (isF32) {
+                    out_ ~= Op.f32_const;
+                    float one = 1.0f;
+                    out_ ~= (cast(ubyte*)&one)[0 .. 4];
+                    out_ ~= (inc ? Op.f32_add : Op.f32_sub);
+                } else if (isF64) {
+                    out_ ~= Op.f64_const;
+                    double one = 1.0;
+                    out_ ~= (cast(ubyte*)&one)[0 .. 8];
+                    out_ ~= (inc ? Op.f64_add : Op.f64_sub);
+                } else {
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, 1);
+                    out_ ~= (inc ? Op.i32_add : Op.i32_sub);
+                }
                 out_ ~= Op.local_set;
                 leb128u(out_, idx);
             } else {
                 out_ ~= Op.local_get;
                 leb128u(out_, idx);
-                out_ ~= Op.i32_const;
-                leb128s(out_, 1);
-                out_ ~= (inc ? Op.i32_add : Op.i32_sub);
+                if (isF32) {
+                    out_ ~= Op.f32_const;
+                    float one = 1.0f;
+                    out_ ~= (cast(ubyte*)&one)[0 .. 4];
+                    out_ ~= (inc ? Op.f32_add : Op.f32_sub);
+                } else if (isF64) {
+                    out_ ~= Op.f64_const;
+                    double one = 1.0;
+                    out_ ~= (cast(ubyte*)&one)[0 .. 8];
+                    out_ ~= (inc ? Op.f64_add : Op.f64_sub);
+                } else {
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, 1);
+                    out_ ~= (inc ? Op.i32_add : Op.i32_sub);
+                }
                 out_ ~= Op.local_tee;
                 leb128u(out_, idx);
             }
@@ -6609,115 +6666,114 @@ class FuncContext {
      * Each argument is printed according to its type, followed by a newline.
      * Uses __ctfe_write_* (building blocks without prefix) not __ctfe_print_*.
      */
-    void emitWritelnCall(ref Appender!(ubyte[]) out_, Expression[] args) {
-        foreach (arg; args) {
-            // Determine argument type and emit appropriate write call
-            if (auto literal = cast(LiteralExpression)arg) {
-                if (literal.value.type == typeid(string)) {
-                    // String literal: emit __ctfe_write_str(ptr, len)
-                    string strVal = literal.value.get!string();
-                    uint structAddr = emitter.registerArrayLiteral(strVal);
-                    
-                    // Load ptr from struct (offset 0)
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, structAddr);
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;  // align=4
-                    leb128u(out_, 0);         // offset=0
+    private void emitWritelnHostCall(ref Appender!(ubyte[]) out_, string hostFunc) {
+        emitter.neededCTFEImports[hostFunc] = true;
+        uint funcIdx = emitter.getFuncIndex(hostFunc);
+        out_ ~= Op.call;
+        leb128u(out_, funcIdx);
+    }
 
-                    // Load length from struct (offset 4)
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, structAddr + 4);
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
-                    
-                    // Call __ctfe_write_str
-                    emitter.neededCTFEImports["__ctfe_write_str"] = true;
-                    uint funcIdx = emitter.getFuncIndex("__ctfe_write_str");
-                    out_ ~= Op.call;
-                    leb128u(out_, funcIdx);
-                }
-                else if (literal.value.type == typeid(long) || literal.value.type == typeid(int)) {
-                    // Integer literal: emit __ctfe_write_i32(value)
-                    long val = literal.value.type == typeid(long) 
-                        ? literal.value.get!long() 
-                        : literal.value.get!int();
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, cast(int)val);
-                    
-                    emitter.neededCTFEImports["__ctfe_write_i32"] = true;
-                    uint funcIdx = emitter.getFuncIndex("__ctfe_write_i32");
-                    out_ ~= Op.call;
-                    leb128u(out_, funcIdx);
-                }
-                else if (literal.value.type == typeid(double)) {
-                    // Float literal: emit __ctfe_write_f64(value)
-                    double val = literal.value.get!double();
-                    out_ ~= Op.f64_const;
-                    out_ ~= (cast(ubyte*)&val)[0 .. 8];
-
-                    emitter.neededCTFEImports["__ctfe_write_f64"] = true;
-                    uint funcIdx = emitter.getFuncIndex("__ctfe_write_f64");
-                    out_ ~= Op.call;
-                    leb128u(out_, funcIdx);
-                }
-                else if (literal.value.type == typeid(bool)) {
-                    // Boolean literal: emit __ctfe_write_bool(0 or 1)
-                    bool val = literal.value.get!bool();
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, val ? 1 : 0);
-
-                    emitter.neededCTFEImports["__ctfe_write_bool"] = true;
-                    uint funcIdx = emitter.getFuncIndex("__ctfe_write_bool");
-                    out_ ~= Op.call;
-                    leb128u(out_, funcIdx);
-                }
-            }
-            else if (auto manifestStr = getStringManifest(arg)) {
-                // String manifest constant — resolve value and emit like string literal
-                manifestStr.ensureEvaluated();
-                uint structAddr = emitter.registerArrayLiteral(manifestStr.ctfeStringValue);
-
-                // Load ptr from struct (offset 0)
+    private void emitWritelnString(ref Appender!(ubyte[]) out_, Expression arg) {
+        // String needs (ptr, len) unpacked from the array struct.
+        // String literals and manifest constants use registerArrayLiteral for a static struct.
+        // Variables push the struct address via emitExpression; we load ptr/len from it.
+        if (auto literal = cast(LiteralExpression)arg) {
+            if (literal.value.type == typeid(string)) {
+                uint structAddr = emitter.registerArrayLiteral(literal.value.get!string());
                 out_ ~= Op.i32_const;
                 leb128s(out_, structAddr);
                 out_ ~= Op.i32_load;
-                out_ ~= cast(ubyte)0x02;  // align=4
-                leb128u(out_, 0);          // offset=0
-
-                // Load length from struct (offset 4)
+                out_ ~= cast(ubyte)0x02;
+                leb128u(out_, 0);
                 out_ ~= Op.i32_const;
                 leb128s(out_, structAddr + 4);
                 out_ ~= Op.i32_load;
                 out_ ~= cast(ubyte)0x02;
                 leb128u(out_, 0);
-
-                emitter.neededCTFEImports["__ctfe_write_str"] = true;
-                uint funcIdx = emitter.getFuncIndex("__ctfe_write_str");
-                out_ ~= Op.call;
-                leb128u(out_, funcIdx);
+                emitWritelnHostCall(out_, "__ctfe_write_str");
+                return;
             }
-            else if (auto manifestFloat = getFloatManifest(arg)) {
-                // Float manifest constant — emit f64_const + __ctfe_write_f64
-                manifestFloat.ensureEvaluated();
-                double val = manifestFloat.ctfeFloatValue;
-                out_ ~= Op.f64_const;
-                out_ ~= (cast(ubyte*)&val)[0 .. 8];
+        }
+        if (auto manifest = getStringManifest(arg)) {
+            manifest.ensureEvaluated();
+            uint structAddr = emitter.registerArrayLiteral(manifest.ctfeStringValue);
+            out_ ~= Op.i32_const;
+            leb128s(out_, structAddr);
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            out_ ~= Op.i32_const;
+            leb128s(out_, structAddr + 4);
+            out_ ~= Op.i32_load;
+            out_ ~= cast(ubyte)0x02;
+            leb128u(out_, 0);
+            emitWritelnHostCall(out_, "__ctfe_write_str");
+            return;
+        }
+        // String variable: emitExpression pushes struct address, load ptr+len
+        emitExpression(out_, arg);
+        out_ ~= Op.local_set;
+        leb128u(out_, tempLocalA);
+        out_ ~= Op.local_get;
+        leb128u(out_, tempLocalA);
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 0);
+        out_ ~= Op.local_get;
+        leb128u(out_, tempLocalA);
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte)0x02;
+        leb128u(out_, 4);
+        emitWritelnHostCall(out_, "__ctfe_write_str");
+    }
 
-                emitter.neededCTFEImports["__ctfe_write_f64"] = true;
-                uint funcIdx = emitter.getFuncIndex("__ctfe_write_f64");
-                out_ ~= Op.call;
-                leb128u(out_, funcIdx);
+    void emitWritelnCall(ref Appender!(ubyte[]) out_, Expression[] args) {
+        foreach (arg; args) {
+            // Dispatch on expr.type (set by type checker) to pick the right host call.
+            // Note: manifest constants may have incorrect type (Int32 placeholder)
+            // before CTFE evaluation, so we always check AST patterns too.
+            Type argType = arg.type ? arg.type.resolve() : null;
+
+            // String check: type-based OR AST-based (string literal / string manifest)
+            bool isStr = false;
+            if (auto at = cast(ArrayType)argType) {
+                auto bt = cast(BasicType)at.elementType;
+                isStr = bt !is null && (bt.kind == BasicType.Kind.Char || bt.kind == BasicType.Kind.UInt8);
             }
-            else {
-                // Non-literal, non-string expression: evaluate and print as i32
+            if (!isStr) {
+                if (auto lit = cast(LiteralExpression)arg)
+                    isStr = lit.value.type == typeid(string);
+            }
+            if (!isStr && getStringManifest(arg) !is null)
+                isStr = true;
+
+            if (isStr) {
+                emitWritelnString(out_, arg);
+            } else if (isF64Expression(arg)) {
                 emitExpression(out_, arg);
-
-                emitter.neededCTFEImports["__ctfe_write_i32"] = true;
-                uint funcIdx = emitter.getFuncIndex("__ctfe_write_i32");
-                out_ ~= Op.call;
-                leb128u(out_, funcIdx);
+                emitWritelnHostCall(out_, "__ctfe_write_f64");
+            } else if (isF32Expression(arg)) {
+                emitExpression(out_, arg);
+                out_ ~= Op.f64_promote_f32;
+                emitWritelnHostCall(out_, "__ctfe_write_f64");
+            } else {
+                auto bt = cast(BasicType)argType;
+                if (bt && bt.kind == BasicType.Kind.Bool) {
+                    emitExpression(out_, arg);
+                    emitWritelnHostCall(out_, "__ctfe_write_bool");
+                } else {
+                    // Check for float literal when type info is wrong/missing
+                    if (auto lit = cast(LiteralExpression)arg) {
+                        if (lit.value.type == typeid(double)) {
+                            emitExpression(out_, arg);
+                            emitWritelnHostCall(out_, "__ctfe_write_f64");
+                            continue;
+                        }
+                    }
+                    // int, char, and everything else → i32
+                    emitExpression(out_, arg);
+                    emitWritelnHostCall(out_, "__ctfe_write_i32");
+                }
             }
         }
         
@@ -6734,6 +6790,7 @@ class FuncContext {
             auto symbol = emitter.symbolTable.lookupSymbol(ident.name);
             if (symbol && symbol.isConstant) {
                 if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
+                    manifest.ensureEvaluated();
                     if (manifest.isStringType)
                         return manifest;
                 }

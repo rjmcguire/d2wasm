@@ -1,0 +1,6 @@
+{
+  "type": "wasm_exec",
+  "expected_result": 32,
+  "description": "f32 struct fields passed to functions (dot product)",
+  "mangled_entry": "_D4test4mainFZi"
+}

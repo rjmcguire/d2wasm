@@ -629,6 +629,7 @@ struct EnumMember {
  */
 class ManifestConstantDecl : Declaration {
     Expression initializer;  // The expression to evaluate at compile time
+    Type declaredType;       // Explicit type annotation (e.g., `enum float PI = 3.14;`), null if untyped
     Type inferredType;       // Type inferred after CTFE (null before)
     long ctfeValue;          // Value after CTFE evaluation (for integral types)
     double ctfeFloatValue;   // Value for float/double types

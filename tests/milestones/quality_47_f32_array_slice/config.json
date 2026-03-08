@@ -1,0 +1,6 @@
+{
+  "type": "wasm_exec",
+  "expected_result": 11,
+  "description": "f32 static array indexing and slicing",
+  "mangled_entry": "_D4test4mainFZi"
+}

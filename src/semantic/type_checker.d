@@ -728,18 +728,7 @@ class TypeChecker {
                 if (!currentFunctionReturnType) {
                     throw new TypeError("Return statement outside of any function", returnStmt.location);
                 }
-                // Narrow float literals: float foo() { return 10.5; }
-                if (auto targetBt = cast(BasicType)currentFunctionReturnType) {
-                    if (targetBt.kind == BasicType.Kind.Float32) {
-                        if (auto lit = cast(LiteralExpression)returnStmt.value) {
-                            if (lit.value.type == typeid(double)) {
-                                lit.type = currentFunctionReturnType;
-                                returnType = currentFunctionReturnType;
-                            }
-                        }
-                    }
-                }
-                auto compat = checkTypeCompatibility(returnType, currentFunctionReturnType);
+                auto compat = checkTypeCompatibility(returnType, currentFunctionReturnType, returnStmt.value);
                 if (!compat.isCompatible) {
                     // Try alias-this unwrapping
                     if (!tryAliasThisUnwrap(returnStmt.value, returnType, currentFunctionReturnType)) {
@@ -796,18 +785,7 @@ class TypeChecker {
                     // auto type inference
                     varDeclStmt.type = initType;
                 } else {
-                    // Narrow float literals: float x = 10.5; → set literal type to Float32
-                    if (auto targetBt = cast(BasicType)varDeclStmt.type) {
-                        if (targetBt.kind == BasicType.Kind.Float32) {
-                            if (auto lit = cast(LiteralExpression)varDeclStmt.initializer) {
-                                if (lit.value.type == typeid(double)) {
-                                    lit.type = varDeclStmt.type;
-                                    initType = varDeclStmt.type;
-                                }
-                            }
-                        }
-                    }
-                    auto compat = checkTypeCompatibility(initType, varDeclStmt.type);
+                    auto compat = checkTypeCompatibility(initType, varDeclStmt.type, varDeclStmt.initializer);
                     if (!compat.isCompatible) {
                         // Try alias-this unwrapping
                         if (!tryAliasThisUnwrap(varDeclStmt.initializer, initType, varDeclStmt.type)) {
@@ -1310,7 +1288,7 @@ class TypeChecker {
                             Type argType = checkExpression(expr.arguments[i]);
                             Type paramType = method.parameters[i].type;
 
-                            auto compat = checkTypeCompatibility(argType, paramType);
+                            auto compat = checkTypeCompatibility(argType, paramType, expr.arguments[i]);
                             if (!compat.isCompatible) {
                                 throw new TypeError(
                                     format("Argument %d: expected type '%s', got '%s'",
@@ -1349,7 +1327,7 @@ class TypeChecker {
                             Type argType = checkExpression(expr.arguments[i]);
                             Type paramType = method.parameters[i].type;
 
-                            auto compat = checkTypeCompatibility(argType, paramType);
+                            auto compat = checkTypeCompatibility(argType, paramType, expr.arguments[i]);
                             if (!compat.isCompatible) {
                                 throw new TypeError(
                                     format("Argument %d: expected type '%s', got '%s'",
@@ -1383,12 +1361,12 @@ class TypeChecker {
                                 expr.location
                             );
                         }
-                        
+
                         for (size_t i = 0; i < expr.arguments.length; i++) {
                             Type argType = checkExpression(expr.arguments[i]);
                             Type paramType = method.parameters[i].type;
-                            
-                            auto compat = checkTypeCompatibility(argType, paramType);
+
+                            auto compat = checkTypeCompatibility(argType, paramType, expr.arguments[i]);
                             if (!compat.isCompatible) {
                                 throw new TypeError(
                                     format("Argument %d: expected type '%s', got '%s'",
@@ -1449,8 +1427,8 @@ class TypeChecker {
                         for (size_t i = 0; i < expr.arguments.length; i++) {
                             Type argType = checkExpression(expr.arguments[i]);
                             Type paramType = builtinMethod.parameters[i].type;
-                            
-                            auto compat = checkTypeCompatibility(argType, paramType);
+
+                            auto compat = checkTypeCompatibility(argType, paramType, expr.arguments[i]);
                             if (!compat.isCompatible) {
                                 throw new TypeError(
                                     format("Argument %d: expected type '%s', got '%s'",
@@ -1498,8 +1476,8 @@ class TypeChecker {
                                 for (size_t i = 0; i < expr.arguments.length; i++) {
                                     Type argType = checkExpression(expr.arguments[i]);
                                     Type paramType = funcType.parameterTypes[i + 1];  // +1 to skip first param
-                                    
-                                    auto argCompat = checkTypeCompatibility(argType, paramType);
+
+                                    auto argCompat = checkTypeCompatibility(argType, paramType, expr.arguments[i]);
                                     if (!argCompat.isCompatible) {
                                         throw new TypeError(
                                             format("Argument %d: expected type '%s', got '%s'",
@@ -1584,7 +1562,7 @@ class TypeChecker {
                 Type argType = checkExpression(expr.arguments[i]);
                 Type paramType = functionType.parameterTypes[i];
 
-                auto compat = checkTypeCompatibility(argType, paramType);
+                auto compat = checkTypeCompatibility(argType, paramType, expr.arguments[i]);
                 if (!compat.isCompatible) {
                     // Try alias-this unwrapping on argument
                     if (!tryAliasThisUnwrap(expr.arguments[i], argType, paramType)) {
@@ -1669,7 +1647,7 @@ class TypeChecker {
                 Type argType = checkExpression(expr.callArguments[i]);
                 Type paramType = funcInst.parameters[i].type;
 
-                auto compat = checkTypeCompatibility(argType, paramType);
+                auto compat = checkTypeCompatibility(argType, paramType, expr.callArguments[i]);
                 if (!compat.isCompatible) {
                     throw new TypeError(
                         format("Argument %d: expected type '%s', got '%s'",
@@ -1906,7 +1884,7 @@ class TypeChecker {
         // Check call argument types against instantiation
         for (size_t i = 0; i < expr.arguments.length; i++) {
             Type paramType = inst.parameters[i].type;
-            auto compat = checkTypeCompatibility(argTypes[i], paramType);
+            auto compat = checkTypeCompatibility(argTypes[i], paramType, expr.arguments[i]);
             if (!compat.isCompatible) {
                 throw new TypeError(
                     format("Argument %d: expected type '%s', got '%s'",
@@ -1981,7 +1959,7 @@ class TypeChecker {
         }
         for (size_t i = 0; i < expr.arguments.length; i++) {
             Type paramType = instantiated.parameters[i].type;
-            auto compat = checkTypeCompatibility(argTypes[i], paramType);
+            auto compat = checkTypeCompatibility(argTypes[i], paramType, expr.arguments[i]);
             if (!compat.isCompatible) {
                 throw new TypeError(
                     format("Argument %d: expected type '%s', got '%s'",
@@ -2144,9 +2122,9 @@ class TypeChecker {
         for (size_t i = 0; i < arguments.length; i++) {
             Type argType = checkExpression(arguments[i]);
             Type fieldType = structDecl.fields[i].type;
-            
+
             if (fieldType) {
-                auto compat = checkTypeCompatibility(argType, fieldType);
+                auto compat = checkTypeCompatibility(argType, fieldType, arguments[i]);
                 if (!compat.isCompatible) {
                     throw new TypeError(
                         format("Cannot initialize field '%s' of type '%s' with value of type '%s'",
@@ -2204,7 +2182,7 @@ class TypeChecker {
             Type argType = checkExpression(fieldArgs[i]);
             Type fieldType = aggDecl.fields[i].type;
             if (fieldType) {
-                auto compat = checkTypeCompatibility(argType, fieldType);
+                auto compat = checkTypeCompatibility(argType, fieldType, fieldArgs[i]);
                 if (!compat.isCompatible)
                     throw new TypeError(
                         format("emplace: cannot initialize field '%s' of type '%s' with value of type '%s'",
@@ -2260,7 +2238,7 @@ class TypeChecker {
                 Type argType = checkExpression(expr.arguments[i]);
                 Type fieldType = structDecl.fields[i].type;
                 if (fieldType) {
-                    auto compat = checkTypeCompatibility(argType, fieldType);
+                    auto compat = checkTypeCompatibility(argType, fieldType, expr.arguments[i]);
                     if (!compat.isCompatible)
                         throw new TypeError(
                             format("'new %s': cannot initialize field '%s' of type '%s' with '%s'",
@@ -2283,7 +2261,7 @@ class TypeChecker {
                     Type argType = checkExpression(expr.arguments[i]);
                     Type paramType = ctorParams[i].type;
                     if (paramType) {
-                        auto compat = checkTypeCompatibility(argType, paramType);
+                        auto compat = checkTypeCompatibility(argType, paramType, expr.arguments[i]);
                         if (!compat.isCompatible)
                             throw new TypeError(
                                 format("'new %s': cannot pass '%s' as parameter '%s' of type '%s'",
@@ -2303,7 +2281,7 @@ class TypeChecker {
                     Type argType = checkExpression(expr.arguments[i]);
                     Type fieldType = classDecl.fields[i].type;
                     if (fieldType) {
-                        auto compat = checkTypeCompatibility(argType, fieldType);
+                        auto compat = checkTypeCompatibility(argType, fieldType, expr.arguments[i]);
                         if (!compat.isCompatible)
                             throw new TypeError(
                                 format("'new %s': cannot initialize field '%s' of type '%s' with '%s'",
@@ -3284,7 +3262,7 @@ class TypeChecker {
             );
         }
         
-        auto compat = checkTypeCompatibility(rightType, leftType);
+        auto compat = checkTypeCompatibility(rightType, leftType, expr.right);
         if (!compat.isCompatible) {
             // Try alias-this unwrapping on right-hand side
             if (!tryAliasThisUnwrap(expr.right, rightType, leftType)) {
@@ -3334,9 +3312,14 @@ class TypeChecker {
     }
     
     /**
-     * Check if two types are compatible
+     * Check if two types are compatible.
+     * When fromExpr is provided, float literals are narrowed to Float32 if the
+     * target type is Float32 (D's VRP — the literal value is known at compile time).
      */
-    TypeCompatibility checkTypeCompatibility(Type from, Type to) {
+    TypeCompatibility checkTypeCompatibility(Type from, Type to, Expression fromExpr = null) {
+        // Narrow float literals to Float32 when target is float
+        if (fromExpr !is null && narrowFloatLiteral(fromExpr, to))
+            from = to;
         from = resolveAliasType(from.resolve());
         to = resolveAliasType(to.resolve());
         // Exact type match
@@ -3454,6 +3437,38 @@ class TypeChecker {
         return null;
     }
     
+    /**
+     * Narrow a double literal expression to Float32 when the target type is float.
+     * In D, floating-point literals are implicitly narrowable because their value
+     * is known at compile time (VRP — Value Range Propagation).
+     * Handles bare literals and unary +/- wrapping a literal.
+     * Returns true if narrowing occurred.
+     */
+    bool narrowFloatLiteral(Expression expr, Type targetType) {
+        auto targetBt = cast(BasicType)targetType;
+        if (!targetBt || targetBt.kind != BasicType.Kind.Float32)
+            return false;
+
+        // Direct literal: 3.5
+        if (auto lit = cast(LiteralExpression)expr) {
+            if (lit.value.type == typeid(double)) {
+                lit.type = targetType;
+                return true;
+            }
+        }
+        // Unary +/- wrapping a literal: -3.25
+        if (auto unary = cast(UnaryExpression)expr) {
+            if (unary.operator == UnaryExpression.Operator.Minus ||
+                unary.operator == UnaryExpression.Operator.Plus) {
+                if (narrowFloatLiteral(unary.operand, targetType)) {
+                    unary.type = targetType;
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     /**
      * Check compatibility between basic types
      */

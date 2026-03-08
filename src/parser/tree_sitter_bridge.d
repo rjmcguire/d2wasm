@@ -1710,16 +1710,18 @@ class TreeSitterBridge {
      */
     ManifestConstantDecl parseManifestConstant(TSNode node) {
         SourceLocation loc = makeSourceLocation(node);
-        
-        // Find the manifest_declarator child
+
+        // Find the manifest_declarator and optional type children
         TSNode declarator;
+        TSNode typeNode;
         uint childCount = TreeSitterParser.getChildCount(node);
         for (uint i = 0; i < childCount; i++) {
             TSNode child = TreeSitterParser.getChild(node, i);
             string childType = TreeSitterParser.getNodeType(child);
             if (childType == "manifest_declarator") {
                 declarator = child;
-                break;
+            } else if (childType == "type") {
+                typeNode = child;
             }
         }
         
@@ -1763,6 +1765,8 @@ class TreeSitterBridge {
 
         log(3, "Parsed manifest constant: ", name, " = ", initializer.toString());
         auto mc = new ManifestConstantDecl(loc, name, initializer);
+        if (TreeSitterParser.isValid(typeNode))
+            mc.declaredType = parseType(typeNode);
         mc.visibility = vis;
         mc.attrs = dattrs;
         return mc;

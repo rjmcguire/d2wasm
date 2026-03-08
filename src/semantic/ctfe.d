@@ -430,7 +430,11 @@ class CTFEEvaluator {
                 manifest.ctfeFloatValue = literal.value.get!double();
                 manifest.ctfeComplete = true;
                 manifest.isFloatType = true;
-                manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Float64);
+                // Use declared type if available (e.g., `enum float PI = 3.14;`)
+                if (manifest.declaredType !is null)
+                    manifest.inferredType = manifest.declaredType;
+                else
+                    manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Float64);
                 log(3, "CTFE: ", manifest.name, " = ", manifest.ctfeFloatValue, " (float literal)");
                 return;
             }
@@ -509,7 +513,10 @@ class CTFEEvaluator {
                     manifest.ctfeFloatValue = value;
                     manifest.ctfeComplete = true;
                     manifest.isFloatType = true;
-                    manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Float64);
+                    if (manifest.declaredType !is null)
+                        manifest.inferredType = manifest.declaredType;
+                    else
+                        manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Float64);
                     log(3, "CTFE: ", manifest.name, " = ", manifest.ctfeFloatValue, " (float unary minus)");
                     return;
                 }
@@ -574,7 +581,10 @@ class CTFEEvaluator {
                 manifest.ctfeFloatValue = value;
                 manifest.ctfeComplete = true;
                 manifest.isFloatType = true;
-                manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Float64);
+                if (manifest.declaredType !is null)
+                    manifest.inferredType = manifest.declaredType;
+                else
+                    manifest.inferredType = new BasicType(manifest.location, BasicType.Kind.Float64);
                 log(3, "CTFE: ", manifest.name, " = ", manifest.ctfeFloatValue, " (float binary expression)");
                 return;
             }

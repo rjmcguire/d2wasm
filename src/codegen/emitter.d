@@ -2063,34 +2063,13 @@ class BinaryEmitter {
                 if (symbol && symbol.isCTFEOnly) {
                     // Special case: __writeln is variadic, expand to typed imports
                     if (ident.name == "__writeln") {
-                        // Pre-register all __ctfe_write_* imports that might be needed
-                        // We always need newline
+                        // Register all __ctfe_write_* imports unconditionally —
+                        // predicting which types are needed is fragile and unnecessary.
                         neededCTFEImports["__ctfe_write_newline"] = true;
-
-                        // Scan arguments to determine which typed writers we need
-                        foreach (arg; call.arguments) {
-                            if (auto literal = cast(LiteralExpression)arg) {
-                                if (literal.value.type == typeid(string)) {
-                                    neededCTFEImports["__ctfe_write_str"] = true;
-                                } else if (literal.value.type == typeid(double)) {
-                                    neededCTFEImports["__ctfe_write_f64"] = true;
-                                } else if (literal.value.type == typeid(long) ||
-                                           literal.value.type == typeid(int)) {
-                                    neededCTFEImports["__ctfe_write_i32"] = true;
-                                } else if (literal.value.type == typeid(bool)) {
-                                    neededCTFEImports["__ctfe_write_bool"] = true;
-                                }
-                            } else {
-                                // Check if non-literal arg is string/float-typed (e.g. manifest constant)
-                                if (isStringTypedExpression(arg)) {
-                                    neededCTFEImports["__ctfe_write_str"] = true;
-                                } else if (isFloatTypedExpression(arg)) {
-                                    neededCTFEImports["__ctfe_write_f64"] = true;
-                                } else {
-                                    neededCTFEImports["__ctfe_write_i32"] = true;
-                                }
-                            }
-                        }
+                        neededCTFEImports["__ctfe_write_str"] = true;
+                        neededCTFEImports["__ctfe_write_i32"] = true;
+                        neededCTFEImports["__ctfe_write_f64"] = true;
+                        neededCTFEImports["__ctfe_write_bool"] = true;
                     } else {
                         neededCTFEImports[ident.name] = true;
                     }
@@ -2116,34 +2095,6 @@ class BinaryEmitter {
         }
     }
 
-    /// Check if an expression has string type (for __writeln type-aware lowering).
-    private bool isStringTypedExpression(Expression expr) {
-        if (auto ident = cast(IdentifierExpression)expr) {
-            auto symbol = symbolTable.lookupSymbol(ident.name);
-            if (symbol && symbol.isConstant) {
-                if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
-                    return manifest.isStringType;
-                }
-            }
-        }
-        return false;
-    }
-
-    /// Check if an expression has float/double type (for __writeln type-aware lowering).
-    private bool isFloatTypedExpression(Expression expr) {
-        if (auto literal = cast(LiteralExpression)expr) {
-            return literal.value.type == typeid(double);
-        }
-        if (auto ident = cast(IdentifierExpression)expr) {
-            auto symbol = symbolTable.lookupSymbol(ident.name);
-            if (symbol && symbol.isConstant) {
-                if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
-                    return manifest.isFloatType;
-                }
-            }
-        }
-        return false;
-    }
 
     /**
      * Check if a function contains only CTFE intrinsics (like __writeln)
