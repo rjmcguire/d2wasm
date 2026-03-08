@@ -1,0 +1,8 @@
+{
+    "name": "objc_struct_return",
+    "description": "ObjC methods returning structs via hidden result pointer",
+    "type": "ffi_exec",
+    "expected_result": 42,
+    "link_frameworks": ["Foundation"],
+    "capability": "ObjC interface methods returning structs use hidden result pointer FFI convention"
+}

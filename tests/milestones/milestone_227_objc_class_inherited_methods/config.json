@@ -1,0 +1,8 @@
+{
+    "name": "objc_class_inherited_methods",
+    "description": "ObjC class can call methods inherited from parent interface",
+    "type": "ffi_exec",
+    "expected_result": 42,
+    "link_frameworks": ["Foundation"],
+    "capability": "ObjC class instances dispatch inherited interface methods correctly"
+}

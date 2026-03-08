@@ -449,6 +449,20 @@ class CTFERuntime {
                 continue;
             }
 
+            // Configure struct return metadata if needed
+            enum RET_STRUCT = 6;
+            if (entry.retKind == RET_STRUCT && entry.retStructFieldKinds.length > 0) {
+                int[] fieldKinds;
+                foreach (fk; entry.retStructFieldKinds)
+                    fieldKinds ~= cast(int)fk;
+                ffi_configure_struct_return(
+                    desc,
+                    cast(int)entry.retStructSize,
+                    cast(int)entry.retStructFieldKinds.length,
+                    fieldKinds.length > 0 ? fieldKinds.ptr : null
+                );
+            }
+
             // Build wasm3 signature string: "ret(params)"
             string sig = buildWasm3Sig(entry.retKind, entry.paramKinds);
 
@@ -529,6 +543,9 @@ class CTFERuntime {
         ubyte retKind;
         ubyte[] paramKinds;
         string nativeName;  // if set, dlsym uses this instead of name
+        // Struct return metadata (only valid when retKind == RET_STRUCT)
+        uint retStructSize;
+        ubyte[] retStructFieldKinds;
     }
 
     /**
@@ -586,6 +603,19 @@ class CTFERuntime {
             // Return kind
             if (pos >= data.length) break;
             entry.retKind = data[pos++];
+
+            // Struct return metadata (when retKind == RET_STRUCT == 6)
+            enum RET_STRUCT = 6;
+            if (entry.retKind == RET_STRUCT) {
+                entry.retStructSize = readLEB128(data, pos);
+                if (pos < data.length) {
+                    ubyte fieldCount = data[pos++];
+                    if (pos + fieldCount <= data.length) {
+                        entry.retStructFieldKinds = data[pos .. pos + fieldCount].dup;
+                        pos += fieldCount;
+                    }
+                }
+            }
 
             // Parameter count and kinds
             if (pos >= data.length) break;
@@ -645,7 +675,7 @@ class CTFERuntime {
 
     private static char argKindToSigChar(ubyte kind, bool isReturn) {
         // ArgKind enum values matching emitter
-        enum : ubyte { ARG_I32=0, ARG_I64=1, ARG_F32=2, ARG_F64=3, ARG_PTR=4, RET_VOID=5 }
+        enum : ubyte { ARG_I32=0, ARG_I64=1, ARG_F32=2, ARG_F64=3, ARG_PTR=4, RET_VOID=5, RET_STRUCT_=6 }
         switch (kind) {
             case ARG_I32: return 'i';
             case ARG_I64: return 'I';
@@ -653,6 +683,7 @@ class CTFERuntime {
             case ARG_F64: return 'F';
             case ARG_PTR: return 'i';  // Pointers are i32 in WASM
             case RET_VOID: return 'v';
+            case RET_STRUCT_: return 'v';  // WASM sig is void — struct written to memory via result_ptr
             default: return 'i';
         }
     }

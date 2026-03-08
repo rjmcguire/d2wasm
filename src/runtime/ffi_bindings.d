@@ -28,6 +28,11 @@ extern(C) @nogc nothrow {
     /// Free a descriptor returned by ffi_make_descriptor
     void ffi_free_descriptor(FFIDescriptor* desc);
 
+    /// Configure struct return metadata on an existing descriptor.
+    /// Builds ffi_type struct and re-preps CIF for struct return.
+    void ffi_configure_struct_return(FFIDescriptor* desc, int struct_size,
+                                     int nfields, int* field_kinds);
+
     /// Generic trampoline — has M3RawCall-compatible signature.
     /// Pass as the function pointer to m3_LinkRawFunctionEx,
     /// with the FFIDescriptor* as userData.

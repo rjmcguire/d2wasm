@@ -18,12 +18,13 @@
 
 /* ArgKind enum — must match emitter.d's ArgKind */
 typedef enum {
-    ARG_I32  = 0,
-    ARG_I64  = 1,
-    ARG_F32  = 2,
-    ARG_F64  = 3,
-    ARG_PTR  = 4,   /* WASM i32 offset → native pointer (memory_base + offset) */
-    RET_VOID = 5,
+    ARG_I32    = 0,
+    ARG_I64    = 1,
+    ARG_F32    = 2,
+    ARG_F64    = 3,
+    ARG_PTR    = 4,   /* WASM i32 offset → native pointer (memory_base + offset) */
+    RET_VOID   = 5,
+    RET_STRUCT = 6,
 } ArgKind;
 
 typedef struct {
@@ -34,6 +35,11 @@ typedef struct {
     ArgKind      ret_kind;
     ArgKind     *arg_kinds;     /* how to marshal each arg from WASM stack */
     ffi_type   **ffi_arg_types; /* libffi type array */
+    /* Struct return metadata (only valid when ret_kind == RET_STRUCT) */
+    int          ret_struct_size;       /* total size in bytes */
+    int          ret_struct_nfields;    /* number of fields */
+    ArgKind     *ret_struct_field_kinds;/* ArgKind per field */
+    ffi_type    *ret_struct_ffi_type;   /* cached libffi struct type */
 } FFIDescriptor;
 
 /* ---------------------------------------------------------------------------
@@ -93,7 +99,60 @@ void ffi_free_descriptor(FFIDescriptor *d) {
     if (!d) return;
     free(d->arg_kinds);
     free(d->ffi_arg_types);
+    if (d->ret_struct_field_kinds) free(d->ret_struct_field_kinds);
+    if (d->ret_struct_ffi_type) {
+        free(d->ret_struct_ffi_type->elements);
+        free(d->ret_struct_ffi_type);
+    }
     free(d);
+}
+
+/*
+ * Configure struct return metadata on an existing descriptor.
+ * Builds ffi_type struct from field kinds and re-preps the CIF
+ * with the correct struct return type, excluding the WASM result_ptr
+ * argument (at index 2 in the WASM parameter list).
+ */
+void ffi_configure_struct_return(FFIDescriptor *d, int struct_size,
+                                  int nfields, int *field_kinds) {
+    d->ret_struct_size = struct_size;
+    d->ret_struct_nfields = nfields;
+    d->ret_struct_field_kinds = calloc(nfields, sizeof(ArgKind));
+    for (int i = 0; i < nfields; i++)
+        d->ret_struct_field_kinds[i] = (ArgKind)field_kinds[i];
+
+    /* Build ffi_type for the return struct */
+    ffi_type *stype = calloc(1, sizeof(ffi_type));
+    stype->type = FFI_TYPE_STRUCT;
+    stype->size = 0;       /* libffi computes from elements */
+    stype->alignment = 0;
+    stype->elements = calloc(nfields + 1, sizeof(ffi_type *));
+    for (int i = 0; i < nfields; i++)
+        stype->elements[i] = argkind_to_ffi_type(field_kinds[i]);
+    stype->elements[nfields] = NULL;  /* sentinel */
+    d->ret_struct_ffi_type = stype;
+
+    /* Build native CIF: exclude WASM result_ptr arg (at index 2).
+     * WASM args:   [recv(i64), sel(i64), result_ptr(i32), user_args...]
+     * Native args:  [recv(i64), sel(i64), user_args...] → struct return */
+    int native_nargs = d->nargs - 1;
+    ffi_type **native_types = calloc(native_nargs, sizeof(ffi_type *));
+    int j = 0;
+    for (int i = 0; i < d->nargs; i++) {
+        if (i == 2) continue;  /* skip result_ptr */
+        native_types[j++] = argkind_to_ffi_type(d->arg_kinds[i]);
+    }
+
+    /* Replace ffi_arg_types and re-prep CIF */
+    free(d->ffi_arg_types);
+    d->ffi_arg_types = native_types;
+
+    ffi_status status = ffi_prep_cif(&d->cif, FFI_DEFAULT_ABI,
+                                      native_nargs, stype, native_types);
+    if (status != FFI_OK) {
+        fprintf(stderr, "ffi_configure_struct_return: ffi_prep_cif failed for %s (status=%d)\n",
+                d->name, status);
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -104,6 +163,60 @@ const void *ffi_generic_trampoline(IM3Runtime runtime, IM3ImportContext _ctx,
                                    uint64_t *_sp, void *_mem) {
     (void)runtime;
     FFIDescriptor *desc = (FFIDescriptor *)_ctx->userdata;
+
+    /* Handle struct returns specially: WASM signature is void, but native returns struct */
+    if (desc->ret_kind == RET_STRUCT) {
+        uint64_t *sp = _sp;  /* no return slot — WASM sig is void */
+
+        /* Read WASM args: receiver(i64), selector(i64), result_ptr(i32), user_args... */
+        void *arg_values[32];
+        union { int32_t i32; int64_t i64; float f32; double f64; void *ptr; } arg_storage[32];
+
+        /* arg 0: receiver (i64) */
+        arg_storage[0].i64 = *(int64_t *)sp; sp++;
+        arg_values[0] = &arg_storage[0].i64;
+        /* arg 1: selector (i64) */
+        arg_storage[1].i64 = *(int64_t *)sp; sp++;
+        arg_values[1] = &arg_storage[1].i64;
+        /* arg 2 in WASM: result_ptr (i32 WASM offset) — NOT passed to native */
+        uint32_t result_offset = *(uint32_t *)sp; sp++;
+        void *result_ptr = (uint8_t *)_mem + result_offset;
+
+        /* Remaining user args (WASM index 3+ → native index 2+) */
+        int native_idx = 2;
+        for (int i = 3; i < desc->nargs && native_idx < 32; i++) {
+            switch (desc->arg_kinds[i]) {
+                case ARG_I32:
+                    arg_storage[native_idx].i32 = *(int32_t *)sp;
+                    arg_values[native_idx] = &arg_storage[native_idx].i32;
+                    sp++; break;
+                case ARG_I64:
+                    arg_storage[native_idx].i64 = *(int64_t *)sp;
+                    arg_values[native_idx] = &arg_storage[native_idx].i64;
+                    sp++; break;
+                case ARG_F32:
+                    arg_storage[native_idx].f32 = *(float *)sp;
+                    arg_values[native_idx] = &arg_storage[native_idx].f32;
+                    sp++; break;
+                case ARG_F64:
+                    arg_storage[native_idx].f64 = *(double *)sp;
+                    arg_values[native_idx] = &arg_storage[native_idx].f64;
+                    sp++; break;
+                case ARG_PTR: {
+                    uint32_t off = *(uint32_t *)sp;
+                    arg_storage[native_idx].ptr = (uint8_t *)_mem + off;
+                    arg_values[native_idx] = &arg_storage[native_idx].ptr;
+                    sp++; break;
+                }
+                default: break;
+            }
+            native_idx++;
+        }
+
+        /* Call via libffi — struct result written directly to WASM memory */
+        ffi_call(&desc->cif, FFI_FN(desc->fn_ptr), result_ptr, arg_values);
+        return NULL;
+    }
 
     /* wasm3 convention: _sp[0] is the return slot when function has a return value */
     uint64_t *sp = _sp;

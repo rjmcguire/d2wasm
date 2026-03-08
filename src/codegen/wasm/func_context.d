@@ -493,8 +493,22 @@ class FuncContext {
 
                 // Class local
                 if (auto classDecl = userType.asClass()) {
+                    if (classDecl.isObjC && varDecl.initializer !is null) {
+                        // ObjC class: i64 WASM local (opaque native pointer, like ObjC interface)
+                        VarInfo vi;
+                        vi.kind = VarKind.class_;
+                        vi.addrMode = AddrMode.wasmLocal;
+                        vi.wasmLocalIdx = cast(uint)localTypes.length;
+                        localTypes ~= ValType.i64;
+                        vi.type = varDecl.type;
+                        vi.classDecl = classDecl;
+                        if (varDecl.uniqueLocalId != uint.max)
+                            varsByLocalId[varDecl.uniqueLocalId] = vi;
+                        varsByName[varDecl.name] = vi;
+                        return;
+                    }
                     if (varDecl.initializer !is null) {
-                        // Class reference — stored as i32 WASM local (D reference semantics)
+                        // D class reference — stored as i32 WASM local (D reference semantics)
                         VarInfo vi;
                         vi.kind = VarKind.class_;
                         vi.addrMode = AddrMode.wasmLocal;
@@ -2122,6 +2136,63 @@ class FuncContext {
             }
             // Method call returning struct: Point p = s.origin()
             if (auto memberExpr = cast(MemberExpression)callExpr.function_) {
+                // Check if this is an ObjC method call
+                InterfaceDecl objcIface = null;
+                bool objcStaticCall = false;
+                if (auto objIdent = cast(IdentifierExpression)memberExpr.object) {
+                    auto objVarInfo = resolveVar(objIdent.resolvedLocalId, objIdent.name);
+                    if (objVarInfo && objVarInfo.isInterface && objVarInfo.ifaceDecl.isObjC)
+                        objcIface = objVarInfo.ifaceDecl;
+                    if (!objcIface) {
+                        if (auto iface = objIdent.name in emitter.objcInterfaces) {
+                            objcIface = *iface;
+                            objcStaticCall = true;
+                        }
+                    }
+                }
+                if (!objcIface && memberExpr.object.type !is null) {
+                    auto resolved = memberExpr.object.type.resolve();
+                    if (auto iface = resolved.asInterface()) {
+                        if (iface.isObjC) objcIface = iface;
+                    }
+                }
+                if (objcIface !is null) {
+                    // ObjC struct return: call writes to shadow stack, then copy to local
+                    emitObjCMethodCall(out_, objcIface, memberExpr.object,
+                                       memberExpr.memberName, callExpr.arguments, objcStaticCall);
+                    // Result address (i32) is on WASM stack — copy struct to local
+                    out_ ~= Op.local_set;
+                    leb128u(out_, tempLocalA);
+                    foreach (field; structDecl.fields) {
+                        auto bt = cast(BasicType)field.type;
+                        bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
+                        // Destination: FP + local offset + field offset
+                        out_ ~= Op.local_get;
+                        leb128u(out_, fpLocal);
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, info.frameOffset + cast(int)field.offset);
+                        out_ ~= Op.i32_add;
+                        // Source: tempLocalA + field offset
+                        out_ ~= Op.local_get;
+                        leb128u(out_, tempLocalA);
+                        if (field.offset > 0) {
+                            out_ ~= Op.i32_const;
+                            leb128s(out_, cast(int)field.offset);
+                            out_ ~= Op.i32_add;
+                        }
+                        emitLoadForSize(out_, cast(uint)field.size, isFloat);
+                        emitStoreForSize(out_, cast(uint)field.size, isFloat);
+                    }
+                    // Restore SP (free shadow stack temp)
+                    out_ ~= Op.global_get;
+                    leb128u(out_, emitter.spGlobal);
+                    out_ ~= Op.i32_const;
+                    leb128s(out_, cast(int)structDecl.aggregateSize_);
+                    out_ ~= Op.i32_add;
+                    out_ ~= Op.global_set;
+                    leb128u(out_, emitter.spGlobal);
+                    return;
+                }
                 emitStructReturnMethodCall(out_, memberExpr, callExpr.arguments, info.frameOffset);
                 return;
             }
@@ -6826,6 +6897,9 @@ class FuncContext {
     /**
      * Emit extern(Objective-C) method call.
      * Lowers to: objc_msgSend(receiver, sel_registerName("selector"), args...)
+     *
+     * For struct returns: allocates shadow stack temp, passes result pointer
+     * as hidden arg after receiver+selector, leaves result address on stack.
      */
     void emitObjCMethodCall(ref Appender!(ubyte[]) out_, InterfaceDecl ifaceDecl,
                             Expression receiverExpr, string methodName,
@@ -6844,6 +6918,34 @@ class FuncContext {
 
         string selector = method.objcSelector;
         if (selector is null) selector = method.name;
+
+        // Detect struct return
+        auto resolvedRet = method.returnType.resolve();
+        StructDecl retStructDecl = resolvedRet.asStruct();
+        bool isStructReturn = retStructDecl !is null;
+        uint structRetSize = 0;
+
+        // For struct returns: allocate shadow stack temp and save address
+        if (isStructReturn) {
+            assert(retStructDecl.layoutComputed,
+                "ObjC struct return " ~ retStructDecl.name ~ ": layout not computed");
+            structRetSize = cast(uint)retStructDecl.aggregateSize_;
+
+            // SP -= structRetSize
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.spGlobal);
+            out_ ~= Op.i32_const;
+            leb128s(out_, structRetSize);
+            out_ ~= Op.i32_sub;
+            out_ ~= Op.global_set;
+            leb128u(out_, emitter.spGlobal);
+
+            // Save result address to tempLocalA
+            out_ ~= Op.global_get;
+            leb128u(out_, emitter.spGlobal);
+            out_ ~= Op.local_set;
+            leb128u(out_, tempLocalA);
+        }
 
         // Arg 1: receiver (i64)
         if (isStaticCall) {
@@ -6867,7 +6969,13 @@ class FuncContext {
         out_ ~= Op.call;
         leb128u(out_, selRegIdx);
 
-        // Arg 3..N: user arguments (with i32→i64 promotion where needed)
+        // Arg 3 (struct return only): result pointer (i32)
+        if (isStructReturn) {
+            out_ ~= Op.local_get;
+            leb128u(out_, tempLocalA);
+        }
+
+        // Remaining args: user arguments (with i32→i64 promotion where needed)
         foreach (i, arg; args) {
             if (i < method.parameters.length) {
                 auto paramType = method.parameters[i].type.resolve();
@@ -6877,10 +6985,10 @@ class FuncContext {
                         "ObjC call: struct " ~ structDecl.name ~ " has no fields at emission time");
                     emitExpression(out_, arg);  // pushes i32 address
                     out_ ~= Op.local_set;
-                    leb128u(out_, tempLocalA);
+                    leb128u(out_, tempLocalB);
                     foreach (field; structDecl.fields) {
                         out_ ~= Op.local_get;
-                        leb128u(out_, tempLocalA);
+                        leb128u(out_, tempLocalB);
                         if (field.offset > 0) {
                             out_ ~= Op.i32_const;
                             leb128s(out_, cast(int)field.offset);
@@ -6910,6 +7018,12 @@ class FuncContext {
         uint funcIdx = emitter.getFuncIndex(importName, method.location);
         out_ ~= Op.call;
         leb128u(out_, funcIdx);
+
+        // For struct returns: push result address (trampoline wrote struct to shadow stack)
+        if (isStructReturn) {
+            out_ ~= Op.local_get;
+            leb128u(out_, tempLocalA);
+        }
     }
 
     /**

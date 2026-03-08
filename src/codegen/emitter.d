@@ -130,12 +130,13 @@ class BinaryEmitter {
     
     /// FFI ArgKind — matches the C enum in ffi_trampoline.c
     package enum ArgKind : ubyte {
-        ARG_I32  = 0,
-        ARG_I64  = 1,
-        ARG_F32  = 2,
-        ARG_F64  = 3,
-        ARG_PTR  = 4,
-        RET_VOID = 5,
+        ARG_I32    = 0,
+        ARG_I64    = 1,
+        ARG_F32    = 2,
+        ARG_F64    = 3,
+        ARG_PTR    = 4,
+        RET_VOID   = 5,
+        RET_STRUCT = 6,
     }
 
     /// FFI metadata for one imported function
@@ -144,6 +145,9 @@ class BinaryEmitter {
         ArgKind retKind;
         ArgKind[] paramKinds;
         string nativeName;  // if set, dlsym uses this instead of name (for objc_msgSend aliasing)
+        // Struct return metadata (only valid when retKind == RET_STRUCT)
+        ArgKind[] retStructFieldKinds;
+        uint retStructSize;  // total size in bytes
     }
 
     private {
@@ -1245,10 +1249,21 @@ class BinaryEmitter {
             string selector = method.objcSelector;
             if (selector is null) selector = method.name;
 
-            // WASM signature: [i64 receiver, i64 selector, ...user_params] -> return_type
+            // Detect struct return type
+            auto resolvedRet = method.returnType.resolve();
+            if (auto ut = cast(UserType)resolvedRet) {
+                if (!ut.declaration) ut.ensureResolved(symbolTable);
+            }
+            auto retStructDecl = resolvedRet.asStruct();
+            bool isStructReturn = retStructDecl !is null;
+
+            // WASM signature: [i64 receiver, i64 selector, (i32 result_ptr if struct return), ...user_params]
             FuncSig sig;
             sig.params ~= ValType.i64;  // receiver (opaque native pointer)
             sig.params ~= ValType.i64;  // selector (opaque native pointer)
+            if (isStructReturn) {
+                sig.params ~= ValType.i32;  // hidden result pointer
+            }
             foreach (p; method.parameters) {
                 auto resolved = p.type.resolve();
                 // Resolve struct UserTypes for field access
@@ -1266,9 +1281,13 @@ class BinaryEmitter {
                 }
             }
 
-            bool isVoid = isVoidType(method.returnType);
-            if (!isVoid) {
-                sig.results = [dTypeToValType(method.returnType)];
+            if (isStructReturn) {
+                // No WASM return — caller uses the result pointer on shadow stack
+            } else {
+                bool isVoid = isVoidType(method.returnType);
+                if (!isVoid) {
+                    sig.results = [dTypeToValType(method.returnType)];
+                }
             }
 
             // Unique import name per method
@@ -1296,8 +1315,19 @@ class BinaryEmitter {
             FFIMeta meta;
             meta.name = importName;
             meta.nativeName = "objc_msgSend";
-            meta.retKind = isVoid ? ArgKind.RET_VOID : dTypeToArgKind(method.returnType);
-            meta.paramKinds = [ArgKind.ARG_I64, ArgKind.ARG_I64];  // receiver + selector
+            if (isStructReturn) {
+                meta.retKind = ArgKind.RET_STRUCT;
+                meta.paramKinds = [ArgKind.ARG_I64, ArgKind.ARG_I64, ArgKind.ARG_PTR];
+                assert(retStructDecl.layoutComputed,
+                    "ObjC struct return " ~ retStructDecl.name ~ ": layout not computed");
+                meta.retStructSize = cast(uint)retStructDecl.aggregateSize_;
+                foreach (field; retStructDecl.fields)
+                    meta.retStructFieldKinds ~= dTypeToArgKind(field.type);
+            } else {
+                bool isVoid = isVoidType(method.returnType);
+                meta.retKind = isVoid ? ArgKind.RET_VOID : dTypeToArgKind(method.returnType);
+                meta.paramKinds = [ArgKind.ARG_I64, ArgKind.ARG_I64];  // receiver + selector
+            }
             foreach (p; method.parameters) {
                 auto resolved = p.type.resolve();
                 if (auto structDecl = resolved.asStruct()) {
@@ -1433,13 +1463,44 @@ class BinaryEmitter {
             // via objc_msgSend on instances of this class). Same pattern as interface.
             string sendImportName = "__objc_send_" ~ classDecl.name ~ "_" ~ method.name;
 
+            // Detect struct return for send import
+            auto resolvedRet = method.returnType.resolve();
+            if (auto ut = cast(UserType)resolvedRet) {
+                if (!ut.declaration) ut.ensureResolved(symbolTable);
+            }
+            auto retStructDecl = resolvedRet.asStruct();
+            bool isStructReturn = retStructDecl !is null;
+
+            // Build send import signature (may differ from impl if struct return)
+            FuncSig sendSig;
+            sendSig.params ~= ValType.i64;  // receiver
+            sendSig.params ~= ValType.i64;  // selector
+            if (isStructReturn) {
+                sendSig.params ~= ValType.i32;  // hidden result pointer
+            }
+            foreach (p; method.parameters) {
+                auto resolved = p.type.resolve();
+                if (auto ut2 = cast(UserType)resolved) {
+                    if (!ut2.declaration) ut2.ensureResolved(symbolTable);
+                }
+                if (auto sd = resolved.asStruct()) {
+                    foreach (field; sd.fields)
+                        sendSig.params ~= dTypeToValType(field.type);
+                } else {
+                    sendSig.params ~= dTypeToValType(p.type);
+                }
+            }
+            if (!isStructReturn && !isVoid) {
+                sendSig.results = [dTypeToValType(method.returnType)];
+            }
+
             uint sendTIdx;
-            if (auto existing = sig in typeIndex) {
+            if (auto existing = sendSig in typeIndex) {
                 sendTIdx = *existing;
             } else {
                 sendTIdx = cast(uint)types.length;
-                types ~= sig;
-                typeIndex[sig] = sendTIdx;
+                types ~= sendSig;
+                typeIndex[sendSig] = sendTIdx;
             }
 
             ImportInfo importInfo;
@@ -1452,12 +1513,22 @@ class BinaryEmitter {
             FFIMeta meta;
             meta.name = sendImportName;
             meta.nativeName = "objc_msgSend";
-            meta.retKind = isVoid ? ArgKind.RET_VOID : dTypeToArgKind(method.returnType);
-            meta.paramKinds = [ArgKind.ARG_I64, ArgKind.ARG_I64];
+            if (isStructReturn) {
+                meta.retKind = ArgKind.RET_STRUCT;
+                meta.paramKinds = [ArgKind.ARG_I64, ArgKind.ARG_I64, ArgKind.ARG_PTR];
+                assert(retStructDecl.layoutComputed,
+                    "ObjC struct return " ~ retStructDecl.name ~ ": layout not computed");
+                meta.retStructSize = cast(uint)retStructDecl.aggregateSize_;
+                foreach (field; retStructDecl.fields)
+                    meta.retStructFieldKinds ~= dTypeToArgKind(field.type);
+            } else {
+                meta.retKind = isVoid ? ArgKind.RET_VOID : dTypeToArgKind(method.returnType);
+                meta.paramKinds = [ArgKind.ARG_I64, ArgKind.ARG_I64];
+            }
             foreach (p; method.parameters) {
                 auto resolved = p.type.resolve();
-                if (auto structDecl = resolved.asStruct()) {
-                    foreach (field; structDecl.fields)
+                if (auto sd = resolved.asStruct()) {
+                    foreach (field; sd.fields)
                         meta.paramKinds ~= dTypeToArgKind(field.type);
                 } else {
                     meta.paramKinds ~= dTypeToArgKind(p.type);
@@ -1505,10 +1576,21 @@ class BinaryEmitter {
             resolveObjCUserType(cast(UserType)p.type);
         }
 
-        // Build WASM signature: (receiver:i64, selector:i64, ...user_params) → return_type
+        // Detect struct return type
+        auto resolvedRet = method.returnType.resolve();
+        if (auto ut = cast(UserType)resolvedRet) {
+            if (!ut.declaration) ut.ensureResolved(symbolTable);
+        }
+        auto retStructDecl = resolvedRet.asStruct();
+        bool isStructReturn = retStructDecl !is null;
+
+        // Build WASM signature: (receiver:i64, selector:i64, [result_ptr:i32], ...user_params)
         FuncSig sig;
         sig.params ~= ValType.i64;  // receiver
         sig.params ~= ValType.i64;  // selector
+        if (isStructReturn) {
+            sig.params ~= ValType.i32;  // hidden result pointer
+        }
         foreach (p; method.parameters) {
             auto resolved = p.type.resolve();
             if (auto ut = cast(UserType)resolved) {
@@ -1522,9 +1604,13 @@ class BinaryEmitter {
             }
         }
 
-        bool isVoid = isVoidType(method.returnType);
-        if (!isVoid) {
-            sig.results = [dTypeToValType(method.returnType)];
+        if (isStructReturn) {
+            // No WASM return — caller uses the result pointer
+        } else {
+            bool isVoid = isVoidType(method.returnType);
+            if (!isVoid) {
+                sig.results = [dTypeToValType(method.returnType)];
+            }
         }
 
         string sendImportName = "__objc_send_" ~ classDecl.name ~ "_" ~ method.name;
@@ -1548,8 +1634,19 @@ class BinaryEmitter {
         FFIMeta meta;
         meta.name = sendImportName;
         meta.nativeName = "objc_msgSend";
-        meta.retKind = isVoid ? ArgKind.RET_VOID : dTypeToArgKind(method.returnType);
-        meta.paramKinds = [ArgKind.ARG_I64, ArgKind.ARG_I64];
+        if (isStructReturn) {
+            meta.retKind = ArgKind.RET_STRUCT;
+            meta.paramKinds = [ArgKind.ARG_I64, ArgKind.ARG_I64, ArgKind.ARG_PTR];
+            assert(retStructDecl.layoutComputed,
+                "ObjC struct return " ~ retStructDecl.name ~ ": layout not computed");
+            meta.retStructSize = cast(uint)retStructDecl.aggregateSize_;
+            foreach (field; retStructDecl.fields)
+                meta.retStructFieldKinds ~= dTypeToArgKind(field.type);
+        } else {
+            bool isVoid = isVoidType(method.returnType);
+            meta.retKind = isVoid ? ArgKind.RET_VOID : dTypeToArgKind(method.returnType);
+            meta.paramKinds = [ArgKind.ARG_I64, ArgKind.ARG_I64];
+        }
         foreach (p; method.parameters) {
             auto resolved = p.type.resolve();
             if (auto structDecl = resolved.asStruct()) {
@@ -3774,6 +3871,14 @@ class BinaryEmitter {
 
             // Return kind
             body_ ~= cast(ubyte)meta.retKind;
+
+            // Struct return metadata (when retKind == RET_STRUCT)
+            if (meta.retKind == ArgKind.RET_STRUCT) {
+                leb128u(body_, meta.retStructSize);
+                body_ ~= cast(ubyte)meta.retStructFieldKinds.length;
+                foreach (fk; meta.retStructFieldKinds)
+                    body_ ~= cast(ubyte)fk;
+            }
 
             // Parameter count and kinds
             body_ ~= cast(ubyte)meta.paramKinds.length;

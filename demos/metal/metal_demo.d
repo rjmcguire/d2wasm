@@ -1,8 +1,8 @@
 // Metal Render Demo — D drives Metal via extern(Objective-C) interfaces
 //
 // D handles: device init, command queue, shader compilation, pipeline,
-// buffer creation, window setup, render pass, and game loop orchestration.
-// Bridge handles: NSView subclass, window delegate, event loop only.
+// buffer creation, window setup, render pass, game loop, view and delegate.
+// Bridge handles: event loop (@autoreleasepool), vertex buffers, string constants.
 
 pragma(lib, "/System/Library/Frameworks/Metal.framework/Metal");
 pragma(lib, "/System/Library/Frameworks/Foundation.framework/Foundation");
@@ -12,6 +12,7 @@ pragma(lib, "./libmetal_bridge.dylib");
 
 // ── Struct Types ───────────────────────────────────────────────────
 
+struct NSPoint { double x; double y; }
 struct NSRect { double x; double y; double width; double height; }
 struct CGSize { double width; double height; }
 struct MTLClearColor { double red; double green; double blue; double alpha; }
@@ -44,6 +45,24 @@ interface NSWindow {
         @selector("initWithContentRect:styleMask:backing:defer:");
     void setTitle(NSString title) @selector("setTitle:");
     void makeKeyAndOrderFront(long sender) @selector("makeKeyAndOrderFront:");
+    long contentView() @selector("contentView");
+    void setDelegate(long del) @selector("setDelegate:");
+}
+
+extern(Objective-C)
+interface NSView {
+    static NSView alloc() @selector("alloc");
+    NSView initWithFrame(NSRect frame_) @selector("initWithFrame:");
+    void setWantsLayer(int flag) @selector("setWantsLayer:");
+    void setLayer(long layer) @selector("setLayer:");
+    void setAutoresizingMask(long mask) @selector("setAutoresizingMask:");
+    void addSubview(long view) @selector("addSubview:");
+    NSRect bounds() @selector("bounds");
+}
+
+extern(Objective-C)
+interface NSEvent {
+    NSPoint locationInWindow() @selector("locationInWindow");
 }
 
 extern(Objective-C)
@@ -132,13 +151,9 @@ interface MTLRenderCommandEncoder {
 
 extern(C) long MTLCreateSystemDefaultDevice();
 
-// Bridge: things that need ObjC class definitions
-extern(C) void metal_setup_view(long window, long metalLayer);
-extern(C) void metal_set_delegate(long window);
+// Bridge: event loop (needs @autoreleasepool), notify
 extern(C) int metal_process_events();
-extern(C) int metal_has_click();
-extern(C) double metal_get_click_x();
-extern(C) double metal_get_click_y();
+extern(C) void metal_notify_close();
 
 // Bridge: vertex accumulation (native memory needed for Metal)
 extern(C) void metal_add_vertex(double x, double y, double r, double g, double b, double a);
@@ -171,11 +186,51 @@ double cos_approx(double x) {
     return sin_approx(x + 1.5707963);
 }
 
+// ── Click State (D globals) ───────────────────────────────────────
+
+int g_hasClick = 0;
+double g_clickX = 0.0;
+double g_clickY = 0.0;
+
 // ── Clear Color State ─────────────────────────────────────────────
 
 double g_clearR = 0.05;
 double g_clearG = 0.05;
 double g_clearB = 0.10;
+
+// ── ObjC Classes (D-defined, registered at runtime) ───────────────
+
+extern(Objective-C)
+class BridgeWindowDelegate : NSObject {
+    static BridgeWindowDelegate myAlloc() @selector("alloc");
+    BridgeWindowDelegate myInit() @selector("init");
+
+    void windowWillClose(long notification) @selector("windowWillClose:") {
+        metal_notify_close();
+    }
+}
+
+extern(Objective-C)
+class MetalView : NSView {
+    static MetalView myAlloc() @selector("alloc");
+    MetalView myInitWithFrame(NSRect frame_) @selector("initWithFrame:");
+
+    int acceptsFirstResponder() @selector("acceptsFirstResponder") {
+        return 1;
+    }
+
+    int acceptsFirstMouse(long event) @selector("acceptsFirstMouse:") {
+        return 1;
+    }
+
+    void mouseDown(long rawEvent) @selector("mouseDown:") {
+        NSEvent event = cast(NSEvent) rawEvent;
+        NSPoint loc = event.locationInWindow();
+        g_hasClick = 1;
+        g_clickX = (loc.x / 800.0) * 2.0 - 1.0;
+        g_clickY = (loc.y / 600.0) * 2.0 - 1.0;
+    }
+}
 
 // ── Click Handler ──────────────────────────────────────────────────
 
@@ -237,15 +292,29 @@ int main() {
     NSString title = NSString.stringWithUTF8String(metal_get_cstr_title());
     window.setTitle(title);
 
-    // Attach metal layer + delegate (bridge: needs NSView subclass)
-    long windowPtr = cast(long)window;
-    long metalLayerPtr = cast(long)metalLayer;
+    // Attach metal layer + view (D-side ObjC classes)
     CGSize drawSize;
     drawSize.width = 800.0;
     drawSize.height = 600.0;
     metalLayer.setDrawableSize(drawSize);
-    metal_setup_view(windowPtr, metalLayerPtr);
-    metal_set_delegate(windowPtr);
+
+    NSRect viewFrame;
+    viewFrame.x = 0.0;
+    viewFrame.y = 0.0;
+    viewFrame.width = 800.0;
+    viewFrame.height = 600.0;
+    MetalView metalView = MetalView.myAlloc().myInitWithFrame(viewFrame);
+    metalView.setWantsLayer(1);
+    metalView.setLayer(cast(long)metalLayer);
+    metalView.setAutoresizingMask(18);
+
+    long cv = window.contentView();
+    NSView contentView = cast(NSView) cv;
+    contentView.addSubview(cast(long)metalView);
+
+    // Set window delegate (D-side ObjC class)
+    BridgeWindowDelegate del = BridgeWindowDelegate.myAlloc().myInit();
+    window.setDelegate(cast(long)del);
 
     // Generate color wheel geometry
     int segments = 64;
@@ -280,8 +349,9 @@ int main() {
 
     // Game loop
     while (metal_process_events() != 0) {
-        if (metal_has_click() != 0) {
-            on_click(metal_get_click_x(), metal_get_click_y());
+        if (g_hasClick != 0) {
+            g_hasClick = 0;
+            on_click(g_clickX, g_clickY);
         }
 
         // Render frame (D-side ObjC — chained calls via expression receivers)

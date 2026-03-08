@@ -2002,6 +2002,19 @@ class TypeChecker {
             }
             current = current.baseClassDecl;
         }
+        // For ObjC classes, search parent interfaces (baseClass moved to interfaces[])
+        if (classDecl.isObjC) {
+            foreach (iface; classDecl.interfaces) {
+                if (auto ut = cast(UserType)iface) {
+                    if (auto ifaceDecl = cast(InterfaceDecl)ut.declaration) {
+                        foreach (m; ifaceDecl.methods) {
+                            if (m.name == methodName)
+                                return m;
+                        }
+                    }
+                }
+            }
+        }
         return null;
     }
 
@@ -3015,8 +3028,23 @@ class TypeChecker {
                                 return funcDecl.returnType;
                         }
                     }
-                    // Method may be inherited from parent ObjC interface
-                    return objectType;  // resolved at codegen
+                    // Search inherited methods from parent ObjC interfaces
+                    // (baseClass is moved to interfaces[] during type checking)
+                    foreach (iface; classDecl.interfaces) {
+                        auto ifaceType = iface.resolve();
+                        if (auto ifaceUT = cast(UserType)ifaceType) {
+                            if (!ifaceUT.declaration)
+                                ifaceUT.ensureResolved(symbolTable);
+                            if (auto parentIface = cast(InterfaceDecl)ifaceUT.declaration) {
+                                foreach (m; parentIface.methods) {
+                                    if (m.name == expr.memberName)
+                                        return m.returnType;
+                                }
+                            }
+                        }
+                    }
+                    // Method not found but may be resolved at codegen
+                    return objectType;
                 }
 
                 auto field = classDecl.getField(expr.memberName);

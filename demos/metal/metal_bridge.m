@@ -1,78 +1,24 @@
 /**
- * Metal C Bridge — slim residual that requires Objective-C class definitions
+ * Metal C Bridge — slim residual requiring Objective-C runtime features
  *
- * Handles: MetalView (NSView subclass), BridgeWindowDelegate,
- * event loop (@autoreleasepool), click state, view setup,
- * and vertex buffer accumulation (native memory needed for Metal).
+ * Handles: event loop (@autoreleasepool), vertex buffer accumulation
+ * (native memory needed for Metal), string constants, and window close notification.
  *
  * D handles: Metal device, command queue, shader compilation, pipeline,
- * buffer creation, window creation, render pass, and the game loop.
+ * buffer creation, window creation, render pass, game loop,
+ * MetalView (NSView subclass), and BridgeWindowDelegate.
  */
 #import <Metal/Metal.h>
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
 
-// ── Click state ────────────────────────────────────────────────────
+// ── Window close state ──────────────────────────────────────────────
 
-static double g_clickX = 0.0;
-static double g_clickY = 0.0;
-static int    g_hasClick = 0;
-static BOOL   g_windowClosed = NO;
+static BOOL g_windowClosed = NO;
 
-// ── Window delegate ─────────────────────────────────────────────────
-
-@interface BridgeWindowDelegate : NSObject <NSWindowDelegate>
-@end
-
-@implementation BridgeWindowDelegate
-- (void)windowWillClose:(NSNotification *)notification {
+/// Called from D's BridgeWindowDelegate.windowWillClose
+void metal_notify_close(void) {
     g_windowClosed = YES;
-}
-@end
-
-static BridgeWindowDelegate *g_windowDelegate;
-
-// ── Custom NSView for mouse event handling ─────────────────────────
-
-@interface MetalView : NSView
-@end
-
-@implementation MetalView
-
-- (BOOL)acceptsFirstResponder { return YES; }
-- (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
-
-- (void)mouseDown:(NSEvent *)event {
-    NSPoint loc = [self convertPoint:[event locationInWindow] fromView:nil];
-    NSSize size = self.bounds.size;
-
-    // Convert to NDC: (-1,-1) bottom-left to (1,1) top-right
-    g_clickX = (loc.x / size.width)  * 2.0 - 1.0;
-    g_clickY = (loc.y / size.height) * 2.0 - 1.0;
-    g_hasClick = 1;
-}
-
-@end
-
-// ── C API ───────────────────────────────────────────────────────────
-
-/// Attach MetalView with CAMetalLayer to window's content view
-void metal_setup_view(long window, long metalLayer) {
-    NSWindow *win = (NSWindow *)window;
-    CAMetalLayer *layer = (CAMetalLayer *)metalLayer;
-
-    MetalView *metalView = [[MetalView alloc] initWithFrame:win.contentView.bounds];
-    [metalView setWantsLayer:YES];
-    [metalView setLayer:layer];
-    metalView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    [win.contentView addSubview:metalView];
-}
-
-/// Install window delegate for close detection
-void metal_set_delegate(long window) {
-    NSWindow *win = (NSWindow *)window;
-    g_windowDelegate = [[BridgeWindowDelegate alloc] init];
-    [win setDelegate:g_windowDelegate];
 }
 
 /// Poll events; returns 0 when window closed
@@ -93,16 +39,8 @@ int metal_process_events(void) {
     return 1;
 }
 
-int metal_has_click(void) {
-    int result = g_hasClick;
-    g_hasClick = 0;
-    return result;
-}
+// ── Vertex accumulator ──────────────────────────────────────────────
 
-double metal_get_click_x(void) { return g_clickX; }
-double metal_get_click_y(void) { return g_clickY; }
-
-/// Vertex accumulator for D-computed geometry
 typedef struct {
     float x, y;
     float r, g, b, a;
