@@ -142,6 +142,7 @@ class FuncContext {
     uint tempLocalB;           // Temp local for aggregate copy (src addr)
     uint tempLocalI64;         // Temp local for i64 values (e.g., i64-returning call exception check)
     uint tempLocalF64;         // Temp local for f64 values (e.g., f64-returning call exception check)
+    uint tempLocalF32;         // Temp local for f32 values (e.g., f32-returning call exception check)
     
     // Block depth for br instructions
     uint blockDepth = 0;
@@ -798,6 +799,8 @@ class FuncContext {
         localTypes ~= ValType.i64;
         tempLocalF64 = cast(uint)localTypes.length;
         localTypes ~= ValType.f64;
+        tempLocalF32 = cast(uint)localTypes.length;
+        localTypes ~= ValType.f32;
 
         if (frameSize > 0) {
             // Need locals for saved SP (epilogue restore) and FP (stable frame access)
@@ -1340,6 +1343,10 @@ class FuncContext {
             // Regular return
             if (stmt.value) {
                 emitExpression(out_, stmt.value);
+                // Implicit f64→f32 for float-returning functions
+                if (auto retBt = cast(BasicType)func.decl.returnType.resolve())
+                    if (retBt.kind == BasicType.Kind.Float32 && isF64Expression(stmt.value))
+                        out_ ~= Op.f32_demote_f64;
             }
 
             // Call destructors for all scopes being unwound (RAII)
@@ -1502,10 +1509,10 @@ class FuncContext {
      * Emit exception check when a call result value is on the WASM stack.
      * Saves the result to a type-appropriate temp local, checks, restores on normal path.
      */
-    void emitExceptionCheckWithValue(ref Appender!(ubyte[]) out_, SourceLocation callSite, bool isI64Value, bool isF64Value = false) {
+    void emitExceptionCheckWithValue(ref Appender!(ubyte[]) out_, SourceLocation callSite, bool isI64Value, bool isF64Value = false, bool isF32Value = false) {
         // Save the call result off the stack — use typed temp to match the value on the stack
         assert(!(isI64Value && isF64Value), "emitExceptionCheckWithValue: value cannot be both i64 and f64");
-        uint tempLocal = isF64Value ? tempLocalF64 : (isI64Value ? tempLocalI64 : tempLocalA);
+        uint tempLocal = isF64Value ? tempLocalF64 : (isF32Value ? tempLocalF32 : (isI64Value ? tempLocalI64 : tempLocalA));
         out_ ~= Op.local_set;
         leb128u(out_, tempLocal);
         // Check exception flag
@@ -2051,9 +2058,24 @@ class FuncContext {
 
         if (stmt.initializer) {
             emitExpression(out_, stmt.initializer);
+            // Implicit f64→f32 for float locals initialized with double expressions
+            if (info.wasmLocalIdx < localTypes.length &&
+                localTypes[info.wasmLocalIdx] == ValType.f32 &&
+                isF64Expression(stmt.initializer))
+                out_ ~= Op.f32_demote_f64;
         } else {
             // Default-initialize based on local type
             if (info.wasmLocalIdx < localTypes.length &&
+                localTypes[info.wasmLocalIdx] == ValType.f64) {
+                out_ ~= Op.f64_const;
+                double zero = 0.0;
+                out_ ~= (cast(ubyte*)&zero)[0..8];
+            } else if (info.wasmLocalIdx < localTypes.length &&
+                       localTypes[info.wasmLocalIdx] == ValType.f32) {
+                out_ ~= Op.f32_const;
+                float zero = 0.0f;
+                out_ ~= (cast(ubyte*)&zero)[0..4];
+            } else if (info.wasmLocalIdx < localTypes.length &&
                 localTypes[info.wasmLocalIdx] == ValType.i64) {
                 out_ ~= Op.i64_const;
                 leb128s(out_, 0);
@@ -3056,7 +3078,7 @@ class FuncContext {
             // Check for exception after real function calls (not struct/class construction)
             if (!isConstructionCall(call)) {
                 if (expressionHasValue(call))
-                    emitExceptionCheckWithValue(out_, call.location, isI64Expression(call), isF64Expression(call));
+                    emitExceptionCheckWithValue(out_, call.location, isI64Expression(call), isF64Expression(call), isF32Expression(call));
                 else
                     emitExceptionCheck(out_, call.location);
             }
@@ -3134,7 +3156,7 @@ class FuncContext {
                     out_ ~= Op.i32_mul;
                     out_ ~= Op.i32_add;
                     // Load value for scalar elements
-                    bool isFloat = isF64ElementType(arrType.elementType);
+                    bool isFloat = isF64ElementType(arrType.elementType) || isF32ElementType(arrType.elementType);
                     if (elemSize <= 4 || isFloat)
                         emitLoadForSize(out_, elemSize, isFloat);
                     return;
@@ -3161,7 +3183,7 @@ class FuncContext {
                 out_ ~= Op.i32_add;
                 // Aggregate elements: leave address on stack (like struct variables)
                 {
-                    bool isFloat = isF64ElementType(info.elementType);
+                    bool isFloat = isF64ElementType(info.elementType) || isF32ElementType(info.elementType);
                     if (info.elementSize <= 4 || isFloat)
                         emitLoadForSize(out_, info.elementSize, isFloat);
                 }
@@ -3179,7 +3201,7 @@ class FuncContext {
                 out_ ~= Op.i32_add;
                 // Aggregate elements: leave address on stack (like struct variables)
                 {
-                    bool isFloat = isF64ElementType(info.elementType);
+                    bool isFloat = isF64ElementType(info.elementType) || isF32ElementType(info.elementType);
                     if (info.elementSize <= 4 || isFloat)
                         emitLoadForSize(out_, info.elementSize, isFloat);
                 }
@@ -3217,7 +3239,7 @@ class FuncContext {
                             out_ ~= Op.i32_mul;
                             out_ ~= Op.i32_add;
                             // Load value for scalar elements
-                            bool isFloat = isF64ElementType(arrType.elementType);
+                            bool isFloat = isF64ElementType(arrType.elementType) || isF32ElementType(arrType.elementType);
                             if (elemSize <= 4 || isFloat)
                                 emitLoadForSize(out_, elemSize, isFloat);
                             return;
@@ -3705,7 +3727,7 @@ class FuncContext {
     void emitSliceAppend(ref Appender!(ubyte[]) out_, string sliceName,
                          VarInfo* sliceInfo, Expression value) {
         int sliceAddr = sliceInfo.frameOffset;
-        bool isFloat = isF64ElementType(sliceInfo.elementType);
+        bool isFloat = isF64ElementType(sliceInfo.elementType) || isF32ElementType(sliceInfo.elementType);
         uint elementSize = sliceInfo.elementSize;
         bool isAggregate = (elementSize > 4 && !isFloat);
         // SP scratch layout: value takes valSize bytes, then 3 i32 temporaries
@@ -4499,52 +4521,50 @@ class FuncContext {
             return;
         }
 
-        // Check for f64→i32 truncation (e.g., cast(int)(doubleExpr))
-        if (auto targetBt = cast(BasicType)expr.targetType) {
-            bool targetIsInt = targetBt.kind != BasicType.Kind.Float64 &&
-                               targetBt.kind != BasicType.Kind.Float32;
-            if (targetIsInt && isF64Expression(expr.expression)) {
-                emitExpression(out_, expr.expression);
-                out_ ~= Op.i32_trunc_f64_s;
-                return;
-            }
+        auto targetBt = cast(BasicType)expr.targetType;
+        if (!targetBt) {
+            // Non-basic target type (pointer casts, etc.) — emit as no-op
+            emitExpression(out_, expr.expression);
+            return;
         }
 
-        // Check for i32→i64 sign extension (e.g., cast(long)(intExpr))
-        if (auto targetBt = cast(BasicType)expr.targetType) {
-            if ((targetBt.kind == BasicType.Kind.Int64 || targetBt.kind == BasicType.Kind.UInt64)
-                    && !isI64Expression(expr.expression)) {
-                emitExpression(out_, expr.expression);
-                out_ ~= Op.i64_extend_i32_s;
-                return;
-            }
-        }
+        // Determine source WASM kind
+        bool srcF64 = isF64Expression(expr.expression);
+        bool srcF32 = isF32Expression(expr.expression);
+        bool srcI64 = isI64Expression(expr.expression);
+        // srcI32 is the default (everything else)
 
-        // Check for i64→i32 truncation (e.g., cast(int)(longExpr))
-        if (auto targetBt = cast(BasicType)expr.targetType) {
-            bool targetIsI32 = targetBt.kind != BasicType.Kind.Int64 &&
-                               targetBt.kind != BasicType.Kind.UInt64 &&
-                               targetBt.kind != BasicType.Kind.Float64 &&
-                               targetBt.kind != BasicType.Kind.Float32;
-            if (targetIsI32 && isI64Expression(expr.expression)) {
-                emitExpression(out_, expr.expression);
-                out_ ~= Op.i32_wrap_i64;
-                return;
-            }
-        }
+        // Determine target kind
+        bool tgtF64 = targetBt.kind == BasicType.Kind.Float64;
+        bool tgtF32 = targetBt.kind == BasicType.Kind.Float32;
+        bool tgtI64 = targetBt.kind == BasicType.Kind.Int64 || targetBt.kind == BasicType.Kind.UInt64;
+        // tgtI32 is the default
 
-        // Check for i32→f64 promotion (e.g., cast(double)(intExpr))
-        if (auto targetBt = cast(BasicType)expr.targetType) {
-            if ((targetBt.kind == BasicType.Kind.Float64 || targetBt.kind == BasicType.Kind.Float32)
-                    && !isF64Expression(expr.expression)) {
-                emitExpression(out_, expr.expression);
-                out_ ~= Op.f64_convert_i32_s;
-                return;
-            }
-        }
-
-        // Emit the expression being cast (no-op casts like int→uint, widening, etc.)
         emitExpression(out_, expr.expression);
+
+        // Emit conversion opcode based on source→target type pair
+        if (srcF64) {
+            if (tgtF32)      out_ ~= Op.f32_demote_f64;
+            else if (tgtI64) out_ ~= Op.i64_trunc_f64_s;
+            else if (tgtF64) {} // no-op
+            else             out_ ~= Op.i32_trunc_f64_s;
+        } else if (srcF32) {
+            if (tgtF64)      out_ ~= Op.f64_promote_f32;
+            else if (tgtI64) out_ ~= Op.i64_trunc_f32_s;
+            else if (tgtF32) {} // no-op
+            else             out_ ~= Op.i32_trunc_f32_s;
+        } else if (srcI64) {
+            if (tgtF64)      out_ ~= Op.f64_convert_i64_s;
+            else if (tgtF32) out_ ~= Op.f32_convert_i64_s;
+            else if (tgtI64) {} // no-op
+            else             out_ ~= Op.i32_wrap_i64;
+        } else {
+            // srcI32
+            if (tgtF64)      out_ ~= Op.f64_convert_i32_s;
+            else if (tgtF32) out_ ~= Op.f32_convert_i32_s;
+            else if (tgtI64) out_ ~= Op.i64_extend_i32_s;
+            // else: i32→i32, no-op (e.g., int→uint)
+        }
     }
     
     /**
@@ -5059,17 +5079,34 @@ class FuncContext {
     /// Check if an element type is a 64-bit floating point.
     private static bool isF64ElementType(Type t) {
         if (auto bt = cast(BasicType)t)
-            return bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32;
+            return bt.kind == BasicType.Kind.Float64;
         return false;
     }
 
-    /// Check if an expression produces f64/f32 on the WASM stack.
+    /// Check if an element type is a 32-bit floating point.
+    private static bool isF32ElementType(Type t) {
+        if (auto bt = cast(BasicType)t)
+            return bt.kind == BasicType.Kind.Float32;
+        return false;
+    }
+
+    /// Check if an expression produces f64 on the WASM stack.
     private bool isF64Expression(Expression expr) {
         assert(expr.type !is null,
             "isF64Expression: expr.type not set — type checker must set type on all expressions before codegen");
         auto bt = cast(BasicType)expr.type.resolve();
         if (bt)
-            return bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32;
+            return bt.kind == BasicType.Kind.Float64;
+        return false;
+    }
+
+    /// Check if an expression produces f32 on the WASM stack.
+    private bool isF32Expression(Expression expr) {
+        assert(expr.type !is null,
+            "isF32Expression: expr.type not set — type checker must set type on all expressions before codegen");
+        auto bt = cast(BasicType)expr.type.resolve();
+        if (bt)
+            return bt.kind == BasicType.Kind.Float32;
         return false;
     }
 
@@ -5111,6 +5148,10 @@ class FuncContext {
             out_ ~= Op.i64_load;
             out_ ~= cast(ubyte)0x03;  // alignment log2(8)
             leb128u(out_, 0);
+        } else if (elemSize == 4 && isFloat) {
+            out_ ~= Op.f32_load;
+            out_ ~= cast(ubyte)0x02;  // alignment log2(4)
+            leb128u(out_, 0);
         } else {
             out_ ~= Op.i32_load;
             out_ ~= cast(ubyte)0x02;
@@ -5128,6 +5169,10 @@ class FuncContext {
             out_ ~= Op.f64_store;
             out_ ~= cast(ubyte)0x03;  // alignment log2(8)
             leb128u(out_, 0);
+        } else if (elemSize == 4 && isFloat) {
+            out_ ~= Op.f32_store;
+            out_ ~= cast(ubyte)0x02;  // alignment log2(4)
+            leb128u(out_, 0);
         } else {
             out_ ~= Op.i32_store;
             out_ ~= cast(ubyte)0x02;
@@ -5136,6 +5181,14 @@ class FuncContext {
     }
 
     void emitLiteral(ref Appender!(ubyte[]) out_, LiteralExpression expr) {
+        // If expression type indicates f32, emit f32_const (literal stored as double, demote here)
+        if (isF32Expression(expr)) {
+            out_ ~= Op.f32_const;
+            float val = cast(float)(expr.value.type == typeid(double) ? expr.value.get!double() : 0.0);
+            out_ ~= (cast(ubyte*)&val)[0..4];
+            return;
+        }
+
         // If expression type indicates i64, emit i64_const regardless of variant type
         if (isI64Expression(expr)) {
             long value;
@@ -5399,10 +5452,11 @@ class FuncContext {
         emitExpression(out_, expr.left);
         emitExpression(out_, expr.right);
 
-        // Emit operator — dispatch f64 ops when operands are float
+        // Emit operator — dispatch f64/f32 ops when operands are float
         Op op;
-        bool isFloat = isF64Expression(expr.left);
-        if (isFloat) {
+        bool isF64 = isF64Expression(expr.left);
+        bool isF32 = isF32Expression(expr.left);
+        if (isF64) {
             switch (expr.operator) {
                 case BinaryExpression.Operator.Add: op = Op.f64_add; break;
                 case BinaryExpression.Operator.Subtract: op = Op.f64_sub; break;
@@ -5417,11 +5471,25 @@ class FuncContext {
                 default:
                     assert(0, "Float binary operator not supported: " ~ to!string(expr.operator));
             }
+        } else if (isF32) {
+            switch (expr.operator) {
+                case BinaryExpression.Operator.Add: op = Op.f32_add; break;
+                case BinaryExpression.Operator.Subtract: op = Op.f32_sub; break;
+                case BinaryExpression.Operator.Multiply: op = Op.f32_mul; break;
+                case BinaryExpression.Operator.Divide: op = Op.f32_div; break;
+                case BinaryExpression.Operator.Equal: op = Op.f32_eq; break;
+                case BinaryExpression.Operator.NotEqual: op = Op.f32_ne; break;
+                case BinaryExpression.Operator.Less: op = Op.f32_lt; break;
+                case BinaryExpression.Operator.LessEqual: op = Op.f32_le; break;
+                case BinaryExpression.Operator.Greater: op = Op.f32_gt; break;
+                case BinaryExpression.Operator.GreaterEqual: op = Op.f32_ge; break;
+                default:
+                    assert(0, "Float binary operator not supported: " ~ to!string(expr.operator));
+            }
         } else {
-            // Safety: if either operand is f64, isFloat should have been true.
-            // This assert catches bugs in isF64Expression that would silently emit i32 ops on f64 values.
-            assert(!isF64Expression(expr.right),
-                "emitBinary: right operand is f64 but left was not detected as f64 — type mismatch in binary expression");
+            // Safety: if either operand is float, it should have been caught above.
+            assert(!isF64Expression(expr.right) && !isF32Expression(expr.right),
+                "emitBinary: right operand is float but left was not detected as float — type mismatch in binary expression");
             final switch (expr.operator) {
             case BinaryExpression.Operator.Add: op = Op.i32_add; break;
             case BinaryExpression.Operator.Subtract: op = Op.i32_sub; break;
@@ -5487,6 +5555,9 @@ class FuncContext {
                 if (isF64Expression(expr)) {
                     emitExpression(out_, expr.operand);
                     out_ ~= Op.f64_neg;
+                } else if (isF32Expression(expr)) {
+                    emitExpression(out_, expr.operand);
+                    out_ ~= Op.f32_neg;
                 } else if (isI64Expression(expr)) {
                     out_ ~= Op.i64_const;
                     leb128s(out_, 0);
@@ -6450,8 +6521,15 @@ class FuncContext {
 
             // Non-struct argument
             emitExpression(out_, arg);
+            // Implicit f64→f32 for float params passed double arguments
+            if (calleeDecl && argIdx < calleeDecl.parameters.length) {
+                auto paramType = calleeDecl.parameters[argIdx].type;
+                if (auto pbt = cast(BasicType)paramType)
+                    if (pbt.kind == BasicType.Kind.Float32 && isF64Expression(arg))
+                        out_ ~= Op.f32_demote_f64;
+            }
         }
-        
+
         // Call — use IFTI resolved name if available
         string callName = expr.resolvedInstantiation ? expr.resolvedInstantiation.name : ident.name;
         uint funcIdx = emitter.getFuncIndex(callName, expr.location);
@@ -7700,9 +7778,19 @@ class FuncContext {
                     out_ ~= Op.local_get;
                     leb128u(out_, wasmIdx);
                     emitExpression(out_, expr.right);
-                    emitCompoundOp(out_, expr.operator, isF64Expression(expr.left), expr.location);
+                    // Implicit f64→f32 before compound op on float local
+                    if (info.wasmLocalIdx < localTypes.length &&
+                        localTypes[info.wasmLocalIdx] == ValType.f32 &&
+                        isF64Expression(expr.right))
+                        out_ ~= Op.f32_demote_f64;
+                    emitCompoundOp(out_, expr.operator, isF64Expression(expr.left), isF32Expression(expr.left), expr.location);
                 } else {
                     emitExpression(out_, expr.right);
+                    // Implicit f64→f32 for float local assigned double expression
+                    if (info.wasmLocalIdx < localTypes.length &&
+                        localTypes[info.wasmLocalIdx] == ValType.f32 &&
+                        isF64Expression(expr.right))
+                        out_ ~= Op.f32_demote_f64;
                 }
                 out_ ~= Op.local_tee;
                 leb128u(out_, wasmIdx);
@@ -7726,7 +7814,7 @@ class FuncContext {
                     out_ ~= cast(ubyte)0x02;
                     leb128u(out_, 0);
                     emitExpression(out_, expr.right);
-                    emitCompoundOp(out_, expr.operator, isF64Expression(expr.left), expr.location);
+                    emitCompoundOp(out_, expr.operator, isF64Expression(expr.left), isF32Expression(expr.left), expr.location);
                 } else {
                     emitExpression(out_, expr.right);
                 }
@@ -7798,7 +7886,7 @@ class FuncContext {
                         out_ ~= Op.global_get;
                         leb128u(out_, varDecl.wasmGlobalIndex);
                         emitExpression(out_, expr.right);
-                        emitCompoundOp(out_, expr.operator, isF64Expression(expr.left), expr.location);
+                        emitCompoundOp(out_, expr.operator, isF64Expression(expr.left), isF32Expression(expr.left), expr.location);
                     } else {
                         emitExpression(out_, expr.right);
                     }
@@ -7819,8 +7907,8 @@ class FuncContext {
 
     /// Emit the compound operation for compound assignment operators.
     private void emitCompoundOp(ref Appender!(ubyte[]) out_, AssignmentExpression.Operator op,
-            bool isFloat, SourceLocation loc = SourceLocation.init) {
-        if (isFloat) {
+            bool isF64, bool isF32 = false, SourceLocation loc = SourceLocation.init) {
+        if (isF64) {
             final switch (op) {
                 case AssignmentExpression.Operator.Assign:
                     assert(0, "emitCompoundOp called with Assign");
@@ -7828,6 +7916,27 @@ class FuncContext {
                 case AssignmentExpression.Operator.SubtractAssign: out_ ~= Op.f64_sub; break;
                 case AssignmentExpression.Operator.MultiplyAssign: out_ ~= Op.f64_mul; break;
                 case AssignmentExpression.Operator.DivideAssign: out_ ~= Op.f64_div; break;
+                case AssignmentExpression.Operator.ModuloAssign:
+                    throw new EmitError("%= not supported for floating-point types", loc);
+                case AssignmentExpression.Operator.AndAssign:
+                case AssignmentExpression.Operator.OrAssign:
+                case AssignmentExpression.Operator.XorAssign:
+                    throw new EmitError("bitwise compound assignment not supported for floating-point types", loc);
+                case AssignmentExpression.Operator.ShiftLeftAssign:
+                    assert(0, "<<= should be lowered to opShiftLeft call");
+                case AssignmentExpression.Operator.ShiftRightAssign:
+                    assert(0, ">>= should be lowered to opShiftRight call");
+                case AssignmentExpression.Operator.ConcatAssign:
+                    throw new EmitError("~= should use slice path", SourceLocation.init);
+            }
+        } else if (isF32) {
+            final switch (op) {
+                case AssignmentExpression.Operator.Assign:
+                    assert(0, "emitCompoundOp called with Assign");
+                case AssignmentExpression.Operator.AddAssign: out_ ~= Op.f32_add; break;
+                case AssignmentExpression.Operator.SubtractAssign: out_ ~= Op.f32_sub; break;
+                case AssignmentExpression.Operator.MultiplyAssign: out_ ~= Op.f32_mul; break;
+                case AssignmentExpression.Operator.DivideAssign: out_ ~= Op.f32_div; break;
                 case AssignmentExpression.Operator.ModuloAssign:
                     throw new EmitError("%= not supported for floating-point types", loc);
                 case AssignmentExpression.Operator.AndAssign:
@@ -7899,6 +8008,9 @@ class FuncContext {
                     emitExpression(out_, value);
                     auto bt = cast(BasicType)field.type;
                     bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
+                    // Implicit f64→f32 for float struct fields assigned double expressions
+                    if (bt && bt.kind == BasicType.Kind.Float32 && isF64Expression(value))
+                        out_ ~= Op.f32_demote_f64;
                     emitStoreForSize(out_, cast(uint)field.size, isFloat);
                     // Re-emit value for expression result
                     emitExpression(out_, value);
@@ -7934,6 +8046,9 @@ class FuncContext {
                     out_ ~= Op.i32_add;
                 }
                 emitExpression(out_, value);
+                // Implicit f64→f32 for float struct fields assigned double expressions
+                if (bt && bt.kind == BasicType.Kind.Float32 && isF64Expression(value))
+                    out_ ~= Op.f32_demote_f64;
                 emitStoreForSize(out_, cast(uint)field.size, isFloat);
 
                 // Re-load for expression value

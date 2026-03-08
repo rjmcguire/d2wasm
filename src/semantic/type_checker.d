@@ -728,6 +728,17 @@ class TypeChecker {
                 if (!currentFunctionReturnType) {
                     throw new TypeError("Return statement outside of any function", returnStmt.location);
                 }
+                // Narrow float literals: float foo() { return 10.5; }
+                if (auto targetBt = cast(BasicType)currentFunctionReturnType) {
+                    if (targetBt.kind == BasicType.Kind.Float32) {
+                        if (auto lit = cast(LiteralExpression)returnStmt.value) {
+                            if (lit.value.type == typeid(double)) {
+                                lit.type = currentFunctionReturnType;
+                                returnType = currentFunctionReturnType;
+                            }
+                        }
+                    }
+                }
                 auto compat = checkTypeCompatibility(returnType, currentFunctionReturnType);
                 if (!compat.isCompatible) {
                     // Try alias-this unwrapping
@@ -785,6 +796,17 @@ class TypeChecker {
                     // auto type inference
                     varDeclStmt.type = initType;
                 } else {
+                    // Narrow float literals: float x = 10.5; → set literal type to Float32
+                    if (auto targetBt = cast(BasicType)varDeclStmt.type) {
+                        if (targetBt.kind == BasicType.Kind.Float32) {
+                            if (auto lit = cast(LiteralExpression)varDeclStmt.initializer) {
+                                if (lit.value.type == typeid(double)) {
+                                    lit.type = varDeclStmt.type;
+                                    initType = varDeclStmt.type;
+                                }
+                            }
+                        }
+                    }
                     auto compat = checkTypeCompatibility(initType, varDeclStmt.type);
                     if (!compat.isCompatible) {
                         // Try alias-this unwrapping

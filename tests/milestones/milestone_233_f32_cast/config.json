@@ -1,0 +1,6 @@
+{
+  "type": "wasm_exec",
+  "expected_result": 122,
+  "description": "f32 casts: int/float/double/long conversions",
+  "mangled_entry": "_D4test4mainFZi"
+}

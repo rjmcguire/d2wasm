@@ -1,0 +1,6 @@
+{
+  "type": "wasm_exec",
+  "expected_result": 4,
+  "description": "f32 unary: negation and plus",
+  "mangled_entry": "_D4test4mainFZi"
+}
