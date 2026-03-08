@@ -1,43 +1,15 @@
 /**
- * Metal C Bridge — slim residual requiring Objective-C runtime features
+ * Metal C Bridge — vertex buffer accumulation only
  *
- * Handles: event loop (@autoreleasepool), vertex buffer accumulation
- * (native memory needed for Metal), and window close notification.
+ * Handles: vertex buffer accumulation (float/f32 memory needed for Metal).
+ * Will be eliminated once the compiler supports f32 codegen.
  *
- * D handles: Metal device, command queue, shader compilation, pipeline,
- * buffer creation, window creation, render pass, game loop,
- * MetalView (NSView subclass), and BridgeWindowDelegate.
+ * D handles: everything else — device, command queue, shaders, pipeline,
+ * window, render pass, event loop, view, delegate.
  */
 #import <Metal/Metal.h>
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
-
-// ── Window close state ──────────────────────────────────────────────
-
-static BOOL g_windowClosed = NO;
-
-/// Called from D's BridgeWindowDelegate.windowWillClose
-void metal_notify_close(void) {
-    g_windowClosed = YES;
-}
-
-/// Poll events; returns 0 when window closed
-int metal_process_events(void) {
-    if (g_windowClosed) return 0;
-
-    @autoreleasepool {
-        NSEvent *event;
-        while ((event = [NSApp nextEventMatchingMask:NSEventMaskAny
-                                           untilDate:[NSDate dateWithTimeIntervalSinceNow:0.016]
-                                              inMode:NSDefaultRunLoopMode
-                                             dequeue:YES])) {
-            [NSApp sendEvent:event];
-            [NSApp updateWindows];
-            if (g_windowClosed) return 0;
-        }
-    }
-    return 1;
-}
 
 // ── Vertex accumulator ──────────────────────────────────────────────
 

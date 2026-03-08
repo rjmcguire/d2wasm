@@ -4510,6 +4510,29 @@ class FuncContext {
             }
         }
 
+        // Check for i32→i64 sign extension (e.g., cast(long)(intExpr))
+        if (auto targetBt = cast(BasicType)expr.targetType) {
+            if ((targetBt.kind == BasicType.Kind.Int64 || targetBt.kind == BasicType.Kind.UInt64)
+                    && !isI64Expression(expr.expression)) {
+                emitExpression(out_, expr.expression);
+                out_ ~= Op.i64_extend_i32_s;
+                return;
+            }
+        }
+
+        // Check for i64→i32 truncation (e.g., cast(int)(longExpr))
+        if (auto targetBt = cast(BasicType)expr.targetType) {
+            bool targetIsI32 = targetBt.kind != BasicType.Kind.Int64 &&
+                               targetBt.kind != BasicType.Kind.UInt64 &&
+                               targetBt.kind != BasicType.Kind.Float64 &&
+                               targetBt.kind != BasicType.Kind.Float32;
+            if (targetIsI32 && isI64Expression(expr.expression)) {
+                emitExpression(out_, expr.expression);
+                out_ ~= Op.i32_wrap_i64;
+                return;
+            }
+        }
+
         // Check for i32→f64 promotion (e.g., cast(double)(intExpr))
         if (auto targetBt = cast(BasicType)expr.targetType) {
             if ((targetBt.kind == BasicType.Kind.Float64 || targetBt.kind == BasicType.Kind.Float32)

@@ -1,8 +1,8 @@
 // Metal Render Demo — D drives Metal via extern(Objective-C) interfaces
 //
 // D handles: device init, command queue, shader compilation, pipeline,
-// buffer creation, window setup, render pass, game loop, view and delegate.
-// Bridge handles: event loop (@autoreleasepool), vertex buffers.
+// buffer creation, window setup, render pass, event loop, view and delegate.
+// Bridge handles: vertex buffers (needs f32 codegen to eliminate).
 
 pragma(lib, "/System/Library/Frameworks/Metal.framework/Metal");
 pragma(lib, "/System/Library/Frameworks/Foundation.framework/Foundation");
@@ -31,6 +31,10 @@ interface NSApplication {
     static NSApplication sharedApplication() @selector("sharedApplication");
     void setActivationPolicy(long policy) @selector("setActivationPolicy:");
     void activateIgnoringOtherApps(int flag) @selector("activateIgnoringOtherApps:");
+    NSEvent nextEventMatchingMask(long mask, NSDate untilDate, NSString inMode, int dequeue)
+        @selector("nextEventMatchingMask:untilDate:inMode:dequeue:");
+    void sendEvent(NSEvent event) @selector("sendEvent:");
+    void updateWindows() @selector("updateWindows");
 }
 
 extern(Objective-C)
@@ -63,6 +67,12 @@ interface NSView {
 extern(Objective-C)
 interface NSEvent {
     NSPoint locationInWindow() @selector("locationInWindow");
+}
+
+extern(Objective-C)
+interface NSDate {
+    static NSDate dateWithTimeIntervalSinceNow(double secs)
+        @selector("dateWithTimeIntervalSinceNow:");
 }
 
 extern(Objective-C)
@@ -151,9 +161,9 @@ interface MTLRenderCommandEncoder {
 
 extern(C) long MTLCreateSystemDefaultDevice();
 
-// Bridge: event loop (needs @autoreleasepool), notify
-extern(C) int metal_process_events();
-extern(C) void metal_notify_close();
+// Autorelease pool (ObjC runtime)
+extern(C) long objc_autoreleasePoolPush();
+extern(C) void objc_autoreleasePoolPop(long pool);
 
 // Bridge: vertex accumulation (native memory needed for Metal)
 extern(C) void metal_add_vertex(double x, double y, double r, double g, double b, double a);
@@ -180,8 +190,9 @@ double cos_approx(double x) {
     return sin_approx(x + 1.5707963);
 }
 
-// ── Click State (D globals) ───────────────────────────────────────
+// ── Window/Click State (D globals) ────────────────────────────────
 
+int g_windowClosed = 0;
 int g_hasClick = 0;
 double g_clickX = 0.0;
 double g_clickY = 0.0;
@@ -200,7 +211,7 @@ class BridgeWindowDelegate : NSObject {
     BridgeWindowDelegate myInit() @selector("init");
 
     void windowWillClose(long notification) @selector("windowWillClose:") {
-        metal_notify_close();
+        g_windowClosed = 1;
     }
 }
 
@@ -338,8 +349,24 @@ int main() {
     window.makeKeyAndOrderFront(0);
     app.activateIgnoringOtherApps(1);
 
-    // Game loop
-    while (metal_process_events() != 0) {
+    // Game loop — event processing in D (no more C bridge)
+    NSString runLoopMode = NSString.stringWithUTF8String("kCFRunLoopDefaultMode".toStringz());
+
+    while (g_windowClosed == 0) {
+        long pool = objc_autoreleasePoolPush();
+
+        while (1 != 0) {
+            NSDate timeout = NSDate.dateWithTimeIntervalSinceNow(0.016);
+            NSEvent event = app.nextEventMatchingMask(cast(long)-1, timeout, runLoopMode, 1);
+            if (cast(long)event == 0) break;
+            app.sendEvent(event);
+            app.updateWindows();
+            if (g_windowClosed != 0) break;
+        }
+
+        objc_autoreleasePoolPop(pool);
+        if (g_windowClosed != 0) break;
+
         if (g_hasClick != 0) {
             g_hasClick = 0;
             on_click(g_clickX, g_clickY);
