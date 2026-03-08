@@ -1,0 +1,8 @@
+{
+    "name": "objc_class",
+    "description": "extern(Objective-C) class with method bodies, registered at runtime",
+    "type": "ffi_exec",
+    "expected_result": 42,
+    "link_frameworks": ["Foundation"],
+    "capability": "extern(Objective-C) class definitions compiled to WASM with ObjC runtime registration"
+}

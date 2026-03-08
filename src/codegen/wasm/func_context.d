@@ -190,11 +190,22 @@ class FuncContext {
     uint frameLine;
     uint frameColumn;
     
+    bool isObjCMethod;  // true when this function is an extern(Objective-C) class method
+    uint objcCmdLocalIdx;  // WASM local index of hidden _cmd parameter (i64)
+
     this(FuncInfo f, BinaryEmitter e) {
         import codegen.param_layout : ParamRole;
 
         this.func = f;
         this.emitter = e;
+
+        // --- Special path for extern(Objective-C) class methods ---
+        // These have a different calling convention: (self:i64, _cmd:i64, ...user_params)
+        // No ParamLayout is used — locals are set up directly from the WASM signature.
+        if (f.classParent !is null && f.classParent.isObjC) {
+            initObjCClassMethod(f, e);
+            return;
+        }
 
         // --- Register all parameters from canonical ParamLayout ---
         foreach (ref entry; f.paramLayout.entries) {
@@ -354,6 +365,90 @@ class FuncContext {
         }
     }
     
+    /**
+     * Initialize locals for an extern(Objective-C) class method.
+     * Calling convention: (self:i64, _cmd:i64, ...user_params) → return_type
+     * self and _cmd are i64 WASM locals (native ObjC pointers).
+     */
+    private void initObjCClassMethod(FuncInfo f, BinaryEmitter e) {
+        isObjCMethod = true;
+
+        // Local 0: self (i64) — registered as "this" with special ObjC handling
+        uint selfIdx = cast(uint)localTypes.length;
+        localTypes ~= ValType.i64;
+        thisLocalIndex = selfIdx;
+
+        VarInfo selfVi;
+        selfVi.kind = VarKind.class_;
+        selfVi.classDecl = f.classParent;
+        selfVi.addrMode = AddrMode.wasmLocal;  // i64 scalar, not a WASM memory pointer
+        selfVi.wasmLocalIdx = selfIdx;
+        varsByLocalId[THIS_LOCAL_ID] = selfVi;
+        varsByName["this"] = selfVi;
+
+        // Local 1: _cmd (i64) — ObjC selector, not directly used by D code
+        objcCmdLocalIdx = cast(uint)localTypes.length;
+        localTypes ~= ValType.i64;
+
+        // Locals 2+: user parameters
+        foreach (i, p; f.decl.parameters) {
+            uint wasmIdx = cast(uint)localTypes.length;
+            auto resolved = p.type.resolve();
+
+            // Resolve UserType declarations
+            if (auto ut = cast(UserType)resolved) {
+                if (!ut.declaration) ut.ensureResolved(e.symbolTable);
+            }
+
+            // ObjC interface/class params are i64
+            if (auto ut = cast(UserType)resolved) {
+                if (auto ifaceDecl = cast(InterfaceDecl)ut.declaration) {
+                    if (ifaceDecl.isObjC) {
+                        localTypes ~= ValType.i64;
+                        VarInfo uvi;
+                        uvi.kind = VarKind.interface_;
+                        uvi.addrMode = AddrMode.wasmLocal;
+                        uvi.wasmLocalIdx = wasmIdx;
+                        uvi.type = p.type;
+                        uvi.ifaceDecl = ifaceDecl;
+                        if (p.uniqueLocalId != uint.max) varsByLocalId[p.uniqueLocalId] = uvi;
+                        varsByName[p.name] = uvi;
+                        continue;
+                    }
+                }
+            }
+
+            // Struct params: flattened HFA
+            if (auto structDecl = resolved.asStruct()) {
+                // First local is the start of the flattened fields
+                foreach (field; structDecl.fields) {
+                    localTypes ~= e.dTypeToValType(field.type);
+                }
+                VarInfo uvi;
+                uvi.kind = VarKind.struct_;
+                uvi.addrMode = AddrMode.wasmLocal;
+                uvi.wasmLocalIdx = wasmIdx;
+                uvi.structDecl = structDecl;
+                uvi.type = p.type;
+                if (p.uniqueLocalId != uint.max) varsByLocalId[p.uniqueLocalId] = uvi;
+                varsByName[p.name] = uvi;
+                continue;
+            }
+
+            // Regular scalar params
+            localTypes ~= e.dTypeToValType(p.type);
+            VarInfo uvi;
+            uvi.kind = VarKind.scalar;
+            uvi.addrMode = AddrMode.wasmLocal;
+            uvi.wasmLocalIdx = wasmIdx;
+            uvi.type = p.type;
+            if (p.uniqueLocalId != uint.max) varsByLocalId[p.uniqueLocalId] = uvi;
+            varsByName[p.name] = uvi;
+        }
+
+        paramCount = cast(uint)localTypes.length;
+    }
+
     /**
      * Collect local variable declarations from statements
      */
@@ -4847,10 +4942,13 @@ class FuncContext {
         auto bt = cast(BasicType)resolved;
         if (bt)
             return bt.kind == BasicType.Kind.Int64 || bt.kind == BasicType.Kind.UInt64;
-        // ObjC interface types are i64 (opaque native pointers)
+        // ObjC interface/class types are i64 (opaque native pointers)
         if (auto ut = cast(UserType)resolved) {
             if (auto ifaceDecl = cast(InterfaceDecl)ut.declaration) {
                 if (ifaceDecl.isObjC) return true;
+            }
+            if (auto classDecl = cast(ClassDecl)ut.declaration) {
+                if (classDecl.isObjC) return true;
             }
         }
         return false;
@@ -6513,6 +6611,15 @@ class FuncContext {
                         return;
                     }
                 }
+                // ObjC class expression receiver: dispatch via synthetic interface
+                if (auto classDecl2 = resolved.asClass()) {
+                    if (classDecl2.isObjC) {
+                        if (auto synthIface = classDecl2.name in emitter.objcInterfaces) {
+                            emitObjCMethodCall(out_, *synthIface, memberExpr.object, memberExpr.memberName, args, false);
+                            return;
+                        }
+                    }
+                }
             }
             throw new EmitError("Method call on non-identifier object not yet supported", memberExpr.location);
         }
@@ -6542,7 +6649,16 @@ class FuncContext {
 
         if (objInfo) {
             if (objInfo.isStruct) structDecl = objInfo.structDecl;
-            else if (objInfo.isClass) classDecl = objInfo.classDecl;
+            else if (objInfo.isClass) {
+                classDecl = objInfo.classDecl;
+                // ObjC class: dispatch via objc_msgSend (same as ObjC interface)
+                if (classDecl !is null && classDecl.isObjC) {
+                    if (auto ifaceDecl = classDecl.name in emitter.objcInterfaces) {
+                        emitObjCMethodCall(out_, *ifaceDecl, memberExpr.object, memberExpr.memberName, args, false);
+                        return;
+                    }
+                }
+            }
             // Auto-deref: pointer-to-struct/class variable
             else if (memberExpr.isAutoDereference) {
                 auto aggDecl = resolvePointeeAggregate(memberExpr.object);
@@ -8127,6 +8243,16 @@ class FuncContext {
                         }
                     }
 
+                    // ObjC class method: dispatch via synthetic interface
+                    if (objInfo && objInfo.isClass && objInfo.classDecl.isObjC) {
+                        if (auto ifaceDecl2 = objInfo.classDecl.name in emitter.objcInterfaces) {
+                            foreach (m; (*ifaceDecl2).methods) {
+                                if (m.name == memberExpr.memberName)
+                                    return !isVoidType(m.returnType);
+                            }
+                        }
+                    }
+
                     if (structDecl) {
                         // Find the method
                         foreach (member; structDecl.members) {
@@ -8148,6 +8274,17 @@ class FuncContext {
                             foreach (m; ifaceDecl.methods) {
                                 if (m.name == memberExpr.memberName)
                                     return !isVoidType(m.returnType);
+                            }
+                        }
+                    }
+                    // ObjC class expression receiver
+                    if (auto classDecl3 = resolved.asClass()) {
+                        if (classDecl3.isObjC) {
+                            if (auto synthIface = classDecl3.name in emitter.objcInterfaces) {
+                                foreach (m; (*synthIface).methods) {
+                                    if (m.name == memberExpr.memberName)
+                                        return !isVoidType(m.returnType);
+                                }
                             }
                         }
                     }

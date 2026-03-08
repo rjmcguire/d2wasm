@@ -33,4 +33,17 @@ extern(C) @nogc nothrow {
     /// with the FFIDescriptor* as userData.
     const(void)* ffi_generic_trampoline(void* runtime, void* ctx,
                                         ulong* sp, void* mem);
+
+    /**
+     * Register ObjC classes from the objc_classes custom section.
+     *
+     * Parses section data, creates ObjC class pairs via objc_allocateClassPair,
+     * creates ffi_closures for each method that call back into WASM, and
+     * registers each class pair.
+     *
+     * Returns: number of classes registered, or -1 on error.
+     */
+    int objc_register_classes_from_section(
+        const(ubyte)* section_data, size_t section_len,
+        void* runtime, void* module_);
 }

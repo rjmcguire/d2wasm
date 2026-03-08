@@ -859,6 +859,24 @@ class SymbolCollector {
     }
     
     private void collectClassSymbol(ClassDecl decl) {
+        // ObjC classes don't have D layout — skip layout computation
+        if (decl.isObjC) {
+            auto userType = new UserType(decl.location, decl.name);
+            userType.declaration = decl;
+
+            auto symbol = new Symbol(
+                decl.name,
+                SymbolKind.Type,
+                userType,
+                decl,
+                decl.location,
+                symbolTable.inGlobalScope(),
+                symbolTable.modulePath
+            );
+            symbolTable.addSymbol(symbol);
+            return;
+        }
+
         // First, resolve base class if present (needed for layout inheritance)
         if (decl.baseClass && !decl.baseClassDecl) {
             if (auto userType = cast(UserType)decl.baseClass) {
@@ -871,14 +889,14 @@ class SymbolCollector {
                 }
             }
         }
-        
+
         // Compute class layout (with vtable pointer as first field)
         // Default to 4-byte pointers (wasm32)
         computeClassLayout(decl, 4);
-        
+
         auto userType = new UserType(decl.location, decl.name);
         userType.declaration = decl;  // Link type to declaration for size lookup
-        
+
         auto symbol = new Symbol(
             decl.name,
             SymbolKind.Type,

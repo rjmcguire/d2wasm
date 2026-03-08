@@ -425,6 +425,7 @@ abstract class AggregateDecl : Declaration {
 class ClassDecl : AggregateDecl {
     Type baseClass;  // null if no inheritance (implicitly inherits Object)
     Type[] interfaces;
+    bool isObjC;  // true for extern(Objective-C) classes
 
     // Resolved base class (set during type checking)
     ClassDecl baseClassDecl;

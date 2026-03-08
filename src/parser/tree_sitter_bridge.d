@@ -994,22 +994,41 @@ class TreeSitterBridge {
      */
     ClassDecl parseClassDeclaration(TSNode node) {
         SourceLocation loc = makeSourceLocation(node);
-        
+
         string name;
         Type baseClass = null;
         Type[] interfaces;
         Declaration[] members;
         string[] aliasThisNames;
+        bool isObjC = false;
 
         uint childCount = TreeSitterParser.getChildCount(node);
         for (uint i = 0; i < childCount; i++) {
             TSNode child = TreeSitterParser.getChild(node, i);
             string childType = TreeSitterParser.getNodeType(child);
 
-            if (childType == "identifier") {
+            if (childType == "linkage_attribute" || childType == "storage_class") {
+                // Check for extern(Objective-C) linkage (same pattern as interface parsing)
+                if (childType == "storage_class") {
+                    uint scCount = TreeSitterParser.getChildCount(child);
+                    for (uint j = 0; j < scCount; j++) {
+                        TSNode sc = TreeSitterParser.getChild(child, j);
+                        if (TreeSitterParser.getNodeType(sc) == "linkage_attribute") {
+                            if (isObjectiveCLinkage(sc)) isObjC = true;
+                        }
+                    }
+                } else {
+                    if (isObjectiveCLinkage(child)) isObjC = true;
+                }
+            } else if (childType == "identifier") {
                 name = TreeSitterParser.getNodeText(child, sourceText);
             } else if (childType == "aggregate_body") {
-                members = parseAggregateBody(child, aliasThisNames);
+                if (isObjC) {
+                    // ObjC class: parse methods with @selector and bodies
+                    members = parseObjCClassMembers(child);
+                } else {
+                    members = parseAggregateBody(child, aliasThisNames);
+                }
             } else if (childType == "base_class_list" || childType == "super_class" || childType == "base_class") {
                 // Parse inheritance - accumulate all base types
                 auto inheritTypes = parseBaseClassList(child);
@@ -1023,11 +1042,11 @@ class TreeSitterBridge {
                 }
             }
         }
-        
+
         if (name.length == 0) {
             throw new ParseError("Class declaration missing name", loc);
         }
-        
+
         Visibility vis;
         DeclAttrs dattrs;
         extractAttributes(node, vis, dattrs);
@@ -1036,25 +1055,26 @@ class TreeSitterBridge {
         classDecl.visibility = vis;
         classDecl.attrs = dattrs;
         classDecl.aliasThis = aliasThisNames;
+        classDecl.isObjC = isObjC;
 
         // Mark FunctionDecl members as methods and extract constructor/destructor
         foreach (member; members) {
             if (auto funcDecl = cast(FunctionDecl)member) {
                 funcDecl.isMethod = true;
                 funcDecl.parent = classDecl;
-                
+
                 // Check for constructor (this)
                 if (funcDecl.name == "this" || funcDecl.isConstructor) {
                     classDecl.constructor = funcDecl;
                 }
-                
+
                 // Check for destructor (~this)
                 if (funcDecl.isDestructor) {
                     classDecl.destructor = funcDecl;
                 }
             }
         }
-        
+
         return classDecl;
     }
     
@@ -1453,6 +1473,80 @@ class TreeSitterBridge {
         if (returnType is null) returnType = new BasicType(loc, BasicType.Kind.Void);
 
         auto decl = new FunctionDecl(loc, name, returnType, parameters, null);
+        decl.isStatic = isStatic;
+        decl.objcSelector = selector;
+        return decl;
+    }
+
+    /**
+     * Parse extern(Objective-C) class members — methods with @selector AND bodies.
+     * Unlike interface methods which are signature-only, class methods have implementations.
+     */
+    private Declaration[] parseObjCClassMembers(TSNode body_) {
+        Declaration[] members;
+
+        uint childCount = TreeSitterParser.getChildCount(body_);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(body_, i);
+            string childType = TreeSitterParser.getNodeType(child);
+
+            if (childType == "function_declaration") {
+                auto method = parseObjCClassMethod(child);
+                if (method) {
+                    method.isMethod = true;
+                    members ~= method;
+                }
+            } else if (childType == "variable_declaration" || childType == "auto_declaration") {
+                // Allow field declarations in ObjC classes
+                auto decls = parseDeclarationNode(child);
+                foreach (d; decls) members ~= d;
+            }
+        }
+
+        return members;
+    }
+
+    /**
+     * Parse a single ObjC class method — like parseObjCMethod but also parses the function body.
+     */
+    private FunctionDecl parseObjCClassMethod(TSNode node) {
+        SourceLocation loc = makeSourceLocation(node);
+
+        Type returnType = null;
+        string name;
+        Parameter[] parameters;
+        string selector = null;
+        bool isStatic = false;
+        Statement funcBody = null;
+
+        uint childCount = TreeSitterParser.getChildCount(node);
+        for (uint i = 0; i < childCount; i++) {
+            TSNode child = TreeSitterParser.getChild(node, i);
+            string childType = TreeSitterParser.getNodeType(child);
+
+            if (childType == "type" || childType == "basic_type" || childType == "builtin_type") {
+                returnType = parseType(child);
+            } else if (childType == "identifier") {
+                name = TreeSitterParser.getNodeText(child, sourceText);
+            } else if (childType == "parameters") {
+                parameters = parseParameterList(child);
+            } else if (childType == "static") {
+                isStatic = true;
+            } else if (childType == "storage_class") {
+                string text = TreeSitterParser.getNodeText(child, sourceText);
+                if (text == "static") isStatic = true;
+            } else if (childType == "at_attribute" || childType == "member_function_attribute") {
+                auto sel = extractObjCSelector(child);
+                if (sel !is null) selector = sel;
+            } else if (childType == "function_body") {
+                funcBody = parseFunctionBody(child);
+            }
+        }
+
+        if (name.length == 0) return null;
+        if (returnType is null) returnType = new BasicType(loc, BasicType.Kind.Void);
+
+        auto decl = new FunctionDecl(loc, name, returnType, parameters, funcBody);
         decl.isStatic = isStatic;
         decl.objcSelector = selector;
         return decl;

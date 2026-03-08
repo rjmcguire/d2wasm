@@ -330,9 +330,15 @@ class TypeChecker {
      * Type check class declaration
      */
     void checkClassDeclaration(ClassDecl decl) {
+        // ObjC classes: base class is an ObjC interface, no D vtable/layout
+        if (decl.isObjC) {
+            checkObjCClassDeclaration(decl);
+            return;
+        }
+
         symbolTable.enterScope("class:" ~ decl.name);
         scope(exit) symbolTable.exitScope();
-        
+
         // Resolve base class if present
         if (decl.baseClass) {
             if (auto userType = cast(UserType)decl.baseClass) {
@@ -341,12 +347,12 @@ class TypeChecker {
                     if (auto baseClassDecl = cast(ClassDecl)typeSymbol.declaration) {
                         decl.baseClassDecl = baseClassDecl;
                         userType.declaration = baseClassDecl;
-                        
+
                         // Validate: can't inherit from self
                         if (baseClassDecl is decl) {
                             throw new TypeError("Class cannot inherit from itself: " ~ decl.name, decl.location);
                         }
-                        
+
                         // Check for circular inheritance (A : B, B : A)
                         ClassDecl walker = baseClassDecl;
                         while (walker.baseClassDecl) {
@@ -371,17 +377,17 @@ class TypeChecker {
                 }
             }
         }
-        
+
         // Type check members
         foreach (member; decl.members) {
             checkDeclaration(member);
         }
-        
+
         // Validate method overrides if we have a base class
         if (decl.baseClassDecl) {
             validateOverrides(decl);
         }
-        
+
         // Validate interface implementations
         foreach (ifaceType; decl.interfaces) {
             if (auto userType = cast(UserType)ifaceType) {
@@ -395,6 +401,47 @@ class TypeChecker {
                     validateInterfaceImplementation(decl, ifaceDecl);
                 }
             }
+        }
+    }
+
+    /**
+     * Type check an extern(Objective-C) class declaration.
+     * ObjC classes have no D vtable or layout — they're registered dynamically.
+     * Base class must be an ObjC interface (e.g., NSView, NSObject).
+     */
+    void checkObjCClassDeclaration(ClassDecl decl) {
+        symbolTable.enterScope("class:" ~ decl.name);
+        scope(exit) symbolTable.exitScope();
+
+        // Resolve base class — must be an ObjC interface
+        if (decl.baseClass) {
+            if (auto userType = cast(UserType)decl.baseClass) {
+                auto typeSymbol = symbolTable.lookupSymbol(userType.name);
+                if (typeSymbol && typeSymbol.kind == SymbolKind.Type) {
+                    if (auto ifaceDecl = cast(InterfaceDecl)typeSymbol.declaration) {
+                        if (!ifaceDecl.isObjC) {
+                            throw new TypeError(
+                                "extern(Objective-C) class base must be an ObjC interface: " ~ userType.name,
+                                decl.location);
+                        }
+                        userType.declaration = ifaceDecl;
+                        // Move to interfaces list (ObjC classes don't have D base classes)
+                        decl.interfaces = [decl.baseClass] ~ decl.interfaces;
+                        decl.baseClass = null;
+                    } else {
+                        throw new TypeError(
+                            "extern(Objective-C) class base must be an ObjC interface, not: " ~ userType.name,
+                            decl.location);
+                    }
+                } else {
+                    throw new TypeError("Unknown base type: " ~ userType.name, decl.location);
+                }
+            }
+        }
+
+        // Type check method bodies
+        foreach (member; decl.members) {
+            checkDeclaration(member);
         }
     }
     
@@ -2881,6 +2928,35 @@ class TypeChecker {
         if (auto ident = cast(IdentifierExpression)expr.object) {
             auto symbol = symbolTable.lookupSymbol(ident.name);
             if (symbol && symbol.kind == SymbolKind.Type) {
+                // ObjC interface/class: static method calls like NSApp.sharedApplication()
+                // Return the interface/class type (resolved at codegen time)
+                if (auto ut = cast(UserType)symbol.type) {
+                    if (auto ifaceDecl = cast(InterfaceDecl)ut.declaration) {
+                        if (ifaceDecl.isObjC) {
+                            // Look up method return type
+                            foreach (m; ifaceDecl.methods) {
+                                if (m.name == expr.memberName)
+                                    return m.returnType;
+                            }
+                            // Static methods on ObjC types are resolved at codegen
+                            return symbol.type;
+                        }
+                    }
+                    if (auto classDecl = cast(ClassDecl)ut.declaration) {
+                        if (classDecl.isObjC) {
+                            // Look up method return type from class members
+                            foreach (member; classDecl.members) {
+                                if (auto m = cast(FunctionDecl)member) {
+                                    if (m.name == expr.memberName)
+                                        return m.returnType;
+                                }
+                            }
+                            // Static methods resolved at codegen
+                            return symbol.type;
+                        }
+                    }
+                }
+
                 // It's a type property access
                 if (expr.memberName == "sizeof") {
                     // Type.sizeof returns a compile-time integer
@@ -2929,8 +3005,20 @@ class TypeChecker {
                     expr.location);
             }
 
-            // Handle class field access (same as struct, but layout includes vtable_ptr)
+            // Handle class field/method access
             if (auto classDecl = cast(ClassDecl)userType.declaration) {
+                // ObjC classes: look up methods by name (no D fields)
+                if (classDecl.isObjC) {
+                    foreach (member; classDecl.members) {
+                        if (auto funcDecl = cast(FunctionDecl)member) {
+                            if (funcDecl.name == expr.memberName)
+                                return funcDecl.returnType;
+                        }
+                    }
+                    // Method may be inherited from parent ObjC interface
+                    return objectType;  // resolved at codegen
+                }
+
                 auto field = classDecl.getField(expr.memberName);
                 if (field) {
                     return field.type;

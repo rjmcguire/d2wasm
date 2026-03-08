@@ -332,6 +332,9 @@ class CTFERuntime {
         // Link extern(C) FFI functions (if ffi_meta custom section is present)
         linkFFIFunctions(wasmBytes);
 
+        // Register extern(Objective-C) classes (if objc_classes section is present)
+        registerObjCClasses(wasmBytes);
+
         initialized = true;
     }
     
@@ -464,6 +467,60 @@ class CTFERuntime {
                     fromStringz(result).idup);
             }
         }
+    }
+
+    /**
+     * Register extern(Objective-C) classes by reading the objc_classes custom section
+     * from the WASM binary and calling the C registration function.
+     */
+    private void registerObjCClasses(const(ubyte)[] wasmBytes) {
+        import runtime.ffi_bindings : objc_register_classes_from_section;
+
+        auto sectionData = parseObjCClassesSection(wasmBytes);
+        if (sectionData.length == 0)
+            return;
+
+        int result = objc_register_classes_from_section(
+            sectionData.ptr, sectionData.length,
+            cast(void*)runtime, cast(void*)mod
+        );
+
+        if (result > 0) {
+            stderr.writeln("ObjC: registered ", result, " class(es)");
+        }
+    }
+
+    /**
+     * Parse the objc_classes custom section from raw WASM bytes.
+     * Returns the section body (without the section name), or empty if not found.
+     */
+    private static const(ubyte)[] parseObjCClassesSection(const(ubyte)[] bytes) {
+        if (bytes.length < 8)
+            return [];
+
+        size_t pos = 8;  // Skip WASM header
+
+        while (pos < bytes.length) {
+            ubyte sectionId = bytes[pos++];
+            uint sectionLen = readLEB128(bytes, pos);
+            size_t sectionEnd = pos + sectionLen;
+
+            if (sectionId == 0) {  // Custom section
+                uint nameLen = readLEB128(bytes, pos);
+                if (pos + nameLen <= sectionEnd) {
+                    string sectionName = cast(string) bytes[pos .. pos + nameLen];
+                    pos += nameLen;
+
+                    if (sectionName == "objc_classes") {
+                        return bytes[pos .. sectionEnd];
+                    }
+                }
+            }
+
+            pos = sectionEnd;
+        }
+
+        return [];
     }
 
     /// Parsed FFI metadata entry

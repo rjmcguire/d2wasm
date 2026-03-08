@@ -165,7 +165,27 @@ class BinaryEmitter {
     // ObjC interface lookup (package-visible for codegen)
     package InterfaceDecl[string] objcInterfaces;
 
+    // ObjC class lookup (package-visible for codegen — classes with method bodies)
+    package ClassDecl[string] objcClasses;
+
+    /// Metadata for one ObjC class method (for objc_classes section)
+    private struct ObjCMethodMeta {
+        string selector;
+        string wasmExport;   // e.g. "__objc_impl_MetalView_mouseDown"
+        string typeEncoding;
+        ArgKind retKind;
+        ArgKind[] paramKinds;  // excluding self/_cmd
+    }
+
+    /// Metadata for one ObjC class (for objc_classes section)
+    private struct ObjCClassMeta {
+        string className;
+        string superName;
+        ObjCMethodMeta[] methods;
+    }
+
     private {
+        ObjCClassMeta[] objcClassMetas;
         bool objcHelpersAdded = false;
         uint[string] cStringOffsets;  // cached data section offsets for C strings
 
@@ -473,6 +493,11 @@ class BinaryEmitter {
             emitFFIMetaSection();
         }
 
+        // Custom ObjC classes section (only when extern(Objective-C) classes exist)
+        if (objcClassMetas.length > 0) {
+            emitObjCClassesSection();
+        }
+
         phase = EmitPhase.done;
         return output.data.dup;
     }
@@ -775,16 +800,25 @@ class BinaryEmitter {
     //==========================================================================
     
     private void collect(Declaration[] decls) {
-        // Pass 0a: Register all ObjC interfaces in map (names only)
+        // Pass 0a: Register all ObjC interfaces and classes in map (names only)
         foreach (decl; decls) {
             if (auto ifaceDecl = cast(InterfaceDecl)decl) {
                 if (ifaceDecl.isObjC) objcInterfaces[ifaceDecl.name] = ifaceDecl;
+            }
+            if (auto classDecl = cast(ClassDecl)decl) {
+                if (classDecl.isObjC) objcClasses[classDecl.name] = classDecl;
             }
         }
         // Pass 0b: Process ObjC interface methods (can now resolve cross-refs)
         foreach (decl; decls) {
             if (auto ifaceDecl = cast(InterfaceDecl)decl) {
                 if (ifaceDecl.isObjC) collectObjCInterface(ifaceDecl);
+            }
+        }
+        // Pass 0c: Process ObjC class methods (compile as exported functions)
+        foreach (decl; decls) {
+            if (auto classDecl = cast(ClassDecl)decl) {
+                if (classDecl.isObjC) collectObjCClass(classDecl);
             }
         }
         // Pass 1: Imported functions (can reference ObjC interface types)
@@ -814,19 +848,24 @@ class BinaryEmitter {
                 // Collect methods from struct declarations
                 collectStructMethods(structDecl);
             } else if (auto classDecl = cast(ClassDecl)decl) {
-                // Collect methods and generate vtable for class
-                collectClassMethods(classDecl);
+                if (!classDecl.isObjC) {
+                    // Collect methods and generate vtable for class (non-ObjC only)
+                    collectClassMethods(classDecl);
+                }
             }
         }
     }
 
     /// Collect declarations from ModulesContext — each module processed once, no duplicates.
     private void collectFromModules(ModulesContext ctx) {
-        // Pass 0a: Register all ObjC interfaces in map (names only) across all modules
+        // Pass 0a: Register all ObjC interfaces and classes in map (names only) across all modules
         foreach (mod; ctx.modulesInOrder()) {
             foreach (decl; mod.ast) {
                 if (auto ifaceDecl = cast(InterfaceDecl)decl) {
                     if (ifaceDecl.isObjC) objcInterfaces[ifaceDecl.name] = ifaceDecl;
+                }
+                if (auto classDecl = cast(ClassDecl)decl) {
+                    if (classDecl.isObjC) objcClasses[classDecl.name] = classDecl;
                 }
             }
         }
@@ -835,6 +874,14 @@ class BinaryEmitter {
             foreach (decl; mod.ast) {
                 if (auto ifaceDecl = cast(InterfaceDecl)decl) {
                     if (ifaceDecl.isObjC) collectObjCInterface(ifaceDecl);
+                }
+            }
+        }
+        // Pass 0c: Process ObjC class methods (compile as exported functions)
+        foreach (mod; ctx.modulesInOrder()) {
+            foreach (decl; mod.ast) {
+                if (auto classDecl = cast(ClassDecl)decl) {
+                    if (classDecl.isObjC) collectObjCClass(classDecl);
                 }
             }
         }
@@ -864,7 +911,9 @@ class BinaryEmitter {
                 } else if (auto structDecl = cast(StructDecl)decl) {
                     collectStructMethods(structDecl);
                 } else if (auto classDecl = cast(ClassDecl)decl) {
-                    collectClassMethods(classDecl);
+                    if (!classDecl.isObjC) {
+                        collectClassMethods(classDecl);
+                    }
                 }
             }
         }
@@ -1269,6 +1318,320 @@ class BinaryEmitter {
         }
     }
 
+    /**
+     * Collect an extern(Objective-C) class — compile methods as exported WASM functions.
+     * Each method gets signature (self:i64, _cmd:i64, ...user_params) → return_type,
+     * exported as "__objc_impl_ClassName_methodName".
+     * Also builds metadata for the objc_classes custom section.
+     */
+    private void collectObjCClass(ClassDecl classDecl) {
+        ensureObjCHelpers();
+
+        // Determine superclass name from the first interface (e.g., NSView, NSObject)
+        string superName = "NSObject";  // default
+        if (classDecl.interfaces.length > 0) {
+            if (auto ut = cast(UserType)classDecl.interfaces[0]) {
+                superName = ut.name;
+            }
+        }
+
+        ObjCClassMeta classMeta;
+        classMeta.className = classDecl.name;
+        classMeta.superName = superName;
+
+        // Also register this class's interface-like methods in objcInterfaces
+        // so that callers using this class type can dispatch via emitObjCMethodCall.
+        // We create a synthetic InterfaceDecl for the class.
+        auto syntheticIface = new InterfaceDecl(classDecl.location, classDecl.name,
+            cast(Type[])null, cast(FunctionDecl[])null);
+        syntheticIface.isObjC = true;
+        FunctionDecl[] ifaceMethods;
+
+        foreach (member; classDecl.members) {
+            auto method = cast(FunctionDecl)member;
+            if (!method || !method.isMethod)
+                continue;
+
+            string selector = method.objcSelector;
+            if (selector is null) selector = method.name;
+
+            // Bodyless methods: register as ObjC send imports only (like interface methods)
+            if (method.body_ is null) {
+                collectObjCClassSendMethod(classDecl, method, selector, ifaceMethods);
+                continue;
+            }
+
+            string exportName = "__objc_impl_" ~ classDecl.name ~ "_" ~ method.name;
+
+            // Build WASM signature: (self:i64, _cmd:i64, ...user_params) → return_type
+            FuncSig sig;
+            sig.params ~= ValType.i64;  // self
+            sig.params ~= ValType.i64;  // _cmd
+
+            foreach (p; method.parameters) {
+                auto resolved = p.type.resolve();
+                if (auto ut = cast(UserType)resolved) {
+                    if (!ut.declaration) ut.ensureResolved(symbolTable);
+                }
+                if (auto structDecl = resolved.asStruct()) {
+                    assert(structDecl.layoutComputed, "ObjC class struct param " ~ p.name ~ ": layout not computed");
+                    assert(structDecl.fields.length > 0, "ObjC class struct param " ~ p.name ~ ": no fields");
+                    foreach (field; structDecl.fields)
+                        sig.params ~= dTypeToValType(field.type);
+                } else {
+                    sig.params ~= dTypeToValType(p.type);
+                }
+            }
+
+            bool isVoid = isVoidType(method.returnType);
+            if (!isVoid) {
+                sig.results = [dTypeToValType(method.returnType)];
+            }
+
+            uint tIdx;
+            if (auto existing = sig in typeIndex) {
+                tIdx = *existing;
+            } else {
+                tIdx = cast(uint)types.length;
+                types ~= sig;
+                typeIndex[sig] = tIdx;
+            }
+
+            // Register as a local function (not import) that gets exported
+            method.mangledName = exportName;
+
+            FuncInfo info;
+            info.name = exportName;
+            info.exportName = exportName;
+            info.typeIndex = tIdx;
+            info.decl = method;
+            info.exported = true;
+            info.classParent = classDecl;
+
+            funcIndex[exportName] = cast(uint)functions.length;
+            functions ~= info;
+
+            // Build method metadata for objc_classes section
+            ObjCMethodMeta methodMeta;
+            methodMeta.selector = selector;
+            methodMeta.wasmExport = exportName;
+            methodMeta.typeEncoding = buildObjCTypeEncoding(method);
+            methodMeta.retKind = isVoid ? ArgKind.RET_VOID : dTypeToArgKind(method.returnType);
+            foreach (p; method.parameters) {
+                auto resolved = p.type.resolve();
+                if (auto structDecl = resolved.asStruct()) {
+                    assert(structDecl.layoutComputed, "ObjC class struct param " ~ p.name ~ ": layout not computed");
+                    foreach (field; structDecl.fields)
+                        methodMeta.paramKinds ~= dTypeToArgKind(field.type);
+                } else {
+                    methodMeta.paramKinds ~= dTypeToArgKind(p.type);
+                }
+            }
+            classMeta.methods ~= methodMeta;
+
+            // Also register as ObjC send import (so other code can call this method
+            // via objc_msgSend on instances of this class). Same pattern as interface.
+            string sendImportName = "__objc_send_" ~ classDecl.name ~ "_" ~ method.name;
+
+            uint sendTIdx;
+            if (auto existing = sig in typeIndex) {
+                sendTIdx = *existing;
+            } else {
+                sendTIdx = cast(uint)types.length;
+                types ~= sig;
+                typeIndex[sig] = sendTIdx;
+            }
+
+            ImportInfo importInfo;
+            importInfo.moduleName = "ffi";
+            importInfo.fieldName = sendImportName;
+            importInfo.typeIndex = sendTIdx;
+            importIndex[sendImportName] = cast(uint)imports.length;
+            imports ~= importInfo;
+
+            FFIMeta meta;
+            meta.name = sendImportName;
+            meta.nativeName = "objc_msgSend";
+            meta.retKind = isVoid ? ArgKind.RET_VOID : dTypeToArgKind(method.returnType);
+            meta.paramKinds = [ArgKind.ARG_I64, ArgKind.ARG_I64];
+            foreach (p; method.parameters) {
+                auto resolved = p.type.resolve();
+                if (auto structDecl = resolved.asStruct()) {
+                    foreach (field; structDecl.fields)
+                        meta.paramKinds ~= dTypeToArgKind(field.type);
+                } else {
+                    meta.paramKinds ~= dTypeToArgKind(p.type);
+                }
+            }
+            ffiMetas ~= meta;
+
+            // Create a bodyless copy for the synthetic interface
+            auto ifaceMethod = new FunctionDecl(method.location, method.name,
+                method.returnType, method.parameters, null);
+            ifaceMethod.objcSelector = selector;
+            ifaceMethod.mangledName = sendImportName;
+            ifaceMethod.isMethod = true;
+            ifaceMethods ~= ifaceMethod;
+        }
+
+        // Inherit methods from parent ObjC interface (e.g., NSObject's alloc, init)
+        // so callers can use MyClass.alloc().init() etc.
+        if (auto parentIface = superName in objcInterfaces) {
+            foreach (parentMethod; (*parentIface).methods) {
+                // Don't override methods the class defines itself
+                bool overridden = false;
+                foreach (m; ifaceMethods) {
+                    if (m.name == parentMethod.name) { overridden = true; break; }
+                }
+                if (!overridden)
+                    ifaceMethods ~= parentMethod;
+            }
+        }
+
+        syntheticIface.methods = ifaceMethods;
+        objcInterfaces[classDecl.name] = syntheticIface;
+
+        objcClassMetas ~= classMeta;
+    }
+
+    /// Register a bodyless ObjC class method as an ObjC send import.
+    /// This handles methods like `static MyClass myAlloc() @selector("alloc")` —
+    /// they have no WASM body but need to be callable via objc_msgSend.
+    private void collectObjCClassSendMethod(ClassDecl classDecl, FunctionDecl method,
+                                             string selector, ref FunctionDecl[] ifaceMethods) {
+        // Resolve ObjC interface types in parameters
+        resolveObjCUserType(cast(UserType)method.returnType);
+        foreach (p; method.parameters) {
+            resolveObjCUserType(cast(UserType)p.type);
+        }
+
+        // Build WASM signature: (receiver:i64, selector:i64, ...user_params) → return_type
+        FuncSig sig;
+        sig.params ~= ValType.i64;  // receiver
+        sig.params ~= ValType.i64;  // selector
+        foreach (p; method.parameters) {
+            auto resolved = p.type.resolve();
+            if (auto ut = cast(UserType)resolved) {
+                if (!ut.declaration) ut.ensureResolved(symbolTable);
+            }
+            if (auto structDecl = resolved.asStruct()) {
+                foreach (field; structDecl.fields)
+                    sig.params ~= dTypeToValType(field.type);
+            } else {
+                sig.params ~= dTypeToValType(p.type);
+            }
+        }
+
+        bool isVoid = isVoidType(method.returnType);
+        if (!isVoid) {
+            sig.results = [dTypeToValType(method.returnType)];
+        }
+
+        string sendImportName = "__objc_send_" ~ classDecl.name ~ "_" ~ method.name;
+
+        uint tIdx;
+        if (auto existing = sig in typeIndex) {
+            tIdx = *existing;
+        } else {
+            tIdx = cast(uint)types.length;
+            types ~= sig;
+            typeIndex[sig] = tIdx;
+        }
+
+        ImportInfo info;
+        info.moduleName = "ffi";
+        info.fieldName = sendImportName;
+        info.typeIndex = tIdx;
+        importIndex[sendImportName] = cast(uint)imports.length;
+        imports ~= info;
+
+        FFIMeta meta;
+        meta.name = sendImportName;
+        meta.nativeName = "objc_msgSend";
+        meta.retKind = isVoid ? ArgKind.RET_VOID : dTypeToArgKind(method.returnType);
+        meta.paramKinds = [ArgKind.ARG_I64, ArgKind.ARG_I64];
+        foreach (p; method.parameters) {
+            auto resolved = p.type.resolve();
+            if (auto structDecl = resolved.asStruct()) {
+                foreach (field; structDecl.fields)
+                    meta.paramKinds ~= dTypeToArgKind(field.type);
+            } else {
+                meta.paramKinds ~= dTypeToArgKind(p.type);
+            }
+        }
+        ffiMetas ~= meta;
+
+        method.mangledName = sendImportName;
+
+        // Add to synthetic interface for caller dispatch
+        auto ifaceMethod = new FunctionDecl(method.location, method.name,
+            method.returnType, method.parameters, null);
+        ifaceMethod.objcSelector = selector;
+        ifaceMethod.mangledName = sendImportName;
+        ifaceMethod.isMethod = true;
+        ifaceMethod.isStatic = method.isStatic;
+        ifaceMethods ~= ifaceMethod;
+    }
+
+    /// Build ObjC type encoding string for a method signature.
+    /// Format: ret_type "@" ":" param1_type param2_type ...
+    private static string buildObjCTypeEncoding(FunctionDecl method) {
+        char[] enc;
+
+        // Return type
+        enc ~= typeToObjCEncoding(method.returnType);
+
+        // self (@) and _cmd (:) are always present
+        enc ~= '@';
+        enc ~= ':';
+
+        // User parameters
+        foreach (p; method.parameters) {
+            enc ~= typeToObjCEncoding(p.type);
+        }
+
+        return cast(string)enc;
+    }
+
+    /// Map a D type to its ObjC type encoding character
+    private static char typeToObjCEncoding(Type t) {
+        t = t.resolve();
+
+        if (auto bt = cast(BasicType)t) {
+            final switch (bt.kind) with (BasicType.Kind) {
+                case Bool: return 'B';
+                case Char: return 'c';
+                case Int8: return 'c';
+                case UInt8: return 'C';
+                case Int16: return 's';
+                case UInt16: return 'S';
+                case Int32: return 'i';
+                case UInt32: return 'I';
+                case Int64: return 'q';
+                case UInt64: return 'Q';
+                case Float32: return 'f';
+                case Float64: return 'd';
+                case Void: return 'v';
+            }
+        }
+
+        // ObjC interface / class types → '@' (object pointer)
+        if (auto ut = cast(UserType)t) {
+            if (auto ifaceDecl = cast(InterfaceDecl)ut.declaration) {
+                if (ifaceDecl.isObjC) return '@';
+            }
+            if (auto classDecl = cast(ClassDecl)ut.declaration) {
+                if (classDecl.isObjC) return '@';
+            }
+        }
+
+        // Pointer types → '^' + pointee (simplified to '@' for id)
+        if (cast(PointerType)t) return '^';
+
+        // Default: treat as object pointer
+        return '@';
+    }
+
     /// Ensure objc_getClass and sel_registerName are registered as FFI imports
     private void ensureObjCHelpers() {
         if (objcHelpersAdded) return;
@@ -1346,6 +1709,9 @@ class BinaryEmitter {
         if (auto ut = cast(UserType) t) {
             if (auto ifaceDecl = cast(InterfaceDecl)ut.declaration) {
                 if (ifaceDecl.isObjC) return ArgKind.ARG_I64;
+            }
+            if (auto classDecl = cast(ClassDecl)ut.declaration) {
+                if (classDecl.isObjC) return ArgKind.ARG_I64;
             }
             return ArgKind.ARG_PTR;
         }
@@ -1794,10 +2160,13 @@ class BinaryEmitter {
         // Unwrap TemplateParamType to the concrete bound type
         t = t.resolve();
 
-        // Struct/class types are passed as i32 pointers; ObjC interfaces as i64
+        // Struct/class types are passed as i32 pointers; ObjC interfaces/classes as i64
         if (auto userType = cast(UserType)t) {
             if (auto ifaceDecl = cast(InterfaceDecl)userType.declaration) {
                 if (ifaceDecl.isObjC) return ValType.i64;  // ObjC pointer = i64
+            }
+            if (auto classDecl = cast(ClassDecl)userType.declaration) {
+                if (classDecl.isObjC) return ValType.i64;  // ObjC class pointer = i64
             }
             return ValType.i32;  // Pointer to struct/class
         }
@@ -3419,6 +3788,73 @@ class BinaryEmitter {
                 body_ ~= cast(const(ubyte)[])meta.nativeName;
             } else {
                 body_ ~= cast(ubyte)0;
+            }
+        }
+
+        emitSection(Section.custom, body_.data);
+    }
+
+    /**
+     * Emit a custom "objc_classes" section describing extern(Objective-C) class definitions.
+     * Format:
+     *   section_id: 0 (custom)
+     *   name: "objc_classes" (LEB128 length-prefixed)
+     *   body:
+     *     count: LEB128 u32
+     *     per class:
+     *       class_name_len: LEB128 u32, class_name: bytes
+     *       super_name_len: LEB128 u32, super_name: bytes
+     *       method_count: LEB128 u32
+     *       per method:
+     *         selector_len: LEB128 u32, selector: bytes
+     *         wasm_export_len: LEB128 u32, wasm_export: bytes
+     *         type_encoding_len: LEB128 u32, type_encoding: bytes
+     *         ret_kind: u8
+     *         param_count: u8, param_kinds: u8[]  (user args only, no self/_cmd)
+     */
+    private void emitObjCClassesSection() {
+        Appender!(ubyte[]) body_;
+
+        enum sectionName = "objc_classes";
+        leb128u(body_, sectionName.length);
+        body_ ~= cast(const(ubyte)[])sectionName;
+
+        // Number of classes
+        leb128u(body_, objcClassMetas.length);
+
+        foreach (ref cls; objcClassMetas) {
+            // Class name
+            leb128u(body_, cls.className.length);
+            body_ ~= cast(const(ubyte)[])cls.className;
+
+            // Superclass name
+            leb128u(body_, cls.superName.length);
+            body_ ~= cast(const(ubyte)[])cls.superName;
+
+            // Method count
+            leb128u(body_, cls.methods.length);
+
+            foreach (ref m; cls.methods) {
+                // Selector
+                leb128u(body_, m.selector.length);
+                body_ ~= cast(const(ubyte)[])m.selector;
+
+                // WASM export name
+                leb128u(body_, m.wasmExport.length);
+                body_ ~= cast(const(ubyte)[])m.wasmExport;
+
+                // ObjC type encoding
+                leb128u(body_, m.typeEncoding.length);
+                body_ ~= cast(const(ubyte)[])m.typeEncoding;
+
+                // Return kind
+                body_ ~= cast(ubyte)m.retKind;
+
+                // Param count + kinds (user args only)
+                body_ ~= cast(ubyte)m.paramKinds.length;
+                foreach (k; m.paramKinds) {
+                    body_ ~= cast(ubyte)k;
+                }
             }
         }
 
