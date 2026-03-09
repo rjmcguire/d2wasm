@@ -1,14 +1,13 @@
 // Metal Render Demo — D drives Metal via extern(Objective-C) interfaces
 //
-// D handles: device init, command queue, shader compilation, pipeline,
-// buffer creation, window setup, render pass, event loop, view and delegate.
-// Bridge handles: vertex buffers (needs f32 codegen to eliminate).
+// D handles everything: device init, command queue, shader compilation,
+// pipeline, vertex buffers (f32), window setup, render pass, event loop.
+// No C/ObjC bridge needed.
 
 pragma(lib, "/System/Library/Frameworks/Metal.framework/Metal");
 pragma(lib, "/System/Library/Frameworks/Foundation.framework/Foundation");
 pragma(lib, "/System/Library/Frameworks/Cocoa.framework/Cocoa");
 pragma(lib, "/System/Library/Frameworks/QuartzCore.framework/QuartzCore");
-pragma(lib, "./libmetal_bridge.dylib");
 
 // ── Struct Types ───────────────────────────────────────────────────
 
@@ -91,6 +90,7 @@ interface MTLDevice {
     MTLLibrary newLibraryWithSource(NSString source, long options, long errPtr) @selector("newLibraryWithSource:options:error:");
     NSString name() @selector("name");
     long newRenderPipelineStateWithDescriptor(long desc, long error) @selector("newRenderPipelineStateWithDescriptor:error:");
+    long newBufferWithBytes(long bytes, long length, long options) @selector("newBufferWithBytes:length:options:");
 }
 
 extern(Objective-C)
@@ -165,12 +165,6 @@ extern(C) long MTLCreateSystemDefaultDevice();
 extern(C) long objc_autoreleasePoolPush();
 extern(C) void objc_autoreleasePoolPop(long pool);
 
-// Bridge: vertex accumulation (native memory needed for Metal)
-extern(C) void metal_add_vertex(double x, double y, double r, double g, double b, double a);
-extern(C) void metal_create_buffers(long device);
-extern(C) long metal_get_pos_buf();
-extern(C) long metal_get_col_buf();
-extern(C) int metal_get_vertex_count();
 
 // ── Math Helpers ───────────────────────────────────────────────────
 
@@ -318,9 +312,14 @@ int main() {
     BridgeWindowDelegate del = BridgeWindowDelegate.myAlloc().myInit();
     window.setDelegate(cast(long)del);
 
-    // Generate color wheel geometry
+    // Generate color wheel geometry — vertex data in D (f32)
     int segments = 64;
+    int vertexCount = segments * 3;
     double two_pi = 6.28318530;
+    float[384] positions;  // 192 vertices * 2 floats
+    float[768] colors;     // 192 vertices * 4 floats
+
+    int vi = 0;
     int i = 0;
     while (i < segments) {
         double fi = cast(double) i;
@@ -332,18 +331,41 @@ int main() {
         double g = sin_approx(a1 + 2.094) * 0.5 + 0.5;
         double b = sin_approx(a1 + 4.189) * 0.5 + 0.5;
 
-        metal_add_vertex(0.0, 0.0, 0.1, 0.1, 0.1, 1.0);
-        metal_add_vertex(cos_approx(a1) * 0.8, sin_approx(a1) * 0.8, r, g, b, 1.0);
-        metal_add_vertex(cos_approx(a2) * 0.8, sin_approx(a2) * 0.8, r, g, b, 1.0);
+        // Center vertex
+        positions[vi * 2] = 0.0;
+        positions[vi * 2 + 1] = 0.0;
+        colors[vi * 4] = 0.1;
+        colors[vi * 4 + 1] = 0.1;
+        colors[vi * 4 + 2] = 0.1;
+        colors[vi * 4 + 3] = 1.0;
+        vi = vi + 1;
+
+        // Edge vertex 1
+        positions[vi * 2] = cast(float)(cos_approx(a1) * 0.8);
+        positions[vi * 2 + 1] = cast(float)(sin_approx(a1) * 0.8);
+        colors[vi * 4] = cast(float) r;
+        colors[vi * 4 + 1] = cast(float) g;
+        colors[vi * 4 + 2] = cast(float) b;
+        colors[vi * 4 + 3] = 1.0;
+        vi = vi + 1;
+
+        // Edge vertex 2
+        positions[vi * 2] = cast(float)(cos_approx(a2) * 0.8);
+        positions[vi * 2 + 1] = cast(float)(sin_approx(a2) * 0.8);
+        colors[vi * 4] = cast(float) r;
+        colors[vi * 4 + 1] = cast(float) g;
+        colors[vi * 4 + 2] = cast(float) b;
+        colors[vi * 4 + 3] = 1.0;
+        vi = vi + 1;
 
         i = i + 1;
     }
 
-    // Create Metal buffers from accumulated vertices
-    metal_create_buffers(devicePtr);
-    long posBuf = metal_get_pos_buf();
-    long colBuf = metal_get_col_buf();
-    int vertexCount = metal_get_vertex_count();
+    // Create Metal GPU buffers directly from D float arrays
+    long posBuf = device.newBufferWithBytes(
+        cast(long)positions.ptr, cast(long)(vi * 2 * 4), 0);
+    long colBuf = device.newBufferWithBytes(
+        cast(long)colors.ptr, cast(long)(vi * 4 * 4), 0);
 
     // Show window
     window.makeKeyAndOrderFront(0);
