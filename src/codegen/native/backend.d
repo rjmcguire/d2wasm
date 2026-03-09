@@ -281,7 +281,7 @@ class NativeCompiledFunction : CompiledFunction {
     static struct ObjectDataSymbol { string name; uint offset; }
     private ObjectDataSymbol[] objectDataSymbols;
 
-    static struct ObjectReloc { uint codeOffset; string symbol; RelocType type; }
+    static struct ObjectReloc { uint codeOffset; string symbol; RelocType type; uint sectionIndex = 0; }
     private ObjectReloc[] objectRelocations;
 
     private string[] objectExternalSymbols;
@@ -3532,18 +3532,31 @@ class NativeCompiledFunction : CompiledFunction {
         // Must happen BEFORE emitMethodArgs, because vtable lookup clobbers x0/x1.
         assert(vtableStartOffset != size_t.max, "vtable not allocated for class " ~ classDecl.name);
 
-        // Load vtable_base_index from object[0] (i32 at offset 0)
-        gen.emitLoadLocal32(info.offset);  // w0 = vtable base index
+        if (objectMode) {
+            // Object mode: load vtable base via ADRP+ADD, then index into it
+            // Save slot index to temp first since ADRP+ADD clobbers x0
+            gen.emitLoadLocal32(info.offset);  // w0 = vtable base index
+            if (slotIdx > 0) {
+                gen.emitMoveX0ToX1();
+                gen.emitImm32(stencil_load_imm32, slotIdx);
+                gen.emit(stencil_add_i32);
+            }
+            gen.emitStoreLocal32(funcPtrTemp);  // save slot index
 
-        // Add slotIdx to get absolute slot: x0 = vtable_base + slotIdx
-        if (slotIdx > 0) {
-            gen.emitMoveX0ToX1();
-            gen.emitImm32(stencil_load_imm32, slotIdx);
-            gen.emit(stencil_add_i32);
+            emitLoadDataAddress("__vtable");    // x0 = vtable base address
+            gen.emitMoveX0ToX9();               // x9 = vtable base
+
+            gen.emitLoadLocal32(funcPtrTemp);   // w0 = slot index
+        } else {
+            // JIT mode: hardcoded data section address
+            gen.emitLoadLocal32(info.offset);  // w0 = vtable base index
+            if (slotIdx > 0) {
+                gen.emitMoveX0ToX1();
+                gen.emitImm32(stencil_load_imm32, slotIdx);
+                gen.emit(stencil_add_i32);
+            }
+            gen.emitLoadImm64ToX9(cast(ulong)(cast(size_t)dataSection.base + vtableStartOffset));
         }
-
-        // x9 = data section base + vtableStartOffset
-        gen.emitLoadImm64ToX9(cast(ulong)(cast(size_t)dataSection.base + vtableStartOffset));
         // x9 = x9 + x0 * 8 (index into function pointer array)
         gen.emitAddX9X0LSL3();
         // x9 = *x9 (load function pointer from vtable slot)
@@ -3628,11 +3641,12 @@ class NativeCompiledFunction : CompiledFunction {
             // Virtual dispatch with hidden result pointer
             ClassDecl classDecl = info.classDecl;
             assert(classDecl !is null, "Class info without classDecl for " ~ objIdent.name);
-            computeVirtualMethodsIfNeeded(classDecl);
 
             FunctionDecl method = findMethodInClass(classDecl, memberFunc.memberName);
             assert(method !is null,
                 "Class '" ~ classDecl.name ~ "' has no method '" ~ memberFunc.memberName ~ "'");
+
+            computeVirtualMethodsIfNeeded(classDecl);
 
             int slotIdx = findVtableSlot(classDecl, method);
             assert(slotIdx >= 0,
@@ -3646,25 +3660,36 @@ class NativeCompiledFunction : CompiledFunction {
 
             // Step 1: Compute function pointer via vtable and save to temp
             assert(vtableStartOffset != size_t.max, "vtable not allocated");
-            gen.emitLoadLocal32(info.offset);  // w0 = vtable base index
-            if (slotIdx > 0) {
-                gen.emitMoveX0ToX1();
-                gen.emitImm32(stencil_load_imm32, slotIdx);
-                gen.emit(stencil_add_i32);
+            if (objectMode) {
+                gen.emitLoadLocal32(info.offset);
+                if (slotIdx > 0) {
+                    gen.emitMoveX0ToX1();
+                    gen.emitImm32(stencil_load_imm32, slotIdx);
+                    gen.emit(stencil_add_i32);
+                }
+                gen.emitStoreLocal32(funcPtrTemp);  // save slot index
+
+                emitLoadDataAddress("__vtable");
+                gen.emitMoveX0ToX9();
+
+                gen.emitLoadLocal32(funcPtrTemp);   // restore slot index
+            } else {
+                gen.emitLoadLocal32(info.offset);
+                if (slotIdx > 0) {
+                    gen.emitMoveX0ToX1();
+                    gen.emitImm32(stencil_load_imm32, slotIdx);
+                    gen.emit(stencil_add_i32);
+                }
+                gen.emitLoadImm64ToX9(cast(ulong)(cast(size_t)dataSection.base + vtableStartOffset));
             }
-            gen.emitLoadImm64ToX9(cast(ulong)(cast(size_t)dataSection.base + vtableStartOffset));
             gen.emitAddX9X0LSL3();
             gen.emitLoadFromX9();
             gen.emitMoveX9ToX0();
             gen.emitStorePtr(funcPtrTemp);
 
             // Step 2: Load user arguments (shifted by this + result_ptr + arena)
-            // For struct-returning methods: x0=result_ptr, x1=this, [x2=arena], x2+/x3+=args
-            // But emitMethodArgs uses x1+arenaShift for args which would work for regular methods.
-            // For struct return, args start at x(2+arenaShift):
             for (long i = cast(long)args.length - 1; i >= 0; i--) {
                 compileExpression(args[i]);
-                // Args go into x(2+arenaShift), x(3+arenaShift), ...
                 switch (cast(int)i + 2 + arenaShift) {
                     case 2: gen.emitMoveX0ToX2(); break;
                     case 3: gen.emitMoveX0ToX3(); break;
@@ -4873,24 +4898,46 @@ class NativeCompiledFunction : CompiledFunction {
         classTableBases[classDecl.name] = tableBase;
         nextNativeTableBase += slotCount;
 
-        // Pre-allocate 8-byte slots in data section (filled with zeros)
-        if (vtableStartOffset == size_t.max && slotCount > 0)
-            vtableStartOffset = dataSection.bytesUsed;
-
         // Extend vtableMethodNames to cover new slots
         while (vtableMethodNames.length < tableBase + slotCount)
             vtableMethodNames ~= null;
 
-        foreach (i, method; classDecl.virtualMethods) {
-            import codegen.mangle : computeMangledName;
-            string mangledName = method.mangledName;
-            if (mangledName is null || mangledName.length == 0)
-                mangledName = computeMangledName(symbolTable.modulePath, method);
-            vtableMethodNames[tableBase + i] = mangledName;
+        if (objectMode) {
+            // Object mode: allocate vtable slots in objectData with relocations
+            if (vtableStartOffset == size_t.max && slotCount > 0) {
+                vtableStartOffset = cast(size_t)objectData.length;
+                // Register __vtable symbol at the start of vtable data
+                objectDataSymbols ~= ObjectDataSymbol("__vtable", cast(uint)vtableStartOffset);
+            }
 
-            // Allocate 8 bytes in data section (will be patched after finalize)
-            ubyte[8] zero = 0;
-            dataSection.addData(zero[]);
+            foreach (i, method; classDecl.virtualMethods) {
+                import codegen.mangle : computeMangledName;
+                string mangledName = method.mangledName;
+                if (mangledName is null || mangledName.length == 0)
+                    mangledName = computeMangledName(symbolTable.modulePath, method);
+                vtableMethodNames[tableBase + i] = mangledName;
+
+                // Allocate 8-byte slot in object data (zero-filled, linker patches via relocation)
+                uint slotOff = appendObjectData(new ubyte[8]);
+                // Add relocation: data section offset -> text symbol (linker resolves address)
+                objectRelocations ~= ObjectReloc(slotOff, mangledName, RelocType.unsigned64, 1);
+            }
+        } else {
+            // JIT mode: allocate vtable slots in data section (patched after finalize)
+            if (vtableStartOffset == size_t.max && slotCount > 0)
+                vtableStartOffset = dataSection.bytesUsed;
+
+            foreach (i, method; classDecl.virtualMethods) {
+                import codegen.mangle : computeMangledName;
+                string mangledName = method.mangledName;
+                if (mangledName is null || mangledName.length == 0)
+                    mangledName = computeMangledName(symbolTable.modulePath, method);
+                vtableMethodNames[tableBase + i] = mangledName;
+
+                // Allocate 8 bytes in data section (will be patched after finalize)
+                ubyte[8] zero = 0;
+                dataSection.addData(zero[]);
+            }
         }
     }
 

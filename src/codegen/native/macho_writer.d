@@ -31,6 +31,7 @@ enum : uint {
     N_SECT  = 0x0E,
 
     // Relocation types for ARM64
+    ARM64_RELOC_UNSIGNED  = 0,
     ARM64_RELOC_BRANCH26  = 2,
     ARM64_RELOC_PAGE21    = 3,
     ARM64_RELOC_PAGEOFF12 = 4,
@@ -136,6 +137,7 @@ enum RelocType {
     branch26,
     page21,
     pageoff12,
+    unsigned64,  // 64-bit absolute pointer (for vtable entries in data section)
 }
 
 struct PendingReloc {
@@ -227,8 +229,9 @@ class MachOWriter {
             symNameToIndex[s.name] = cast(uint)i;
         }
 
-        // Build relocation entries
-        RelocationInfo[] relocEntries;
+        // Build relocation entries, split by section
+        RelocationInfo[] textRelocs;
+        RelocationInfo[] dataRelocs;
         foreach (ref r; relocs) {
             uint symIdx = symNameToIndex.get(r.symbol, 0);
             bool isExtern = true;
@@ -249,6 +252,11 @@ class MachOWriter {
                     rtype = ARM64_RELOC_PAGEOFF12;
                     pcrel = false;
                     break;
+                case RelocType.unsigned64:
+                    rtype = ARM64_RELOC_UNSIGNED;
+                    pcrel = false;
+                    length = 3; // 8 bytes (2^3)
+                    break;
             }
 
             uint packed = (symIdx & 0x00FF_FFFF)
@@ -257,8 +265,12 @@ class MachOWriter {
                         | (isExtern ? (1 << 27) : 0)
                         | (rtype << 28);
 
-            relocEntries ~= RelocationInfo(cast(int)r.offset, packed);
+            if (r.sectionIndex == 1) // data section
+                dataRelocs ~= RelocationInfo(cast(int)r.offset, packed);
+            else
+                textRelocs ~= RelocationInfo(cast(int)r.offset, packed);
         }
+        auto allRelocs = textRelocs ~ dataRelocs;
 
         // Layout calculation
         uint headerSize = cast(uint)MachHeader64.sizeof;
@@ -278,7 +290,11 @@ class MachOWriter {
 
         // Relocations follow section data
         uint relocStart = dataConstOffset + dataConstSize;
-        uint relocSize = cast(uint)(relocEntries.length * RelocationInfo.sizeof);
+        uint textRelocStart = relocStart;
+        uint textRelocSize = cast(uint)(textRelocs.length * RelocationInfo.sizeof);
+        uint dataRelocStart = textRelocStart + textRelocSize;
+        uint dataRelocSize = cast(uint)(dataRelocs.length * RelocationInfo.sizeof);
+        uint relocSize = textRelocSize + dataRelocSize;
 
         // Symbol table follows relocations
         uint symtabOffset = relocStart + relocSize;
@@ -321,9 +337,9 @@ class MachOWriter {
         textSect.flags = S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS;
 
         // Attach relocations to __text section
-        if (relocEntries.length > 0) {
-            textSect.relocOffset = relocStart;
-            textSect.nRelocs = cast(uint)relocEntries.length;
+        if (textRelocs.length > 0) {
+            textSect.relocOffset = textRelocStart;
+            textSect.nRelocs = cast(uint)textRelocs.length;
         }
 
         writeStruct(result, sectOffset, textSect);
@@ -339,6 +355,10 @@ class MachOWriter {
             dataSect.fileOffset = dataConstOffset;
             dataSect.align_ = 3; // 8-byte aligned
             dataSect.flags = S_REGULAR;
+            if (dataRelocs.length > 0) {
+                dataSect.relocOffset = dataRelocStart;
+                dataSect.nRelocs = cast(uint)dataRelocs.length;
+            }
             writeStruct(result, sectOffset, dataSect);
         }
 
@@ -367,7 +387,7 @@ class MachOWriter {
             result[dataConstOffset .. dataConstOffset + dataConstSize] = dataConst[];
 
         // 8. Relocations
-        foreach (i, ref rel; relocEntries) {
+        foreach (i, ref rel; allRelocs) {
             uint off = relocStart + cast(uint)(i * RelocationInfo.sizeof);
             writeStruct(result, off, rel);
         }

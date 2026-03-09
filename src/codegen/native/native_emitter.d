@@ -107,9 +107,9 @@ class NativeModuleEmitter {
                 writer.addLocalSymbol(ds.name, 2, dataVmBase + ds.offset);
         }
 
-        // Relocations (ADRP/ADD for data refs, BL for external calls)
+        // Relocations (ADRP/ADD for data refs, BL for external calls, unsigned64 for vtable)
         foreach (r; compiled.getObjectRelocations())
-            writer.addRelocation(0, r.codeOffset, r.symbol, r.type);
+            writer.addRelocation(r.sectionIndex, r.codeOffset, r.symbol, r.type);
 
         // Export _main (C entry point).
         // MachOWriter.addString prepends '_', so pass "main" → "_main" in Mach-O.
