@@ -4787,6 +4787,16 @@ class FuncContext {
                     out_ ~= cast(ubyte)0x02;
                     leb128u(out_, 0);
                     return;
+                } else if (info.isStaticArray) {
+                    if (expr.memberName == "ptr") {
+                        emitVarAddress(out_, info);
+                    } else if (expr.memberName == "length") {
+                        out_ ~= Op.i32_const;
+                        leb128s(out_, cast(int)info.elementCount);
+                    } else {
+                        throw new EmitError("Static array has no field '" ~ expr.memberName ~ "'", expr.location);
+                    }
+                    return;
                 }
             }
 

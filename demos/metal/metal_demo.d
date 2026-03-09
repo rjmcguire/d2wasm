@@ -90,7 +90,7 @@ interface MTLDevice {
     MTLLibrary newLibraryWithSource(NSString source, long options, long errPtr) @selector("newLibraryWithSource:options:error:");
     NSString name() @selector("name");
     long newRenderPipelineStateWithDescriptor(long desc, long error) @selector("newRenderPipelineStateWithDescriptor:error:");
-    long newBufferWithBytes(long bytes, long length, long options) @selector("newBufferWithBytes:length:options:");
+    long newBufferWithBytes(ubyte* bytes, long length, long options) @selector("newBufferWithBytes:length:options:");
 }
 
 extern(Objective-C)
@@ -363,9 +363,9 @@ int main() {
 
     // Create Metal GPU buffers directly from D float arrays
     long posBuf = device.newBufferWithBytes(
-        cast(long)positions.ptr, cast(long)(vi * 2 * 4), 0);
+        cast(ubyte*)positions.ptr, cast(long)(vi * 2 * 4), 0);
     long colBuf = device.newBufferWithBytes(
-        cast(long)colors.ptr, cast(long)(vi * 4 * 4), 0);
+        cast(ubyte*)colors.ptr, cast(long)(vi * 4 * 4), 0);
 
     // Show window
     window.makeKeyAndOrderFront(0);
