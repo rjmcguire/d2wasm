@@ -12,7 +12,7 @@ COMPILER="$PROJECT_DIR/d2wasm"
 TESTS_DIR="$SCRIPT_DIR"
 
 # Output backends that must have feature parity
-OUTPUT_BACKENDS=(wasm native)
+OUTPUT_BACKENDS=(wasm native native-jit)
 
 # Colors
 RED='\033[0;31m'
@@ -71,8 +71,43 @@ run_test_with_backend() {
             ;;
     esac
 
+    if [ "$backend" = "native-jit" ]; then
+        # Native ARM64 JIT: compile and run directly in-process
+        if [ "$(uname -m)" != "arm64" ] || [ "$(uname)" != "Darwin" ]; then
+            echo -e "${YELLOW}SKIP${NC} $test_name [$backend] (requires macOS ARM64)"
+            return 0
+        fi
+
+        if [ "$test_type" = "compile_only" ]; then
+            echo -e "${YELLOW}SKIP${NC} $test_name [$backend] (compile_only not applicable for JIT)"
+            return 0
+        fi
+
+        if [ $VERBOSE -eq 1 ]; then
+            echo "  JIT compiling and running natively..."
+        fi
+
+        local run_output
+        run_output=$("$COMPILER" --run --target arm64-macos "$test_file" 2>&1)
+        local actual=$?
+
+        local expected_result=$(jq -r '.expected_result // "null"' "$config_file")
+
+        if [ "$expected_result" != "null" ] && [ "$actual" != "$expected_result" ]; then
+            echo -e "${RED}FAIL${NC} $test_name [$backend]"
+            echo "  Expected: $expected_result, Actual: $actual"
+            if [ $VERBOSE -eq 1 ]; then
+                echo "  Output: $run_output"
+            fi
+            return 1
+        fi
+
+        echo -e "${GREEN}PASS${NC} $test_name [$backend] (result: $actual)"
+        return 0
+    fi
+
     if [ "$backend" = "native" ]; then
-        # Native ARM64 output backend
+        # Native ARM64 output backend — compile to .o, link, run
         if [ "$(uname -m)" != "arm64" ] || [ "$(uname)" != "Darwin" ]; then
             echo -e "${YELLOW}SKIP${NC} $test_name [$backend] (requires macOS ARM64)"
             return 0

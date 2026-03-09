@@ -471,6 +471,56 @@ int compileFile(CompilerOptions options) {
 
         // 7. Code generation
         if (!options.dryRun && options.target == "arm64-macos") {
+            if (options.run) {
+                // Native ARM64 JIT: compile and run directly
+                log(1, "JIT compiling and running native ARM64...");
+
+                import codegen.native.backend : NativeCompiledFunction;
+                import codegen.mangle : computeMangledName;
+                import codegen.target : sliceInfo, SliceInfo;
+
+                sliceInfo = SliceInfo(8); // ARM64: 8-byte pointers
+
+                // Collect functions and extern(C) imports from AST
+                FunctionDecl[] funcs;
+                ImportedFunctionDecl[] imports;
+                string entryName;
+
+                foreach (decl; ast) {
+                    if (auto imp = cast(ImportedFunctionDecl)decl) {
+                        if (imp.moduleName == "ffi")
+                            imports ~= imp;
+                        continue;
+                    }
+                    auto funcDecl = cast(FunctionDecl)decl;
+                    if (funcDecl is null) continue;
+                    if (funcDecl.body_ is null) continue;
+                    if (funcDecl.isTemplate) continue;
+
+                    funcs ~= funcDecl;
+                    if (funcDecl.name == options.runFunc) {
+                        entryName = funcDecl.mangledName ? funcDecl.mangledName
+                            : computeMangledName([], funcDecl);
+                    }
+                }
+
+                if (entryName.length == 0)
+                    throw new Exception("No " ~ options.runFunc ~ "() function found");
+
+                auto compiled = new NativeCompiledFunction(funcs, entryName,
+                    inputModule.symbolTable, options.stackTrace, imports);
+                int result = cast(int) compiled.call([]).intValue;
+                compiled.dispose();
+
+                log(1, "Exit code: ", result);
+
+                if (options.verbosity >= 2) {
+                    controller.printAllStats();
+                }
+
+                return result;
+            }
+
             // Native ARM64 Mach-O object file output
             log(1, "Generating ARM64 Mach-O object file...");
 
