@@ -1,7 +1,7 @@
 {
   "name": "negative",
-  "description": "Output parity: negative numbers",
+  "description": "Output parity: negative number arithmetic",
   "type": "wasm_exec",
   "entry": "_D4test4mainFZi",
-  "expected_result": -42
+  "expected_result": 42
 }

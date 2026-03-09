@@ -2,7 +2,6 @@
   "name": "parameters",
   "description": "Output parity: function parameters",
   "type": "wasm_exec",
-  "entry": "identity",
-  "args": ["7"],
+  "entry": "_D4test4mainFZi",
   "expected_result": 7
 }

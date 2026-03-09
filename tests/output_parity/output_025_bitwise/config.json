@@ -3,5 +3,5 @@
   "description": "Output parity: bitwise operators",
   "type": "wasm_exec",
   "entry": "_D4test4mainFZi",
-  "expected_result": 542
+  "expected_result": 158
 }

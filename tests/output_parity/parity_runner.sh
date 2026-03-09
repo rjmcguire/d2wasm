@@ -12,8 +12,7 @@ COMPILER="$PROJECT_DIR/d2wasm"
 TESTS_DIR="$SCRIPT_DIR"
 
 # Output backends that must have feature parity
-# Add new backends here as they're implemented (e.g., "native" for ARM64 direct output)
-OUTPUT_BACKENDS=(wasm)
+OUTPUT_BACKENDS=(wasm native)
 
 # Colors
 RED='\033[0;31m'
@@ -71,28 +70,87 @@ run_test_with_backend() {
             return 0
             ;;
     esac
-    
-    # Build
+
+    if [ "$backend" = "native" ]; then
+        # Native ARM64 output backend
+        if [ "$(uname -m)" != "arm64" ] || [ "$(uname)" != "Darwin" ]; then
+            echo -e "${YELLOW}SKIP${NC} $test_name [$backend] (requires macOS ARM64)"
+            return 0
+        fi
+
+        local obj_file="$test_dir/test.o"
+        local bin_file="$test_dir/test_bin"
+        rm -f "$obj_file" "$bin_file"
+
+        if [ $VERBOSE -eq 1 ]; then
+            echo "  Compiling for native output..."
+        fi
+
+        local compile_output
+        compile_output=$("$COMPILER" --target arm64-macos "$test_file" -o "$obj_file" 2>&1)
+        local compile_status=$?
+
+        if [ $compile_status -ne 0 ]; then
+            echo -e "${RED}FAIL${NC} $test_name [$backend]"
+            echo "  Compilation failed:"
+            echo "$compile_output" | sed 's/^/    /'
+            return 1
+        fi
+
+        case "$test_type" in
+            compile_only)
+                echo -e "${GREEN}PASS${NC} $test_name [$backend] (compiled)"
+                return 0
+                ;;
+            wasm_exec)
+                # Link with system linker
+                local link_output
+                link_output=$(cc -o "$bin_file" "$obj_file" -lSystem 2>&1)
+                if [ $? -ne 0 ]; then
+                    echo -e "${RED}FAIL${NC} $test_name [$backend]"
+                    echo "  Linking failed:"
+                    echo "$link_output" | sed 's/^/    /'
+                    return 1
+                fi
+
+                # Run native binary — exit code is the result
+                local run_output
+                run_output=$("$bin_file" 2>&1)
+                local actual=$?
+
+                local expected_result=$(jq -r '.expected_result // "null"' "$config_file")
+
+                if [ "$expected_result" != "null" ] && [ "$actual" != "$expected_result" ]; then
+                    echo -e "${RED}FAIL${NC} $test_name [$backend]"
+                    echo "  Expected: $expected_result, Actual: $actual"
+                    return 1
+                fi
+
+                echo -e "${GREEN}PASS${NC} $test_name [$backend] (result: $actual)"
+                return 0
+                ;;
+        esac
+    fi
+
+    # WASM output backend
     local wasm_file="$test_dir/test.wasm"
     rm -f "$wasm_file"
-    
+
     if [ $VERBOSE -eq 1 ]; then
         echo "  Compiling for $backend output..."
     fi
-    
+
     local compile_output
-    # For now, output backend selection would be a future flag
-    # Currently we just compile normally for WASM output
     compile_output=$("$COMPILER" "$test_file" -o "$wasm_file" 2>&1)
     local compile_status=$?
-    
+
     if [ $compile_status -ne 0 ]; then
         echo -e "${RED}FAIL${NC} $test_name [$backend]"
         echo "  Compilation failed:"
         echo "$compile_output" | sed 's/^/    /'
         return 1
     fi
-    
+
     case "$test_type" in
         compile_only)
             # Just verify it compiles and produces valid output
@@ -104,7 +162,7 @@ run_test_with_backend() {
             echo -e "${GREEN}PASS${NC} $test_name [$backend] (compiled)"
             return 0
             ;;
-            
+
         wasm_exec)
             # Validate WASM binary
             if ! wasm2wat "$wasm_file" >/dev/null 2>&1; then
@@ -112,10 +170,10 @@ run_test_with_backend() {
                 echo "  Invalid WASM binary"
                 return 1
             fi
-            
+
             local func_name=$(jq -r '.entry // .function // "main"' "$config_file")
             local args=$(jq -r '.args // [] | join(" ")' "$config_file")
-            
+
             local result
             if ! result=$(wasm3 --func "$func_name" "$wasm_file" $args 2>&1); then
                 echo -e "${RED}FAIL${NC} $test_name [$backend]"
@@ -123,16 +181,16 @@ run_test_with_backend() {
                 echo "$result" | sed 's/^/    /'
                 return 1
             fi
-            
+
             local actual=$(echo "$result" | grep -oE 'Result: -?[0-9]+' | grep -oE '\-?[0-9]+')
             local expected_result=$(jq -r '.expected_result // "null"' "$config_file")
-            
+
             if [ "$expected_result" != "null" ] && [ "$actual" != "$expected_result" ]; then
                 echo -e "${RED}FAIL${NC} $test_name [$backend]"
                 echo "  Expected: $expected_result, Actual: $actual"
                 return 1
             fi
-            
+
             echo -e "${GREEN}PASS${NC} $test_name [$backend] (result: $actual)"
             return 0
             ;;
