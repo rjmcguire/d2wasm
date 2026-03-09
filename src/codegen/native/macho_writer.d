@@ -284,8 +284,11 @@ class MachOWriter {
         // Section offsets
         uint textOffset = sectionDataStart;
         uint textSize = cast(uint)textCode.length;
+        // Pad text size to 8-byte boundary so data section is 8-byte aligned
+        // (required for ARM64_RELOC_UNSIGNED 64-bit pointer relocations)
+        uint textSizePadded = (textSize + 7) & ~7;
 
-        uint dataConstOffset = textOffset + textSize;
+        uint dataConstOffset = textOffset + textSizePadded;
         uint dataConstSize = cast(uint)dataConst.length;
 
         // Relocations follow section data
@@ -319,9 +322,9 @@ class MachOWriter {
         // 2. LC_SEGMENT_64
         SegmentCommand64 segCmd;
         segCmd.cmdSize = segCmdSize;
-        segCmd.vmSize = textSize + dataConstSize;
+        segCmd.vmSize = textSizePadded + dataConstSize;
         segCmd.fileOff = sectionDataStart;
-        segCmd.fileSize = textSize + dataConstSize;
+        segCmd.fileSize = textSizePadded + dataConstSize;
         segCmd.nSections = nSections;
         writeStruct(result, headerSize, segCmd);
 
@@ -350,7 +353,7 @@ class MachOWriter {
             Section64 dataSect;
             setName(dataSect.sectName, "__const");
             setName(dataSect.segName, "__DATA");
-            dataSect.addr = textSize; // vm address follows text
+            dataSect.addr = textSizePadded; // vm address follows text (8-byte aligned)
             dataSect.size = dataConstSize;
             dataSect.fileOffset = dataConstOffset;
             dataSect.align_ = 3; // 8-byte aligned

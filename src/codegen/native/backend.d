@@ -150,6 +150,7 @@ class NativeCompiledFunction : CompiledFunction {
         uint staticArraySize;     // Element count when kind == staticArray
         uint staticArrayElemSize; // Element byte size when kind == staticArray
         uint sliceElemSize;       // Element byte size when kind == slice
+        bool isReference;         // true for 'this' pointers (stores address, not inline data)
 
         bool isStruct() const { return kind == VarKind.struct_; }
         bool isClass() const { return kind == VarKind.class_; }
@@ -612,6 +613,7 @@ class NativeCompiledFunction : CompiledFunction {
             currentThisOffset = nextLocalOffset;
             NativeLocalInfo thisInfo;
             thisInfo.offset = nextLocalOffset;
+            thisInfo.isReference = true;  // 'this' stores a pointer, not inline data
 
             if (auto sd = cast(StructDecl)func.parent) {
                 currentMethodStruct = sd;
@@ -3493,8 +3495,11 @@ class NativeCompiledFunction : CompiledFunction {
             gen.emitMoveX0ToX1();
         }
 
-        // Load 'this' pointer into x0 (stack address of the struct)
-        gen.emitStackAddress(info.offset);
+        // Load 'this' pointer into x0
+        if (info.isReference)
+            gen.emitLoadPtr(info.offset);      // 'this' is already a pointer
+        else
+            gen.emitStackAddress(info.offset);  // local var: compute stack address
 
         // Emit the call
         gen.emitCall(*labelPtr);
@@ -3511,6 +3516,7 @@ class NativeCompiledFunction : CompiledFunction {
     private void emitClassMethodCall(ClassDecl classDecl, NativeLocalInfo info, string methodName, Expression[] args) {
         log(2, "native: emitClassMethodCall ", classDecl.name, ".", methodName);
         assert(classDecl !is null, "emitClassMethodCall: classDecl is null");
+        ensureNativeVtable(classDecl);
         computeVirtualMethodsIfNeeded(classDecl);
 
         // Find method in class hierarchy (walk base classes)
@@ -3532,16 +3538,25 @@ class NativeCompiledFunction : CompiledFunction {
         // Must happen BEFORE emitMethodArgs, because vtable lookup clobbers x0/x1.
         assert(vtableStartOffset != size_t.max, "vtable not allocated for class " ~ classDecl.name);
 
-        if (objectMode) {
-            // Object mode: load vtable base via ADRP+ADD, then index into it
-            // Save slot index to temp first since ADRP+ADD clobbers x0
+        // Load vtable base index from the class instance.
+        // For references (e.g. 'this'), dereference the pointer first.
+        // For local instances, read directly from stack.
+        if (info.isReference) {
+            gen.emitLoadPtr(info.offset);      // x0 = pointer to instance
+            gen.emitLoadFromPointer(0);        // w0 = vtable base index at instance offset 0
+        } else {
             gen.emitLoadLocal32(info.offset);  // w0 = vtable base index
-            if (slotIdx > 0) {
-                gen.emitMoveX0ToX1();
-                gen.emitImm32(stencil_load_imm32, slotIdx);
-                gen.emit(stencil_add_i32);
-            }
-            gen.emitStoreLocal32(funcPtrTemp);  // save slot index
+        }
+        if (slotIdx > 0) {
+            gen.emitMoveX0ToX1();
+            gen.emitImm32(stencil_load_imm32, slotIdx);
+            gen.emit(stencil_add_i32);
+        }
+
+        if (objectMode) {
+            // Object mode: load vtable base via ADRP+ADD
+            // Save slot index to temp first since ADRP+ADD clobbers x0
+            gen.emitStoreLocal32(funcPtrTemp);
 
             emitLoadDataAddress("__vtable");    // x0 = vtable base address
             gen.emitMoveX0ToX9();               // x9 = vtable base
@@ -3549,12 +3564,6 @@ class NativeCompiledFunction : CompiledFunction {
             gen.emitLoadLocal32(funcPtrTemp);   // w0 = slot index
         } else {
             // JIT mode: hardcoded data section address
-            gen.emitLoadLocal32(info.offset);  // w0 = vtable base index
-            if (slotIdx > 0) {
-                gen.emitMoveX0ToX1();
-                gen.emitImm32(stencil_load_imm32, slotIdx);
-                gen.emit(stencil_add_i32);
-            }
             gen.emitLoadImm64ToX9(cast(ulong)(cast(size_t)dataSection.base + vtableStartOffset));
         }
         // x9 = x9 + x0 * 8 (index into function pointer array)
@@ -3579,7 +3588,11 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitMoveX0ToX9();
 
         // Step 5: Load 'this' pointer into x0
-        gen.emitStackAddress(info.offset);
+        // For references, load the stored pointer; for locals, compute stack address.
+        if (info.isReference)
+            gen.emitLoadPtr(info.offset);
+        else
+            gen.emitStackAddress(info.offset);
 
         // Step 6: Indirect call via x9
         gen.emitCallIndirectX9();
@@ -3642,6 +3655,8 @@ class NativeCompiledFunction : CompiledFunction {
             ClassDecl classDecl = info.classDecl;
             assert(classDecl !is null, "Class info without classDecl for " ~ objIdent.name);
 
+            ensureNativeVtable(classDecl);
+
             FunctionDecl method = findMethodInClass(classDecl, memberFunc.memberName);
             assert(method !is null,
                 "Class '" ~ classDecl.name ~ "' has no method '" ~ memberFunc.memberName ~ "'");
@@ -3660,13 +3675,21 @@ class NativeCompiledFunction : CompiledFunction {
 
             // Step 1: Compute function pointer via vtable and save to temp
             assert(vtableStartOffset != size_t.max, "vtable not allocated");
-            if (objectMode) {
+
+            // Load vtable base index (dereference pointer for references like 'this')
+            if (info.isReference) {
+                gen.emitLoadPtr(info.offset);
+                gen.emitLoadFromPointer(0);
+            } else {
                 gen.emitLoadLocal32(info.offset);
-                if (slotIdx > 0) {
-                    gen.emitMoveX0ToX1();
-                    gen.emitImm32(stencil_load_imm32, slotIdx);
-                    gen.emit(stencil_add_i32);
-                }
+            }
+            if (slotIdx > 0) {
+                gen.emitMoveX0ToX1();
+                gen.emitImm32(stencil_load_imm32, slotIdx);
+                gen.emit(stencil_add_i32);
+            }
+
+            if (objectMode) {
                 gen.emitStoreLocal32(funcPtrTemp);  // save slot index
 
                 emitLoadDataAddress("__vtable");
@@ -3674,12 +3697,6 @@ class NativeCompiledFunction : CompiledFunction {
 
                 gen.emitLoadLocal32(funcPtrTemp);   // restore slot index
             } else {
-                gen.emitLoadLocal32(info.offset);
-                if (slotIdx > 0) {
-                    gen.emitMoveX0ToX1();
-                    gen.emitImm32(stencil_load_imm32, slotIdx);
-                    gen.emit(stencil_add_i32);
-                }
                 gen.emitLoadImm64ToX9(cast(ulong)(cast(size_t)dataSection.base + vtableStartOffset));
             }
             gen.emitAddX9X0LSL3();
@@ -3703,8 +3720,11 @@ class NativeCompiledFunction : CompiledFunction {
                 gen.emitMoveX0ToX2();
             }
 
-            // Step 4: Load 'this' into x1
-            gen.emitStackAddress(info.offset);
+            // Step 4: Load 'this' into x1 (pointer value for refs, stack address for locals)
+            if (info.isReference)
+                gen.emitLoadPtr(info.offset);
+            else
+                gen.emitStackAddress(info.offset);
             gen.emitMoveX0ToX1();
 
             // Step 5: Load result pointer into x0
@@ -3765,7 +3785,10 @@ class NativeCompiledFunction : CompiledFunction {
             }
 
             // x1 = this pointer
-            gen.emitStackAddress(info.offset);
+            if (info.isReference)
+                gen.emitLoadPtr(info.offset);
+            else
+                gen.emitStackAddress(info.offset);
             gen.emitMoveX0ToX1();
 
             // x0 = result pointer
@@ -4911,10 +4934,7 @@ class NativeCompiledFunction : CompiledFunction {
             }
 
             foreach (i, method; classDecl.virtualMethods) {
-                import codegen.mangle : computeMangledName;
-                string mangledName = method.mangledName;
-                if (mangledName is null || mangledName.length == 0)
-                    mangledName = computeMangledName(symbolTable.modulePath, method);
+                string mangledName = getMangledName(method);
                 vtableMethodNames[tableBase + i] = mangledName;
 
                 // Allocate 8-byte slot in object data (zero-filled, linker patches via relocation)
@@ -4928,10 +4948,7 @@ class NativeCompiledFunction : CompiledFunction {
                 vtableStartOffset = dataSection.bytesUsed;
 
             foreach (i, method; classDecl.virtualMethods) {
-                import codegen.mangle : computeMangledName;
-                string mangledName = method.mangledName;
-                if (mangledName is null || mangledName.length == 0)
-                    mangledName = computeMangledName(symbolTable.modulePath, method);
+                string mangledName = getMangledName(method);
                 vtableMethodNames[tableBase + i] = mangledName;
 
                 // Allocate 8 bytes in data section (will be patched after finalize)
@@ -4945,13 +4962,16 @@ class NativeCompiledFunction : CompiledFunction {
     private void patchVtableEntries() {
         if (vtableStartOffset == size_t.max) return; // no vtables
 
+        log(2, "native: patchVtableEntries: ", vtableMethodNames.length, " slots, vtableStartOffset=", vtableStartOffset);
         foreach (slotIdx, mangledName; vtableMethodNames) {
             if (mangledName is null || mangledName.length == 0) continue;
-            if (auto labelPtr = mangledName in functionLabels) {
-                ulong funcAddr = cast(ulong)(cast(size_t)gen.base + (*labelPtr).offset);
-                size_t slotOffset = vtableStartOffset + slotIdx * 8;
-                *cast(ulong*)(dataSection.base + slotOffset) = funcAddr;
-            }
+            auto labelPtr = mangledName in functionLabels;
+            if (labelPtr is null)
+                throw new Exception("vtable slot " ~ mangledName ~ " has no compiled function label");
+            ulong funcAddr = cast(ulong)(cast(size_t)gen.base + (*labelPtr).offset);
+            size_t slotOffset = vtableStartOffset + slotIdx * 8;
+            *cast(ulong*)(dataSection.base + slotOffset) = funcAddr;
+            log(2, "native:   vtable[", slotIdx, "] = ", mangledName, " -> addr ", funcAddr);
         }
     }
 

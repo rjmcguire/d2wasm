@@ -100,9 +100,9 @@ class NativeModuleEmitter {
 
         // Data symbols (local symbols in __DATA,__const = section 2)
         // Symbol value = virtual address = dataSectionBase + offset within data section.
-        // In MH_OBJECT, __DATA,__const vmAddr = textSize (follows __text).
+        // In MH_OBJECT, __DATA,__const vmAddr = textSizePadded (8-byte aligned, follows __text).
         if (hasDataSection) {
-            ulong dataVmBase = fullCode.length;
+            ulong dataVmBase = (fullCode.length + 7) & ~7;  // match MachOWriter padding
             foreach (ds; compiled.getObjectDataSymbols())
                 writer.addLocalSymbol(ds.name, 2, dataVmBase + ds.offset);
         }
