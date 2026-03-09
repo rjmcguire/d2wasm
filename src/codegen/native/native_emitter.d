@@ -25,11 +25,17 @@ class NativeModuleEmitter {
     /// Compile declarations to a Mach-O .o file.
     /// Returns the .o bytes ready to write to disk.
     ubyte[] emit(Declaration[] decls) {
-        // Collect functions (skip templates, forward decls)
+        // Collect functions and extern(C) imports
         FunctionDecl[] funcs;
         FunctionDecl mainFunc;
+        ImportedFunctionDecl[] imports;
 
         foreach (decl; decls) {
+            if (auto imp = cast(ImportedFunctionDecl)decl) {
+                if (imp.moduleName == "ffi")
+                    imports ~= imp;
+                continue;
+            }
             auto funcDecl = cast(FunctionDecl)decl;
             if (funcDecl is null) continue;
             if (funcDecl.body_ is null) continue;     // forward declaration
@@ -44,7 +50,7 @@ class NativeModuleEmitter {
             throw new Exception("No main() function found");
 
         // Compile all functions in object mode (relocatable buffer, no CTFE infrastructure)
-        auto compiled = new NativeCompiledFunction(funcs, symbolTable, true /* objectMode */);
+        auto compiled = new NativeCompiledFunction(funcs, symbolTable, true, imports);
 
         // Look up main's offset using its mangled name (symbol table sets mangledName
         // during type checking, e.g. "main" → "_D4test4mainFZi")
@@ -79,9 +85,12 @@ class NativeModuleEmitter {
             writer.addExternalSymbol(sym);
 
         // Data symbols (local symbols in __DATA,__const = section 2)
+        // Symbol value = virtual address = dataSectionBase + offset within data section.
+        // In MH_OBJECT, __DATA,__const vmAddr = textSize (follows __text).
         if (hasDataSection) {
+            ulong dataVmBase = fullCode.length;
             foreach (ds; compiled.getObjectDataSymbols())
-                writer.addLocalSymbol(ds.name, 2, ds.offset);
+                writer.addLocalSymbol(ds.name, 2, dataVmBase + ds.offset);
         }
 
         // Relocations (ADRP/ADD for data refs, BL for external calls)

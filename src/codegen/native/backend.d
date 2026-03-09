@@ -285,6 +285,7 @@ class NativeCompiledFunction : CompiledFunction {
 
     private string[] objectExternalSymbols;
     private uint objectDataSymCount;
+    private bool[string] objectExternFunctions;  // extern(C) function names for object mode
 
     /// Single function constructor (original)
     this(FunctionDecl func, SymbolTable st, bool enableStackTrace = true) {
@@ -400,7 +401,8 @@ class NativeCompiledFunction : CompiledFunction {
 
     /// Object-mode constructor: compiles functions into a relocatable buffer for .o output.
     /// Skips CTFE-only infrastructure (exceptions, host functions, data section).
-    this(FunctionDecl[] funcs, SymbolTable st, bool objectModeFlag) {
+    this(FunctionDecl[] funcs, SymbolTable st, bool objectModeFlag,
+         ImportedFunctionDecl[] imports = null) {
         assert(objectModeFlag, "Use other constructors for JIT mode");
         this.objectMode = true;
         this.symbolTable = st;
@@ -412,6 +414,12 @@ class NativeCompiledFunction : CompiledFunction {
         }
 
         // No data section, exception globals, or host functions in object mode
+
+        // Register extern(C) function names for call dispatch
+        if (imports !is null) {
+            foreach (imp; imports)
+                objectExternFunctions[imp.name] = true;
+        }
 
         foreach (func; funcs) {
             string name = getMangledName(func);
@@ -2622,53 +2630,16 @@ class NativeCompiledFunction : CompiledFunction {
                     return;
                 }
 
+                // Object-mode extern(C): emit BL with relocation (linker resolves)
+                if (objectMode && funcIdent.name in objectExternFunctions) {
+                    emitCCallArgs(call.arguments);
+                    emitObjectExternalCall(funcIdent.name);
+                    return;
+                }
+
                 // Check if this is an FFI call (extern(C) import resolved via dlsym)
                 if (auto ffiSlot = funcIdent.name in ffiSlots) {
-                    if (call.arguments.length > 4) {
-                        throw new Exception("Native backend: FFI calls support max 4 arguments");
-                    }
-
-                    // Compile arguments into x0-x3 (standard C calling convention, no context shift)
-                    bool hasNestedCalls = false;
-                    foreach (arg; call.arguments) {
-                        if (containsCall(arg)) {
-                            hasNestedCalls = true;
-                            break;
-                        }
-                    }
-
-                    if (hasNestedCalls && call.arguments.length > 1) {
-                        auto mark = temps.save();
-                        size_t[] argSlots;
-                        foreach (i, arg; call.arguments) {
-                            compileExpression(arg);
-                            size_t slot = temps.alloc(8);
-                            gen.emitStorePtr(slot);
-                            argSlots ~= slot;
-                        }
-                        for (long i = cast(long)argSlots.length - 1; i >= 0; i--) {
-                            gen.emitLoadPtr(argSlots[cast(size_t)i]);
-                            switch (cast(int)i) {
-                                case 0: break;
-                                case 1: gen.emitMoveX0ToX1(); break;
-                                case 2: gen.emitMoveX0ToX2(); break;
-                                case 3: gen.emitMoveX0ToX3(); break;
-                                default: assert(0, "FFI argument register > 3");
-                            }
-                        }
-                        temps.restore(mark);
-                    } else {
-                        for (long i = cast(long)call.arguments.length - 1; i >= 0; i--) {
-                            compileExpression(call.arguments[i]);
-                            switch (cast(int)i) {
-                                case 0: break;
-                                case 1: gen.emitMoveX0ToX1(); break;
-                                case 2: gen.emitMoveX0ToX2(); break;
-                                case 3: gen.emitMoveX0ToX3(); break;
-                                default: assert(0, "FFI argument register > 3");
-                            }
-                        }
-                    }
+                    emitCCallArgs(call.arguments);
 
                     // Call through the function pointer slot (no context injection)
                     gen.emitIndirectCall(*ffiSlot);
@@ -2778,6 +2749,33 @@ class NativeCompiledFunction : CompiledFunction {
                                     return;
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            // String literal .ptr / .length: "hello\0".ptr → pointer to string data
+            if (member.memberName == "ptr" || member.memberName == "length") {
+                if (auto litExpr = cast(LiteralExpression)member.object) {
+                    if (litExpr.value.peek!string() !is null) {
+                        string strVal = litExpr.value.get!string();
+                        if (member.memberName == "ptr") {
+                            if (objectMode) {
+                                import std.conv : to;
+                                string symName = "__str_" ~ to!string(objectDataSymCount++);
+                                uint dataOff = appendObjectData(cast(const(ubyte)[])strVal);
+                                objectDataSymbols ~= ObjectDataSymbol(symName, dataOff);
+                                emitLoadDataAddress(symName);
+                            } else {
+                                ubyte[] strData = cast(ubyte[])strVal.dup;
+                                ubyte* dataPtr = dataSection.addData(strData);
+                                gen.emitLoadImm64(cast(ulong)dataPtr);
+                            }
+                            return;
+                        } else {
+                            // .length
+                            gen.emitLoadImm(cast(int)strVal.length);
+                            return;
                         }
                     }
                 }
@@ -4051,6 +4049,54 @@ class NativeCompiledFunction : CompiledFunction {
      * Builds the error string at compile time, stores in __DATA,__const,
      * emits ADRP+ADD to load its address, then calls write(2, msg, len) + _exit(1).
      */
+    /// Compile arguments into x0-x3 following the C calling convention.
+    /// Used for both JIT FFI calls and object-mode extern(C) calls.
+    private void emitCCallArgs(Expression[] arguments) {
+        if (arguments.length > 4)
+            throw new Exception("Native backend: C calls support max 4 arguments");
+
+        bool hasNestedCalls = false;
+        foreach (arg; arguments) {
+            if (containsCall(arg)) {
+                hasNestedCalls = true;
+                break;
+            }
+        }
+
+        if (hasNestedCalls && arguments.length > 1) {
+            auto mark = temps.save();
+            size_t[] argSlots;
+            foreach (i, arg; arguments) {
+                compileExpression(arg);
+                size_t slot = temps.alloc(8);
+                gen.emitStorePtr(slot);
+                argSlots ~= slot;
+            }
+            for (long i = cast(long)argSlots.length - 1; i >= 0; i--) {
+                gen.emitLoadPtr(argSlots[cast(size_t)i]);
+                switch (cast(int)i) {
+                    case 0: break;
+                    case 1: gen.emitMoveX0ToX1(); break;
+                    case 2: gen.emitMoveX0ToX2(); break;
+                    case 3: gen.emitMoveX0ToX3(); break;
+                    default: assert(0, "C call argument register > 3");
+                }
+            }
+            temps.restore(mark);
+        } else {
+            for (long i = cast(long)arguments.length - 1; i >= 0; i--) {
+                compileExpression(arguments[i]);
+                switch (cast(int)i) {
+                    case 0: break;
+                    case 1: gen.emitMoveX0ToX1(); break;
+                    case 2: gen.emitMoveX0ToX2(); break;
+                    case 3: gen.emitMoveX0ToX3(); break;
+                    default: assert(0, "C call argument register > 3");
+                }
+            }
+        }
+    }
+
     private void emitRuntimeError(string errorKind, string fileName, uint line) {
         import std.conv : to;
         string msg = "Runtime Error: " ~ errorKind ~ " at " ~ fileName ~ ":" ~ to!string(line) ~ "\n";
@@ -4197,17 +4243,29 @@ class NativeCompiledFunction : CompiledFunction {
 
     /// Initialize a slice from a string literal by storing bytes in the data section.
     private void compileStringLiteralInit(size_t sliceOffset, string strVal) {
-        ubyte[] strData = cast(ubyte[])strVal.dup;
-        uint len = cast(uint)strData.length;
+        import std.conv : to;
 
-        ubyte* dataPtr = dataSection.addData(strData);
-        if (dataPtr is null) {
-            throw new Exception("String literal: data section full");
+        uint len = cast(uint)strVal.length;
+
+        if (objectMode) {
+            // Store string bytes in __DATA,__const
+            string symName = "__str_" ~ to!string(objectDataSymCount++);
+            uint dataOff = appendObjectData(cast(const(ubyte)[])strVal);
+            objectDataSymbols ~= ObjectDataSymbol(symName, dataOff);
+
+            // ptr = ADRP+ADD (address of string data in data section)
+            emitLoadDataAddress(symName);
+            gen.emitStorePtr(sliceOffset);
+        } else {
+            ubyte[] strData = cast(ubyte[])strVal.dup;
+            ubyte* dataPtr = dataSection.addData(strData);
+            if (dataPtr is null)
+                throw new Exception("String literal: data section full");
+
+            // ptr = dataPtr (64-bit host pointer)
+            gen.emitLoadImm64(cast(ulong)dataPtr);
+            gen.emitStorePtr(sliceOffset);
         }
-
-        // ptr = dataPtr (64-bit host pointer)
-        gen.emitLoadImm64(cast(ulong)dataPtr);
-        gen.emitStorePtr(sliceOffset);
 
         // length (32-bit at offset 8)
         gen.emitImm32(stencil_load_imm32, cast(int)len);
