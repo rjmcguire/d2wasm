@@ -21,6 +21,7 @@ import ast.expressions;
 import semantic.symbol_table;
 import semantic.type_checker;
 import std.conv : to;
+import diagnostic.log : log;
 
 alias ArrayType = ast.nodes.ArrayType;
 
@@ -378,10 +379,12 @@ class NativeCompiledFunction : CompiledFunction {
         }
         
         // Compile all functions
+        log(1, "native: JIT compiling ", funcs.length, " functions");
         foreach (func; funcs) {
             compileFunction(func);
         }
-        
+        log(1, "native: JIT compilation done");
+
         // Set entry point to the entry function
         if (auto entryLabel = entryFuncName in functionLabels) {
             entryPoint = (*entryLabel).offset;
@@ -427,9 +430,11 @@ class NativeCompiledFunction : CompiledFunction {
             functionLabels[name] = gen.newLabel();
         }
 
+        log(1, "native: object mode compiling ", funcs.length, " functions");
         foreach (func; funcs) {
             compileFunction(func);
         }
+        log(1, "native: object mode compilation done");
     }
 
     /// Get relocatable code bytes (for object mode).
@@ -530,13 +535,12 @@ class NativeCompiledFunction : CompiledFunction {
     }
 
     private void compileFunction(FunctionDecl func) {
-        import std.stdio : writeln;
-
         // Skip forward declarations (no body)
         if (func.body_ is null)
             return;
 
         string name = getMangledName(func);
+        log(2, "native: compileFunction ", name, " (isMethod=", func.isMethod, ", parent=", func.parent ? func.parent.name : "null", ")");
 
         // Bind function label (for multi-function mode)
         if (auto labelPtr = name in functionLabels) {
@@ -623,6 +627,9 @@ class NativeCompiledFunction : CompiledFunction {
 
             localVars["this"] = thisInfo;
             nextLocalOffset += 8;  // 64-bit pointer
+            log(3, "native:   this pointer at offset ", currentThisOffset,
+                " struct=", currentMethodStruct ? currentMethodStruct.name : "null",
+                " class=", currentMethodClass ? currentMethodClass.name : "null");
         }
 
         // Hidden arena pointer
@@ -1264,6 +1271,7 @@ class NativeCompiledFunction : CompiledFunction {
     }
     
     private void compileStatement(Statement stmt) {
+        log(3, "native: stmt ", typeid(stmt));
         if (auto compound = cast(CompoundStatement)stmt) {
             foreach (s; compound.statements) {
                 compileStatement(s);
@@ -1400,6 +1408,7 @@ class NativeCompiledFunction : CompiledFunction {
 
             // Class vtable pointer initialization: store table base index at offset 0
             if (nli.isClass && classType) {
+                log(2, "native: class var '", varDecl.name, "' type=", classType.name, " size=", classType.classSize);
                 ensureNativeVtable(classType);
                 uint tableBase = classTableBases[classType.name];
                 gen.emitImm32(stencil_load_imm32, cast(int)tableBase);
@@ -2031,7 +2040,7 @@ class NativeCompiledFunction : CompiledFunction {
 
     private void compileExpression(Expression expr) {
         import std.variant : Variant;
-        
+        log(3, "native: expr ", typeid(expr));
         if (auto lit = cast(LiteralExpression)expr) {
             // Handle different literal types via Variant
             if (lit.value.type == typeid(long)) {
@@ -2274,10 +2283,10 @@ class NativeCompiledFunction : CompiledFunction {
                 assert(0, "Unsupported unary operator: " ~ to!string(unaryOp.operator));
             }
         } else if (auto ident = cast(IdentifierExpression)expr) {
-            import std.stdio : writeln;
-            writeln("Native Backend: compileExpression ident=", ident.name);
+            log(3, "native:   ident '", ident.name, "'");
             // Load variable from stack
             if (auto info = ident.name in localVars) {
+                log(3, "native:     -> local (kind=", info.kind, ", offset=", info.offset, ")");
                 final switch (info.kind) {
                     case VarKind.struct_:
                     case VarKind.class_:
@@ -2294,10 +2303,9 @@ class NativeCompiledFunction : CompiledFunction {
             } else {
                 // Check if it's a manifest constant
                 auto symbol = symbolTable.lookupSymbol(ident.name);
-                import std.stdio : writeln;
-                writeln("Native Backend: lookupSymbol(", ident.name, ") = ", symbol ? symbol.name : "null");
                 if (symbol && symbol.isConstant) {
                     if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
+                        log(3, "native:     -> manifest '", manifest.name, "'");
                         assert(manifest.ownModuleResolver !is null,
                             "Manifest '" ~ manifest.name ~ "' reached codegen without resolver stamp");
                         manifest.ensureEvaluated();
@@ -2323,6 +2331,9 @@ class NativeCompiledFunction : CompiledFunction {
                 if (auto currentAgg = currentMethodAggregate()) {
                     // In a method: check for implicit field access (field without 'this.')
                     auto field = currentAgg.getField(ident.name);
+                    log(3, "native:     -> implicit field '", ident.name, "' in ", currentAgg.name,
+                        " found=", field !is null,
+                        field ? " offset=" : "", field ? to!string(field.offset) : "");
                     if (field) {
                         // Slice field: emit address (this_ptr + field.offset) — consumed by .length, [i], ~= etc.
                         if (auto arrType = cast(ArrayType)field.type) {
@@ -2345,8 +2356,6 @@ class NativeCompiledFunction : CompiledFunction {
                         throw new NativeCompileError(
                             "Cannot access module-level variable '" ~ ident.name ~ "' during CTFE",
                             ident.location);
-                    import std.stdio : writeln;
-                    writeln("Native Backend: Final fallback for ", ident.name, " symbol=", symbol ? "exists" : "null");
                     throw new NativeCompileError("Unknown variable in native backend: " ~ ident.name, ident.location);
                 } else {
                     if (symbol && cast(VariableDecl)symbol.declaration)
@@ -2404,6 +2413,7 @@ class NativeCompiledFunction : CompiledFunction {
                 // In a method: check for implicit field assignment
                 if (auto currentAgg = currentMethodAggregate()) {
                     auto field = currentAgg.getField(targetIdent.name);
+                    log(3, "native: assign implicit field '", targetIdent.name, "' in ", currentAgg.name, " found=", field !is null);
                     if (field) {
                         // ConcatAssign on implicit slice field: data ~= value
                         if (assign.operator == AssignmentExpression.Operator.ConcatAssign) {
@@ -2503,6 +2513,7 @@ class NativeCompiledFunction : CompiledFunction {
             }
             // Result of assignment is the assigned value (already in x0)
         } else if (auto call = cast(CallExpression)expr) {
+            log(3, "native: call ", cast(IdentifierExpression)call.function_ ? (cast(IdentifierExpression)call.function_).name : cast(MemberExpression)call.function_ ? (cast(MemberExpression)call.function_).memberName : "?");
             // Check if this is struct construction
             if (auto funcIdent = cast(IdentifierExpression)call.function_) {
                 auto symbol = symbolTable.lookupSymbol(funcIdent.name);
@@ -3385,6 +3396,7 @@ class NativeCompiledFunction : CompiledFunction {
      * then user arguments in x1, x2, etc.
      */
     private void emitMethodCall(MemberExpression memberExpr, Expression[] args) {
+        log(2, "native: emitMethodCall .", memberExpr.memberName);
         // Handle nested MemberExpression objects (e.g., obj.field.method() from alias-this)
         if (auto objMember = cast(MemberExpression)memberExpr.object) {
             auto innerStruct = getStructDeclFromExpr(objMember);
@@ -3497,6 +3509,7 @@ class NativeCompiledFunction : CompiledFunction {
      * and emits an indirect call through the vtable.
      */
     private void emitClassMethodCall(ClassDecl classDecl, NativeLocalInfo info, string methodName, Expression[] args) {
+        log(2, "native: emitClassMethodCall ", classDecl.name, ".", methodName);
         assert(classDecl !is null, "emitClassMethodCall: classDecl is null");
         computeVirtualMethodsIfNeeded(classDecl);
 
@@ -4817,6 +4830,7 @@ class NativeCompiledFunction : CompiledFunction {
     /// Ensure virtualMethods is populated for the class and its base chain.
     private void computeVirtualMethodsIfNeeded(ClassDecl classDecl) {
         if (classDecl.virtualMethods.length > 0) return;
+        log(2, "native: computeVirtualMethods for ", classDecl.name);
 
         if (classDecl.baseClassDecl) {
             computeVirtualMethodsIfNeeded(classDecl.baseClassDecl);
@@ -4846,6 +4860,7 @@ class NativeCompiledFunction : CompiledFunction {
     private void ensureNativeVtable(ClassDecl classDecl) {
         assert(classDecl !is null, "ensureNativeVtable: null ClassDecl");
         if (classDecl.name in classTableBases) return; // already set up
+        log(2, "native: ensureNativeVtable ", classDecl.name);
 
         // Ensure base class has vtable first
         if (classDecl.baseClassDecl)
