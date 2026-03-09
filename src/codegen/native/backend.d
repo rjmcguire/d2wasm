@@ -818,6 +818,8 @@ class NativeCompiledFunction : CompiledFunction {
     /// If exception pending and inside try block: branch to catch handler.
     /// If exception pending and not in try block: branch to epilogue (propagate).
     private void emitNativeExceptionCheck() {
+        if (objectMode) return; // No exception infrastructure in object mode
+
         // Load __exception_pending from data section
         gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)exceptionPendingAddr);
         gen.emitLoadFromX9Offset(0);  // w0 = *exceptionPendingAddr
@@ -833,6 +835,8 @@ class NativeCompiledFunction : CompiledFunction {
     /// Emit exception check after a function call that returns a value in w0/x0.
     /// Saves result to a temp slot, checks exception flag, restores on normal path.
     private void emitNativeExceptionCheckWithValue() {
+        if (objectMode) return; // No exception infrastructure in object mode
+
         auto mark = temps.save();
         size_t savedResultOffset = temps.alloc(8);
 

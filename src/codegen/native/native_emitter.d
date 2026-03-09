@@ -9,6 +9,7 @@ module codegen.native.native_emitter;
 import codegen.native.macho_writer;
 import codegen.native.backend : NativeCompiledFunction;
 import codegen.target : sliceInfo, SliceInfo;
+import codegen.mangle : computeMangledName;
 import ast.nodes;
 import semantic.symbol_table;
 
@@ -45,10 +46,12 @@ class NativeModuleEmitter {
         // Compile all functions in object mode (relocatable buffer, no CTFE infrastructure)
         auto compiled = new NativeCompiledFunction(funcs, symbolTable, true /* objectMode */);
 
-        // Get function offset before extracting code (both read from the same NativeCodeGen)
-        size_t mainOffset = compiled.getFunctionOffset("main");
+        // Look up main's offset using its mangled name (symbol table sets mangledName
+        // during type checking, e.g. "main" → "_D4test4mainFZi")
+        string mainKey = mangledNameOf(mainFunc);
+        size_t mainOffset = compiled.getFunctionOffset(mainKey);
         if (mainOffset == size_t.max)
-            throw new Exception("main() function offset not found");
+            throw new Exception("main() function offset not found (key: " ~ mainKey ~ ")");
 
         // Get the compiled code bytes (returns a .dup copy)
         ubyte[] code = compiled.getRelocatableCode();
@@ -71,12 +74,10 @@ class NativeModuleEmitter {
 
         // Add user functions as local symbols (for debugging/nm)
         foreach (func; funcs) {
-            size_t off = compiled.getFunctionOffset(func.name);
-            if (off != size_t.max) {
-                // Avoid duplicate key: user's "main" is already used for the exported wrapper
-                string symName = (func.name == "main") ? "_d_main" : func.name;
-                writer.addLocalSymbol(symName, 1, off);
-            }
+            string key = mangledNameOf(func);
+            size_t off = compiled.getFunctionOffset(key);
+            if (off != size_t.max)
+                writer.addLocalSymbol(key, 1, off);
         }
 
         compiled.dispose(); // free the malloc'd code buffer
@@ -85,6 +86,16 @@ class NativeModuleEmitter {
     }
 
 private:
+    /// Get the key used by NativeCompiledFunction.getMangledName for a function.
+    /// Mirrors its logic: use mangledName if set, else bare name.
+    static string mangledNameOf(FunctionDecl func) {
+        if (func.mangledName)
+            return func.mangledName;
+        if (func.isMethod && func.parent !is null)
+            return computeMangledName([], func);
+        return func.name;
+    }
+
     /// Emit a minimal C ABI _main wrapper:
     ///   STP x29, x30, [SP, #-16]!
     ///   MOV x29, SP
