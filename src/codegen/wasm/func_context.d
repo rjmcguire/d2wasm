@@ -114,6 +114,103 @@ class FuncContext {
         return null;
     }
 
+    // ─── Opcode emission helpers ─────────────────────────────────────────
+
+    void emitLocalGet(ref Appender!(ubyte[]) out_, uint idx) {
+        out_ ~= Op.local_get;
+        leb128u(out_, idx);
+    }
+
+    void emitLocalSet(ref Appender!(ubyte[]) out_, uint idx) {
+        out_ ~= Op.local_set;
+        leb128u(out_, idx);
+    }
+
+    void emitLocalTee(ref Appender!(ubyte[]) out_, uint idx) {
+        out_ ~= Op.local_tee;
+        leb128u(out_, idx);
+    }
+
+    void emitGlobalGet(ref Appender!(ubyte[]) out_, uint idx) {
+        out_ ~= Op.global_get;
+        leb128u(out_, idx);
+    }
+
+    void emitGlobalSet(ref Appender!(ubyte[]) out_, uint idx) {
+        out_ ~= Op.global_set;
+        leb128u(out_, idx);
+    }
+
+    void emitI32Const(ref Appender!(ubyte[]) out_, long value) {
+        out_ ~= Op.i32_const;
+        leb128s(out_, value);
+    }
+
+    void emitI64Const(ref Appender!(ubyte[]) out_, long value) {
+        out_ ~= Op.i64_const;
+        leb128s(out_, value);
+    }
+
+    void emitF64Const(ref Appender!(ubyte[]) out_, double value) {
+        out_ ~= Op.f64_const;
+        out_ ~= (cast(ubyte*)&value)[0 .. 8];
+    }
+
+    void emitF32Const(ref Appender!(ubyte[]) out_, float value) {
+        out_ ~= Op.f32_const;
+        out_ ~= (cast(ubyte*)&value)[0 .. 4];
+    }
+
+    void emitI32Load(ref Appender!(ubyte[]) out_, uint offset = 0) {
+        out_ ~= Op.i32_load;
+        out_ ~= cast(ubyte) 0x02;
+        leb128u(out_, offset);
+    }
+
+    void emitI32Store(ref Appender!(ubyte[]) out_, uint offset = 0) {
+        out_ ~= Op.i32_store;
+        out_ ~= cast(ubyte) 0x02;
+        leb128u(out_, offset);
+    }
+
+    void emitI64Load(ref Appender!(ubyte[]) out_, uint offset = 0) {
+        out_ ~= Op.i64_load;
+        out_ ~= cast(ubyte) 0x03;
+        leb128u(out_, offset);
+    }
+
+    void emitI64Store(ref Appender!(ubyte[]) out_, uint offset = 0) {
+        out_ ~= Op.i64_store;
+        out_ ~= cast(ubyte) 0x03;
+        leb128u(out_, offset);
+    }
+
+    void emitCall(ref Appender!(ubyte[]) out_, uint funcIdx) {
+        out_ ~= Op.call;
+        leb128u(out_, funcIdx);
+    }
+
+    void emitBr(ref Appender!(ubyte[]) out_, uint depth) {
+        out_ ~= Op.br;
+        leb128u(out_, depth);
+    }
+
+    void emitBrIf(ref Appender!(ubyte[]) out_, uint depth) {
+        out_ ~= Op.br_if;
+        leb128u(out_, depth);
+    }
+
+    /// Emit FP + offset to compute a shadow-stack address.
+    void emitFPOffset(ref Appender!(ubyte[]) out_, int offset) {
+        out_ ~= Op.local_get;
+        leb128u(out_, fpLocal);
+        out_ ~= Op.i32_const;
+        leb128s(out_, offset);
+        out_ ~= Op.i32_add;
+    }
+
+    // ─── End opcode helpers ──────────────────────────────────────────────
+
     /// Emit the base address of a variable onto the WASM stack.
     /// For wasmLocal/paramPointer: emits local_get.
     /// For shadowStack: emits FP + frameOffset.
@@ -121,16 +218,11 @@ class FuncContext {
         final switch (info.addrMode) {
             case AddrMode.wasmLocal:
             case AddrMode.paramPointer:
-                out_ ~= Op.local_get;
-                leb128u(out_, info.wasmLocalIdx);
+                emitLocalGet(out_, info.wasmLocalIdx);
                 break;
             case AddrMode.shadowStack:
                 // FP + frameOffset
-                out_ ~= Op.local_get;
-                leb128u(out_, fpLocal);
-                out_ ~= Op.i32_const;
-                leb128s(out_, info.frameOffset);
-                out_ ~= Op.i32_add;
+                emitFPOffset(out_, info.frameOffset);
                 break;
         }
     }
@@ -827,25 +919,18 @@ class FuncContext {
         if (frameSize == 0) return;
         
         // savedSp = global.get $sp
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.local_set;
-        leb128u(out_, savedSpLocal);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitLocalSet(out_, savedSpLocal);
         
         // $sp = $sp - frameSize
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, frameSize);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, frameSize);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.global_set;
-        leb128u(out_, emitter.spGlobal);
+        emitGlobalSet(out_, emitter.spGlobal);
         
         // FP = $sp (frame pointer for stable local access)
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.local_set;
-        leb128u(out_, fpLocal);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitLocalSet(out_, fpLocal);
     }
     
     /**
@@ -857,8 +942,7 @@ class FuncContext {
         // Pop call stack frame on normal return only — preserve during exception propagation
         // so the host can read the call chain for error reporting
         if (enableStackTrace) {
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.exceptionPendingGlobal);
+            emitGlobalGet(out_, emitter.exceptionPendingGlobal);
             out_ ~= Op.i32_eqz;
             out_ ~= Op.if_;
             out_ ~= cast(ubyte)BlockType.void_;
@@ -871,10 +955,8 @@ class FuncContext {
         if (frameSize == 0) return;
 
         // $sp = savedSp
-        out_ ~= Op.local_get;
-        leb128u(out_, savedSpLocal);
-        out_ ~= Op.global_set;
-        leb128u(out_, emitter.spGlobal);
+        emitLocalGet(out_, savedSpLocal);
+        emitGlobalSet(out_, emitter.spGlobal);
     }
 
     /// Push the current arena pointer onto the WASM stack.
@@ -882,11 +964,9 @@ class FuncContext {
     /// otherwise falls back to the global root arena.
     void emitArenaPointer(ref Appender!(ubyte[]) out_) {
         if (hasArenaParam) {
-            out_ ~= Op.local_get;
-            leb128u(out_, arenaLocalIdx);
+            emitLocalGet(out_, arenaLocalIdx);
         } else {
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.arenaBaseGlobal);
+            emitGlobalGet(out_, emitter.arenaBaseGlobal);
         }
     }
 
@@ -898,8 +978,7 @@ class FuncContext {
         if (!hasArenaParam) return;
         if (returnsArenaData) return;
         emitArenaPointer(out_);
-        out_ ~= Op.call;
-        leb128u(out_, isNew ? emitter.arenaNewFuncIndex : emitter.arenaDropFuncIndex);
+        emitCall(out_, isNew ? emitter.arenaNewFuncIndex : emitter.arenaDropFuncIndex);
     }
 
     /// Returns true if this function's return type contains pointers to arena memory
@@ -927,15 +1006,11 @@ class FuncContext {
                                     CALL_STACK_FRAME_SIZE, CALL_STACK_MAX_FRAMES;
         
         // Load current depth from memory
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_DEPTH_OFFSET);  // address 0
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;  // alignment = 4
-        out_ ~= cast(ubyte)0x00;  // offset = 0
+        emitI32Const(out_, CALL_STACK_DEPTH_OFFSET);
+        emitI32Load(out_, 0x00);
 
         // Check if depth < 64
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_MAX_FRAMES);
+        emitI32Const(out_, CALL_STACK_MAX_FRAMES);
         out_ ~= Op.i32_lt_u;
 
         // if (depth < 64) {
@@ -943,140 +1018,85 @@ class FuncContext {
         out_ ~= BlockType.void_;  // No result
 
         // Calculate frame address: 8 + depth * 24
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_FRAMES_OFFSET);
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_DEPTH_OFFSET);
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        out_ ~= cast(ubyte)0x00;
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_FRAME_SIZE);
+        emitI32Const(out_, CALL_STACK_FRAMES_OFFSET);
+        emitI32Const(out_, CALL_STACK_DEPTH_OFFSET);
+        emitI32Load(out_, 0x00);
+        emitI32Const(out_, CALL_STACK_FRAME_SIZE);
         out_ ~= Op.i32_mul;
         out_ ~= Op.i32_add;
         // Stack: [frameAddr]
 
         // Store nameOffset at frameAddr + 0
-        out_ ~= Op.i32_const;
-        leb128s(out_, frameNameOffset);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        out_ ~= cast(ubyte)0x00;
+        emitI32Const(out_, frameNameOffset);
+        emitI32Store(out_, 0x00);
 
         // Recalculate frameAddr for next store (depth still same)
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_FRAMES_OFFSET);
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_DEPTH_OFFSET);
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        out_ ~= cast(ubyte)0x00;
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_FRAME_SIZE);
+        emitI32Const(out_, CALL_STACK_FRAMES_OFFSET);
+        emitI32Const(out_, CALL_STACK_DEPTH_OFFSET);
+        emitI32Load(out_, 0x00);
+        emitI32Const(out_, CALL_STACK_FRAME_SIZE);
         out_ ~= Op.i32_mul;
         out_ ~= Op.i32_add;
 
         // Store nameLen at frameAddr + 4
-        out_ ~= Op.i32_const;
-        leb128s(out_, frameNameLen);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        out_ ~= cast(ubyte)0x04;
+        emitI32Const(out_, frameNameLen);
+        emitI32Store(out_, 0x04);
 
         // Recalculate frameAddr
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_FRAMES_OFFSET);
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_DEPTH_OFFSET);
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        out_ ~= cast(ubyte)0x00;
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_FRAME_SIZE);
+        emitI32Const(out_, CALL_STACK_FRAMES_OFFSET);
+        emitI32Const(out_, CALL_STACK_DEPTH_OFFSET);
+        emitI32Load(out_, 0x00);
+        emitI32Const(out_, CALL_STACK_FRAME_SIZE);
         out_ ~= Op.i32_mul;
         out_ ~= Op.i32_add;
 
         // Store fileOffset at frameAddr + 8
-        out_ ~= Op.i32_const;
-        leb128s(out_, frameFileOffset);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        out_ ~= cast(ubyte)0x08;
+        emitI32Const(out_, frameFileOffset);
+        emitI32Store(out_, 0x08);
 
         // Recalculate frameAddr
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_FRAMES_OFFSET);
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_DEPTH_OFFSET);
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        out_ ~= cast(ubyte)0x00;
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_FRAME_SIZE);
+        emitI32Const(out_, CALL_STACK_FRAMES_OFFSET);
+        emitI32Const(out_, CALL_STACK_DEPTH_OFFSET);
+        emitI32Load(out_, 0x00);
+        emitI32Const(out_, CALL_STACK_FRAME_SIZE);
         out_ ~= Op.i32_mul;
         out_ ~= Op.i32_add;
 
         // Store fileLen at frameAddr + 12
-        out_ ~= Op.i32_const;
-        leb128s(out_, frameFileLen);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        out_ ~= cast(ubyte)0x0C;
+        emitI32Const(out_, frameFileLen);
+        emitI32Store(out_, 0x0C);
 
         // Recalculate frameAddr
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_FRAMES_OFFSET);
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_DEPTH_OFFSET);
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        out_ ~= cast(ubyte)0x00;
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_FRAME_SIZE);
+        emitI32Const(out_, CALL_STACK_FRAMES_OFFSET);
+        emitI32Const(out_, CALL_STACK_DEPTH_OFFSET);
+        emitI32Load(out_, 0x00);
+        emitI32Const(out_, CALL_STACK_FRAME_SIZE);
         out_ ~= Op.i32_mul;
         out_ ~= Op.i32_add;
 
         // Store line at frameAddr + 16
-        out_ ~= Op.i32_const;
-        leb128s(out_, frameLine);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        out_ ~= cast(ubyte)0x10;
+        emitI32Const(out_, frameLine);
+        emitI32Store(out_, 0x10);
 
         // Recalculate frameAddr
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_FRAMES_OFFSET);
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_DEPTH_OFFSET);
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        out_ ~= cast(ubyte)0x00;
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_FRAME_SIZE);
+        emitI32Const(out_, CALL_STACK_FRAMES_OFFSET);
+        emitI32Const(out_, CALL_STACK_DEPTH_OFFSET);
+        emitI32Load(out_, 0x00);
+        emitI32Const(out_, CALL_STACK_FRAME_SIZE);
         out_ ~= Op.i32_mul;
         out_ ~= Op.i32_add;
 
         // Store column at frameAddr + 20
-        out_ ~= Op.i32_const;
-        leb128s(out_, frameColumn);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        out_ ~= cast(ubyte)0x14;
+        emitI32Const(out_, frameColumn);
+        emitI32Store(out_, 0x14);
 
         // Increment depth: mem[0] = mem[0] + 1
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_DEPTH_OFFSET);  // address for store
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_DEPTH_OFFSET);  // address for load
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        out_ ~= cast(ubyte)0x00;
-        out_ ~= Op.i32_const;
-        leb128s(out_, 1);
+        emitI32Const(out_, CALL_STACK_DEPTH_OFFSET);
+        emitI32Const(out_, CALL_STACK_DEPTH_OFFSET);
+        emitI32Load(out_, 0x00);
+        emitI32Const(out_, 1);
         out_ ~= Op.i32_add;
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        out_ ~= cast(ubyte)0x00;
+        emitI32Store(out_, 0x00);
 
         // end if
         out_ ~= Op.end;
@@ -1091,19 +1111,12 @@ class FuncContext {
         import codegen.wasm.types : CALL_STACK_DEPTH_OFFSET;
         
         // Decrement depth: mem[0] = mem[0] - 1
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_DEPTH_OFFSET);  // address for store
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_DEPTH_OFFSET);  // address for load
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        out_ ~= cast(ubyte)0x00;
-        out_ ~= Op.i32_const;
-        leb128s(out_, 1);
+        emitI32Const(out_, CALL_STACK_DEPTH_OFFSET);
+        emitI32Const(out_, CALL_STACK_DEPTH_OFFSET);
+        emitI32Load(out_, 0x00);
+        emitI32Const(out_, 1);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        out_ ~= cast(ubyte)0x00;
+        emitI32Store(out_, 0x00);
     }
     
     /**
@@ -1122,8 +1135,7 @@ class FuncContext {
 
         // Save divisor, test for zero
         //   Stack: [..., dividend, divisor]
-        out_ ~= Op.local_tee;
-        leb128u(out_, tempLocalB);
+        emitLocalTee(out_, tempLocalB);
         //   Stack: [..., dividend, divisor]  (divisor also in tempLocalB)
         out_ ~= Op.i32_eqz;
         //   Stack: [..., dividend, is_zero]
@@ -1145,8 +1157,7 @@ class FuncContext {
 
         if (tryStack.length > 0) {
             // Inside a try block: branch to catch handler
-            out_ ~= Op.br;
-            leb128u(out_, blockDepth - tryStack[$ - 1].catchBlockDepth);
+            emitBr(out_, blockDepth - tryStack[$ - 1].catchBlockDepth);
         } else {
             // Not in a try block: propagate by returning.
             // Don't call emitCallStackOverwrite here — the error originates in THIS
@@ -1162,8 +1173,7 @@ class FuncContext {
 
         // Restore divisor and perform the operation
         //   Stack: [..., dividend]
-        out_ ~= Op.local_get;
-        leb128u(out_, tempLocalB);
+        emitLocalGet(out_, tempLocalB);
         //   Stack: [..., dividend, divisor]
         out_ ~= divOp;
     }
@@ -1193,17 +1203,12 @@ class FuncContext {
         
         // Push the address of the struct (this pointer)
         // FP + frameOffset
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, info.frameOffset);
-        out_ ~= Op.i32_add;
+        emitFPOffset(out_, info.frameOffset);
         
         // Call the destructor using its mangled name
         string dtorName = dtor.mangledName ? dtor.mangledName : info.structDecl.name ~ "_~this";
         if (auto funcIdx = dtorName in emitter.funcIndex) {
-            out_ ~= Op.call;
-            leb128u(out_, cast(uint)emitter.imports.length + *funcIdx);
+            emitCall(out_, cast(uint)emitter.imports.length + *funcIdx);
         } else {
             // Destructor not registered - this shouldn't happen
             // For now, just drop the this pointer
@@ -1308,14 +1313,12 @@ class FuncContext {
             if (loopStack.length == 0)
                 throw new EmitError("break statement outside of loop", stmt.location);
             auto ctx = loopStack[$ - 1];
-            out_ ~= Op.br;
-            leb128u(out_, blockDepth - ctx.breakBlockDepth);
+            emitBr(out_, blockDepth - ctx.breakBlockDepth);
         } else if (cast(ContinueStatement)stmt) {
             if (loopStack.length == 0)
                 throw new EmitError("continue statement outside of loop", stmt.location);
             auto ctx = loopStack[$ - 1];
-            out_ ~= Op.br;
-            leb128u(out_, blockDepth - ctx.continueBlockDepth);
+            emitBr(out_, blockDepth - ctx.continueBlockDepth);
         } else if (cast(StructDeclarationStatement)stmt) {
             // Inner struct declaration — no runtime code; methods already collected by emitter
         } else if (auto tryStmt = cast(TryStatement)stmt) {
@@ -1383,10 +1386,8 @@ class FuncContext {
                                     EXCEPTION_SLOT_COL, EXCEPTION_SLOT_VALUE;
 
         // Overflow check: if depth >= 100, halt
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.exceptionDepthGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, EXCEPTION_MAX_SLOTS);
+        emitGlobalGet(out_, emitter.exceptionDepthGlobal);
+        emitI32Const(out_, EXCEPTION_MAX_SLOTS);
         out_ ~= Op.i32_ge_u;
         out_ ~= Op.if_;
         out_ ~= BlockType.void_;
@@ -1396,88 +1397,55 @@ class FuncContext {
         out_ ~= Op.end;
 
         // Compute slotAddr = exceptionArrayOffset + depth * 24
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.exceptionDepthGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, EXCEPTION_SLOT_SIZE);
+        emitGlobalGet(out_, emitter.exceptionDepthGlobal);
+        emitI32Const(out_, EXCEPTION_SLOT_SIZE);
         out_ ~= Op.i32_mul;
-        out_ ~= Op.i32_const;
-        leb128s(out_, emitter.exceptionArrayOffset);
+        emitI32Const(out_, emitter.exceptionArrayOffset);
         out_ ~= Op.i32_add;
-        out_ ~= Op.local_tee;
-        leb128u(out_, tempLocalA);
+        emitLocalTee(out_, tempLocalA);
 
         // Write kind (offset 0)
-        out_ ~= Op.i32_const;
-        leb128s(out_, kind);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;  // align=4
-        out_ ~= cast(ubyte)EXCEPTION_SLOT_KIND;
+        emitI32Const(out_, kind);
+        emitI32Store(out_, EXCEPTION_SLOT_KIND);
 
         // Write file_offset (offset 4)
-        out_ ~= Op.local_get;
-        leb128u(out_, tempLocalA);
-        out_ ~= Op.i32_const;
-        leb128s(out_, frameFileOffset);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        out_ ~= cast(ubyte)EXCEPTION_SLOT_FILE_OFFSET;
+        emitLocalGet(out_, tempLocalA);
+        emitI32Const(out_, frameFileOffset);
+        emitI32Store(out_, EXCEPTION_SLOT_FILE_OFFSET);
 
         // Write file_len (offset 8)
-        out_ ~= Op.local_get;
-        leb128u(out_, tempLocalA);
-        out_ ~= Op.i32_const;
-        leb128s(out_, frameFileLen);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        out_ ~= cast(ubyte)EXCEPTION_SLOT_FILE_LEN;
+        emitLocalGet(out_, tempLocalA);
+        emitI32Const(out_, frameFileLen);
+        emitI32Store(out_, EXCEPTION_SLOT_FILE_LEN);
 
         // Write line (offset 12)
-        out_ ~= Op.local_get;
-        leb128u(out_, tempLocalA);
-        out_ ~= Op.i32_const;
-        leb128s(out_, loc.line);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        out_ ~= cast(ubyte)EXCEPTION_SLOT_LINE;
+        emitLocalGet(out_, tempLocalA);
+        emitI32Const(out_, loc.line);
+        emitI32Store(out_, EXCEPTION_SLOT_LINE);
 
         // Write col (offset 16)
-        out_ ~= Op.local_get;
-        leb128u(out_, tempLocalA);
-        out_ ~= Op.i32_const;
-        leb128s(out_, loc.column);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        out_ ~= cast(ubyte)EXCEPTION_SLOT_COL;
+        emitLocalGet(out_, tempLocalA);
+        emitI32Const(out_, loc.column);
+        emitI32Store(out_, EXCEPTION_SLOT_COL);
 
         // Write value (offset 20)
-        out_ ~= Op.local_get;
-        leb128u(out_, tempLocalA);
+        emitLocalGet(out_, tempLocalA);
         if (valueLocal != uint.max) {
-            out_ ~= Op.local_get;
-            leb128u(out_, valueLocal);
+            emitLocalGet(out_, valueLocal);
         } else {
-            out_ ~= Op.i32_const;
-            leb128s(out_, 0);
+            emitI32Const(out_, 0);
         }
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        out_ ~= cast(ubyte)EXCEPTION_SLOT_VALUE;
+        emitI32Store(out_, EXCEPTION_SLOT_VALUE);
 
         // Increment depth
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.exceptionDepthGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 1);
+        emitGlobalGet(out_, emitter.exceptionDepthGlobal);
+        emitI32Const(out_, 1);
         out_ ~= Op.i32_add;
-        out_ ~= Op.global_set;
-        leb128u(out_, emitter.exceptionDepthGlobal);
+        emitGlobalSet(out_, emitter.exceptionDepthGlobal);
 
         // Set __exception_pending = 1
-        out_ ~= Op.i32_const;
-        leb128s(out_, 1);
-        out_ ~= Op.global_set;
-        leb128u(out_, emitter.exceptionPendingGlobal);
+        emitI32Const(out_, 1);
+        emitGlobalSet(out_, emitter.exceptionPendingGlobal);
     }
 
     /**
@@ -1485,12 +1453,10 @@ class FuncContext {
      * If exception pending: propagate by returning (or branch to catch handler).
      */
     void emitExceptionCheck(ref Appender!(ubyte[]) out_, SourceLocation callSite = SourceLocation.init) {
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.exceptionPendingGlobal);
+        emitGlobalGet(out_, emitter.exceptionPendingGlobal);
         if (tryStack.length > 0) {
             // Inside try block: branch to catch handler
-            out_ ~= Op.br_if;
-            leb128u(out_, blockDepth - tryStack[$ - 1].catchBlockDepth);
+            emitBrIf(out_, blockDepth - tryStack[$ - 1].catchBlockDepth);
         } else {
             // Not in try block: propagate exception by returning
             out_ ~= Op.if_;
@@ -1513,15 +1479,12 @@ class FuncContext {
         // Save the call result off the stack — use typed temp to match the value on the stack
         assert(!(isI64Value && isF64Value), "emitExceptionCheckWithValue: value cannot be both i64 and f64");
         uint tempLocal = isF64Value ? tempLocalF64 : (isF32Value ? tempLocalF32 : (isI64Value ? tempLocalI64 : tempLocalA));
-        out_ ~= Op.local_set;
-        leb128u(out_, tempLocal);
+        emitLocalSet(out_, tempLocal);
         // Check exception flag
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.exceptionPendingGlobal);
+        emitGlobalGet(out_, emitter.exceptionPendingGlobal);
         if (tryStack.length > 0) {
             // Inside try block: branch to catch handler (stack is now clean)
-            out_ ~= Op.br_if;
-            leb128u(out_, blockDepth - tryStack[$ - 1].catchBlockDepth);
+            emitBrIf(out_, blockDepth - tryStack[$ - 1].catchBlockDepth);
         } else {
             // Not in try block: propagate
             out_ ~= Op.if_;
@@ -1534,8 +1497,7 @@ class FuncContext {
             out_ ~= Op.end;
         }
         // Restore the call result to the stack for normal execution
-        out_ ~= Op.local_get;
-        leb128u(out_, tempLocal);
+        emitLocalGet(out_, tempLocal);
     }
 
     /**
@@ -1547,19 +1509,13 @@ class FuncContext {
             return;
         auto retVt = emitter.dTypeToValType(func.decl.returnType);
         if (retVt == ValType.f64) {
-            out_ ~= Op.f64_const;
-            double zero = 0.0;
-            out_ ~= (cast(ubyte*)&zero)[0..8];
+            emitF64Const(out_, 0.0);
         } else if (retVt == ValType.f32) {
-            out_ ~= Op.f32_const;
-            float zero = 0.0f;
-            out_ ~= (cast(ubyte*)&zero)[0..4];
+            emitF32Const(out_, 0.0f);
         } else if (retVt == ValType.i64) {
-            out_ ~= Op.i64_const;
-            leb128s(out_, 0);
+            emitI64Const(out_, 0);
         } else {
-            out_ ~= Op.i32_const;
-            leb128s(out_, 0);
+            emitI32Const(out_, 0);
         }
     }
 
@@ -1576,38 +1532,24 @@ class FuncContext {
             return;
 
         // Calculate frameAddr = FRAMES_OFFSET + (depth - 1) * FRAME_SIZE
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_FRAMES_OFFSET);
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_DEPTH_OFFSET);
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;  // align=4
-        out_ ~= cast(ubyte)0x00;  // offset=0
-        out_ ~= Op.i32_const;
-        leb128s(out_, 1);
+        emitI32Const(out_, CALL_STACK_FRAMES_OFFSET);
+        emitI32Const(out_, CALL_STACK_DEPTH_OFFSET);
+        emitI32Load(out_, 0x00);
+        emitI32Const(out_, 1);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_const;
-        leb128s(out_, CALL_STACK_FRAME_SIZE);
+        emitI32Const(out_, CALL_STACK_FRAME_SIZE);
         out_ ~= Op.i32_mul;
         out_ ~= Op.i32_add;
-        out_ ~= Op.local_tee;
-        leb128u(out_, tempLocalB);
+        emitLocalTee(out_, tempLocalB);
 
         // Store call-site line at frameAddr + 16
-        out_ ~= Op.i32_const;
-        leb128s(out_, callSite.line);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;  // align=4
-        out_ ~= cast(ubyte)0x10;  // offset=16
+        emitI32Const(out_, callSite.line);
+        emitI32Store(out_, 0x10);
 
         // Store call-site column at frameAddr + 20
-        out_ ~= Op.local_get;
-        leb128u(out_, tempLocalB);
-        out_ ~= Op.i32_const;
-        leb128s(out_, callSite.column);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;  // align=4
-        out_ ~= cast(ubyte)0x14;  // offset=20
+        emitLocalGet(out_, tempLocalB);
+        emitI32Const(out_, callSite.column);
+        emitI32Store(out_, 0x14);
     }
 
     /**
@@ -1619,16 +1561,14 @@ class FuncContext {
 
         // Evaluate the thrown value and save to tempLocalB
         emitExpression(out_, expr.operand);
-        out_ ~= Op.local_set;
-        leb128u(out_, tempLocalB);
+        emitLocalSet(out_, tempLocalB);
 
         // Write exception slot (reads thrown value from tempLocalB)
         emitExceptionSlotWrite(out_, ErrorKind.UserThrow, expr.location, tempLocalB);
 
         if (tryStack.length > 0) {
             // Inside a try block: branch directly to catch handler
-            out_ ~= Op.br;
-            leb128u(out_, blockDepth - tryStack[$ - 1].catchBlockDepth);
+            emitBr(out_, blockDepth - tryStack[$ - 1].catchBlockDepth);
         } else {
             // Not in a try block: propagate by returning
             emitDummyReturnValue(out_);
@@ -1667,8 +1607,7 @@ class FuncContext {
         tryStack = tryStack[0 .. $ - 1];
 
         // Normal exit: skip catch handler
-        out_ ~= Op.br;
-        leb128u(out_, blockDepth - afterTryCatchDepth);
+        emitBr(out_, blockDepth - afterTryCatchDepth);
 
         //   end $catch_handler
         blockDepth--;
@@ -1676,25 +1615,19 @@ class FuncContext {
 
         // Catch handler: decrement depth, conditionally clear pending flag
         // __exception_depth--
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.exceptionDepthGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 1);
+        emitGlobalGet(out_, emitter.exceptionDepthGlobal);
+        emitI32Const(out_, 1);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.global_set;
-        leb128u(out_, emitter.exceptionDepthGlobal);
+        emitGlobalSet(out_, emitter.exceptionDepthGlobal);
 
         // if (depth == 0) __exception_pending = 0
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.exceptionDepthGlobal);
+        emitGlobalGet(out_, emitter.exceptionDepthGlobal);
         out_ ~= Op.i32_eqz;
         out_ ~= Op.if_;
         out_ ~= BlockType.void_;
         blockDepth++;
-        out_ ~= Op.i32_const;
-        leb128s(out_, 0);
-        out_ ~= Op.global_set;
-        leb128u(out_, emitter.exceptionPendingGlobal);
+        emitI32Const(out_, 0);
+        emitGlobalSet(out_, emitter.exceptionPendingGlobal);
         blockDepth--;
         out_ ~= Op.end;
 
@@ -1704,23 +1637,17 @@ class FuncContext {
             if (c.paramName !is null && c.paramName.length > 0) {
                 // Read caught value from slot[depth].value
                 // slotAddr = exceptionArrayOffset + depth * 24
-                out_ ~= Op.global_get;
-                leb128u(out_, emitter.exceptionDepthGlobal);
-                out_ ~= Op.i32_const;
-                leb128s(out_, EXCEPTION_SLOT_SIZE);
+                emitGlobalGet(out_, emitter.exceptionDepthGlobal);
+                emitI32Const(out_, EXCEPTION_SLOT_SIZE);
                 out_ ~= Op.i32_mul;
-                out_ ~= Op.i32_const;
-                leb128s(out_, emitter.exceptionArrayOffset);
+                emitI32Const(out_, emitter.exceptionArrayOffset);
                 out_ ~= Op.i32_add;
                 // Load value field (offset 20)
-                out_ ~= Op.i32_load;
-                out_ ~= cast(ubyte)0x02;  // align=4
-                out_ ~= cast(ubyte)EXCEPTION_SLOT_VALUE;  // offset=20
+                emitI32Load(out_, EXCEPTION_SLOT_VALUE);
 
                 auto info = resolveVar(0, c.paramName);
                 if (info !is null) {
-                    out_ ~= Op.local_set;
-                    leb128u(out_, info.wasmLocalIdx);
+                    emitLocalSet(out_, info.wasmLocalIdx);
                 } else {
                     out_ ~= Op.drop;
                 }
@@ -1774,8 +1701,7 @@ class FuncContext {
         // We need to pop src into a temp, then do the copy
         
         // Store src address to pre-allocated temp local
-        out_ ~= Op.local_set;
-        leb128u(out_, returnTempLocalIdx);
+        emitLocalSet(out_, returnTempLocalIdx);
         
         // Now copy from temp to result pointer
         emitMemoryCopyFromLocal(out_, resultPtrLocalIdx, returnTempLocalIdx, returnValueSize);
@@ -1793,28 +1719,18 @@ class FuncContext {
         
         for (uint offset = 0; offset < size; offset += 4) {
             // Dst address
-            out_ ~= Op.local_get;
-            leb128u(out_, dstLocalIdx);
+            emitLocalGet(out_, dstLocalIdx);
             if (offset > 0) {
-                out_ ~= Op.i32_const;
-                leb128s(out_, offset);
+                emitI32Const(out_, offset);
                 out_ ~= Op.i32_add;
             }
             
             // Src value
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, srcFrameOffset + offset);
-            out_ ~= Op.i32_add;
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            emitFPOffset(out_, srcFrameOffset + offset);
+            emitI32Load(out_);
             
             // Store: [dst_addr, value] -> memory
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            emitI32Store(out_);
         }
     }
     
@@ -1824,30 +1740,22 @@ class FuncContext {
     void emitMemoryCopyFromLocal(ref Appender!(ubyte[]) out_, uint dstLocalIdx, uint srcLocalIdx, uint size) {
         for (uint offset = 0; offset < size; offset += 4) {
             // Dst address
-            out_ ~= Op.local_get;
-            leb128u(out_, dstLocalIdx);
+            emitLocalGet(out_, dstLocalIdx);
             if (offset > 0) {
-                out_ ~= Op.i32_const;
-                leb128s(out_, offset);
+                emitI32Const(out_, offset);
                 out_ ~= Op.i32_add;
             }
             
             // Src value
-            out_ ~= Op.local_get;
-            leb128u(out_, srcLocalIdx);
+            emitLocalGet(out_, srcLocalIdx);
             if (offset > 0) {
-                out_ ~= Op.i32_const;
-                leb128s(out_, offset);
+                emitI32Const(out_, offset);
                 out_ ~= Op.i32_add;
             }
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            emitI32Load(out_);
             
             // Store
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            emitI32Store(out_);
         }
     }
     
@@ -1946,15 +1854,13 @@ class FuncContext {
         // Condition
         emitExpression(out_, stmt.condition);
         out_ ~= Op.i32_eqz;  // Invert: break if false
-        out_ ~= Op.br_if;
-        leb128u(out_, 1);  // Break to outer block
+        emitBrIf(out_, 1);
 
         // Body
         emitStatement(out_, stmt.body_);
 
         // Continue: branch back to loop
-        out_ ~= Op.br;
-        leb128u(out_, 0);  // Back to loop
+        emitBr(out_, 0);
 
         loopStack = loopStack[0 .. $ - 1];
 
@@ -1986,8 +1892,7 @@ class FuncContext {
         if (stmt.condition) {
             emitExpression(out_, stmt.condition);
             out_ ~= Op.i32_eqz;
-            out_ ~= Op.br_if;
-            leb128u(out_, 1);  // Break to outer block
+            emitBrIf(out_, 1);
         }
 
         // Inner block (continue target — exiting falls through to update)
@@ -2015,8 +1920,7 @@ class FuncContext {
         }
 
         // Loop back
-        out_ ~= Op.br;
-        leb128u(out_, 0);
+        emitBr(out_, 0);
 
         blockDepth--;
         out_ ~= Op.end;  // End loop
@@ -2033,22 +1937,15 @@ class FuncContext {
 
         if (info.addrMode == AddrMode.shadowStack && info.kind == VarKind.scalar) {
             // Captured scalar promoted to shadow stack — store via FP + offset
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset);
-            out_ ~= Op.i32_add;
+            emitFPOffset(out_, info.frameOffset);
 
             if (stmt.initializer) {
                 emitExpression(out_, stmt.initializer);
             } else {
-                out_ ~= Op.i32_const;
-                leb128s(out_, 0);
+                emitI32Const(out_, 0);
             }
 
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte) 0x02; // align=4
-            leb128u(out_, 0);          // offset=0
+            emitI32Store(out_);
             return;
         }
 
@@ -2074,26 +1971,19 @@ class FuncContext {
             // Default-initialize based on local type
             if (info.wasmLocalIdx < localTypes.length &&
                 localTypes[info.wasmLocalIdx] == ValType.f64) {
-                out_ ~= Op.f64_const;
-                double zero = 0.0;
-                out_ ~= (cast(ubyte*)&zero)[0..8];
+                emitF64Const(out_, 0.0);
             } else if (info.wasmLocalIdx < localTypes.length &&
                        localTypes[info.wasmLocalIdx] == ValType.f32) {
-                out_ ~= Op.f32_const;
-                float zero = 0.0f;
-                out_ ~= (cast(ubyte*)&zero)[0..4];
+                emitF32Const(out_, 0.0f);
             } else if (info.wasmLocalIdx < localTypes.length &&
                 localTypes[info.wasmLocalIdx] == ValType.i64) {
-                out_ ~= Op.i64_const;
-                leb128s(out_, 0);
+                emitI64Const(out_, 0);
             } else {
-                out_ ~= Op.i32_const;
-                leb128s(out_, 0);
+                emitI32Const(out_, 0);
             }
         }
 
-        out_ ~= Op.local_set;
-        leb128u(out_, info.wasmLocalIdx);
+        emitLocalSet(out_, info.wasmLocalIdx);
     }
     
     /**
@@ -2111,20 +2001,13 @@ class FuncContext {
                 uint fieldBytes = cast(uint)field.size;
                 for (uint off = 0; off < fieldBytes; off += 4) {
                     // Address: FP + frameOffset + fieldOffset + off
-                    out_ ~= Op.local_get;
-                    leb128u(out_, fpLocal);
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, info.frameOffset + cast(int)field.offset + cast(int)off);
-                    out_ ~= Op.i32_add;
+                    emitFPOffset(out_, info.frameOffset + cast(int)field.offset + cast(int)off);
 
                     // Value: 0
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, 0);
+                    emitI32Const(out_, 0);
 
                     // Store
-                    out_ ~= Op.i32_store;
-                    out_ ~= cast(ubyte)0x02;  // alignment log2(4)
-                    leb128u(out_, 0);          // offset
+                    emitI32Store(out_);
                 }
             }
             return;
@@ -2201,29 +2084,23 @@ class FuncContext {
                     // Arg 1: receiver (i64)
                     if (objcStaticCall) {
                         uint classNameAddr = emitter.registerCString(objcIface.name);
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, classNameAddr);
+                        emitI32Const(out_, classNameAddr);
                         uint getClassIdx = emitter.getFuncIndex("objc_getClass", method.location);
-                        out_ ~= Op.call;
-                        leb128u(out_, getClassIdx);
+                        emitCall(out_, getClassIdx);
                     } else {
                         emitExpression(out_, memberExpr.object);
                     }
 
                     // Arg 2: selector (i64)
                     uint selAddr = emitter.registerCString(selector);
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, selAddr);
+                    emitI32Const(out_, selAddr);
                     uint selRegIdx = emitter.getFuncIndex("sel_registerName", method.location);
-                    out_ ~= Op.call;
-                    leb128u(out_, selRegIdx);
+                    emitCall(out_, selRegIdx);
 
                     // Arg 3: result_ptr = FP + frameOffset (write directly to local)
-                    out_ ~= Op.local_get;
-                    leb128u(out_, fpLocal);
+                    emitLocalGet(out_, fpLocal);
                     if (info.frameOffset > 0) {
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, info.frameOffset);
+                        emitI32Const(out_, info.frameOffset);
                         out_ ~= Op.i32_add;
                     }
 
@@ -2233,14 +2110,11 @@ class FuncContext {
                             auto paramType = method.parameters[i].type.resolve();
                             if (auto sd = paramType.asStruct()) {
                                 emitExpression(out_, arg);
-                                out_ ~= Op.local_set;
-                                leb128u(out_, tempLocalB);
+                                emitLocalSet(out_, tempLocalB);
                                 foreach (field; sd.fields) {
-                                    out_ ~= Op.local_get;
-                                    leb128u(out_, tempLocalB);
+                                    emitLocalGet(out_, tempLocalB);
                                     if (field.offset > 0) {
-                                        out_ ~= Op.i32_const;
-                                        leb128s(out_, cast(int)field.offset);
+                                        emitI32Const(out_, cast(int)field.offset);
                                         out_ ~= Op.i32_add;
                                     }
                                     auto bt = cast(BasicType)field.type;
@@ -2263,8 +2137,7 @@ class FuncContext {
                     // Call — trampoline writes result directly to FP + frameOffset
                     string importName = method.mangledName;
                     uint funcIdx = emitter.getFuncIndex(importName, method.location);
-                    out_ ~= Op.call;
-                    leb128u(out_, funcIdx);
+                    emitCall(out_, funcIdx);
                     return;
                 }
                 emitStructReturnMethodCall(out_, memberExpr, callExpr.arguments, info.frameOffset);
@@ -2296,18 +2169,10 @@ class FuncContext {
                     bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
 
                     // Destination address: FP + destOffset + fieldOffset
-                    out_ ~= Op.local_get;
-                    leb128u(out_, fpLocal);
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, info.frameOffset + cast(int)field.offset);
-                    out_ ~= Op.i32_add;
+                    emitFPOffset(out_, info.frameOffset + cast(int)field.offset);
 
                     // Source value: load from FP + srcOffset + fieldOffset
-                    out_ ~= Op.local_get;
-                    leb128u(out_, fpLocal);
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, srcInfo.frameOffset + cast(int)field.offset);
-                    out_ ~= Op.i32_add;
+                    emitFPOffset(out_, srcInfo.frameOffset + cast(int)field.offset);
                     emitLoadForSize(out_, cast(uint)field.size, isFloat);
 
                     // Store to destination
@@ -2339,32 +2204,18 @@ class FuncContext {
         // - tableBase: starting index in function table for virtual dispatch
         uint packedVtablePtr = WasmVtablePacking.pack(classDecl.typeId, classDecl.tableBase);
         
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, info.frameOffset);  // offset 0 = vtable_ptr
-        out_ ~= Op.i32_add;
-        out_ ~= Op.i32_const;
-        leb128s(out_, cast(int)packedVtablePtr);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitFPOffset(out_, info.frameOffset);
+        emitI32Const(out_, cast(int)packedVtablePtr);
+        emitI32Store(out_);
         
         if (!stmt.initializer) {
             // Zero-initialize all fields (handle multi-word fields like doubles)
             foreach (field; classDecl.fields) {
                 uint fieldBytes = cast(uint)field.size;
                 for (uint off = 0; off < fieldBytes; off += 4) {
-                    out_ ~= Op.local_get;
-                    leb128u(out_, fpLocal);
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, info.frameOffset + cast(int)field.offset + cast(int)off);
-                    out_ ~= Op.i32_add;
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, 0);
-                    out_ ~= Op.i32_store;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitFPOffset(out_, info.frameOffset + cast(int)field.offset + cast(int)off);
+                    emitI32Const(out_, 0);
+                    emitI32Store(out_);
                 }
             }
             return;
@@ -2375,11 +2226,7 @@ class FuncContext {
             // Initialize fields from constructor arguments (same as struct)
             for (size_t i = 0; i < classDecl.fields.length && i < callExpr.arguments.length; i++) {
                 auto field = classDecl.fields[i];
-                out_ ~= Op.local_get;
-                leb128u(out_, fpLocal);
-                out_ ~= Op.i32_const;
-                leb128s(out_, info.frameOffset + cast(int)field.offset);
-                out_ ~= Op.i32_add;
+                emitFPOffset(out_, info.frameOffset + cast(int)field.offset);
                 emitExpression(out_, callExpr.arguments[i]);
                 auto bt = cast(BasicType)field.type;
                 bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
@@ -2395,24 +2242,12 @@ class FuncContext {
                 uint totalSize = cast(uint)classDecl.classSize;
                 for (uint offset = 0; offset < totalSize; offset += 4) {
                     // Dst address
-                    out_ ~= Op.local_get;
-                    leb128u(out_, fpLocal);
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, info.frameOffset + offset);
-                    out_ ~= Op.i32_add;
+                    emitFPOffset(out_, info.frameOffset + offset);
                     // Src value
-                    out_ ~= Op.local_get;
-                    leb128u(out_, fpLocal);
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, srcInfo.frameOffset + offset);
-                    out_ ~= Op.i32_add;
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitFPOffset(out_, srcInfo.frameOffset + offset);
+                    emitI32Load(out_);
                     // Store
-                    out_ ~= Op.i32_store;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitI32Store(out_);
                 }
                 return;
             }
@@ -2433,28 +2268,14 @@ class FuncContext {
         if (!stmt.initializer) {
             // Zero-initialize the fat pointer (obj_ptr=0, itable_ptr=0)
             // obj_ptr at offset 0
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset);
-            out_ ~= Op.i32_add;
-            out_ ~= Op.i32_const;
-            leb128s(out_, 0);
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            emitFPOffset(out_, info.frameOffset);
+            emitI32Const(out_, 0);
+            emitI32Store(out_);
             
             // itable_ptr at offset 4
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset + sliceLayout.lengthOffset);
-            out_ ~= Op.i32_add;
-            out_ ~= Op.i32_const;
-            leb128s(out_, 0);
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            emitFPOffset(out_, info.frameOffset + sliceLayout.lengthOffset);
+            emitI32Const(out_, 0);
+            emitI32Store(out_);
             return;
         }
         
@@ -2469,17 +2290,11 @@ class FuncContext {
                     srcClass = srcVar.classDecl;
 
                     // Store obj_ptr: dest = FP + info.frameOffset, src = srcVar address
-                    out_ ~= Op.local_get;
-                    leb128u(out_, fpLocal);
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, info.frameOffset);  // dest
-                    out_ ~= Op.i32_add;
+                    emitFPOffset(out_, info.frameOffset);
 
                     emitVarAddress(out_, srcVar);  // src obj addr
 
-                    out_ ~= Op.i32_store;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitI32Store(out_);
                 }
             } else {
                 throw new EmitError("Unknown class for interface assignment: " ~ identExpr.name, identExpr.location);
@@ -2490,18 +2305,11 @@ class FuncContext {
                 // Look up itable base for this interface
                 string ifaceName = info.ifaceDecl.name;
                 if (auto itableBase = ifaceName in srcClass.itableBases) {
-                    out_ ~= Op.local_get;
-                    leb128u(out_, fpLocal);
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, info.frameOffset + sliceLayout.lengthOffset);
-                    out_ ~= Op.i32_add;
+                    emitFPOffset(out_, info.frameOffset + sliceLayout.lengthOffset);
                     
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, cast(int)*itableBase);
+                    emitI32Const(out_, cast(int)*itableBase);
                     
-                    out_ ~= Op.i32_store;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitI32Store(out_);
                 } else {
                     throw new EmitError("Class " ~ srcClass.name ~ " has no itable for interface " ~ ifaceName, stmt.location);
                 }
@@ -2517,11 +2325,7 @@ class FuncContext {
                     ClassDecl srcClass = castExpr.sourceClassDecl;
                     
                     // Store obj_ptr at offset 0
-                    out_ ~= Op.local_get;
-                    leb128u(out_, fpLocal);
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, info.frameOffset);
-                    out_ ~= Op.i32_add;
+                    emitFPOffset(out_, info.frameOffset);
                     
                     if (auto srcInfo = resolveVar(identExpr.resolvedLocalId, identExpr.name)) {
                         if (srcInfo.isClass) {
@@ -2531,28 +2335,19 @@ class FuncContext {
                         throw new EmitError("Unknown class in cast: " ~ identExpr.name, identExpr.location);
                     }
                     
-                    out_ ~= Op.i32_store;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitI32Store(out_);
                     
                     // Store itable_ptr at offset 4
-                    out_ ~= Op.local_get;
-                    leb128u(out_, fpLocal);
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, info.frameOffset + sliceLayout.lengthOffset);
-                    out_ ~= Op.i32_add;
+                    emitFPOffset(out_, info.frameOffset + sliceLayout.lengthOffset);
                     
                     string ifaceName = castExpr.targetInterfaceDecl.name;
                     if (auto itableBase = ifaceName in srcClass.itableBases) {
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, cast(int)*itableBase);
+                        emitI32Const(out_, cast(int)*itableBase);
                     } else {
                         throw new EmitError("Class " ~ srcClass.name ~ " has no itable for " ~ ifaceName, castExpr.location);
                     }
 
-                    out_ ~= Op.i32_store;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitI32Store(out_);
 
                     return;
                 }
@@ -2574,16 +2369,9 @@ class FuncContext {
         if (!stmt.initializer) {
             // Zero-initialize the slice struct (ptr=0, length=0, capacity=0)
             for (int offset = 0; offset < 12; offset += 4) {
-                out_ ~= Op.local_get;
-                leb128u(out_, fpLocal);
-                out_ ~= Op.i32_const;
-                leb128s(out_, info.frameOffset + offset);
-                out_ ~= Op.i32_add;
-                out_ ~= Op.i32_const;
-                leb128s(out_, 0);
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitFPOffset(out_, info.frameOffset + offset);
+                emitI32Const(out_, 0);
+                emitI32Store(out_);
             }
             return;
         }
@@ -2597,11 +2385,7 @@ class FuncContext {
             // First, store the data elements at FP + dataOffset
             for (uint i = 0; i < elemCount; i++) {
                 // Address: FP + dataOffset + i * elemSize
-                out_ ~= Op.local_get;
-                leb128u(out_, fpLocal);
-                out_ ~= Op.i32_const;
-                leb128s(out_, info.dataOffset + cast(int)(i * elemSize));
-                out_ ~= Op.i32_add;
+                emitFPOffset(out_, info.dataOffset + cast(int)(i * elemSize));
                 
                 // Value: the element expression
                 emitExpression(out_, arrayLit.elements[i]);
@@ -2612,49 +2396,25 @@ class FuncContext {
             
             // Now initialize the slice struct:
             // ptr = FP + dataOffset
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset);  // slice.ptr offset = 0
-            out_ ~= Op.i32_add;
+            emitFPOffset(out_, info.frameOffset);
             
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, info.dataOffset);
-            out_ ~= Op.i32_add;  // ptr value = FP + dataOffset
+            emitFPOffset(out_, info.dataOffset);
             
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            emitI32Store(out_);
             
             // length = elemCount
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset + sliceLayout.lengthOffset);  // slice.length offset = 4
-            out_ ~= Op.i32_add;
+            emitFPOffset(out_, info.frameOffset + sliceLayout.lengthOffset);
             
-            out_ ~= Op.i32_const;
-            leb128s(out_, elemCount);
+            emitI32Const(out_, elemCount);
             
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            emitI32Store(out_);
             
             // capacity = elemCount
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset + sliceLayout.capacityOffset);  // slice.capacity offset = 8
-            out_ ~= Op.i32_add;
+            emitFPOffset(out_, info.frameOffset + sliceLayout.capacityOffset);
             
-            out_ ~= Op.i32_const;
-            leb128s(out_, elemCount);
+            emitI32Const(out_, elemCount);
             
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            emitI32Store(out_);
             
             return;
         }
@@ -2667,49 +2427,26 @@ class FuncContext {
                 uint len = cast(uint)strVal.length;
                 
                 // Load ptr from data section struct
-                out_ ~= Op.local_get;
-                leb128u(out_, fpLocal);
-                out_ ~= Op.i32_const;
-                leb128s(out_, info.frameOffset);  // slice.ptr offset = 0
-                out_ ~= Op.i32_add;
+                emitFPOffset(out_, info.frameOffset);
                 
-                out_ ~= Op.i32_const;
-                leb128s(out_, structAddr);
-                out_ ~= Op.i32_load;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Const(out_, structAddr);
+                emitI32Load(out_);
 
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Store(out_);
                 
                 // length
-                out_ ~= Op.local_get;
-                leb128u(out_, fpLocal);
-                out_ ~= Op.i32_const;
-                leb128s(out_, info.frameOffset + sliceLayout.lengthOffset);  // slice.length offset = 4
-                out_ ~= Op.i32_add;
+                emitFPOffset(out_, info.frameOffset + sliceLayout.lengthOffset);
                 
-                out_ ~= Op.i32_const;
-                leb128s(out_, len);
+                emitI32Const(out_, len);
                 
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Store(out_);
                 
                 // capacity = length (immutable string data)
-                out_ ~= Op.local_get;
-                leb128u(out_, fpLocal);
-                out_ ~= Op.i32_const;
-                leb128s(out_, info.frameOffset + sliceLayout.capacityOffset);  // slice.capacity offset = 8
-                out_ ~= Op.i32_add;
+                emitFPOffset(out_, info.frameOffset + sliceLayout.capacityOffset);
                 
-                out_ ~= Op.i32_const;
-                leb128s(out_, len);
+                emitI32Const(out_, len);
                 
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Store(out_);
                 
                 return;
             }
@@ -2738,38 +2475,17 @@ class FuncContext {
             uint dataOffset = emitter.addData(fileData);
             
             // Initialize slice struct: ptr = dataOffset, length = len, capacity = len
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset);
-            out_ ~= Op.i32_add;
-            out_ ~= Op.i32_const;
-            leb128s(out_, dataOffset);
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            emitFPOffset(out_, info.frameOffset);
+            emitI32Const(out_, dataOffset);
+            emitI32Store(out_);
             
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset + sliceLayout.lengthOffset);
-            out_ ~= Op.i32_add;
-            out_ ~= Op.i32_const;
-            leb128s(out_, len);
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            emitFPOffset(out_, info.frameOffset + sliceLayout.lengthOffset);
+            emitI32Const(out_, len);
+            emitI32Store(out_);
             
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset + sliceLayout.capacityOffset);
-            out_ ~= Op.i32_add;
-            out_ ~= Op.i32_const;
-            leb128s(out_, len);
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            emitFPOffset(out_, info.frameOffset + sliceLayout.capacityOffset);
+            emitI32Const(out_, len);
+            emitI32Store(out_);
             
             return;
         }
@@ -2788,19 +2504,13 @@ class FuncContext {
 
             // Calculate ptr = base + start * elemSize
             // Store at FP + frameOffset (slice.ptr)
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset);
-            out_ ~= Op.i32_add;
+            emitFPOffset(out_, info.frameOffset);
 
             // Load base address
             if (sourceInfo.isSlice) {
                 // Slice source: load .ptr field
                 emitVarAddress(out_, sourceInfo);
-                out_ ~= Op.i32_load;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Load(out_);
             } else {
                 // Static array source: address IS the data
                 emitVarAddress(out_, sourceInfo);
@@ -2808,45 +2518,30 @@ class FuncContext {
             
             // Add start * elemSize
             emitExpression(out_, sliceExpr.start);
-            out_ ~= Op.i32_const;
-            leb128s(out_, sourceInfo.elementSize);
+            emitI32Const(out_, sourceInfo.elementSize);
             out_ ~= Op.i32_mul;
             out_ ~= Op.i32_add;
             
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            emitI32Store(out_);
             
             // Calculate length = end - start
             // Store at FP + frameOffset + 4 (slice.length at LENGTH_OFFSET)
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset + sliceLayout.lengthOffset);
-            out_ ~= Op.i32_add;
+            emitFPOffset(out_, info.frameOffset + sliceLayout.lengthOffset);
             
             emitExpression(out_, sliceExpr.end);
             emitExpression(out_, sliceExpr.start);
             out_ ~= Op.i32_sub;
             
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            emitI32Store(out_);
             
             // Set capacity = length (can't safely grow a view)
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, info.frameOffset + sliceLayout.capacityOffset);
-            out_ ~= Op.i32_add;
+            emitFPOffset(out_, info.frameOffset + sliceLayout.capacityOffset);
             
             emitExpression(out_, sliceExpr.end);
             emitExpression(out_, sliceExpr.start);
             out_ ~= Op.i32_sub;
             
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            emitI32Store(out_);
             
             return;
         }
@@ -2871,47 +2566,20 @@ class FuncContext {
                             : emitter.registerManifestArray(manifest);
                         // Copy 12-byte {ptr, len, cap} struct to frame
                         // ptr field
-                        out_ ~= Op.local_get;
-                        leb128u(out_, fpLocal);
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, info.frameOffset);
-                        out_ ~= Op.i32_add;
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, structAddr);
-                        out_ ~= Op.i32_load;
-                        out_ ~= cast(ubyte)0x02;
-                        leb128u(out_, 0);
-                        out_ ~= Op.i32_store;
-                        out_ ~= cast(ubyte)0x02;
-                        leb128u(out_, 0);
+                        emitFPOffset(out_, info.frameOffset);
+                        emitI32Const(out_, structAddr);
+                        emitI32Load(out_);
+                        emitI32Store(out_);
                         // len field
-                        out_ ~= Op.local_get;
-                        leb128u(out_, fpLocal);
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, info.frameOffset + sliceLayout.lengthOffset);
-                        out_ ~= Op.i32_add;
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, structAddr + sliceLayout.lengthOffset);
-                        out_ ~= Op.i32_load;
-                        out_ ~= cast(ubyte)0x02;
-                        leb128u(out_, 0);
-                        out_ ~= Op.i32_store;
-                        out_ ~= cast(ubyte)0x02;
-                        leb128u(out_, 0);
+                        emitFPOffset(out_, info.frameOffset + sliceLayout.lengthOffset);
+                        emitI32Const(out_, structAddr + sliceLayout.lengthOffset);
+                        emitI32Load(out_);
+                        emitI32Store(out_);
                         // cap field
-                        out_ ~= Op.local_get;
-                        leb128u(out_, fpLocal);
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, info.frameOffset + sliceLayout.capacityOffset);
-                        out_ ~= Op.i32_add;
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, structAddr + sliceLayout.capacityOffset);
-                        out_ ~= Op.i32_load;
-                        out_ ~= cast(ubyte)0x02;
-                        leb128u(out_, 0);
-                        out_ ~= Op.i32_store;
-                        out_ ~= cast(ubyte)0x02;
-                        leb128u(out_, 0);
+                        emitFPOffset(out_, info.frameOffset + sliceLayout.capacityOffset);
+                        emitI32Const(out_, structAddr + sliceLayout.capacityOffset);
+                        emitI32Load(out_);
+                        emitI32Store(out_);
                         return;
                     }
                 }
@@ -2921,8 +2589,7 @@ class FuncContext {
         // General expression initializer (e.g. concat result): copy from pointer
         emitVarAddress(out_, infoPtr);           // dest = FP + frameOffset
         emitExpression(out_, stmt.initializer);  // src pointer
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceLayout.totalSize);    // 12 bytes
+        emitI32Const(out_, sliceLayout.totalSize);
         out_ ~= cast(ubyte) 0xFC;  // memory.copy prefix
         out_ ~= cast(ubyte) 0x0A;  // memory.copy opcode
         leb128u(out_, 0);  // dest memory index
@@ -2945,64 +2612,46 @@ class FuncContext {
         const sliceSize = sliceLayout.totalSize;  // 12
 
         // Allocate temp: SP -= 12
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceSize);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, sliceSize);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.global_set;
-        leb128u(out_, emitter.spGlobal);
+        emitGlobalSet(out_, emitter.spGlobal);
 
         // Store ptr = base + start * elemSize at SP+0
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
+        emitGlobalGet(out_, emitter.spGlobal);
         if (srcInfo.isSlice) {
             emitVarAddress(out_, srcInfo);
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);  // load .ptr field
+            emitI32Load(out_);
         } else {
             // static array: address IS the data
             emitVarAddress(out_, srcInfo);
         }
         emitExpression(out_, sliceExpr.start);
-        out_ ~= Op.i32_const;
-        leb128s(out_, elemSize);
+        emitI32Const(out_, elemSize);
         out_ ~= Op.i32_mul;
         out_ ~= Op.i32_add;
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Store(out_);
 
         // Store length = end - start at SP+LENGTH_OFFSET
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceLayout.lengthOffset);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, sliceLayout.lengthOffset);
         out_ ~= Op.i32_add;
         emitExpression(out_, sliceExpr.end);
         emitExpression(out_, sliceExpr.start);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Store(out_);
 
         // Store capacity = length at SP+CAPACITY_OFFSET
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceLayout.capacityOffset);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, sliceLayout.capacityOffset);
         out_ ~= Op.i32_add;
         emitExpression(out_, sliceExpr.end);
         emitExpression(out_, sliceExpr.start);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Store(out_);
 
         // Push temp address
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
+        emitGlobalGet(out_, emitter.spGlobal);
     }
 
     /**
@@ -3018,16 +2667,9 @@ class FuncContext {
         if (!stmt.initializer) {
             auto totalBytes = info.elementCount * info.elementSize;
             for (uint offset = 0; offset < totalBytes; offset += 4) {
-                out_ ~= Op.local_get;
-                leb128u(out_, fpLocal);
-                out_ ~= Op.i32_const;
-                leb128s(out_, info.frameOffset + offset);
-                out_ ~= Op.i32_add;
-                out_ ~= Op.i32_const;
-                leb128s(out_, 0);
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitFPOffset(out_, info.frameOffset + offset);
+                emitI32Const(out_, 0);
+                emitI32Store(out_);
             }
             return;
         }
@@ -3039,19 +2681,13 @@ class FuncContext {
             // Store each element at FP + frameOffset + i * elemSize
             for (uint i = 0; i < elemCount && i < info.elementCount; i++) {
                 // Address: FP + frameOffset + i * elemSize
-                out_ ~= Op.local_get;
-                leb128u(out_, fpLocal);
-                out_ ~= Op.i32_const;
-                leb128s(out_, info.frameOffset + i * info.elementSize);
-                out_ ~= Op.i32_add;
+                emitFPOffset(out_, info.frameOffset + i * info.elementSize);
                 
                 // Value
                 emitExpression(out_, arrayLit.elements[i]);
                 
                 // Store
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Store(out_);
             }
             return;
         }
@@ -3101,11 +2737,9 @@ class FuncContext {
             emitSliceExpressionToTemp(out_, sliceExpr);
         } else if (auto traits = cast(TraitsExpression)expr) {
             traits.evaluate();
-            out_ ~= Op.i32_const;
-            leb128s(out_, traits.boolResult ? 1 : 0);
+            emitI32Const(out_, traits.boolResult ? 1 : 0);
         } else if (auto isExpr = cast(IsExpression)expr) {
-            out_ ~= Op.i32_const;
-            leb128s(out_, isExpr.boolResult ? 1 : 0);
+            emitI32Const(out_, isExpr.boolResult ? 1 : 0);
         } else if (auto tmplInst = cast(TemplateInstantiationExpression)expr) {
             emitTemplateCall(out_, tmplInst);
             // Check for exception after real template function calls (not struct construction)
@@ -3132,8 +2766,7 @@ class FuncContext {
             emitExpression(out_, expr.array);
             uint elemSize = wasmElementSize(ptrType.pointeeType);
             emitExpression(out_, expr.index);
-            out_ ~= Op.i32_const;
-            leb128s(out_, elemSize);
+            emitI32Const(out_, elemSize);
             out_ ~= Op.i32_mul;
             out_ ~= Op.i32_add;
             bool isFloat = isF64ElementType(ptrType.pointeeType) || isF32ElementType(ptrType.pointeeType);
@@ -3167,14 +2800,11 @@ class FuncContext {
                     // Emit address of the slice struct
                     emitMember(out_, memberExpr);
                     // Load ptr from slice struct (offset 0)
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitI32Load(out_);
                     // Add index * elemSize
                     uint elemSize = wasmElementSize(arrType.elementType);
                     emitExpression(out_, expr.index);
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, elemSize);
+                    emitI32Const(out_, elemSize);
                     out_ ~= Op.i32_mul;
                     out_ ~= Op.i32_add;
                     // Load value for scalar elements
@@ -3199,8 +2829,7 @@ class FuncContext {
                 // Static array: base address + index * elemSize
                 emitVarAddress(out_, info);
                 emitExpression(out_, expr.index);
-                out_ ~= Op.i32_const;
-                leb128s(out_, info.elementSize);
+                emitI32Const(out_, info.elementSize);
                 out_ ~= Op.i32_mul;
                 out_ ~= Op.i32_add;
                 // Aggregate elements: leave address on stack (like struct variables)
@@ -3213,12 +2842,9 @@ class FuncContext {
             } else if (info.isSlice) {
                 // Load ptr from slice struct (offset 0), then add index * elemSize
                 emitVarAddress(out_, info);
-                out_ ~= Op.i32_load;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Load(out_);
                 emitExpression(out_, expr.index);
-                out_ ~= Op.i32_const;
-                leb128s(out_, info.elementSize);
+                emitI32Const(out_, info.elementSize);
                 out_ ~= Op.i32_mul;
                 out_ ~= Op.i32_add;
                 // Aggregate elements: leave address on stack (like struct variables)
@@ -3244,20 +2870,15 @@ class FuncContext {
                         if (!arrType.isStaticArray) {
                             uint elemSize = wasmElementSize(arrType.elementType);
                             // Load ptr from this_ptr + field.offset
-                            out_ ~= Op.local_get;
-                            leb128u(out_, thisInfo.wasmLocalIdx);
+                            emitLocalGet(out_, thisInfo.wasmLocalIdx);
                             if (field.offset > 0) {
-                                out_ ~= Op.i32_const;
-                                leb128s(out_, cast(int)field.offset);
+                                emitI32Const(out_, cast(int)field.offset);
                                 out_ ~= Op.i32_add;
                             }
-                            out_ ~= Op.i32_load;  // load slice.ptr
-                            out_ ~= cast(ubyte)0x02;
-                            leb128u(out_, 0);
+                            emitI32Load(out_);
                             // Add index * elemSize
                             emitExpression(out_, expr.index);
-                            out_ ~= Op.i32_const;
-                            leb128s(out_, elemSize);
+                            emitI32Const(out_, elemSize);
                             out_ ~= Op.i32_mul;
                             out_ ~= Op.i32_add;
                             // Load value for scalar elements
@@ -3286,16 +2907,12 @@ class FuncContext {
                         : (manifest.ctfeElementSize > 0 ? manifest.ctfeElementSize : 4);
                     
                     // Load ptr from struct (offset 0)
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, structAddr);
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitI32Const(out_, structAddr);
+                    emitI32Load(out_);
                     
                     // Calculate address: ptr + index * elemSize
                     emitExpression(out_, expr.index);
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, elemSize);
+                    emitI32Const(out_, elemSize);
                     out_ ~= Op.i32_mul;
                     out_ ~= Op.i32_add;
                     
@@ -3307,9 +2924,7 @@ class FuncContext {
                         out_ ~= cast(ubyte)0x00;
                         leb128u(out_, 0);
                     } else {
-                        out_ ~= Op.i32_load;
-                        out_ ~= cast(ubyte)0x02;
-                        leb128u(out_, 0);
+                        emitI32Load(out_);
                     }
                     return;
                 }
@@ -3328,8 +2943,7 @@ class FuncContext {
             emitExpression(out_, indexExpr.array);
             uint elemSize = wasmElementSize(ptrType.pointeeType);
             emitExpression(out_, indexExpr.index);
-            out_ ~= Op.i32_const;
-            leb128s(out_, elemSize);
+            emitI32Const(out_, elemSize);
             out_ ~= Op.i32_mul;
             out_ ~= Op.i32_add;
             emitExpression(out_, value);
@@ -3352,13 +2966,10 @@ class FuncContext {
                     uint elemSize = wasmElementSize(arrType.elementType);
                     // Emit address of slice struct, load ptr
                     emitMember(out_, memberExpr);
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitI32Load(out_);
                     // Add index * elemSize
                     emitExpression(out_, indexExpr.index);
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, elemSize);
+                    emitI32Const(out_, elemSize);
                     out_ ~= Op.i32_mul;
                     out_ ~= Op.i32_add;
                     // Store value
@@ -3393,49 +3004,35 @@ class FuncContext {
                 } else {
                     // Slice: load ptr field
                     emitVarAddress(out_, info);
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitI32Load(out_);
                 }
                 emitExpression(out_, indexExpr.index);
-                out_ ~= Op.i32_const;
-                leb128s(out_, info.elementSize);
+                emitI32Const(out_, info.elementSize);
                 out_ ~= Op.i32_mul;
                 out_ ~= Op.i32_add;
 
                 if (info.elementSize > 4) {
                     // Aggregate element: copy elementSize bytes from src to dst
-                    out_ ~= Op.local_set;
-                    leb128u(out_, tempLocalA);  // save dst addr
+                    emitLocalSet(out_, tempLocalA);
                     emitExpression(out_, value);  // src addr (aggregate convention)
-                    out_ ~= Op.local_set;
-                    leb128u(out_, tempLocalB);  // save src addr
+                    emitLocalSet(out_, tempLocalB);
                     // Copy 4 bytes at a time
                     for (uint offset = 0; offset < info.elementSize; offset += 4) {
-                        out_ ~= Op.local_get;
-                        leb128u(out_, tempLocalA);
+                        emitLocalGet(out_, tempLocalA);
                         if (offset > 0) {
-                            out_ ~= Op.i32_const;
-                            leb128s(out_, offset);
+                            emitI32Const(out_, offset);
                             out_ ~= Op.i32_add;
                         }
-                        out_ ~= Op.local_get;
-                        leb128u(out_, tempLocalB);
+                        emitLocalGet(out_, tempLocalB);
                         if (offset > 0) {
-                            out_ ~= Op.i32_const;
-                            leb128s(out_, offset);
+                            emitI32Const(out_, offset);
                             out_ ~= Op.i32_add;
                         }
-                        out_ ~= Op.i32_load;
-                        out_ ~= cast(ubyte)0x02;
-                        leb128u(out_, 0);
-                        out_ ~= Op.i32_store;
-                        out_ ~= cast(ubyte)0x02;
-                        leb128u(out_, 0);
+                        emitI32Load(out_);
+                        emitI32Store(out_);
                     }
                     // Expression value: push dst addr
-                    out_ ~= Op.local_get;
-                    leb128u(out_, tempLocalA);
+                    emitLocalGet(out_, tempLocalA);
                 } else {
                     // Scalar element: simple store
                     emitExpression(out_, value);
@@ -3466,20 +3063,15 @@ class FuncContext {
                         if (!arrType.isStaticArray) {
                             uint elemSize = wasmElementSize(arrType.elementType);
                             // Load ptr from this_ptr + field.offset
-                            out_ ~= Op.local_get;
-                            leb128u(out_, thisInfo.wasmLocalIdx);
+                            emitLocalGet(out_, thisInfo.wasmLocalIdx);
                             if (field.offset > 0) {
-                                out_ ~= Op.i32_const;
-                                leb128s(out_, cast(int)field.offset);
+                                emitI32Const(out_, cast(int)field.offset);
                                 out_ ~= Op.i32_add;
                             }
-                            out_ ~= Op.i32_load;  // load slice.ptr
-                            out_ ~= cast(ubyte)0x02;
-                            leb128u(out_, 0);
+                            emitI32Load(out_);
                             // Add index * elemSize
                             emitExpression(out_, indexExpr.index);
-                            out_ ~= Op.i32_const;
-                            leb128s(out_, elemSize);
+                            emitI32Const(out_, elemSize);
                             out_ ~= Op.i32_mul;
                             out_ ~= Op.i32_add;
                             // Store value
@@ -3550,14 +3142,8 @@ class FuncContext {
         
         // Load current capacity
         // Stack: [newCapacity, oldCapacity]
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + sliceLayout.capacityOffset);  // capacity offset
-        out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitFPOffset(out_, sliceAddr + sliceLayout.capacityOffset);
+        emitI32Load(out_);
         
         // if (newCapacity > oldCapacity)
         // Stack: [newCapacity > oldCapacity]
@@ -3573,46 +3159,33 @@ class FuncContext {
         emitArenaPointer(out_);
         // Re-evaluate newCapacity (we consumed it in comparison)
         emitExpression(out_, args[0]);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);  // sizeof(int)
+        emitI32Const(out_, 4);
         out_ ~= Op.i32_mul;
 
         // Call __arena_alloc
         uint allocIdx = emitter.getFuncIndex("__arena_alloc");
-        out_ ~= Op.call;
-        leb128u(out_, allocIdx);
+        emitCall(out_, allocIdx);
         // Stack: [newBuffer]
 
         // Store newBuffer in a temp location (use SP - 4)
         // Save return value to temp local first (i32.store needs [addr, val] order)
-        out_ ~= Op.local_set;
-        leb128u(out_, tempLocalA);
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitLocalSet(out_, tempLocalA);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 4);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.local_get;
-        leb128u(out_, tempLocalA);
+        emitLocalGet(out_, tempLocalA);
         // Stack: [SP-4, newBuffer]
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Store(out_);
         
         // Copy loop: for i = 0 to length-1, copy element
         // We'll use a simple loop with block/loop/br_if
         
         // Initialize loop counter at SP-8
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 8);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 8);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_const;
-        leb128s(out_, 0);  // i = 0
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Const(out_, 0);
+        emitI32Store(out_);
         
         // block $break
         out_ ~= Op.block;
@@ -3624,149 +3197,88 @@ class FuncContext {
         
         // Check: if (i >= length) break
         // Load i
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 8);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 8);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Load(out_);
         
         // Load length
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + sliceLayout.lengthOffset);  // length offset
-        out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitFPOffset(out_, sliceAddr + sliceLayout.lengthOffset);
+        emitI32Load(out_);
         
         // if i >= length, break
         out_ ~= Op.i32_ge_u;
-        out_ ~= Op.br_if;
-        leb128u(out_, 1);  // break to outer block
+        emitBrIf(out_, 1);
         
         // Copy element: newBuffer[i] = oldPtr[i]
         // Dest address: newBuffer + i * 4
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 4);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;  // newBuffer
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Load(out_);
         
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 8);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 8);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;  // i
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Load(out_);
         
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitI32Const(out_, 4);
         out_ ~= Op.i32_mul;
         out_ ~= Op.i32_add;  // newBuffer + i*4
         
         // Load from old ptr[i]
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr);  // ptr offset = 0
-        out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;  // oldPtr
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitFPOffset(out_, sliceAddr);
+        emitI32Load(out_);
         
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 8);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 8);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;  // i
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Load(out_);
         
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitI32Const(out_, 4);
         out_ ~= Op.i32_mul;
         out_ ~= Op.i32_add;  // oldPtr + i*4
         
-        out_ ~= Op.i32_load;  // load oldPtr[i]
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Load(out_);
         
         // Store to newBuffer[i]
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Store(out_);
         
         // Increment i
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 8);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 8);
         out_ ~= Op.i32_sub;
         // Load i, add 1, store back
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 8);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 8);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 1);
+        emitI32Load(out_);
+        emitI32Const(out_, 1);
         out_ ~= Op.i32_add;
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Store(out_);
         
         // Continue loop
-        out_ ~= Op.br;
-        leb128u(out_, 0);  // back to loop
+        emitBr(out_, 0);
         
         out_ ~= Op.end;  // end loop
         out_ ~= Op.end;  // end block
         
         // Update slice.ptr = newBuffer
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr);  // ptr offset
-        out_ ~= Op.i32_add;
+        emitFPOffset(out_, sliceAddr);
         
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 4);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;  // newBuffer
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Load(out_);
         
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Store(out_);
         
         // Update slice.capacity = newCapacity
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + sliceLayout.capacityOffset);  // capacity offset
-        out_ ~= Op.i32_add;
+        emitFPOffset(out_, sliceAddr + sliceLayout.capacityOffset);
         
         emitExpression(out_, args[0]);  // newCapacity
         
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Store(out_);
         
         out_ ~= Op.end;  // end if
         
@@ -3796,36 +3308,25 @@ class FuncContext {
         if (isAggregate) {
             // Expression pushes an address to the element data — copy elementSize bytes word by word
             emitExpression(out_, value);
-            out_ ~= Op.local_set;
-            leb128u(out_, tempLocalA);
+            emitLocalSet(out_, tempLocalA);
             for (uint w = 0; w < elementSize; w += 4) {
                 // dest = SP - valSize + w
-                out_ ~= Op.global_get;
-                leb128u(out_, emitter.spGlobal);
-                out_ ~= Op.i32_const;
-                leb128s(out_, valSize - w);
+                emitGlobalGet(out_, emitter.spGlobal);
+                emitI32Const(out_, valSize - w);
                 out_ ~= Op.i32_sub;
                 // src = tempLocalA + w
-                out_ ~= Op.local_get;
-                leb128u(out_, tempLocalA);
+                emitLocalGet(out_, tempLocalA);
                 if (w > 0) {
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, w);
+                    emitI32Const(out_, w);
                     out_ ~= Op.i32_add;
                 }
-                out_ ~= Op.i32_load;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Load(out_);
                 // store
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Store(out_);
             }
         } else {
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.spGlobal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, valSize);
+            emitGlobalGet(out_, emitter.spGlobal);
+            emitI32Const(out_, valSize);
             out_ ~= Op.i32_sub;
             emitExpression(out_, value);
             if (isFloat) {
@@ -3833,30 +3334,16 @@ class FuncContext {
                 out_ ~= cast(ubyte)0x03;  // alignment log2(8)
                 leb128u(out_, 0);
             } else {
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Store(out_);
             }
         }
 
         // Check if length >= capacity
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + sliceLayout.lengthOffset);  // length
-        out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitFPOffset(out_, sliceAddr + sliceLayout.lengthOffset);
+        emitI32Load(out_);
 
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + sliceLayout.capacityOffset);  // capacity
-        out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitFPOffset(out_, sliceAddr + sliceLayout.capacityOffset);
+        emitI32Load(out_);
 
         out_ ~= Op.i32_ge_u;  // length >= capacity
 
@@ -3866,94 +3353,57 @@ class FuncContext {
         // Need to grow: newCapacity = max(capacity * 2, 4)
         // Store newCapacity at SP-capOff
         // First push the destination address
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, capOff);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, capOff);
         out_ ~= Op.i32_sub;
 
         // Calculate capacity * 2
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + sliceLayout.capacityOffset);
-        out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 2);
+        emitFPOffset(out_, sliceAddr + sliceLayout.capacityOffset);
+        emitI32Load(out_);
+        emitI32Const(out_, 2);
         out_ ~= Op.i32_mul;
 
         // Compare with 4, take max
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitI32Const(out_, 4);
 
         // if (capacity*2 < 4) use 4 else use capacity*2
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + sliceLayout.capacityOffset);
-        out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 2);
+        emitFPOffset(out_, sliceAddr + sliceLayout.capacityOffset);
+        emitI32Load(out_);
+        emitI32Const(out_, 2);
         out_ ~= Op.i32_mul;
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitI32Const(out_, 4);
         emitUnsignedMaxSelect(out_);  // max(capacity*2, 4)
 
         // Now stack has [SP-capOff, newCapacity], store
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Store(out_);
 
         // Allocate new buffer via arena
         emitArenaPointer(out_);
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, capOff);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, capOff);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceInfo.elementSize);
+        emitI32Load(out_);
+        emitI32Const(out_, sliceInfo.elementSize);
         out_ ~= Op.i32_mul;
         uint allocIdx = emitter.getFuncIndex("__arena_alloc");
-        out_ ~= Op.call;
-        leb128u(out_, allocIdx);
+        emitCall(out_, allocIdx);
 
         // Store newBuffer at SP-bufOff
         // Save return value to temp local first (i32.store needs [addr, val] order)
-        out_ ~= Op.local_set;
-        leb128u(out_, tempLocalA);
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, bufOff);
+        emitLocalSet(out_, tempLocalA);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, bufOff);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.local_get;
-        leb128u(out_, tempLocalA);
+        emitLocalGet(out_, tempLocalA);
         // Stack: [SP-bufOff, newBuffer]
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Store(out_);
 
         // Copy loop: i = 0
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, ctrOff);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, ctrOff);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_const;
-        leb128s(out_, 0);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Const(out_, 0);
+        emitI32Store(out_);
 
         out_ ~= Op.block;
         out_ ~= cast(ubyte)0x40;
@@ -3961,140 +3411,79 @@ class FuncContext {
         out_ ~= cast(ubyte)0x40;
 
         // if i >= length break
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, ctrOff);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, ctrOff);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + sliceLayout.lengthOffset);
-        out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Load(out_);
+        emitFPOffset(out_, sliceAddr + sliceLayout.lengthOffset);
+        emitI32Load(out_);
         out_ ~= Op.i32_ge_u;
-        out_ ~= Op.br_if;
-        leb128u(out_, 1);
+        emitBrIf(out_, 1);
 
         // newBuffer[i] = oldPtr[i]
         if (isAggregate) {
             // Compute dest address: newBuffer + i * elementSize → tempLocalA
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.spGlobal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, bufOff);
+            emitGlobalGet(out_, emitter.spGlobal);
+            emitI32Const(out_, bufOff);
             out_ ~= Op.i32_sub;
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.spGlobal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, ctrOff);
+            emitI32Load(out_);
+            emitGlobalGet(out_, emitter.spGlobal);
+            emitI32Const(out_, ctrOff);
             out_ ~= Op.i32_sub;
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
-            out_ ~= Op.i32_const;
-            leb128s(out_, elementSize);
+            emitI32Load(out_);
+            emitI32Const(out_, elementSize);
             out_ ~= Op.i32_mul;
             out_ ~= Op.i32_add;
-            out_ ~= Op.local_set;
-            leb128u(out_, tempLocalA);
+            emitLocalSet(out_, tempLocalA);
 
             // Compute source address: oldPtr + i * elementSize → tempLocalB
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, sliceAddr);
-            out_ ~= Op.i32_add;
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.spGlobal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, ctrOff);
+            emitFPOffset(out_, sliceAddr);
+            emitI32Load(out_);
+            emitGlobalGet(out_, emitter.spGlobal);
+            emitI32Const(out_, ctrOff);
             out_ ~= Op.i32_sub;
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
-            out_ ~= Op.i32_const;
-            leb128s(out_, elementSize);
+            emitI32Load(out_);
+            emitI32Const(out_, elementSize);
             out_ ~= Op.i32_mul;
             out_ ~= Op.i32_add;
-            out_ ~= Op.local_set;
-            leb128u(out_, tempLocalB);
+            emitLocalSet(out_, tempLocalB);
 
             // Word-by-word copy
             for (uint w = 0; w < elementSize; w += 4) {
-                out_ ~= Op.local_get;
-                leb128u(out_, tempLocalA);
+                emitLocalGet(out_, tempLocalA);
                 if (w > 0) {
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, w);
+                    emitI32Const(out_, w);
                     out_ ~= Op.i32_add;
                 }
-                out_ ~= Op.local_get;
-                leb128u(out_, tempLocalB);
+                emitLocalGet(out_, tempLocalB);
                 if (w > 0) {
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, w);
+                    emitI32Const(out_, w);
                     out_ ~= Op.i32_add;
                 }
-                out_ ~= Op.i32_load;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Load(out_);
+                emitI32Store(out_);
             }
         } else {
             // Scalar copy: dest address on stack, load source, store
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.spGlobal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, bufOff);
+            emitGlobalGet(out_, emitter.spGlobal);
+            emitI32Const(out_, bufOff);
             out_ ~= Op.i32_sub;
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.spGlobal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, ctrOff);
+            emitI32Load(out_);
+            emitGlobalGet(out_, emitter.spGlobal);
+            emitI32Const(out_, ctrOff);
             out_ ~= Op.i32_sub;
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
-            out_ ~= Op.i32_const;
-            leb128s(out_, elementSize);
+            emitI32Load(out_);
+            emitI32Const(out_, elementSize);
             out_ ~= Op.i32_mul;
             out_ ~= Op.i32_add;
 
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, sliceAddr);
-            out_ ~= Op.i32_add;
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.spGlobal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, ctrOff);
+            emitFPOffset(out_, sliceAddr);
+            emitI32Load(out_);
+            emitGlobalGet(out_, emitter.spGlobal);
+            emitI32Const(out_, ctrOff);
             out_ ~= Op.i32_sub;
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
-            out_ ~= Op.i32_const;
-            leb128s(out_, elementSize);
+            emitI32Load(out_);
+            emitI32Const(out_, elementSize);
             out_ ~= Op.i32_mul;
             out_ ~= Op.i32_add;
             emitLoadForSize(out_, elementSize, isFloat);
@@ -4103,190 +3492,102 @@ class FuncContext {
         }
 
         // i++
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, ctrOff);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, ctrOff);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, ctrOff);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, ctrOff);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 1);
+        emitI32Load(out_);
+        emitI32Const(out_, 1);
         out_ ~= Op.i32_add;
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Store(out_);
 
-        out_ ~= Op.br;
-        leb128u(out_, 0);
+        emitBr(out_, 0);
         out_ ~= Op.end;
         out_ ~= Op.end;
 
         // Update ptr
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr);
-        out_ ~= Op.i32_add;
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, bufOff);
+        emitFPOffset(out_, sliceAddr);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, bufOff);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Load(out_);
+        emitI32Store(out_);
 
         // Update capacity
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + sliceLayout.capacityOffset);
-        out_ ~= Op.i32_add;
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, capOff);
+        emitFPOffset(out_, sliceAddr + sliceLayout.capacityOffset);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, capOff);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Load(out_);
+        emitI32Store(out_);
 
         out_ ~= Op.end;  // end if (need grow)
 
         // Store value at ptr[length]
         if (isAggregate) {
             // Compute dest address: ptr + length * elementSize → tempLocalA
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, sliceAddr);
-            out_ ~= Op.i32_add;
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, sliceAddr + sliceLayout.lengthOffset);
-            out_ ~= Op.i32_add;
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
-            out_ ~= Op.i32_const;
-            leb128s(out_, elementSize);
+            emitFPOffset(out_, sliceAddr);
+            emitI32Load(out_);
+            emitFPOffset(out_, sliceAddr + sliceLayout.lengthOffset);
+            emitI32Load(out_);
+            emitI32Const(out_, elementSize);
             out_ ~= Op.i32_mul;
             out_ ~= Op.i32_add;
-            out_ ~= Op.local_set;
-            leb128u(out_, tempLocalA);
+            emitLocalSet(out_, tempLocalA);
 
             // Word-by-word copy from scratch area to destination
             for (uint w = 0; w < elementSize; w += 4) {
                 // dest word
-                out_ ~= Op.local_get;
-                leb128u(out_, tempLocalA);
+                emitLocalGet(out_, tempLocalA);
                 if (w > 0) {
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, w);
+                    emitI32Const(out_, w);
                     out_ ~= Op.i32_add;
                 }
                 // source word from scratch
-                out_ ~= Op.global_get;
-                leb128u(out_, emitter.spGlobal);
-                out_ ~= Op.i32_const;
-                leb128s(out_, valSize - w);
+                emitGlobalGet(out_, emitter.spGlobal);
+                emitI32Const(out_, valSize - w);
                 out_ ~= Op.i32_sub;
-                out_ ~= Op.i32_load;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Load(out_);
                 // store
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Store(out_);
             }
         } else {
             // Scalar: compute dest, load from scratch, store
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, sliceAddr);
-            out_ ~= Op.i32_add;
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, sliceAddr + sliceLayout.lengthOffset);
-            out_ ~= Op.i32_add;
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
-            out_ ~= Op.i32_const;
-            leb128s(out_, elementSize);
+            emitFPOffset(out_, sliceAddr);
+            emitI32Load(out_);
+            emitFPOffset(out_, sliceAddr + sliceLayout.lengthOffset);
+            emitI32Load(out_);
+            emitI32Const(out_, elementSize);
             out_ ~= Op.i32_mul;
             out_ ~= Op.i32_add;
 
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.spGlobal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, valSize);
+            emitGlobalGet(out_, emitter.spGlobal);
+            emitI32Const(out_, valSize);
             out_ ~= Op.i32_sub;
             if (isFloat) {
                 out_ ~= Op.f64_load;
                 out_ ~= cast(ubyte)0x03;
                 leb128u(out_, 0);
             } else {
-                out_ ~= Op.i32_load;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Load(out_);
             }
 
             emitStoreForSize(out_, elementSize, isFloat);
         }
         
         // Increment length
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + sliceLayout.lengthOffset);
+        emitFPOffset(out_, sliceAddr + sliceLayout.lengthOffset);
+        emitFPOffset(out_, sliceAddr + sliceLayout.lengthOffset);
+        emitI32Load(out_);
+        emitI32Const(out_, 1);
         out_ ~= Op.i32_add;
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + sliceLayout.lengthOffset);
-        out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 1);
-        out_ ~= Op.i32_add;
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Store(out_);
         
         // ~= expression result is the slice itself (return new length for testing)
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + sliceLayout.lengthOffset);
-        out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitFPOffset(out_, sliceAddr + sliceLayout.lengthOffset);
+        emitI32Load(out_);
     }
     
     /**
@@ -4309,8 +3610,7 @@ class FuncContext {
         void emitFieldAddr() {
             emitVarAddress(out_, structInfo);
             if (fieldOffset > 0) {
-                out_ ~= Op.i32_const;
-                leb128s(out_, fieldOffset);
+                emitI32Const(out_, fieldOffset);
                 out_ ~= Op.i32_add;
             }
         }
@@ -4319,43 +3619,31 @@ class FuncContext {
         void loadSliceField(uint subOffset) {
             emitFieldAddr();
             if (subOffset > 0) {
-                out_ ~= Op.i32_const;
-                leb128s(out_, subOffset);
+                emitI32Const(out_, subOffset);
                 out_ ~= Op.i32_add;
             }
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            emitI32Load(out_);
         }
 
         // Helper: store a 32-bit value to a slice struct sub-field
         // Stack before call: [value]
         void storeSliceField(uint subOffset) {
-            out_ ~= Op.local_set;
-            leb128u(out_, tempLocalA);  // save value
+            emitLocalSet(out_, tempLocalA);
             emitFieldAddr();
             if (subOffset > 0) {
-                out_ ~= Op.i32_const;
-                leb128s(out_, subOffset);
+                emitI32Const(out_, subOffset);
                 out_ ~= Op.i32_add;
             }
-            out_ ~= Op.local_get;
-            leb128u(out_, tempLocalA);
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            emitLocalGet(out_, tempLocalA);
+            emitI32Store(out_);
         }
 
         // Store value at SP scratch area
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, valSize);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, valSize);
         out_ ~= Op.i32_sub;
         emitExpression(out_, value);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Store(out_);
 
         // Check if length >= capacity
         loadSliceField(sliceLayout.lengthOffset);
@@ -4366,71 +3654,46 @@ class FuncContext {
         out_ ~= cast(ubyte)0x40;
 
         // newCapacity = max(capacity * 2, 4)
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, capOff);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, capOff);
         out_ ~= Op.i32_sub;
 
         loadSliceField(sliceLayout.capacityOffset);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 2);
+        emitI32Const(out_, 2);
         out_ ~= Op.i32_mul;
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitI32Const(out_, 4);
         loadSliceField(sliceLayout.capacityOffset);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 2);
+        emitI32Const(out_, 2);
         out_ ~= Op.i32_mul;
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitI32Const(out_, 4);
         emitUnsignedMaxSelect(out_);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Store(out_);
 
         // Allocate new buffer via arena
         emitArenaPointer(out_);
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, capOff);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, capOff);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_const;
-        leb128s(out_, elementSize);
+        emitI32Load(out_);
+        emitI32Const(out_, elementSize);
         out_ ~= Op.i32_mul;
         uint allocIdx = emitter.getFuncIndex("__arena_alloc");
-        out_ ~= Op.call;
-        leb128u(out_, allocIdx);
+        emitCall(out_, allocIdx);
 
         // Store newBuffer at SP-bufOff
-        out_ ~= Op.local_set;
-        leb128u(out_, tempLocalA);
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, bufOff);
+        emitLocalSet(out_, tempLocalA);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, bufOff);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.local_get;
-        leb128u(out_, tempLocalA);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitLocalGet(out_, tempLocalA);
+        emitI32Store(out_);
 
         // Copy loop: i = 0
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, ctrOff);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, ctrOff);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_const;
-        leb128s(out_, 0);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Const(out_, 0);
+        emitI32Store(out_);
 
         out_ ~= Op.block;
         out_ ~= cast(ubyte)0x40;
@@ -4438,104 +3701,67 @@ class FuncContext {
         out_ ~= cast(ubyte)0x40;
 
         // if i >= length break
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, ctrOff);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, ctrOff);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Load(out_);
         loadSliceField(sliceLayout.lengthOffset);
         out_ ~= Op.i32_ge_u;
-        out_ ~= Op.br_if;
-        leb128u(out_, 1);
+        emitBrIf(out_, 1);
 
         // newBuffer[i] = oldPtr[i] (scalar copy)
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, bufOff);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, bufOff);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, ctrOff);
+        emitI32Load(out_);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, ctrOff);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_const;
-        leb128s(out_, elementSize);
+        emitI32Load(out_);
+        emitI32Const(out_, elementSize);
         out_ ~= Op.i32_mul;
         out_ ~= Op.i32_add;
 
         // Load from old ptr[i]
         loadSliceField(0);  // slice.ptr
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, ctrOff);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, ctrOff);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_const;
-        leb128s(out_, elementSize);
+        emitI32Load(out_);
+        emitI32Const(out_, elementSize);
         out_ ~= Op.i32_mul;
         out_ ~= Op.i32_add;
         emitLoadForSize(out_, elementSize, false);
         emitStoreForSize(out_, elementSize, false);
 
         // i++
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, ctrOff);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, ctrOff);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, ctrOff);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, ctrOff);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 1);
+        emitI32Load(out_);
+        emitI32Const(out_, 1);
         out_ ~= Op.i32_add;
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Store(out_);
 
-        out_ ~= Op.br;
-        leb128u(out_, 0);
+        emitBr(out_, 0);
         out_ ~= Op.end;
         out_ ~= Op.end;
 
         // Update slice.ptr = newBuffer
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, bufOff);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, bufOff);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Load(out_);
         storeSliceField(0);  // slice.ptr
 
         // Update slice.capacity = newCapacity
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, capOff);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, capOff);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Load(out_);
         storeSliceField(sliceLayout.capacityOffset);
 
         out_ ~= Op.end;  // end if (need grow)
@@ -4543,25 +3769,19 @@ class FuncContext {
         // Store value at ptr[length]: dest = ptr + length * elemSize
         loadSliceField(0);  // ptr
         loadSliceField(sliceLayout.lengthOffset);  // length
-        out_ ~= Op.i32_const;
-        leb128s(out_, elementSize);
+        emitI32Const(out_, elementSize);
         out_ ~= Op.i32_mul;
         out_ ~= Op.i32_add;
         // Load value from SP scratch
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, valSize);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, valSize);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Load(out_);
         emitStoreForSize(out_, elementSize, false);
 
         // Increment length
         loadSliceField(sliceLayout.lengthOffset);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 1);
+        emitI32Const(out_, 1);
         out_ ~= Op.i32_add;
         storeSliceField(sliceLayout.lengthOffset);
 
@@ -4646,8 +3866,7 @@ class FuncContext {
             // Emit itable_ptr
             string ifaceName = targetIface.name;
             if (auto itableBase = ifaceName in srcClass.itableBases) {
-                out_ ~= Op.i32_const;
-                leb128s(out_, cast(int)*itableBase);
+                emitI32Const(out_, cast(int)*itableBase);
             } else {
                 throw new EmitError("Class " ~ srcClass.name ~ " has no itable for interface " ~ ifaceName, expr.location);
             }
@@ -4670,14 +3889,12 @@ class FuncContext {
                 if (expr.memberName == "sizeof") {
                     // Emit the type's size as a constant
                     size_t size = symbol.type.size();
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, cast(int)size);
+                    emitI32Const(out_, cast(int)size);
                     return;
                 } else if (expr.memberName == "alignof") {
                     // Emit the type's alignment as a constant
                     size_t align_ = symbol.type.alignment();
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, cast(int)align_);
+                    emitI32Const(out_, cast(int)align_);
                     return;
                 }
             }
@@ -4694,18 +3911,12 @@ class FuncContext {
                                     
                                     if (expr.memberName == "length") {
                                         // Length is at offset 4 in Array struct
-                                        out_ ~= Op.i32_const;
-                                        leb128s(out_, structAddr + 4);
-                                        out_ ~= Op.i32_load;
-                                        out_ ~= cast(ubyte)0x02;
-                                        leb128u(out_, 0);
+                                        emitI32Const(out_, structAddr + 4);
+                                        emitI32Load(out_);
                                         return;
                                     } else if (expr.memberName == "ptr") {
-                                        out_ ~= Op.i32_const;
-                                        leb128s(out_, structAddr);
-                                        out_ ~= Op.i32_load;
-                                        out_ ~= cast(ubyte)0x02;
-                                        leb128u(out_, 0);
+                                        emitI32Const(out_, structAddr);
+                                        emitI32Load(out_);
                                         return;
                                     }
                                 }
@@ -4726,27 +3937,18 @@ class FuncContext {
                         
                         if (expr.memberName == "length") {
                             // Length is at offset 4 in Array struct
-                            out_ ~= Op.i32_const;
-                            leb128s(out_, structAddr + 4);
-                            out_ ~= Op.i32_load;
-                            out_ ~= cast(ubyte)0x02;
-                            leb128u(out_, 0);
+                            emitI32Const(out_, structAddr + 4);
+                            emitI32Load(out_);
                             return;
                         } else if (expr.memberName == "ptr") {
                             // Ptr is at offset 0
-                            out_ ~= Op.i32_const;
-                            leb128s(out_, structAddr);
-                            out_ ~= Op.i32_load;
-                            out_ ~= cast(ubyte)0x02;
-                            leb128u(out_, 0);
+                            emitI32Const(out_, structAddr);
+                            emitI32Load(out_);
                             return;
                         } else if (expr.memberName == "capacity") {
                             // Capacity is at offset 8
-                            out_ ~= Op.i32_const;
-                            leb128s(out_, structAddr + 8);
-                            out_ ~= Op.i32_load;
-                            out_ ~= cast(ubyte)0x02;
-                            leb128u(out_, 0);
+                            emitI32Const(out_, structAddr + 8);
+                            emitI32Load(out_);
                             return;
                         }
                     }
@@ -4763,8 +3965,7 @@ class FuncContext {
                                 if (field) {
                                     // Load from data section at struct address + field offset
                                     uint address = varDecl.ctfeStructAddress + cast(uint)field.offset;
-                                    out_ ~= Op.i32_const;
-                                    leb128s(out_, address);
+                                    emitI32Const(out_, address);
                                     auto bt = cast(BasicType)field.type;
                                     bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
                                     emitLoadForSize(out_, cast(uint)field.size, isFloat);
@@ -4788,8 +3989,7 @@ class FuncContext {
                             if (!arrType.isStaticArray) {
                                 emitVarAddress(out_, info);
                                 if (field.offset > 0) {
-                                    out_ ~= Op.i32_const;
-                                    leb128s(out_, cast(int)field.offset);
+                                    emitI32Const(out_, cast(int)field.offset);
                                     out_ ~= Op.i32_add;
                                 }
                                 return;  // address of slice struct on stack
@@ -4797,8 +3997,7 @@ class FuncContext {
                         }
                         emitVarAddress(out_, info);
                         if (field.offset > 0) {
-                            out_ ~= Op.i32_const;
-                            leb128s(out_, cast(int)field.offset);
+                            emitI32Const(out_, cast(int)field.offset);
                             out_ ~= Op.i32_add;
                         }
                         auto bt = cast(BasicType)field.type;
@@ -4815,20 +4014,16 @@ class FuncContext {
 
                     emitVarAddress(out_, info);
                     if (fieldOffset > 0) {
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, fieldOffset);
+                        emitI32Const(out_, fieldOffset);
                         out_ ~= Op.i32_add;
                     }
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitI32Load(out_);
                     return;
                 } else if (info.isStaticArray) {
                     if (expr.memberName == "ptr") {
                         emitVarAddress(out_, info);
                     } else if (expr.memberName == "length") {
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, cast(int)info.elementCount);
+                        emitI32Const(out_, cast(int)info.elementCount);
                     } else {
                         throw new EmitError("Static array has no field '" ~ expr.memberName ~ "'", expr.location);
                     }
@@ -4851,14 +4046,10 @@ class FuncContext {
                                 else if (expr.memberName == "ptr") subOffset = 0;
                                 else if (expr.memberName == "capacity") subOffset = sliceLayout.capacityOffset;
                                 else throw new EmitError("Slice field has no member '" ~ expr.memberName ~ "'", expr.location);
-                                out_ ~= Op.local_get;
-                                leb128u(out_, thisInfo.wasmLocalIdx);
-                                out_ ~= Op.i32_const;
-                                leb128s(out_, cast(int)(field.offset + subOffset));
+                                emitLocalGet(out_, thisInfo.wasmLocalIdx);
+                                emitI32Const(out_, cast(int)(field.offset + subOffset));
                                 out_ ~= Op.i32_add;
-                                out_ ~= Op.i32_load;
-                                out_ ~= cast(ubyte)0x02;
-                                leb128u(out_, 0);
+                                emitI32Load(out_);
                                 return;
                             }
                         }
@@ -4875,8 +4066,7 @@ class FuncContext {
                 auto field = structDecl.getField(expr.memberName);
                 if (field) {
                     if (field.offset > 0) {
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, cast(int)field.offset);
+                        emitI32Const(out_, cast(int)field.offset);
                         out_ ~= Op.i32_add;
                     }
                     auto bt = cast(BasicType)field.type;
@@ -4894,13 +4084,10 @@ class FuncContext {
                     else if (expr.memberName == "capacity") fieldOffset = 8;
                     if (fieldOffset >= 0) {
                         if (fieldOffset > 0) {
-                            out_ ~= Op.i32_const;
-                            leb128s(out_, fieldOffset);
+                            emitI32Const(out_, fieldOffset);
                             out_ ~= Op.i32_add;
                         }
-                        out_ ~= Op.i32_load;
-                        out_ ~= cast(ubyte)0x02;
-                        leb128u(out_, 0);
+                        emitI32Load(out_);
                         return;
                     }
                 }
@@ -4914,18 +4101,12 @@ class FuncContext {
                 uint structAddr = emitter.registerArrayLiteral(strValue);
 
                 if (expr.memberName == "ptr") {
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, structAddr);
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitI32Const(out_, structAddr);
+                    emitI32Load(out_);
                     return;
                 } else if (expr.memberName == "length") {
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, structAddr + 4);
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitI32Const(out_, structAddr + 4);
+                    emitI32Load(out_);
                     return;
                 }
             }
@@ -4945,8 +4126,7 @@ class FuncContext {
                 if (field) {
                     // Add field offset and load
                     if (field.offset > 0) {
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, cast(int)field.offset);
+                        emitI32Const(out_, cast(int)field.offset);
                         out_ ~= Op.i32_add;
                     }
                     auto bt = cast(BasicType)field.type;
@@ -4960,21 +4140,17 @@ class FuncContext {
                 if (!arrType.isStaticArray) {
                     // Address of the slice struct is on the stack
                     if (expr.memberName == "length") {
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, sliceLayout.lengthOffset);
+                        emitI32Const(out_, sliceLayout.lengthOffset);
                         out_ ~= Op.i32_add;
                     } else if (expr.memberName == "ptr") {
                         // ptr is at offset 0, no add needed
                     } else if (expr.memberName == "capacity") {
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, sliceLayout.capacityOffset);
+                        emitI32Const(out_, sliceLayout.capacityOffset);
                         out_ ~= Op.i32_add;
                     } else {
                         throw new EmitError("Slice field has no member '" ~ expr.memberName ~ "'", expr.location);
                     }
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitI32Load(out_);
                     return;
                 }
             }
@@ -4993,19 +4169,15 @@ class FuncContext {
                     if (expr.memberName == "ptr") {
                         // ptr is at offset 0
                     } else if (expr.memberName == "length") {
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, sliceLayout.lengthOffset);
+                        emitI32Const(out_, sliceLayout.lengthOffset);
                         out_ ~= Op.i32_add;
                     } else if (expr.memberName == "capacity") {
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, sliceLayout.capacityOffset);
+                        emitI32Const(out_, sliceLayout.capacityOffset);
                         out_ ~= Op.i32_add;
                     } else {
                         throw new EmitError("Array/slice has no member '" ~ expr.memberName ~ "'", expr.location);
                     }
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitI32Load(out_);
                     return;
                 }
             }
@@ -5016,8 +4188,7 @@ class FuncContext {
                 if (field) {
                     emitExpression(out_, expr.object);
                     if (field.offset > 0) {
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, cast(int) field.offset);
+                        emitI32Const(out_, cast(int) field.offset);
                         out_ ~= Op.i32_add;
                     }
                     auto bt = cast(BasicType)field.type;
@@ -5047,8 +4218,7 @@ class FuncContext {
                     if (field) {
                         emitVarAddress(out_, info);
                         if (field.offset > 0) {
-                            out_ ~= Op.i32_const;
-                            leb128s(out_, cast(int)field.offset);
+                            emitI32Const(out_, cast(int)field.offset);
                             out_ ~= Op.i32_add;
                         }
                         return;
@@ -5063,8 +4233,7 @@ class FuncContext {
             if (auto structDecl = elemType.asStruct()) {
                 auto field = structDecl.getField(expr.memberName);
                 if (field && field.offset > 0) {
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, cast(int)field.offset);
+                    emitI32Const(out_, cast(int)field.offset);
                     out_ ~= Op.i32_add;
                 }
                 return;
@@ -5077,8 +4246,7 @@ class FuncContext {
             if (auto structDecl = innerType.asStruct()) {
                 auto field = structDecl.getField(expr.memberName);
                 if (field && field.offset > 0) {
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, cast(int)field.offset);
+                    emitI32Const(out_, cast(int)field.offset);
                     out_ ~= Op.i32_add;
                 }
                 return;
@@ -5211,17 +4379,13 @@ class FuncContext {
             out_ ~= cast(ubyte)0x03;  // alignment log2(8)
             leb128u(out_, 0);
         } else if (elemSize == 8) {
-            out_ ~= Op.i64_load;
-            out_ ~= cast(ubyte)0x03;  // alignment log2(8)
-            leb128u(out_, 0);
+            emitI64Load(out_);
         } else if (elemSize == 4 && isFloat) {
             out_ ~= Op.f32_load;
             out_ ~= cast(ubyte)0x02;  // alignment log2(4)
             leb128u(out_, 0);
         } else {
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            emitI32Load(out_);
         }
     }
 
@@ -5240,18 +4404,14 @@ class FuncContext {
             out_ ~= cast(ubyte)0x02;  // alignment log2(4)
             leb128u(out_, 0);
         } else {
-            out_ ~= Op.i32_store;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            emitI32Store(out_);
         }
     }
 
     void emitLiteral(ref Appender!(ubyte[]) out_, LiteralExpression expr) {
         // If expression type indicates f32, emit f32_const (literal stored as double, demote here)
         if (isF32Expression(expr)) {
-            out_ ~= Op.f32_const;
-            float val = cast(float)(expr.value.type == typeid(double) ? expr.value.get!double() : 0.0);
-            out_ ~= (cast(ubyte*)&val)[0..4];
+            emitF32Const(out_, cast(float)(expr.value.type == typeid(double) ? expr.value.get!double() : 0.0));
             return;
         }
 
@@ -5264,8 +4424,7 @@ class FuncContext {
                 value = expr.value.get!int();
             else
                 value = 0;
-            out_ ~= Op.i64_const;
-            leb128s(out_, value);
+            emitI64Const(out_, value);
             return;
         }
 
@@ -5282,24 +4441,18 @@ class FuncContext {
             }
             // If value is in unsigned range but above signed max, convert to signed
             int i32Value = (value > int.max) ? cast(int)(value & 0xFFFFFFFF) : cast(int)value;
-            out_ ~= Op.i32_const;
-            leb128s(out_, i32Value);
+            emitI32Const(out_, i32Value);
         } else if (expr.value.type == typeid(bool)) {
-            out_ ~= Op.i32_const;
-            leb128s(out_, expr.value.get!bool() ? 1 : 0);
+            emitI32Const(out_, expr.value.get!bool() ? 1 : 0);
         } else if (expr.value.type == typeid(char)) {
-            out_ ~= Op.i32_const;
-            leb128s(out_, cast(int)expr.value.get!char());
+            emitI32Const(out_, cast(int)expr.value.get!char());
         } else if (expr.value.type == typeid(double)) {
-            out_ ~= Op.f64_const;
-            double val = expr.value.get!double();
-            out_ ~= (cast(ubyte*)&val)[0..8];
+            emitF64Const(out_, expr.value.get!double());
         } else if (expr.value.type == typeid(string)) {
             // String literal: emit pointer to Array struct
             string s = expr.value.get!string();
             uint structAddr = emitter.registerArrayLiteral(s);
-            out_ ~= Op.i32_const;
-            leb128s(out_, structAddr);
+            emitI32Const(out_, structAddr);
         } else {
             throw new EmitError("Unsupported literal type", expr.location);
         }
@@ -5310,19 +4463,13 @@ class FuncContext {
         foreach (ref cap; captures) {
             if (cap.name == expr.name) {
                 // By-reference capture: env stores pointer to captured var's shadow stack slot
-                out_ ~= Op.local_get;
-                leb128u(out_, envParamIdx);  // __env
+                emitLocalGet(out_, envParamIdx);
                 if (cap.envOffset > 0) {
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, cap.envOffset);
+                    emitI32Const(out_, cap.envOffset);
                     out_ ~= Op.i32_add;
                 }
-                out_ ~= Op.i32_load;          // load pointer to captured var
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
-                out_ ~= Op.i32_load;          // dereference: load value
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Load(out_);
+                emitI32Load(out_);
                 return;
             }
         }
@@ -5330,25 +4477,17 @@ class FuncContext {
         if (auto info = resolveVar(expr.resolvedLocalId, expr.name)) {
             final switch (info.addrMode) {
                 case AddrMode.wasmLocal:
-                    out_ ~= Op.local_get;
-                    leb128u(out_, info.wasmLocalIdx);
+                    emitLocalGet(out_, info.wasmLocalIdx);
                     return;
                 case AddrMode.shadowStack:
-                    out_ ~= Op.local_get;
-                    leb128u(out_, fpLocal);
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, info.frameOffset);
-                    out_ ~= Op.i32_add;
+                    emitFPOffset(out_, info.frameOffset);
                     // Scalar on shadow stack (promoted for capture): load value
                     if (info.kind == VarKind.scalar) {
-                        out_ ~= Op.i32_load;
-                        out_ ~= cast(ubyte)0x02;
-                        leb128u(out_, 0);
+                        emitI32Load(out_);
                     }
                     return;
                 case AddrMode.paramPointer:
-                    out_ ~= Op.local_get;
-                    leb128u(out_, info.wasmLocalIdx);
+                    emitLocalGet(out_, info.wasmLocalIdx);
                     return;
             }
         }
@@ -5366,26 +4505,20 @@ class FuncContext {
                     // Slice field: emit address (this_ptr + field.offset) — consumed by .length, [i], ~= etc.
                     if (auto arrType = cast(ArrayType)field.type) {
                         if (!arrType.isStaticArray) {
-                            out_ ~= Op.local_get;
-                            leb128u(out_, thisInfo.wasmLocalIdx);
+                            emitLocalGet(out_, thisInfo.wasmLocalIdx);
                             if (field.offset > 0) {
-                                out_ ~= Op.i32_const;
-                                leb128s(out_, cast(int)field.offset);
+                                emitI32Const(out_, cast(int)field.offset);
                                 out_ ~= Op.i32_add;
                             }
                             return;  // address of slice struct on stack
                         }
                     }
-                    out_ ~= Op.local_get;
-                    leb128u(out_, thisInfo.wasmLocalIdx);
+                    emitLocalGet(out_, thisInfo.wasmLocalIdx);
                     if (field.offset > 0) {
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, cast(int)field.offset);
+                        emitI32Const(out_, cast(int)field.offset);
                         out_ ~= Op.i32_add;
                     }
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;  // alignment log2(4)
-                    leb128u(out_, 0);          // offset
+                    emitI32Load(out_);
                     return;
                 }
             }
@@ -5399,25 +4532,19 @@ class FuncContext {
                 manifest.ensureEvaluated();
                 if (manifest.isStringType) {
                     uint structAddr = emitter.registerArrayLiteral(manifest.ctfeStringValue);
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, structAddr);
+                    emitI32Const(out_, structAddr);
                 } else if (manifest.isFloatType) {
                     // Check if manifest is explicitly typed as Float32
                     bool isF32Manifest = false;
                     if (auto mbt = cast(BasicType)manifest.inferredType)
                         isF32Manifest = mbt.kind == BasicType.Kind.Float32;
                     if (isF32Manifest) {
-                        out_ ~= Op.f32_const;
-                        float val = cast(float)manifest.ctfeFloatValue;
-                        out_ ~= (cast(ubyte*)&val)[0 .. 4];
+                        emitF32Const(out_, cast(float)manifest.ctfeFloatValue);
                     } else {
-                        out_ ~= Op.f64_const;
-                        double val = manifest.ctfeFloatValue;
-                        out_ ~= (cast(ubyte*)&val)[0 .. 8];
+                        emitF64Const(out_, manifest.ctfeFloatValue);
                     }
                 } else {
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, manifest.ctfeValue);
+                    emitI32Const(out_, manifest.ctfeValue);
                 }
                 return;
             }
@@ -5427,8 +4554,7 @@ class FuncContext {
         if (symbol) {
             if (auto varDecl = cast(VariableDecl)symbol.declaration) {
                 if (varDecl.wasmGlobalIndex != uint.max) {
-                    out_ ~= Op.global_get;
-                    leb128u(out_, varDecl.wasmGlobalIndex);
+                    emitGlobalGet(out_, varDecl.wasmGlobalIndex);
                     return;
                 }
                 // Global exists but wasn't collected — happens during CTFE
@@ -5462,12 +4588,10 @@ class FuncContext {
             out_ ~= cast(ubyte)BlockType.i32;
             blockDepth++;
             emitExpression(out_, expr.right);
-            out_ ~= Op.i32_const;
-            leb128s(out_, 0);
+            emitI32Const(out_, 0);
             out_ ~= Op.i32_ne;
             out_ ~= Op.else_;
-            out_ ~= Op.i32_const;
-            leb128s(out_, 0);
+            emitI32Const(out_, 0);
             blockDepth--;
             out_ ~= Op.end;
             return;
@@ -5478,12 +4602,10 @@ class FuncContext {
             out_ ~= Op.if_;
             out_ ~= cast(ubyte)BlockType.i32;
             blockDepth++;
-            out_ ~= Op.i32_const;
-            leb128s(out_, 1);
+            emitI32Const(out_, 1);
             out_ ~= Op.else_;
             emitExpression(out_, expr.right);
-            out_ ~= Op.i32_const;
-            leb128s(out_, 0);
+            emitI32Const(out_, 0);
             out_ ~= Op.i32_ne;
             blockDepth--;
             out_ ~= Op.end;
@@ -5616,8 +4738,7 @@ class FuncContext {
         emitExpression(out_, expr.right);
         
         // Call __array_concat(s1, s2) -> result_ptr
-        out_ ~= Op.call;
-        leb128u(out_, emitter.concatFuncIndex);
+        emitCall(out_, emitter.concatFuncIndex);
     }
     
     void emitUnary(ref Appender!(ubyte[]) out_, UnaryExpression expr) {
@@ -5635,13 +4756,11 @@ class FuncContext {
                     emitExpression(out_, expr.operand);
                     out_ ~= Op.f32_neg;
                 } else if (isI64Expression(expr)) {
-                    out_ ~= Op.i64_const;
-                    leb128s(out_, 0);
+                    emitI64Const(out_, 0);
                     emitExpression(out_, expr.operand);
                     out_ ~= Op.i64_sub;
                 } else {
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, 0);
+                    emitI32Const(out_, 0);
                     emitExpression(out_, expr.operand);
                     out_ ~= Op.i32_sub;
                 }
@@ -5654,8 +4773,7 @@ class FuncContext {
                 
             case UnaryExpression.Operator.BitwiseNot:
                 emitExpression(out_, expr.operand);
-                out_ ~= Op.i32_const;
-                leb128s(out_, -1);
+                emitI32Const(out_, -1);
                 out_ ~= Op.i32_xor;
                 break;
                 
@@ -5689,8 +4807,7 @@ class FuncContext {
                     return;
                 } else if (info.addrMode == AddrMode.paramPointer) {
                     // Struct/slice param: the local holds the pointer already
-                    out_ ~= Op.local_get;
-                    leb128u(out_, info.wasmLocalIdx);
+                    emitLocalGet(out_, info.wasmLocalIdx);
                     return;
                 }
             }
@@ -5716,9 +4833,7 @@ class FuncContext {
             emitLoadForSize(out_, elemSize, isFloat);
         } else {
             // Fallback: assume i32
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;  // align = 4
-            leb128u(out_, 0);          // offset = 0
+            emitI32Load(out_);
         }
     }
 
@@ -5774,8 +4889,7 @@ class FuncContext {
         // Emit pointer value (the struct base address)
         emitExpression(out_, expr.object);
         if (field.offset > 0) {
-            out_ ~= Op.i32_const;
-            leb128s(out_, cast(int)field.offset);
+            emitI32Const(out_, cast(int)field.offset);
             out_ ~= Op.i32_add;
         }
         auto bt = cast(BasicType)field.type;
@@ -5796,8 +4910,7 @@ class FuncContext {
         // Store: [ptr + offset, value] → store
         emitExpression(out_, member.object);
         if (field.offset > 0) {
-            out_ ~= Op.i32_const;
-            leb128s(out_, cast(int)field.offset);
+            emitI32Const(out_, cast(int)field.offset);
             out_ ~= Op.i32_add;
         }
         emitExpression(out_, value);
@@ -5814,11 +4927,9 @@ class FuncContext {
         // Initialize each field at ptr + field.offset
         for (size_t i = 0; i < fieldArgs.length; i++) {
             auto field = aggDecl.fields[i];
-            out_ ~= Op.local_get;
-            leb128u(out_, tempLocalA);
+            emitLocalGet(out_, tempLocalA);
             if (field.offset > 0) {
-                out_ ~= Op.i32_const;
-                leb128s(out_, cast(int)field.offset);
+                emitI32Const(out_, cast(int)field.offset);
                 out_ ~= Op.i32_add;
             }
             emitExpression(out_, fieldArgs[i]);
@@ -5833,11 +4944,9 @@ class FuncContext {
             auto bt = cast(BasicType)field.type;
             bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
             uint fieldSize = cast(uint)field.size;
-            out_ ~= Op.local_get;
-            leb128u(out_, tempLocalA);
+            emitLocalGet(out_, tempLocalA);
             if (field.offset > 0) {
-                out_ ~= Op.i32_const;
-                leb128s(out_, cast(int)field.offset);
+                emitI32Const(out_, cast(int)field.offset);
                 out_ ~= Op.i32_add;
             }
             if (isFloat) {
@@ -5847,17 +4956,11 @@ class FuncContext {
                 out_ ~= cast(ubyte)0x03;  // align = 8
                 leb128u(out_, 0);
             } else if (fieldSize == 8) {
-                out_ ~= Op.i64_const;
-                leb128s(out_, 0);
-                out_ ~= Op.i64_store;
-                out_ ~= cast(ubyte)0x03;  // align = 8
-                leb128u(out_, 0);
+                emitI64Const(out_, 0);
+                emitI64Store(out_);
             } else {
-                out_ ~= Op.i32_const;
-                leb128s(out_, 0);
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Const(out_, 0);
+                emitI32Store(out_);
             }
         }
     }
@@ -5868,8 +4971,7 @@ class FuncContext {
 
         // Emit pointer value and save to tempLocalA
         emitExpression(out_, expr.arguments[0]);
-        out_ ~= Op.local_set;
-        leb128u(out_, tempLocalA);
+        emitLocalSet(out_, tempLocalA);
 
         if (expr.resolvedEmplaceClass) {
             // Class emplace: store vtable pointer + fields
@@ -5881,8 +4983,7 @@ class FuncContext {
         }
 
         // Return the pointer (same as input)
-        out_ ~= Op.local_get;
-        leb128u(out_, tempLocalA);
+        emitLocalGet(out_, tempLocalA);
     }
 
     /// Emit new Type(args) — allocate + initialize (structs and classes)
@@ -5897,53 +4998,39 @@ class FuncContext {
         if (expr.stackPromoted) {
             // Stack-promoted: use pre-allocated shadow stack space
             // tempLocalA = FP + stackFrameOffset
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, cast(int)expr.stackFrameOffset);
-            out_ ~= Op.i32_add;
-            out_ ~= Op.local_set;
-            leb128u(out_, tempLocalA);
+            emitFPOffset(out_, cast(int)expr.stackFrameOffset);
+            emitLocalSet(out_, tempLocalA);
 
             // Store fields (same as heap path)
             emitFieldStores(out_, structDecl, expr.arguments);
 
             // Return pointer (FP + offset)
-            out_ ~= Op.local_get;
-            leb128u(out_, tempLocalA);
+            emitLocalGet(out_, tempLocalA);
             return;
         }
 
         int structSize = cast(int)structDecl.structSize;
 
         // __alloc(sizeof)
-        out_ ~= Op.i32_const;
-        leb128s(out_, structSize);
-        out_ ~= Op.call;
-        leb128u(out_, emitter.getFuncIndex("__alloc"));
+        emitI32Const(out_, structSize);
+        emitCall(out_, emitter.getFuncIndex("__alloc"));
 
         // Save returned pointer to tempLocalA
-        out_ ~= Op.local_set;
-        leb128u(out_, tempLocalA);
+        emitLocalSet(out_, tempLocalA);
 
         // Store fields
         emitFieldStores(out_, structDecl, expr.arguments);
 
         // Return pointer
-        out_ ~= Op.local_get;
-        leb128u(out_, tempLocalA);
+        emitLocalGet(out_, tempLocalA);
     }
 
     /// Store packed vtable pointer at tempLocalA + 0
     private void emitVtableStore(ref Appender!(ubyte[]) out_, ClassDecl classDecl) {
         uint packed = WasmVtablePacking.pack(classDecl.typeId, classDecl.tableBase);
-        out_ ~= Op.local_get;
-        leb128u(out_, tempLocalA);
-        out_ ~= Op.i32_const;
-        leb128s(out_, cast(int)packed);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitLocalGet(out_, tempLocalA);
+        emitI32Const(out_, cast(int)packed);
+        emitI32Store(out_);
     }
 
     /// Emit new Class(args) — allocate + vtable + field init or constructor call
@@ -5952,12 +5039,9 @@ class FuncContext {
         int classSize = cast(int)classDecl.classSize;
 
         // 1. __alloc(classSize)
-        out_ ~= Op.i32_const;
-        leb128s(out_, classSize);
-        out_ ~= Op.call;
-        leb128u(out_, emitter.getFuncIndex("__alloc"));
-        out_ ~= Op.local_set;
-        leb128u(out_, tempLocalA);
+        emitI32Const(out_, classSize);
+        emitCall(out_, emitter.getFuncIndex("__alloc"));
+        emitLocalSet(out_, tempLocalA);
 
         // 2. Store vtable pointer at offset 0
         emitVtableStore(out_, classDecl);
@@ -5965,21 +5049,18 @@ class FuncContext {
         // 3. Initialize fields (or call constructor)
         if (classDecl.constructor !is null) {
             // Direct constructor call: this=tempLocalA, args...
-            out_ ~= Op.local_get;
-            leb128u(out_, tempLocalA);
+            emitLocalGet(out_, tempLocalA);
             foreach (arg; expr.arguments)
                 emitExpression(out_, arg);
             uint funcIdx = emitter.getFuncIndex(classDecl.constructor.mangledName, expr.location);
-            out_ ~= Op.call;
-            leb128u(out_, funcIdx);
+            emitCall(out_, funcIdx);
         } else {
             // Field-by-field init using shared helper
             emitFieldStores(out_, classDecl, expr.arguments);
         }
 
         // 4. Return pointer
-        out_ ~= Op.local_get;
-        leb128u(out_, tempLocalA);
+        emitLocalGet(out_, tempLocalA);
     }
 
     /**
@@ -6000,11 +5081,7 @@ class FuncContext {
             foreach (i, capName; funcLit.capturedNames) {
                 // Store pointer to captured var at env + captureOffset
                 // dest: FP + envFrameOffset + capturedOffsets[i]
-                out_ ~= Op.local_get;
-                leb128u(out_, fpLocal);
-                out_ ~= Op.i32_const;
-                leb128s(out_, funcLit.envFrameOffset + funcLit.capturedOffsets[i]);
-                out_ ~= Op.i32_add;
+                emitFPOffset(out_, funcLit.envFrameOffset + funcLit.capturedOffsets[i]);
 
                 // src: address of captured variable (FP + its frameOffset)
                 auto capInfo = resolveVar(uint.max, capName);
@@ -6013,26 +5090,17 @@ class FuncContext {
                 emitVarAddress(out_, capInfo);
 
                 // Store address into env slot
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Store(out_);
             }
 
             // Push {tableIndex, envPtr}
-            out_ ~= Op.i32_const;
-            leb128s(out_, cast(int)tableIdx);
+            emitI32Const(out_, cast(int)tableIdx);
             // envPtr = FP + envFrameOffset (absolute address via SP)
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, funcLit.envFrameOffset);
-            out_ ~= Op.i32_add;
+            emitFPOffset(out_, funcLit.envFrameOffset);
         } else {
             // Non-capturing: push {tableIndex, 0}
-            out_ ~= Op.i32_const;
-            leb128s(out_, cast(int)tableIdx);
-            out_ ~= Op.i32_const;
-            leb128s(out_, 0);
+            emitI32Const(out_, cast(int)tableIdx);
+            emitI32Const(out_, 0);
         }
     }
 
@@ -6053,30 +5121,21 @@ class FuncContext {
 
         // Stack: [tableIndex, envPtr]
         // Store envPtr at FP + offset + 4
-        out_ ~= Op.local_set;
-        leb128u(out_, tempLocalA);  // save envPtr
+        emitLocalSet(out_, tempLocalA);
 
-        out_ ~= Op.local_set;
-        leb128u(out_, tempLocalB);  // save tableIndex
+        emitLocalSet(out_, tempLocalB);
 
         // Store tableIndex at FP + frameOffset + 0
         emitVarAddress(out_, info);
-        out_ ~= Op.local_get;
-        leb128u(out_, tempLocalB);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;  // align=4
-        leb128u(out_, 0);
+        emitLocalGet(out_, tempLocalB);
+        emitI32Store(out_);
 
         // Store envPtr at FP + frameOffset + 4
         emitVarAddress(out_, info);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitI32Const(out_, 4);
         out_ ~= Op.i32_add;
-        out_ ~= Op.local_get;
-        leb128u(out_, tempLocalA);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;  // align=4
-        leb128u(out_, 0);
+        emitLocalGet(out_, tempLocalA);
+        emitI32Store(out_);
     }
 
     /**
@@ -6087,12 +5146,9 @@ class FuncContext {
                           Expression[] args, FunctionDecl liftedFunc) {
         // 1. Push __env (envPtr from delegate struct)
         emitVarAddress(out_, dgInfo);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitI32Const(out_, 4);
         out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;  // align=4
-        leb128u(out_, 0);
+        emitI32Load(out_);
 
         // 2. Push user arguments
         foreach (arg; args)
@@ -6100,9 +5156,7 @@ class FuncContext {
 
         // 3. Push tableIndex (consumed by call_indirect — must be on top of stack)
         emitVarAddress(out_, dgInfo);
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;  // align=4
-        leb128u(out_, 0);
+        emitI32Load(out_);
 
         // 4. call_indirect with the delegate's type signature
         uint typeIdx;
@@ -6134,47 +5188,32 @@ class FuncContext {
             bool isF64 = idx < localTypes.length && localTypes[idx] == ValType.f64;
 
             if (expr.isPostfix) {
-                out_ ~= Op.local_get;
-                leb128u(out_, idx);
-                out_ ~= Op.local_get;
-                leb128u(out_, idx);
+                emitLocalGet(out_, idx);
+                emitLocalGet(out_, idx);
                 if (isF32) {
-                    out_ ~= Op.f32_const;
-                    float one = 1.0f;
-                    out_ ~= (cast(ubyte*)&one)[0 .. 4];
+                    emitF32Const(out_, 1.0f);
                     out_ ~= (inc ? Op.f32_add : Op.f32_sub);
                 } else if (isF64) {
-                    out_ ~= Op.f64_const;
-                    double one = 1.0;
-                    out_ ~= (cast(ubyte*)&one)[0 .. 8];
+                    emitF64Const(out_, 1.0);
                     out_ ~= (inc ? Op.f64_add : Op.f64_sub);
                 } else {
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, 1);
+                    emitI32Const(out_, 1);
                     out_ ~= (inc ? Op.i32_add : Op.i32_sub);
                 }
-                out_ ~= Op.local_set;
-                leb128u(out_, idx);
+                emitLocalSet(out_, idx);
             } else {
-                out_ ~= Op.local_get;
-                leb128u(out_, idx);
+                emitLocalGet(out_, idx);
                 if (isF32) {
-                    out_ ~= Op.f32_const;
-                    float one = 1.0f;
-                    out_ ~= (cast(ubyte*)&one)[0 .. 4];
+                    emitF32Const(out_, 1.0f);
                     out_ ~= (inc ? Op.f32_add : Op.f32_sub);
                 } else if (isF64) {
-                    out_ ~= Op.f64_const;
-                    double one = 1.0;
-                    out_ ~= (cast(ubyte*)&one)[0 .. 8];
+                    emitF64Const(out_, 1.0);
                     out_ ~= (inc ? Op.f64_add : Op.f64_sub);
                 } else {
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, 1);
+                    emitI32Const(out_, 1);
                     out_ ~= (inc ? Op.i32_add : Op.i32_sub);
                 }
-                out_ ~= Op.local_tee;
-                leb128u(out_, idx);
+                emitLocalTee(out_, idx);
             }
             return;
         }
@@ -6187,30 +5226,22 @@ class FuncContext {
                     auto gIdx = varDecl.wasmGlobalIndex;
                     if (expr.isPostfix) {
                         // Return old value, then modify
-                        out_ ~= Op.global_get;
-                        leb128u(out_, gIdx);
-                        out_ ~= Op.global_get;
-                        leb128u(out_, gIdx);
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, 1);
+                        emitGlobalGet(out_, gIdx);
+                        emitGlobalGet(out_, gIdx);
+                        emitI32Const(out_, 1);
                         out_ ~= (inc ? Op.i32_add : Op.i32_sub);
-                        out_ ~= Op.global_set;
-                        leb128u(out_, gIdx);
+                        emitGlobalSet(out_, gIdx);
                     } else {
                         // Modify, then return new value
-                        out_ ~= Op.global_get;
-                        leb128u(out_, gIdx);
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, 1);
+                        emitGlobalGet(out_, gIdx);
+                        emitI32Const(out_, 1);
                         out_ ~= (inc ? Op.i32_add : Op.i32_sub);
                         // global doesn't have tee, so dup before set
                         // store new value in global, leave copy on stack
                         // We need: [newVal] on stack + global = newVal
                         // Emit: compute newVal, global_set, global_get
-                        out_ ~= Op.global_set;
-                        leb128u(out_, gIdx);
-                        out_ ~= Op.global_get;
-                        leb128u(out_, gIdx);
+                        emitGlobalSet(out_, gIdx);
+                        emitGlobalGet(out_, gIdx);
                     }
                     return;
                 }
@@ -6298,17 +5329,13 @@ class FuncContext {
             resultTempSize = computeLargeReturnSize(calleeDecl.returnType);
 
             // Allocate temp for result: SP = SP - resultSize
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.spGlobal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, resultTempSize);
+            emitGlobalGet(out_, emitter.spGlobal);
+            emitI32Const(out_, resultTempSize);
             out_ ~= Op.i32_sub;
-            out_ ~= Op.global_set;
-            leb128u(out_, emitter.spGlobal);
+            emitGlobalSet(out_, emitter.spGlobal);
 
             // Push result pointer as first hidden argument
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.spGlobal);
+            emitGlobalGet(out_, emitter.spGlobal);
         }
 
         // Push hidden arena pointer if callee needs it
@@ -6331,45 +5358,34 @@ class FuncContext {
                         uint structSize = cast(uint)structDecl.structSize;
 
                         // Allocate temp: SP = SP - structSize
-                        out_ ~= Op.global_get;
-                        leb128u(out_, emitter.spGlobal);
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, structSize);
+                        emitGlobalGet(out_, emitter.spGlobal);
+                        emitI32Const(out_, structSize);
                         out_ ~= Op.i32_sub;
-                        out_ ~= Op.global_set;
-                        leb128u(out_, emitter.spGlobal);
+                        emitGlobalSet(out_, emitter.spGlobal);
 
                         // Copy fields from source to SP
                         foreach (field; structDecl.fields) {
                             // Dest: SP + fieldOffset
-                            out_ ~= Op.global_get;
-                            leb128u(out_, emitter.spGlobal);
+                            emitGlobalGet(out_, emitter.spGlobal);
                             if (field.offset > 0) {
-                                out_ ~= Op.i32_const;
-                                leb128s(out_, cast(int)field.offset);
+                                emitI32Const(out_, cast(int)field.offset);
                                 out_ ~= Op.i32_add;
                             }
 
                             // Src: var address + fieldOffset
                             emitVarAddress(out_, argInfo);
                             if (field.offset > 0) {
-                                out_ ~= Op.i32_const;
-                                leb128s(out_, cast(int)field.offset);
+                                emitI32Const(out_, cast(int)field.offset);
                                 out_ ~= Op.i32_add;
                             }
-                            out_ ~= Op.i32_load;
-                            out_ ~= cast(ubyte)0x02;
-                            leb128u(out_, 0);
+                            emitI32Load(out_);
 
                             // Store
-                            out_ ~= Op.i32_store;
-                            out_ ~= cast(ubyte)0x02;
-                            leb128u(out_, 0);
+                            emitI32Store(out_);
                         }
 
                         // Push SP (address of copy) as argument
-                        out_ ~= Op.global_get;
-                        leb128u(out_, emitter.spGlobal);
+                        emitGlobalGet(out_, emitter.spGlobal);
 
                         totalCopySize += structSize;
                         continue;
@@ -6379,41 +5395,30 @@ class FuncContext {
                         // Static array - copy to temp, pass temp address
                         uint arrSize = argInfo.elementCount * argInfo.elementSize;
 
-                        out_ ~= Op.global_get;
-                        leb128u(out_, emitter.spGlobal);
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, arrSize);
+                        emitGlobalGet(out_, emitter.spGlobal);
+                        emitI32Const(out_, arrSize);
                         out_ ~= Op.i32_sub;
-                        out_ ~= Op.global_set;
-                        leb128u(out_, emitter.spGlobal);
+                        emitGlobalSet(out_, emitter.spGlobal);
 
                         // Copy word by word
                         for (uint off = 0; off < arrSize; off += 4) {
-                            out_ ~= Op.global_get;
-                            leb128u(out_, emitter.spGlobal);
+                            emitGlobalGet(out_, emitter.spGlobal);
                             if (off > 0) {
-                                out_ ~= Op.i32_const;
-                                leb128s(out_, off);
+                                emitI32Const(out_, off);
                                 out_ ~= Op.i32_add;
                             }
 
                             emitVarAddress(out_, argInfo);
                             if (off > 0) {
-                                out_ ~= Op.i32_const;
-                                leb128s(out_, cast(int)off);
+                                emitI32Const(out_, cast(int)off);
                                 out_ ~= Op.i32_add;
                             }
-                            out_ ~= Op.i32_load;
-                            out_ ~= cast(ubyte)0x02;
-                            leb128u(out_, 0);
+                            emitI32Load(out_);
 
-                            out_ ~= Op.i32_store;
-                            out_ ~= cast(ubyte)0x02;
-                            leb128u(out_, 0);
+                            emitI32Store(out_);
                         }
 
-                        out_ ~= Op.global_get;
-                        leb128u(out_, emitter.spGlobal);
+                        emitGlobalGet(out_, emitter.spGlobal);
 
                         totalCopySize += arrSize;
                         continue;
@@ -6423,41 +5428,30 @@ class FuncContext {
                         // Slice - copy 12-byte slice struct to temp, pass temp address
                         const sliceSize = sliceLayout.totalSize;
 
-                        out_ ~= Op.global_get;
-                        leb128u(out_, emitter.spGlobal);
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, sliceSize);
+                        emitGlobalGet(out_, emitter.spGlobal);
+                        emitI32Const(out_, sliceSize);
                         out_ ~= Op.i32_sub;
-                        out_ ~= Op.global_set;
-                        leb128u(out_, emitter.spGlobal);
+                        emitGlobalSet(out_, emitter.spGlobal);
 
                         // Copy 3 fields (ptr, length, capacity)
                         foreach (fieldOffset; [0, 4, 8]) {
-                            out_ ~= Op.global_get;
-                            leb128u(out_, emitter.spGlobal);
+                            emitGlobalGet(out_, emitter.spGlobal);
                             if (fieldOffset > 0) {
-                                out_ ~= Op.i32_const;
-                                leb128s(out_, fieldOffset);
+                                emitI32Const(out_, fieldOffset);
                                 out_ ~= Op.i32_add;
                             }
 
                             emitVarAddress(out_, argInfo);
                             if (fieldOffset > 0) {
-                                out_ ~= Op.i32_const;
-                                leb128s(out_, fieldOffset);
+                                emitI32Const(out_, fieldOffset);
                                 out_ ~= Op.i32_add;
                             }
-                            out_ ~= Op.i32_load;
-                            out_ ~= cast(ubyte)0x02;
-                            leb128u(out_, 0);
+                            emitI32Load(out_);
 
-                            out_ ~= Op.i32_store;
-                            out_ ~= cast(ubyte)0x02;
-                            leb128u(out_, 0);
+                            emitI32Store(out_);
                         }
 
-                        out_ ~= Op.global_get;
-                        leb128u(out_, emitter.spGlobal);
+                        emitGlobalGet(out_, emitter.spGlobal);
 
                         totalCopySize += sliceSize;
                         continue;
@@ -6467,41 +5461,30 @@ class FuncContext {
                         // Delegate - copy 8-byte fat pointer to temp, pass temp address
                         enum delegateSize = 8;
 
-                        out_ ~= Op.global_get;
-                        leb128u(out_, emitter.spGlobal);
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, delegateSize);
+                        emitGlobalGet(out_, emitter.spGlobal);
+                        emitI32Const(out_, delegateSize);
                         out_ ~= Op.i32_sub;
-                        out_ ~= Op.global_set;
-                        leb128u(out_, emitter.spGlobal);
+                        emitGlobalSet(out_, emitter.spGlobal);
 
                         // Copy 2 fields (tableIndex, envPtr)
                         foreach (fieldOffset; [0, 4]) {
-                            out_ ~= Op.global_get;
-                            leb128u(out_, emitter.spGlobal);
+                            emitGlobalGet(out_, emitter.spGlobal);
                             if (fieldOffset > 0) {
-                                out_ ~= Op.i32_const;
-                                leb128s(out_, fieldOffset);
+                                emitI32Const(out_, fieldOffset);
                                 out_ ~= Op.i32_add;
                             }
 
                             emitVarAddress(out_, argInfo);
                             if (fieldOffset > 0) {
-                                out_ ~= Op.i32_const;
-                                leb128s(out_, fieldOffset);
+                                emitI32Const(out_, fieldOffset);
                                 out_ ~= Op.i32_add;
                             }
-                            out_ ~= Op.i32_load;
-                            out_ ~= cast(ubyte)0x02;
-                            leb128u(out_, 0);
+                            emitI32Load(out_);
 
-                            out_ ~= Op.i32_store;
-                            out_ ~= cast(ubyte)0x02;
-                            leb128u(out_, 0);
+                            emitI32Store(out_);
                         }
 
-                        out_ ~= Op.global_get;
-                        leb128u(out_, emitter.spGlobal);
+                        emitGlobalGet(out_, emitter.spGlobal);
 
                         totalCopySize += delegateSize;
                         continue;
@@ -6521,8 +5504,7 @@ class FuncContext {
 
                                 auto classDecl = classInfo.classDecl;
                                 if (auto itableBase = ifaceDecl.name in classDecl.itableBases) {
-                                    out_ ~= Op.i32_const;
-                                    leb128s(out_, *itableBase);
+                                    emitI32Const(out_, *itableBase);
                                 } else {
                                     throw new EmitError("Class " ~ classDecl.name ~
                                         " does not implement interface " ~ ifaceDecl.name, arg.location);
@@ -6550,24 +5532,18 @@ class FuncContext {
                 const sliceSize = sliceLayout.totalSize;
 
                 // Allocate temp: SP = SP - 12
-                out_ ~= Op.global_get;
-                leb128u(out_, emitter.spGlobal);
-                out_ ~= Op.i32_const;
-                leb128s(out_, sliceSize);
+                emitGlobalGet(out_, emitter.spGlobal);
+                emitI32Const(out_, sliceSize);
                 out_ ~= Op.i32_sub;
-                out_ ~= Op.global_set;
-                leb128u(out_, emitter.spGlobal);
+                emitGlobalSet(out_, emitter.spGlobal);
 
                 // Store ptr = base + start * elemSize at SP+0
-                out_ ~= Op.global_get;
-                leb128u(out_, emitter.spGlobal);
+                emitGlobalGet(out_, emitter.spGlobal);
 
                 // Load base address
                 if (srcInfo.isSlice) {
                     emitVarAddress(out_, srcInfo);
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);  // load .ptr field
+                    emitI32Load(out_);
                 } else {
                     // Static array: address IS the data
                     emitVarAddress(out_, srcInfo);
@@ -6575,48 +5551,36 @@ class FuncContext {
 
                 // Add start * elemSize
                 emitExpression(out_, sliceArg.start);
-                out_ ~= Op.i32_const;
-                leb128s(out_, sourceElemSize);
+                emitI32Const(out_, sourceElemSize);
                 out_ ~= Op.i32_mul;
                 out_ ~= Op.i32_add;
 
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Store(out_);
 
                 // Store length = end - start at SP+4
-                out_ ~= Op.global_get;
-                leb128u(out_, emitter.spGlobal);
-                out_ ~= Op.i32_const;
-                leb128s(out_, sliceLayout.lengthOffset);
+                emitGlobalGet(out_, emitter.spGlobal);
+                emitI32Const(out_, sliceLayout.lengthOffset);
                 out_ ~= Op.i32_add;
 
                 emitExpression(out_, sliceArg.end);
                 emitExpression(out_, sliceArg.start);
                 out_ ~= Op.i32_sub;
 
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Store(out_);
 
                 // Store capacity = length at SP+8
-                out_ ~= Op.global_get;
-                leb128u(out_, emitter.spGlobal);
-                out_ ~= Op.i32_const;
-                leb128s(out_, sliceLayout.capacityOffset);
+                emitGlobalGet(out_, emitter.spGlobal);
+                emitI32Const(out_, sliceLayout.capacityOffset);
                 out_ ~= Op.i32_add;
 
                 emitExpression(out_, sliceArg.end);
                 emitExpression(out_, sliceArg.start);
                 out_ ~= Op.i32_sub;
 
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Store(out_);
 
                 // Push SP (address of temp slice) as argument
-                out_ ~= Op.global_get;
-                leb128u(out_, emitter.spGlobal);
+                emitGlobalGet(out_, emitter.spGlobal);
 
                 totalCopySize += sliceSize;
                 continue;
@@ -6636,25 +5600,20 @@ class FuncContext {
         // Call — use IFTI resolved name if available
         string callName = expr.resolvedInstantiation ? expr.resolvedInstantiation.name : ident.name;
         uint funcIdx = emitter.getFuncIndex(callName, expr.location);
-        out_ ~= Op.call;
-        leb128u(out_, funcIdx);
+        emitCall(out_, funcIdx);
         
         // Restore SP after call (deallocate arg copies only, not result temp)
         if (totalCopySize > 0) {
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.spGlobal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, totalCopySize);
+            emitGlobalGet(out_, emitter.spGlobal);
+            emitI32Const(out_, totalCopySize);
             out_ ~= Op.i32_add;
-            out_ ~= Op.global_set;
-            leb128u(out_, emitter.spGlobal);
+            emitGlobalSet(out_, emitter.spGlobal);
         }
 
         // For aggregate-returning functions, leave result address on WASM stack
         // (result temp persists until function epilogue, like emitStructConstructionToTemp)
         if (calleeHasLargeReturn) {
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.spGlobal);
+            emitGlobalGet(out_, emitter.spGlobal);
         }
     }
     
@@ -6680,8 +5639,7 @@ class FuncContext {
 
         // Call the mangled function
         uint funcIdx = emitter.getFuncIndex(inst.name, expr.location);
-        out_ ~= Op.call;
-        leb128u(out_, funcIdx);
+        emitCall(out_, funcIdx);
     }
 
     /**
@@ -6715,8 +5673,7 @@ class FuncContext {
     private void emitWritelnHostCall(ref Appender!(ubyte[]) out_, string hostFunc) {
         emitter.neededCTFEImports[hostFunc] = true;
         uint funcIdx = emitter.getFuncIndex(hostFunc);
-        out_ ~= Op.call;
-        leb128u(out_, funcIdx);
+        emitCall(out_, funcIdx);
     }
 
     private void emitWritelnString(ref Appender!(ubyte[]) out_, Expression arg) {
@@ -6726,16 +5683,10 @@ class FuncContext {
         if (auto literal = cast(LiteralExpression)arg) {
             if (literal.value.type == typeid(string)) {
                 uint structAddr = emitter.registerArrayLiteral(literal.value.get!string());
-                out_ ~= Op.i32_const;
-                leb128s(out_, structAddr);
-                out_ ~= Op.i32_load;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
-                out_ ~= Op.i32_const;
-                leb128s(out_, structAddr + 4);
-                out_ ~= Op.i32_load;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Const(out_, structAddr);
+                emitI32Load(out_);
+                emitI32Const(out_, structAddr + 4);
+                emitI32Load(out_);
                 emitWritelnHostCall(out_, "__ctfe_write_str");
                 return;
             }
@@ -6743,33 +5694,20 @@ class FuncContext {
         if (auto manifest = getStringManifest(arg)) {
             manifest.ensureEvaluated();
             uint structAddr = emitter.registerArrayLiteral(manifest.ctfeStringValue);
-            out_ ~= Op.i32_const;
-            leb128s(out_, structAddr);
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
-            out_ ~= Op.i32_const;
-            leb128s(out_, structAddr + 4);
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            emitI32Const(out_, structAddr);
+            emitI32Load(out_);
+            emitI32Const(out_, structAddr + 4);
+            emitI32Load(out_);
             emitWritelnHostCall(out_, "__ctfe_write_str");
             return;
         }
         // String variable: emitExpression pushes struct address, load ptr+len
         emitExpression(out_, arg);
-        out_ ~= Op.local_set;
-        leb128u(out_, tempLocalA);
-        out_ ~= Op.local_get;
-        leb128u(out_, tempLocalA);
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.local_get;
-        leb128u(out_, tempLocalA);
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 4);
+        emitLocalSet(out_, tempLocalA);
+        emitLocalGet(out_, tempLocalA);
+        emitI32Load(out_);
+        emitLocalGet(out_, tempLocalA);
+        emitI32Load(out_, 4);
         emitWritelnHostCall(out_, "__ctfe_write_str");
     }
 
@@ -6826,8 +5764,7 @@ class FuncContext {
         // Emit newline at the end
         emitter.neededCTFEImports["__ctfe_write_newline"] = true;
         uint newlineIdx = emitter.getFuncIndex("__ctfe_write_newline");
-        out_ ~= Op.call;
-        leb128u(out_, newlineIdx);
+        emitCall(out_, newlineIdx);
     }
 
     /// If expression is an identifier referencing a string manifest constant, return it.
@@ -6874,8 +5811,7 @@ class FuncContext {
                 // Call the imported function
                 string importName = "__ctfe_runtime_" ~ memberExpr.memberName;
                 uint funcIdx = emitter.getFuncIndex(importName, memberExpr.location);
-                out_ ~= Op.call;
-                leb128u(out_, funcIdx);
+                emitCall(out_, funcIdx);
                 return;
             }
         }
@@ -6911,8 +5847,7 @@ class FuncContext {
                     }
                     // Direct call (struct method)
                     uint funcIdx = emitter.getFuncIndex(method.mangledName, memberExpr.location);
-                    out_ ~= Op.call;
-                    leb128u(out_, funcIdx);
+                    emitCall(out_, funcIdx);
                     return;
                 }
             }
@@ -7037,8 +5972,7 @@ class FuncContext {
             emitVarAddress(out_, objInfo);
         } else if (memberExpr.isAutoDereference && objInfo) {
             // Pointer variable: its value IS the struct address
-            out_ ~= Op.local_get;
-            leb128u(out_, objInfo.wasmLocalIdx);
+            emitLocalGet(out_, objInfo.wasmLocalIdx);
         }
 
         // Push hidden result pointer if method returns a large type (struct, array)
@@ -7049,17 +5983,13 @@ class FuncContext {
             assert(methodResultTempSize > 0, "emitMethodCall: large return size is 0 for method '" ~ method.name ~ "'");
 
             // Allocate temp on shadow stack for result
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.spGlobal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, methodResultTempSize);
+            emitGlobalGet(out_, emitter.spGlobal);
+            emitI32Const(out_, methodResultTempSize);
             out_ ~= Op.i32_sub;
-            out_ ~= Op.global_set;
-            leb128u(out_, emitter.spGlobal);
+            emitGlobalSet(out_, emitter.spGlobal);
 
             // Push result pointer as hidden argument
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.spGlobal);
+            emitGlobalGet(out_, emitter.spGlobal);
         }
 
         // Push hidden arena pointer if callee method needs it
@@ -7077,8 +6007,7 @@ class FuncContext {
         if (structDecl) {
             // Struct method: direct call
             uint funcIdx = emitter.getFuncIndex(method.mangledName, memberExpr.location);
-            out_ ~= Op.call;
-            leb128u(out_, funcIdx);
+            emitCall(out_, funcIdx);
         } else if (classDecl) {
             // Class method: virtual dispatch via call_indirect
             // 1. Find method slot in virtualMethods
@@ -7093,8 +6022,7 @@ class FuncContext {
             if (methodSlot < 0) {
                 // Not a virtual method (constructor/destructor) - use direct call
                 uint funcIdx = emitter.getFuncIndex(method.mangledName, memberExpr.location);
-                out_ ~= Op.call;
-                leb128u(out_, funcIdx);
+                emitCall(out_, funcIdx);
             } else {
                 // Virtual dispatch:
                 // tableIndex = (vtable_ptr & TABLE_BASE_MASK) + methodSlot
@@ -7102,27 +6030,20 @@ class FuncContext {
                 // Load vtable_ptr from object (at offset 0)
                 if (objInfo && objInfo.isClass) {
                     emitVarAddress(out_, objInfo);
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitI32Load(out_);
                 } else if (objInfo && memberExpr.isAutoDereference) {
                     // Pointer-to-class: pointer value IS the object address
-                    out_ ~= Op.local_get;
-                    leb128u(out_, objInfo.wasmLocalIdx);
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitLocalGet(out_, objInfo.wasmLocalIdx);
+                    emitI32Load(out_);
                 }
                 
                 // Mask to get tableBase: vtable_ptr & TABLE_BASE_MASK
-                out_ ~= Op.i32_const;
-                leb128s(out_, cast(int)WasmVtablePacking.TABLE_BASE_MASK);
+                emitI32Const(out_, cast(int)WasmVtablePacking.TABLE_BASE_MASK);
                 out_ ~= Op.i32_and;
                 
                 // Add method slot
                 if (methodSlot > 0) {
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, methodSlot);
+                    emitI32Const(out_, methodSlot);
                     out_ ~= Op.i32_add;
                 }
                 
@@ -7138,8 +6059,7 @@ class FuncContext {
 
         // For large-return methods, leave result address on WASM stack
         if (methodHasLargeReturn) {
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.spGlobal);
+            emitGlobalGet(out_, emitter.spGlobal);
         }
     }
 
@@ -7181,30 +6101,23 @@ class FuncContext {
             structRetSize = cast(uint)retStructDecl.aggregateSize_;
 
             // SP -= structRetSize
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.spGlobal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, structRetSize);
+            emitGlobalGet(out_, emitter.spGlobal);
+            emitI32Const(out_, structRetSize);
             out_ ~= Op.i32_sub;
-            out_ ~= Op.global_set;
-            leb128u(out_, emitter.spGlobal);
+            emitGlobalSet(out_, emitter.spGlobal);
 
             // Save result address to tempLocalA
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.spGlobal);
-            out_ ~= Op.local_set;
-            leb128u(out_, tempLocalA);
+            emitGlobalGet(out_, emitter.spGlobal);
+            emitLocalSet(out_, tempLocalA);
         }
 
         // Arg 1: receiver (i64)
         if (isStaticCall) {
             // Push class name string pointer, call objc_getClass -> returns i64
             uint classNameAddr = emitter.registerCString(ifaceDecl.name);
-            out_ ~= Op.i32_const;
-            leb128s(out_, classNameAddr);
+            emitI32Const(out_, classNameAddr);
             uint getClassIdx = emitter.getFuncIndex("objc_getClass", method.location);
-            out_ ~= Op.call;
-            leb128u(out_, getClassIdx);
+            emitCall(out_, getClassIdx);
         } else {
             // Push the receiver expression (already an i64 value)
             emitExpression(out_, receiverExpr);
@@ -7212,16 +6125,13 @@ class FuncContext {
 
         // Arg 2: selector (i64)
         uint selAddr = emitter.registerCString(selector);
-        out_ ~= Op.i32_const;
-        leb128s(out_, selAddr);
+        emitI32Const(out_, selAddr);
         uint selRegIdx = emitter.getFuncIndex("sel_registerName", method.location);
-        out_ ~= Op.call;
-        leb128u(out_, selRegIdx);
+        emitCall(out_, selRegIdx);
 
         // Arg 3 (struct return only): result pointer (i32)
         if (isStructReturn) {
-            out_ ~= Op.local_get;
-            leb128u(out_, tempLocalA);
+            emitLocalGet(out_, tempLocalA);
         }
 
         // Remaining args: user arguments (with i32→i64 promotion where needed)
@@ -7233,14 +6143,11 @@ class FuncContext {
                     assert(structDecl.fields.length > 0,
                         "ObjC call: struct " ~ structDecl.name ~ " has no fields at emission time");
                     emitExpression(out_, arg);  // pushes i32 address
-                    out_ ~= Op.local_set;
-                    leb128u(out_, tempLocalB);
+                    emitLocalSet(out_, tempLocalB);
                     foreach (field; structDecl.fields) {
-                        out_ ~= Op.local_get;
-                        leb128u(out_, tempLocalB);
+                        emitLocalGet(out_, tempLocalB);
                         if (field.offset > 0) {
-                            out_ ~= Op.i32_const;
-                            leb128s(out_, cast(int)field.offset);
+                            emitI32Const(out_, cast(int)field.offset);
                             out_ ~= Op.i32_add;
                         }
                         auto bt = cast(BasicType)field.type;
@@ -7265,13 +6172,11 @@ class FuncContext {
         // Call __objc_send_<Interface>_<method>
         string importName = method.mangledName;
         uint funcIdx = emitter.getFuncIndex(importName, method.location);
-        out_ ~= Op.call;
-        leb128u(out_, funcIdx);
+        emitCall(out_, funcIdx);
 
         // For struct returns: push result address (trampoline wrote struct to shadow stack)
         if (isStructReturn) {
-            out_ ~= Op.local_get;
-            leb128u(out_, tempLocalA);
+            emitLocalGet(out_, tempLocalA);
         }
     }
 
@@ -7302,18 +6207,11 @@ class FuncContext {
         // Emit obj_ptr as 'this' argument
         if (ifaceInfo.addrMode == AddrMode.shadowStack) {
             // Local interface: fat pointer on shadow stack — load obj_ptr from offset 0
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, ifaceInfo.frameOffset);
-            out_ ~= Op.i32_add;
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            emitFPOffset(out_, ifaceInfo.frameOffset);
+            emitI32Load(out_);
         } else {
             // Param interface: obj_ptr is a WASM local
-            out_ ~= Op.local_get;
-            leb128u(out_, ifaceInfo.wasmLocalIdx);
+            emitLocalGet(out_, ifaceInfo.wasmLocalIdx);
         }
 
         // Emit other arguments
@@ -7324,29 +6222,20 @@ class FuncContext {
         // Load itable_ptr
         if (ifaceInfo.addrMode == AddrMode.shadowStack) {
             // Local: load from fat pointer at ITABLE_OFFSET
-            out_ ~= Op.local_get;
-            leb128u(out_, fpLocal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, ifaceInfo.frameOffset + WasmFatPointerLayout.ITABLE_OFFSET);
-            out_ ~= Op.i32_add;
-            out_ ~= Op.i32_load;
-            out_ ~= cast(ubyte)0x02;
-            leb128u(out_, 0);
+            emitFPOffset(out_, ifaceInfo.frameOffset + WasmFatPointerLayout.ITABLE_OFFSET);
+            emitI32Load(out_);
         } else {
             // Param: itable is in a separate WASM local
-            out_ ~= Op.local_get;
-            leb128u(out_, ifaceInfo.itableLocalIdx);
+            emitLocalGet(out_, ifaceInfo.itableLocalIdx);
         }
 
         // Extract itableBase (lower bits via TABLE_BASE_MASK)
-        out_ ~= Op.i32_const;
-        leb128s(out_, cast(int)WasmVtablePacking.TABLE_BASE_MASK);
+        emitI32Const(out_, cast(int)WasmVtablePacking.TABLE_BASE_MASK);
         out_ ~= Op.i32_and;
 
         // Add method slot to get final table index
         if (methodSlot > 0) {
-            out_ ~= Op.i32_const;
-            leb128s(out_, methodSlot);
+            emitI32Const(out_, methodSlot);
             out_ ~= Op.i32_add;
         }
 
@@ -7380,8 +6269,7 @@ class FuncContext {
         
         // Call the free function by name
         uint funcIdx = emitter.getFuncIndex(memberExpr.memberName, memberExpr.location);
-        out_ ~= Op.call;
-        leb128u(out_, funcIdx);
+        emitCall(out_, funcIdx);
     }
     
     /**
@@ -7414,11 +6302,9 @@ class FuncContext {
         assert(frameSize > 0, "emitStructReturnCall requires a shadow stack frame (frameSize > 0)");
         assert(funcName.length > 0, "emitStructReturnCall: empty function name");
         // Push hidden result pointer as first argument: FP + resultFrameOffset
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
+        emitLocalGet(out_, fpLocal);
         if (resultFrameOffset != 0) {
-            out_ ~= Op.i32_const;
-            leb128s(out_, resultFrameOffset);
+            emitI32Const(out_, resultFrameOffset);
             out_ ~= Op.i32_add;
         }
 
@@ -7443,39 +6329,28 @@ class FuncContext {
                     uint structSize = cast(uint)argStructDecl.structSize;
 
                     // Allocate temp: SP = SP - structSize
-                    out_ ~= Op.global_get;
-                    leb128u(out_, emitter.spGlobal);
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, structSize);
+                    emitGlobalGet(out_, emitter.spGlobal);
+                    emitI32Const(out_, structSize);
                     out_ ~= Op.i32_sub;
-                    out_ ~= Op.global_set;
-                    leb128u(out_, emitter.spGlobal);
+                    emitGlobalSet(out_, emitter.spGlobal);
 
                     // Copy fields from source to temp
                     foreach (field; argStructDecl.fields) {
-                        out_ ~= Op.global_get;
-                        leb128u(out_, emitter.spGlobal);
+                        emitGlobalGet(out_, emitter.spGlobal);
                         if (field.offset > 0) {
-                            out_ ~= Op.i32_const;
-                            leb128s(out_, cast(int)field.offset);
+                            emitI32Const(out_, cast(int)field.offset);
                             out_ ~= Op.i32_add;
                         }
                         emitVarAddress(out_, argInfo);
                         if (field.offset > 0) {
-                            out_ ~= Op.i32_const;
-                            leb128s(out_, cast(int)field.offset);
+                            emitI32Const(out_, cast(int)field.offset);
                             out_ ~= Op.i32_add;
                         }
-                        out_ ~= Op.i32_load;
-                        out_ ~= cast(ubyte)0x02;
-                        leb128u(out_, 0);
-                        out_ ~= Op.i32_store;
-                        out_ ~= cast(ubyte)0x02;
-                        leb128u(out_, 0);
+                        emitI32Load(out_);
+                        emitI32Store(out_);
                     }
 
-                    out_ ~= Op.global_get;
-                    leb128u(out_, emitter.spGlobal);
+                    emitGlobalGet(out_, emitter.spGlobal);
                     totalCopySize += structSize;
                     continue;
                 }
@@ -7487,18 +6362,14 @@ class FuncContext {
 
         // Call
         uint funcIdx = emitter.getFuncIndex(funcName, loc);
-        out_ ~= Op.call;
-        leb128u(out_, funcIdx);
+        emitCall(out_, funcIdx);
 
         // Deallocate arg copies (not the result — that lives in the caller's frame)
         if (totalCopySize > 0) {
-            out_ ~= Op.global_get;
-            leb128u(out_, emitter.spGlobal);
-            out_ ~= Op.i32_const;
-            leb128s(out_, totalCopySize);
+            emitGlobalGet(out_, emitter.spGlobal);
+            emitI32Const(out_, totalCopySize);
             out_ ~= Op.i32_add;
-            out_ ~= Op.global_set;
-            leb128u(out_, emitter.spGlobal);
+            emitGlobalSet(out_, emitter.spGlobal);
         }
     }
 
@@ -7556,11 +6427,9 @@ class FuncContext {
         emitVarAddress(out_, objInfo);
 
         // 2. result_ptr: FP + resultFrameOffset (write directly into caller's local)
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
+        emitLocalGet(out_, fpLocal);
         if (resultFrameOffset != 0) {
-            out_ ~= Op.i32_const;
-            leb128s(out_, resultFrameOffset);
+            emitI32Const(out_, resultFrameOffset);
             out_ ~= Op.i32_add;
         }
 
@@ -7575,8 +6444,7 @@ class FuncContext {
         // --- Dispatch: direct call or virtual ---
         if (structDecl) {
             uint funcIdx = emitter.getFuncIndex(method.mangledName, memberExpr.location);
-            out_ ~= Op.call;
-            leb128u(out_, funcIdx);
+            emitCall(out_, funcIdx);
         } else if (classDecl) {
             assert(classDecl.virtualMethods !is null,
                 "emitStructReturnMethodCall: class '" ~ classDecl.name ~ "' has no virtualMethods");
@@ -7586,22 +6454,17 @@ class FuncContext {
 
             if (methodSlot < 0) {
                 uint funcIdx = emitter.getFuncIndex(method.mangledName, memberExpr.location);
-                out_ ~= Op.call;
-                leb128u(out_, funcIdx);
+                emitCall(out_, funcIdx);
             } else {
                 // Virtual dispatch: load vtable_ptr, mask, add slot, call_indirect
                 emitVarAddress(out_, objInfo);
-                out_ ~= Op.i32_load;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Load(out_);
 
-                out_ ~= Op.i32_const;
-                leb128s(out_, cast(int)WasmVtablePacking.TABLE_BASE_MASK);
+                emitI32Const(out_, cast(int)WasmVtablePacking.TABLE_BASE_MASK);
                 out_ ~= Op.i32_and;
 
                 if (methodSlot > 0) {
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, methodSlot);
+                    emitI32Const(out_, methodSlot);
                     out_ ~= Op.i32_add;
                 }
 
@@ -7625,20 +6488,16 @@ class FuncContext {
         uint structSize = cast(uint)structDecl.structSize;
         
         // Allocate space: SP = SP - structSize
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, structSize);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, structSize);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.global_set;
-        leb128u(out_, emitter.spGlobal);
+        emitGlobalSet(out_, emitter.spGlobal);
         
         // Initialize at base address = current SP
         emitStructFieldsInit(out_, structDecl, args, EmitAddrMode.fromSP, 0);
         
         // Leave pointer to struct on stack
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
+        emitGlobalGet(out_, emitter.spGlobal);
     }
     
     // How to compute the destination address for a field
@@ -7680,49 +6539,38 @@ class FuncContext {
                 for (uint off = 0; off < valueSize; off += 4) {
                     // Destination address
                     if (baseMode == EmitAddrMode.fromFP) {
-                        out_ ~= Op.local_get;
-                        leb128u(out_, fpLocal);
+                        emitLocalGet(out_, fpLocal);
                     } else {
-                        out_ ~= Op.global_get;
-                        leb128u(out_, emitter.spGlobal);
+                        emitGlobalGet(out_, emitter.spGlobal);
                     }
                     int destOff = fieldAddr + cast(int)off;
                     if (destOff != 0) {
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, destOff);
+                        emitI32Const(out_, destOff);
                         out_ ~= Op.i32_add;
                     }
                     
                     // Load from source: duplicate src_addr, add offset, load
                     emitExpression(out_, args[i]);  // Stack: [dest_addr, src_addr]
                     if (off != 0) {
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, cast(int)off);
+                        emitI32Const(out_, cast(int)off);
                         out_ ~= Op.i32_add;
                     }
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitI32Load(out_);
                     
                     // Store to destination: Stack: [dest_addr, value]
-                    out_ ~= Op.i32_store;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitI32Store(out_);
                 }
                 continue;
             }
             
             // Emit destination address based on mode
             if (baseMode == EmitAddrMode.fromFP) {
-                out_ ~= Op.local_get;
-                leb128u(out_, fpLocal);
+                emitLocalGet(out_, fpLocal);
             } else {
-                out_ ~= Op.global_get;
-                leb128u(out_, emitter.spGlobal);
+                emitGlobalGet(out_, emitter.spGlobal);
             }
             if (fieldAddr != 0) {
-                out_ ~= Op.i32_const;
-                leb128s(out_, fieldAddr);
+                emitI32Const(out_, fieldAddr);
                 out_ ~= Op.i32_add;
             }
             
@@ -7805,9 +6653,7 @@ class FuncContext {
                 // *ptr = value → [ptr_addr, value, i32.store]
                 emitExpression(out_, derefExpr.operand);  // ptr address
                 emitExpression(out_, expr.right);          // value
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;  // align = 4
-                leb128u(out_, 0);          // offset = 0
+                emitI32Store(out_);
                 return;
             }
         }
@@ -7821,26 +6667,18 @@ class FuncContext {
         foreach (ref cap; captures) {
             if (cap.name == ident.name) {
                 // Load pointer to captured var from env
-                out_ ~= Op.local_get;
-                leb128u(out_, envParamIdx);
+                emitLocalGet(out_, envParamIdx);
                 if (cap.envOffset > 0) {
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, cap.envOffset);
+                    emitI32Const(out_, cap.envOffset);
                     out_ ~= Op.i32_add;
                 }
-                out_ ~= Op.i32_load;  // load pointer to captured var
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
+                emitI32Load(out_);
                 // Emit RHS value
                 emitExpression(out_, expr.right);
                 // Save value, store through pointer, leave value on stack
-                out_ ~= Op.local_tee;
-                leb128u(out_, tempLocalB);
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
-                out_ ~= Op.local_get;
-                leb128u(out_, tempLocalB);
+                emitLocalTee(out_, tempLocalB);
+                emitI32Store(out_);
+                emitLocalGet(out_, tempLocalB);
                 return;
             }
         }
@@ -7853,17 +6691,13 @@ class FuncContext {
             if (field) {
                 // Implicit this.fieldName = value
                 if (auto thisInfo = resolveVar(THIS_LOCAL_ID, "this")) {
-                    out_ ~= Op.local_get;
-                    leb128u(out_, thisInfo.wasmLocalIdx);
+                    emitLocalGet(out_, thisInfo.wasmLocalIdx);
                     if (field.offset > 0) {
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, cast(int)field.offset);
+                        emitI32Const(out_, cast(int)field.offset);
                         out_ ~= Op.i32_add;
                     }
                     emitExpression(out_, expr.right);
-                    out_ ~= Op.i32_store;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitI32Store(out_);
                     emitExpression(out_, expr.right);
                     return;
                 }
@@ -7878,8 +6712,7 @@ class FuncContext {
                 if (expr.loweredCall) {
                     emitExpression(out_, expr.loweredCall);
                 } else if (expr.operator != AssignmentExpression.Operator.Assign) {
-                    out_ ~= Op.local_get;
-                    leb128u(out_, wasmIdx);
+                    emitLocalGet(out_, wasmIdx);
                     emitExpression(out_, expr.right);
                     // Implicit f64→f32 before compound op on float local
                     if (info.wasmLocalIdx < localTypes.length &&
@@ -7895,8 +6728,7 @@ class FuncContext {
                         isF64Expression(expr.right))
                         out_ ~= Op.f32_demote_f64;
                 }
-                out_ ~= Op.local_tee;
-                leb128u(out_, wasmIdx);
+                emitLocalTee(out_, wasmIdx);
                 return;
             }
             // Scalar on shadow stack (promoted for capture): store value
@@ -7907,28 +6739,19 @@ class FuncContext {
                 } else if (expr.operator != AssignmentExpression.Operator.Assign) {
                     // Compound assignment: load current, compute, store
                     // Duplicate the address for both load and store
-                    out_ ~= Op.local_set;
-                    leb128u(out_, tempLocalA);
-                    out_ ~= Op.local_get;
-                    leb128u(out_, tempLocalA);
-                    out_ ~= Op.local_get;
-                    leb128u(out_, tempLocalA);
-                    out_ ~= Op.i32_load;
-                    out_ ~= cast(ubyte)0x02;
-                    leb128u(out_, 0);
+                    emitLocalSet(out_, tempLocalA);
+                    emitLocalGet(out_, tempLocalA);
+                    emitLocalGet(out_, tempLocalA);
+                    emitI32Load(out_);
                     emitExpression(out_, expr.right);
                     emitCompoundOp(out_, expr.operator, isF64Expression(expr.left), isF32Expression(expr.left), expr.location);
                 } else {
                     emitExpression(out_, expr.right);
                 }
                 // Save value, store it, leave value on stack (assignment is an expression)
-                out_ ~= Op.local_tee;
-                leb128u(out_, tempLocalB);
-                out_ ~= Op.i32_store;
-                out_ ~= cast(ubyte)0x02;
-                leb128u(out_, 0);
-                out_ ~= Op.local_get;
-                leb128u(out_, tempLocalB);
+                emitLocalTee(out_, tempLocalB);
+                emitI32Store(out_);
+                emitLocalGet(out_, tempLocalB);
                 return;
             }
             // Shadow-stack or param-pointer aggregate reassignment: s = expr
@@ -7964,8 +6787,7 @@ class FuncContext {
                     // [dest, src, len] memory.copy
                     emitVarAddress(out_, info);       // dest
                     emitExpression(out_, expr.right);  // src pointer
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, size);
+                    emitI32Const(out_, size);
                     out_ ~= cast(ubyte) 0xFC;  // memory.copy prefix
                     out_ ~= cast(ubyte) 0x0A;  // memory.copy opcode
                     leb128u(out_, 0);  // dest memory index
@@ -7986,17 +6808,14 @@ class FuncContext {
                     if (expr.loweredCall) {
                         emitExpression(out_, expr.loweredCall);
                     } else if (expr.operator != AssignmentExpression.Operator.Assign) {
-                        out_ ~= Op.global_get;
-                        leb128u(out_, varDecl.wasmGlobalIndex);
+                        emitGlobalGet(out_, varDecl.wasmGlobalIndex);
                         emitExpression(out_, expr.right);
                         emitCompoundOp(out_, expr.operator, isF64Expression(expr.left), isF32Expression(expr.left), expr.location);
                     } else {
                         emitExpression(out_, expr.right);
                     }
-                    out_ ~= Op.global_set;
-                    leb128u(out_, varDecl.wasmGlobalIndex);
-                    out_ ~= Op.global_get;
-                    leb128u(out_, varDecl.wasmGlobalIndex);
+                    emitGlobalSet(out_, varDecl.wasmGlobalIndex);
+                    emitGlobalGet(out_, varDecl.wasmGlobalIndex);
                     return;
                 }
                 // Global exists but wasn't collected — happens during CTFE
@@ -8104,8 +6923,7 @@ class FuncContext {
                 auto field = structDecl.getField(member.memberName);
                 if (field) {
                     if (field.offset > 0) {
-                        out_ ~= Op.i32_const;
-                        leb128s(out_, cast(int)field.offset);
+                        emitI32Const(out_, cast(int)field.offset);
                         out_ ~= Op.i32_add;
                     }
                     emitExpression(out_, value);
@@ -8144,8 +6962,7 @@ class FuncContext {
 
                 emitVarAddress(out_, info);
                 if (field.offset > 0) {
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, cast(int)field.offset);
+                    emitI32Const(out_, cast(int)field.offset);
                     out_ ~= Op.i32_add;
                 }
                 emitExpression(out_, value);
@@ -8157,8 +6974,7 @@ class FuncContext {
                 // Re-load for expression value
                 emitVarAddress(out_, info);
                 if (field.offset > 0) {
-                    out_ ~= Op.i32_const;
-                    leb128s(out_, cast(int)field.offset);
+                    emitI32Const(out_, cast(int)field.offset);
                     out_ ~= Op.i32_add;
                 }
                 emitLoadForSize(out_, cast(uint)field.size, isFloat);
@@ -8189,35 +7005,21 @@ class FuncContext {
         int sliceAddr = sliceInfo.frameOffset;
         
         // Store newLength at SP-4
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 4);
         out_ ~= Op.i32_sub;
         emitExpression(out_, newLengthExpr);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Store(out_);
         
         // Load current capacity
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + sliceLayout.capacityOffset);
-        out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitFPOffset(out_, sliceAddr + sliceLayout.capacityOffset);
+        emitI32Load(out_);
         
         // Load newLength for comparison
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 4);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Load(out_);
         
         // if (capacity < newLength) - need to reserve
         out_ ~= Op.i32_lt_u;
@@ -8227,49 +7029,32 @@ class FuncContext {
         
         // Allocate new buffer: __arena_alloc(arena, newLength * 4)
         emitArenaPointer(out_);
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 4);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitI32Load(out_);
+        emitI32Const(out_, 4);
         out_ ~= Op.i32_mul;
         uint allocIdx = emitter.getFuncIndex("__arena_alloc");
-        out_ ~= Op.call;
-        leb128u(out_, allocIdx);
+        emitCall(out_, allocIdx);
         
         // Store newBuffer at SP-8
         // Save return value to temp local first (i32.store needs [addr, val] order)
-        out_ ~= Op.local_set;
-        leb128u(out_, tempLocalA);
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 8);
+        emitLocalSet(out_, tempLocalA);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 8);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.local_get;
-        leb128u(out_, tempLocalA);
+        emitLocalGet(out_, tempLocalA);
         // Stack: [SP-8, newBuffer]
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Store(out_);
 
         // Copy loop: for i = 0 to oldLength-1
         // Init counter at SP-12
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 12);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 12);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_const;
-        leb128s(out_, 0);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Const(out_, 0);
+        emitI32Store(out_);
         
         out_ ~= Op.block;
         out_ ~= cast(ubyte)0x40;
@@ -8277,162 +7062,87 @@ class FuncContext {
         out_ ~= cast(ubyte)0x40;
         
         // if (i >= oldLength) break
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 12);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 12);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Load(out_);
         
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + sliceLayout.lengthOffset);
-        out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitFPOffset(out_, sliceAddr + sliceLayout.lengthOffset);
+        emitI32Load(out_);
         
         out_ ~= Op.i32_ge_u;
-        out_ ~= Op.br_if;
-        leb128u(out_, 1);
+        emitBrIf(out_, 1);
         
         // newBuffer[i] = oldPtr[i]
         // dest addr
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 8);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 8);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 12);
+        emitI32Load(out_);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 12);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitI32Load(out_);
+        emitI32Const(out_, 4);
         out_ ~= Op.i32_mul;
         out_ ~= Op.i32_add;
         
         // src value
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr);
-        out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 12);
+        emitFPOffset(out_, sliceAddr);
+        emitI32Load(out_);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 12);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitI32Load(out_);
+        emitI32Const(out_, 4);
         out_ ~= Op.i32_mul;
         out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Load(out_);
         
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Store(out_);
         
         // i++
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 12);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 12);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 12);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 12);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 1);
+        emitI32Load(out_);
+        emitI32Const(out_, 1);
         out_ ~= Op.i32_add;
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Store(out_);
         
-        out_ ~= Op.br;
-        leb128u(out_, 0);
+        emitBr(out_, 0);
         out_ ~= Op.end;
         out_ ~= Op.end;
         
         // Update ptr = newBuffer
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr);
-        out_ ~= Op.i32_add;
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 8);
+        emitFPOffset(out_, sliceAddr);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 8);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Load(out_);
+        emitI32Store(out_);
         
         // Update capacity = newLength
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + sliceLayout.capacityOffset);
-        out_ ~= Op.i32_add;
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitFPOffset(out_, sliceAddr + sliceLayout.capacityOffset);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 4);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Load(out_);
+        emitI32Store(out_);
         
         out_ ~= Op.end;  // end if (need reserve)
         
         // Zero-init from oldLength to newLength if growing
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + sliceLayout.lengthOffset);
-        out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitFPOffset(out_, sliceAddr + sliceLayout.lengthOffset);
+        emitI32Load(out_);
         
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 4);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Load(out_);
         
         out_ ~= Op.i32_lt_u;  // oldLength < newLength
         
@@ -8440,22 +7150,12 @@ class FuncContext {
         out_ ~= cast(ubyte)0x40;
         
         // Init counter = oldLength
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 12);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 12);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + sliceLayout.lengthOffset);
-        out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitFPOffset(out_, sliceAddr + sliceLayout.lengthOffset);
+        emitI32Load(out_);
+        emitI32Store(out_);
         
         out_ ~= Op.block;
         out_ ~= cast(ubyte)0x40;
@@ -8463,107 +7163,60 @@ class FuncContext {
         out_ ~= cast(ubyte)0x40;
         
         // if (i >= newLength) break
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 12);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 12);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitI32Load(out_);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 4);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Load(out_);
         out_ ~= Op.i32_ge_u;
-        out_ ~= Op.br_if;
-        leb128u(out_, 1);
+        emitBrIf(out_, 1);
         
         // ptr[i] = 0
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr);
-        out_ ~= Op.i32_add;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 12);
+        emitFPOffset(out_, sliceAddr);
+        emitI32Load(out_);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 12);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitI32Load(out_);
+        emitI32Const(out_, 4);
         out_ ~= Op.i32_mul;
         out_ ~= Op.i32_add;
-        out_ ~= Op.i32_const;
-        leb128s(out_, 0);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Const(out_, 0);
+        emitI32Store(out_);
         
         // i++
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 12);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 12);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 12);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 12);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 1);
+        emitI32Load(out_);
+        emitI32Const(out_, 1);
         out_ ~= Op.i32_add;
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Store(out_);
         
-        out_ ~= Op.br;
-        leb128u(out_, 0);
+        emitBr(out_, 0);
         out_ ~= Op.end;
         out_ ~= Op.end;
         out_ ~= Op.end;  // end if (need zero init)
         
         // Update length = newLength
-        out_ ~= Op.local_get;
-        leb128u(out_, fpLocal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, sliceAddr + sliceLayout.lengthOffset);
-        out_ ~= Op.i32_add;
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitFPOffset(out_, sliceAddr + sliceLayout.lengthOffset);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 4);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
-        out_ ~= Op.i32_store;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Load(out_);
+        emitI32Store(out_);
         
         // Leave newLength on stack for expression result
-        out_ ~= Op.global_get;
-        leb128u(out_, emitter.spGlobal);
-        out_ ~= Op.i32_const;
-        leb128s(out_, 4);
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 4);
         out_ ~= Op.i32_sub;
-        out_ ~= Op.i32_load;
-        out_ ~= cast(ubyte)0x02;
-        leb128u(out_, 0);
+        emitI32Load(out_);
     }
     
     //==========================================================================
