@@ -74,6 +74,9 @@ struct CompilerOptions {
     // FFI options
     string[] linkFrameworks;      // --link-framework: macOS frameworks to dlopen for FFI
     string[] linkDylibs;          // --link-dylib: shared libraries to dlopen for FFI
+
+    // Compile-only flag
+    bool compileOnly = false;     // -c: compile to .o only, don't link
 }
 
 int main(string[] args) {
@@ -134,7 +137,9 @@ int main(string[] args) {
             "dep-graph", "Build and print dependency graph after type checking", &options.depGraph,
             // FFI options
             "link-framework", "macOS framework to load for FFI (can be repeated)", &options.linkFrameworks,
-            "link-dylib", "Shared library (.dylib) to load for FFI (can be repeated)", &options.linkDylibs
+            "link-dylib", "Shared library (.dylib) to load for FFI (can be repeated)", &options.linkDylibs,
+            // Compile-only
+            "c", "Compile to .o only, don't link (native targets)", &options.compileOnly
         );
         
         log(3, "main() started");
@@ -177,7 +182,9 @@ int main(string[] args) {
         // Set default output file
         if (options.outputFile.length == 0) {
             if (options.target == "arm64-macos")
-                options.outputFile = setExtension(options.inputFile, ".o");
+                options.outputFile = options.compileOnly
+                    ? setExtension(options.inputFile, ".o")
+                    : stripExtension(options.inputFile);
             else
                 options.outputFile = setExtension(options.inputFile, ".wasm");
         }
@@ -543,9 +550,37 @@ int compileFile(CompilerOptions options) {
             auto nativeEmitter = new NativeModuleEmitter(inputModule.symbolTable);
             ubyte[] objBytes = nativeEmitter.emit(ast);
 
-            std.file.write(options.outputFile, objBytes);
-            log(1, "Generated ", objBytes.length, " bytes → ", options.outputFile);
-            writeln("Successfully compiled to ", options.outputFile);
+            if (options.compileOnly) {
+                // -c: write .o and stop
+                std.file.write(options.outputFile, objBytes);
+                log(1, "Generated ", objBytes.length, " bytes → ", options.outputFile);
+                writeln("Successfully compiled to ", options.outputFile);
+            } else {
+                // Compile + link: write .o to temp, invoke cc to link
+                string objFile = options.outputFile ~ ".o";
+                std.file.write(objFile, objBytes);
+                log(1, "Generated ", objBytes.length, " bytes → ", objFile);
+
+                // Build linker command
+                string[] ccArgs = ["cc", "-o", options.outputFile, objFile, "-lSystem"];
+                foreach (fw; options.linkFrameworks)
+                    ccArgs ~= ["-framework", fw];
+                foreach (lib; options.linkDylibs)
+                    ccArgs ~= ["-l" ~ lib];
+
+                import std.process : execute;
+                log(1, "Linking: ", ccArgs);
+                auto result = execute(ccArgs);
+                if (result.status != 0) {
+                    writeln("Linker error:\n", result.output);
+                    return 1;
+                }
+
+                // Clean up temp .o
+                std.file.remove(objFile);
+
+                writeln("Successfully compiled to ", options.outputFile);
+            }
 
             // Print CTFE stats at verbosity 2+
             if (options.verbosity >= 2) {

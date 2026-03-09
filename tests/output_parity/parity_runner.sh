@@ -122,22 +122,28 @@ run_test_with_backend() {
     fi
 
     if [ "$backend" = "native" ]; then
-        # Native ARM64 output backend — compile to .o, link, run
+        # Native ARM64 output backend — compile + link, run
         if [ "$(uname -m)" != "arm64" ] || [ "$(uname)" != "Darwin" ]; then
             echo -e "${YELLOW}SKIP${NC} $test_name [$backend] (requires macOS ARM64)"
             return 0
         fi
 
-        local obj_file="$test_dir/test.o"
         local bin_file="$test_dir/test_bin"
+        local obj_file="$test_dir/test.o"
         rm -f "$obj_file" "$bin_file"
 
         if [ $VERBOSE -eq 1 ]; then
             echo "  Compiling for native output..."
         fi
 
+        # For compile_only tests, use -c to just produce .o
+        # For exec tests, compiler auto-links to produce an executable
         local compile_output
-        compile_output=$("$COMPILER" --target arm64-macos $fw_args "$test_file" -o "$obj_file" 2>&1)
+        if [ "$test_type" = "compile_only" ]; then
+            compile_output=$("$COMPILER" --target arm64-macos -c $fw_args "$test_file" -o "$obj_file" 2>&1)
+        else
+            compile_output=$("$COMPILER" --target arm64-macos $fw_args "$test_file" -o "$bin_file" 2>&1)
+        fi
         local compile_status=$?
 
         if [ $compile_status -ne 0 ]; then
@@ -147,31 +153,12 @@ run_test_with_backend() {
             return 1
         fi
 
-        # Build linker framework flags
-        local link_fw_args=""
-        if [ "$test_type" = "ffi_exec" ]; then
-            local frameworks=$(jq -r '.link_frameworks // [] | .[]' "$config_file")
-            for fw in $frameworks; do
-                link_fw_args="$link_fw_args -framework $fw"
-            done
-        fi
-
         case "$test_type" in
             compile_only)
                 echo -e "${GREEN}PASS${NC} $test_name [$backend] (compiled)"
                 return 0
                 ;;
             wasm_exec|ffi_exec)
-                # Link with system linker
-                local link_output
-                link_output=$(cc -o "$bin_file" "$obj_file" -lSystem $link_fw_args 2>&1)
-                if [ $? -ne 0 ]; then
-                    echo -e "${RED}FAIL${NC} $test_name [$backend]"
-                    echo "  Linking failed:"
-                    echo "$link_output" | sed 's/^/    /'
-                    return 1
-                fi
-
                 # Run native binary — exit code is the result
                 local run_output
                 run_output=$("$bin_file" 2>&1)
