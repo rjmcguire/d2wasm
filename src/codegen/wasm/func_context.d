@@ -3127,6 +3127,21 @@ class FuncContext {
     }
     
     void emitIndex(ref Appender!(ubyte[]) out_, IndexExpression expr) {
+        // Pointer indexing: p[i] = *(p + i * elemSize)
+        if (auto ptrType = cast(PointerType)(expr.array.type ? expr.array.type.resolve() : null)) {
+            emitExpression(out_, expr.array);
+            uint elemSize = wasmElementSize(ptrType.pointeeType);
+            emitExpression(out_, expr.index);
+            out_ ~= Op.i32_const;
+            leb128s(out_, elemSize);
+            out_ ~= Op.i32_mul;
+            out_ ~= Op.i32_add;
+            bool isFloat = isF64ElementType(ptrType.pointeeType) || isF32ElementType(ptrType.pointeeType);
+            if (elemSize <= 4 || isFloat)
+                emitLoadForSize(out_, elemSize, isFloat);
+            return;
+        }
+
         // Check if this uses the intrinsic opIndex path
         if (expr.usesOpIndex && expr.opIndexMethod && expr.opIndexMethod.isIntrinsic) {
             emitIntrinsicOpIndex(out_, expr);
@@ -3308,6 +3323,27 @@ class FuncContext {
      * Emit index assignment for arrays - arr[i] = value
      */
     void emitIndexAssignment(ref Appender!(ubyte[]) out_, IndexExpression indexExpr, Expression value) {
+        // Pointer index assignment: p[i] = value
+        if (auto ptrType = cast(PointerType)(indexExpr.array.type ? indexExpr.array.type.resolve() : null)) {
+            emitExpression(out_, indexExpr.array);
+            uint elemSize = wasmElementSize(ptrType.pointeeType);
+            emitExpression(out_, indexExpr.index);
+            out_ ~= Op.i32_const;
+            leb128s(out_, elemSize);
+            out_ ~= Op.i32_mul;
+            out_ ~= Op.i32_add;
+            emitExpression(out_, value);
+            bool isFloat = isF64ElementType(ptrType.pointeeType) || isF32ElementType(ptrType.pointeeType);
+            if (isF32ElementType(ptrType.pointeeType) && isF64Expression(value))
+                out_ ~= Op.f32_demote_f64;
+            emitStoreForSize(out_, elemSize, isFloat);
+            // Leave assigned value on stack
+            emitExpression(out_, value);
+            if (isF32ElementType(ptrType.pointeeType) && isF64Expression(value))
+                out_ ~= Op.f32_demote_f64;
+            return;
+        }
+
         // Handle member expression as array source (e.g., s.data[i] = value)
         if (auto memberExpr = cast(MemberExpression)indexExpr.array) {
             auto memberType = getMemberExpressionType(memberExpr);

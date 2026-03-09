@@ -1,0 +1,6 @@
+{
+  "type": "wasm_exec",
+  "expected_result": 7,
+  "description": "Pointer-to-pointer casts (reinterpret pointer types)",
+  "mangled_entry": "_D4test4mainFZi"
+}

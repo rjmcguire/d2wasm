@@ -1,0 +1,6 @@
+{
+  "type": "wasm_exec",
+  "expected_result": 15,
+  "description": "Static array .ptr property returns pointer to data",
+  "mangled_entry": "_D4test4mainFZi"
+}

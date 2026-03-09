@@ -2535,6 +2535,11 @@ class TypeChecker {
             return arrType.elementType;
         }
         
+        // Pointer indexing: p[i] is equivalent to *(p + i)
+        if (auto ptrType = cast(PointerType)arrayType) {
+            return ptrType.pointeeType;
+        }
+
         throw new TypeError(
             format("Cannot index non-array type '%s'", arrayType.toString()),
             expr.location);
