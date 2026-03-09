@@ -562,7 +562,7 @@ int compileFile(CompilerOptions options) {
                 log(1, "Generated ", objBytes.length, " bytes → ", objFile);
 
                 // Build linker command
-                string[] ccArgs = ["cc", "-o", options.outputFile, objFile, "-lSystem"];
+                string[] ccArgs = ["cc", "-o", options.outputFile, objFile, "-lSystem", "-lobjc"];
                 foreach (fw; options.linkFrameworks)
                     ccArgs ~= ["-framework", fw];
                 foreach (lib; options.linkDylibs)

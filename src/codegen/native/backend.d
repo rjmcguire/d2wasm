@@ -2713,6 +2713,11 @@ class NativeCompiledFunction : CompiledFunction {
             }
             // Check for method call: obj.method()
             if (auto memberCall = cast(MemberExpression)call.function_) {
+                if (call.isUFCS) {
+                    // UFCS: obj.func(args...) → func(obj, args...)
+                    emitUFCSCall(memberCall, call.arguments);
+                    return;
+                }
                 emitMethodCall(memberCall, call.arguments);
                 return;
             }
@@ -5013,6 +5018,67 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitStoreToPointerFromX9(field.offset);
     }
 
+    // ---- UFCS (Uniform Function Call Syntax) ----
+
+    /// Emit a UFCS call: obj.func(args...) → func(obj, args...)
+    /// The object becomes the first argument to the free function.
+    private void emitUFCSCall(MemberExpression memberExpr, Expression[] args) {
+        // Build combined argument list: [object, args...]
+        Expression[] allArgs = [memberExpr.object] ~ args;
+
+        // Look up the function by name
+        string funcName = memberExpr.memberName;
+        auto symbol = symbolTable.lookupSymbol(funcName);
+        FunctionDecl funcDecl;
+        if (symbol && symbol.kind == SymbolKind.Function)
+            funcDecl = cast(FunctionDecl)symbol.declaration;
+
+        string callName = funcName;
+        if (funcDecl) {
+            callName = getMangledName(funcDecl);
+        }
+
+        auto labelPtr = callName in functionLabels;
+        if (labelPtr is null)
+            throw new Exception("UFCS function not compiled: " ~ callName);
+
+        bool calleeNeedsArena = false;
+        if (auto calleeDecl = callName in functionDecls)
+            calleeNeedsArena = (*calleeDecl).needsArena;
+        int arenaShift = calleeNeedsArena ? 1 : 0;
+
+        // Compile and save args to temp slots
+        auto mark = temps.save();
+        size_t[] argTemps;
+        foreach (arg; allArgs) {
+            compileExpression(arg);
+            size_t t = temps.alloc(8);
+            gen.emitStorePtr(t);
+            argTemps ~= t;
+        }
+
+        // Load args into registers (shifted by arena)
+        for (long i = cast(long)argTemps.length - 1; i >= 0; i--) {
+            gen.emitLoadPtr(argTemps[cast(size_t)i]);
+            switch (cast(int)i + arenaShift) {
+                case 0: break;  // already in x0
+                case 1: gen.emitMoveX0ToX1(); break;
+                case 2: gen.emitMoveX0ToX2(); break;
+                case 3: gen.emitMoveX0ToX3(); break;
+                default: assert(0, "UFCS: too many arguments");
+            }
+        }
+
+        // Load arena into x0 if callee needs it (user args already shifted to x1+)
+        if (calleeNeedsArena) {
+            gen.emitLoadPtr(currentFunctionArenaOffset);
+        }
+
+        gen.emitCall(*labelPtr);
+        emitNativeExceptionCheck();
+        temps.restore(mark);
+    }
+
     // ---- ObjC runtime dispatch (objc_msgSend) ----
 
     /// Find ObjC method in interface by name
@@ -5073,9 +5139,12 @@ class NativeCompiledFunction : CompiledFunction {
             string methodName, Expression[] args, bool isStatic) {
         // Search class members for the method
         string selector = methodName;
+        FunctionDecl dBodyMethod = null;
         foreach (member; classDecl.members) {
             if (auto funcDecl = cast(FunctionDecl)member) {
                 if (funcDecl.name == methodName) {
+                    if (funcDecl.body_ !is null)
+                        dBodyMethod = funcDecl;  // Has D implementation
                     if (funcDecl.objcSelector !is null && funcDecl.objcSelector.length > 0)
                         selector = funcDecl.objcSelector;
                     break;
@@ -5092,6 +5161,20 @@ class NativeCompiledFunction : CompiledFunction {
                         break;
                     }
                 }
+            }
+        }
+
+        // If method has a D body, call it directly instead of through objc_msgSend
+        if (dBodyMethod !is null) {
+            string mangledName = getMangledName(dBodyMethod);
+            auto labelPtr = mangledName in functionLabels;
+            if (labelPtr !is null) {
+                // Direct call: x0 = this (receiver)
+                if (receiver !is null)
+                    compileExpression(receiver);
+                gen.emitCall(*labelPtr);
+                emitNativeExceptionCheck();
+                return;
             }
         }
 
