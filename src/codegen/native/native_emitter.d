@@ -68,6 +68,26 @@ class NativeModuleEmitter {
         auto writer = new MachOWriter();
         writer.setTextSection(fullCode);
 
+        // Data section (error messages, constant data → __DATA,__const)
+        auto objData = compiled.getObjectData();
+        bool hasDataSection = objData.length > 0;
+        if (hasDataSection)
+            writer.setDataConstSection(objData);
+
+        // External undefined symbols (write, _exit, etc. — resolved by linker)
+        foreach (sym; compiled.getObjectExternalSymbols())
+            writer.addExternalSymbol(sym);
+
+        // Data symbols (local symbols in __DATA,__const = section 2)
+        if (hasDataSection) {
+            foreach (ds; compiled.getObjectDataSymbols())
+                writer.addLocalSymbol(ds.name, 2, ds.offset);
+        }
+
+        // Relocations (ADRP/ADD for data refs, BL for external calls)
+        foreach (r; compiled.getObjectRelocations())
+            writer.addRelocation(0, r.codeOffset, r.symbol, r.type);
+
         // Export _main (C entry point).
         // MachOWriter.addString prepends '_', so pass "main" → "_main" in Mach-O.
         writer.addExportedSymbol("main", 1, wrapperOffset);

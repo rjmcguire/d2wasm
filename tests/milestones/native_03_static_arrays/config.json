@@ -1,0 +1,6 @@
+{
+  "name": "native_static_arrays",
+  "description": "Static array init, foreach, dynamic indexing, division — compiled to ARM64 .o",
+  "type": "native_exec",
+  "expected_exit": 5
+}

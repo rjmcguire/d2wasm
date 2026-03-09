@@ -10,6 +10,7 @@ import codegen.backend : Backend, CompiledFunction, ExecutionResult;
 import codegen.target : sliceInfo, SliceInfo;
 import codegen.native.arm64_codegen : NativeCodeGen, CallFrameData, ErrorLocData,
     createCTFEHostFunctions;
+import codegen.native.macho_writer : RelocType;
 import codegen.native.arm64.stencil_table;
 import codegen.native.stencil_catalog;
 import codegen.native.codegen_interface : Label, NativeDataSection, NativeCTFEContext,
@@ -273,6 +274,18 @@ class NativeCompiledFunction : CompiledFunction {
     // Object file mode: skip CTFE-only infrastructure (exceptions, host functions, data section)
     private bool objectMode;
 
+    // Object-mode data section (error strings, constant data → __DATA,__const in .o)
+    private ubyte[] objectData;
+
+    static struct ObjectDataSymbol { string name; uint offset; }
+    private ObjectDataSymbol[] objectDataSymbols;
+
+    static struct ObjectReloc { uint codeOffset; string symbol; RelocType type; }
+    private ObjectReloc[] objectRelocations;
+
+    private string[] objectExternalSymbols;
+    private uint objectDataSymCount;
+
     /// Single function constructor (original)
     this(FunctionDecl func, SymbolTable st, bool enableStackTrace = true) {
         import std.stdio : writeln;
@@ -423,6 +436,51 @@ class NativeCompiledFunction : CompiledFunction {
         if (auto p = name in functionLabels)
             return (*p).offset;
         return size_t.max;
+    }
+
+    // ========== Object-mode data section and relocations ==========
+
+    /// Get the object-mode data section bytes (for __DATA,__const).
+    const(ubyte)[] getObjectData() { return objectData; }
+
+    /// Get data symbols (local symbols in __DATA,__const).
+    const(ObjectDataSymbol)[] getObjectDataSymbols() { return objectDataSymbols; }
+
+    /// Get relocations (ADRP/ADD/BL fixups for the linker).
+    const(ObjectReloc)[] getObjectRelocations() { return objectRelocations; }
+
+    /// Get external symbol names (undefined symbols resolved by the linker).
+    const(string)[] getObjectExternalSymbols() { return objectExternalSymbols; }
+
+    /// Append data to the object data section, return its offset. 8-byte aligned.
+    private uint appendObjectData(const(ubyte)[] data) {
+        uint off = cast(uint)objectData.length;
+        objectData ~= data;
+        // Align to 8 bytes
+        while (objectData.length % 8 != 0) objectData ~= 0;
+        return off;
+    }
+
+    /// Emit ADRP+ADD to load the address of a data symbol into x0, recording relocations.
+    private void emitLoadDataAddress(string symbolName) {
+        uint adrpOff = gen.pos;
+        gen.emitAdrp(0);  // ADRP x0, sym@PAGE
+        objectRelocations ~= ObjectReloc(adrpOff, symbolName, RelocType.page21);
+
+        uint addOff = gen.pos;
+        gen.emitAddImm12(0, 0);  // ADD x0, x0, sym@PAGEOFF
+        objectRelocations ~= ObjectReloc(addOff, symbolName, RelocType.pageoff12);
+    }
+
+    /// Emit BL to an external function, recording a BRANCH26 relocation.
+    private void emitObjectExternalCall(string funcName) {
+        import std.algorithm : canFind;
+        if (!objectExternalSymbols.canFind(funcName))
+            objectExternalSymbols ~= funcName;
+
+        uint blOff = gen.pos;
+        gen.emitExternalBranchLink();  // BL #0 (placeholder)
+        objectRelocations ~= ObjectReloc(blOff, funcName, RelocType.branch26);
     }
 
     /// Get the mangled name for a function.
@@ -3919,27 +3977,31 @@ class NativeCompiledFunction : CompiledFunction {
         
         // .Ldiv_error:
         gen.bindLabel(errorLabel);
-        
-        // Build ErrorLocData in data section
-        ubyte* filePtr = dataSection.addString(fileName);
-        ErrorLocData errData;
-        errData.filePtr = cast(ulong)filePtr;
-        errData.fileLen = cast(uint)fileName.length;
-        errData.line = line;
-        errData.column = column;
-        errData.errorKind = cast(uint)CTFEErrorKind.DivByZero;
-        
-        ubyte* errLocPtr = dataSection.addData((cast(ubyte*)&errData)[0..ErrorLocData.sizeof]);
-        
-        // Load error location pointer into x0
-        gen.emitLoadImm64(cast(ulong)errLocPtr);
-        
-        // Call __ctfe_trap(ctx, errorLocPtr)
-        ulong trapSlot = hostFunctions.getFunctionSlotAddress("__ctfe_trap");
-        ulong contextSlot = hostFunctions.getContextSlotAddress();
-        gen.emitHostCall(trapSlot, contextSlot);
-        // longjmp happens inside __ctfe_trap, we never return here
-        
+
+        if (objectMode) {
+            emitRuntimeError("division by zero", fileName, line);
+        } else {
+            // Build ErrorLocData in data section
+            ubyte* filePtr = dataSection.addString(fileName);
+            ErrorLocData errData;
+            errData.filePtr = cast(ulong)filePtr;
+            errData.fileLen = cast(uint)fileName.length;
+            errData.line = line;
+            errData.column = column;
+            errData.errorKind = cast(uint)CTFEErrorKind.DivByZero;
+
+            ubyte* errLocPtr = dataSection.addData((cast(ubyte*)&errData)[0..ErrorLocData.sizeof]);
+
+            // Load error location pointer into x0
+            gen.emitLoadImm64(cast(ulong)errLocPtr);
+
+            // Call __ctfe_trap(ctx, errorLocPtr)
+            ulong trapSlot = hostFunctions.getFunctionSlotAddress("__ctfe_trap");
+            ulong contextSlot = hostFunctions.getContextSlotAddress();
+            gen.emitHostCall(trapSlot, contextSlot);
+            // longjmp happens inside __ctfe_trap, we never return here
+        }
+
         // .Ldiv_done:
         gen.bindLabel(doneLabel);
     }
@@ -3960,26 +4022,57 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitBranch(doneLabel);
         
         gen.bindLabel(errorLabel);
-        
-        // Build ErrorLocData in data section
-        ubyte* filePtr = dataSection.addString(fileName);
-        ErrorLocData errData;
-        errData.filePtr = cast(ulong)filePtr;
-        errData.fileLen = cast(uint)fileName.length;
-        errData.line = line;
-        errData.column = column;
-        errData.errorKind = cast(uint)CTFEErrorKind.DivByZero;
-        
-        ubyte* errLocPtr = dataSection.addData((cast(ubyte*)&errData)[0..ErrorLocData.sizeof]);
-        gen.emitLoadImm64(cast(ulong)errLocPtr);
-        
-        ulong trapSlot = hostFunctions.getFunctionSlotAddress("__ctfe_trap");
-        ulong contextSlot = hostFunctions.getContextSlotAddress();
-        gen.emitHostCall(trapSlot, contextSlot);
-        
+
+        if (objectMode) {
+            emitRuntimeError("modulo by zero", fileName, line);
+        } else {
+            // Build ErrorLocData in data section
+            ubyte* filePtr = dataSection.addString(fileName);
+            ErrorLocData errData;
+            errData.filePtr = cast(ulong)filePtr;
+            errData.fileLen = cast(uint)fileName.length;
+            errData.line = line;
+            errData.column = column;
+            errData.errorKind = cast(uint)CTFEErrorKind.DivByZero;
+
+            ubyte* errLocPtr = dataSection.addData((cast(ubyte*)&errData)[0..ErrorLocData.sizeof]);
+            gen.emitLoadImm64(cast(ulong)errLocPtr);
+
+            ulong trapSlot = hostFunctions.getFunctionSlotAddress("__ctfe_trap");
+            ulong contextSlot = hostFunctions.getContextSlotAddress();
+            gen.emitHostCall(trapSlot, contextSlot);
+        }
+
         gen.bindLabel(doneLabel);
     }
     
+    /**
+     * Emit a runtime error message and _exit(1) for object mode.
+     * Builds the error string at compile time, stores in __DATA,__const,
+     * emits ADRP+ADD to load its address, then calls write(2, msg, len) + _exit(1).
+     */
+    private void emitRuntimeError(string errorKind, string fileName, uint line) {
+        import std.conv : to;
+        string msg = "Runtime Error: " ~ errorKind ~ " at " ~ fileName ~ ":" ~ to!string(line) ~ "\n";
+        string symName = "__err_" ~ to!string(objectDataSymCount++);
+        uint dataOff = appendObjectData(cast(const(ubyte)[])msg);
+        objectDataSymbols ~= ObjectDataSymbol(symName, dataOff);
+
+        // Load msg address: ADRP x0, sym@PAGE + ADD x0, x0, sym@PAGEOFF
+        emitLoadDataAddress(symName);
+
+        // Set up write(2, msg, len): x0=fd, x1=buf, x2=len
+        gen.emitMoveX0ToX1();                  // x1 = msg pointer
+        gen.emitLoadImm(cast(int)msg.length);  // x0 = msg length
+        gen.emitMoveX0ToX2();                  // x2 = msg length
+        gen.emitLoadImm(2);                    // x0 = 2 (stderr)
+        emitObjectExternalCall("write");
+
+        // _exit(1)
+        gen.emitLoadImm(1);                    // x0 = 1 (exit code)
+        emitObjectExternalCall("_exit");
+    }
+
     /**
      * Compile struct construction: allocate space on stack, initialize fields
      */

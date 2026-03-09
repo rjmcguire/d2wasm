@@ -528,6 +528,31 @@ struct NativeCodeGen {
         emitRaw32(0xD65F03C0);
     }
     
+    /// Emit BRK #1 — software breakpoint (SIGTRAP). Used for traps in object mode.
+    void emitTrap() {
+        emitRaw32(0xD4200020);  // BRK #1
+    }
+
+    // ========== Relocatable Instructions (Object File Mode) ==========
+
+    /// Emit ADRP Xd, #0 — placeholder, linker fills via ARM64_RELOC_PAGE21.
+    /// Loads the 4KB page base address of a symbol into Xd.
+    void emitAdrp(ubyte rd) {
+        emitRaw32(0x90000000 | rd);
+    }
+
+    /// Emit ADD Xd, Xn, #0 — placeholder, linker fills via ARM64_RELOC_PAGEOFF12.
+    /// Adds the 12-bit page offset to get the exact symbol address.
+    void emitAddImm12(ubyte rd, ubyte rn) {
+        emitRaw32(0x91000000 | (cast(uint)rn << 5) | rd);
+    }
+
+    /// Emit BL #0 — placeholder for external function call.
+    /// Linker fills via ARM64_RELOC_BRANCH26.
+    void emitExternalBranchLink() {
+        emitRaw32(0x94000000);
+    }
+
     // ========== Stack Frame for Locals ==========
     // Use the real stack for locals. Much simpler than shadow stack.
     // Stack layout after prologue:
