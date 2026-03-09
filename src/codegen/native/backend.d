@@ -146,11 +146,13 @@ class NativeCompiledFunction : CompiledFunction {
         size_t offset;            // Stack offset (size_t for 64-bit targets)
         StructDecl structDecl;    // Non-null when kind == struct_
         ClassDecl classDecl;      // Non-null when kind == class_
+        InterfaceDecl interfaceDecl; // Non-null for ObjC interface-typed variables
         Type elementType;         // Element type for staticArray/slice
         uint staticArraySize;     // Element count when kind == staticArray
         uint staticArrayElemSize; // Element byte size when kind == staticArray
         uint sliceElemSize;       // Element byte size when kind == slice
         bool isReference;         // true for 'this' pointers (stores address, not inline data)
+        bool isObjCRef;           // true for ObjC opaque pointers (8-byte, no vtable)
 
         bool isStruct() const { return kind == VarKind.struct_; }
         bool isClass() const { return kind == VarKind.class_; }
@@ -226,6 +228,10 @@ class NativeCompiledFunction : CompiledFunction {
         if (currentMethodClass) return cast(AggregateDecl)currentMethodClass;
         return null;
     }
+
+    // ObjC interface/class tracking
+    private InterfaceDecl[string] objcInterfaces;
+    private ClassDecl[string] objcClasses;
 
     // Vtable infrastructure for class virtual dispatch
     private uint nextNativeTableBase = 0;       // sequential counter for vtable base indices
@@ -1202,7 +1208,15 @@ class NativeCompiledFunction : CompiledFunction {
                     // Zero-size structs (methods-only, no data fields) are valid
                     bytes = sd.structSize > 0 ? cast(uint)sd.structSize : 0;
                 } else if (auto cd = userType.asClass()) {
-                    bytes = cd.classSize > 0 ? cast(uint)cd.classSize : 0;
+                    if (cd.isObjC)
+                        bytes = 8 + 8;  // 8-byte pointer + alignment padding
+                    else
+                        bytes = cd.classSize > 0 ? cast(uint)cd.classSize : 0;
+                } else if (auto iface = userType.asInterface()) {
+                    if (iface.isObjC)
+                        bytes = 8 + 8;  // 8-byte pointer + alignment padding
+                    else
+                        bytes = 4;
                 } else {
                     bytes = 4;
                 }
@@ -1320,6 +1334,8 @@ class NativeCompiledFunction : CompiledFunction {
             uint staticArrayLength = 0;
             size_t varSize = 4;  // default to 4 bytes for int
 
+            bool isObjCRef = false;
+            InterfaceDecl objcIface = null;
             if (auto userType = cast(UserType)varDecl.type) {
                 userType.ensureResolved(symbolTable);
                 if (auto sd = userType.asStruct()) {
@@ -1327,8 +1343,22 @@ class NativeCompiledFunction : CompiledFunction {
                     structType = sd;
                     varSize = sd.structSize > 0 ? sd.structSize : 0;
                 } else if (auto cd = userType.asClass()) {
-                    classType = cd;
-                    varSize = cd.classSize > 0 ? cd.classSize : 0;
+                    if (cd.isObjC) {
+                        // ObjC classes are opaque pointers (8 bytes), no vtable
+                        classType = cd;
+                        isObjCRef = true;
+                        varSize = 8;
+                    } else {
+                        classType = cd;
+                        varSize = cd.classSize > 0 ? cd.classSize : 0;
+                    }
+                } else if (auto iface = userType.asInterface()) {
+                    if (iface.isObjC) {
+                        // ObjC interface = opaque pointer (8 bytes)
+                        isObjCRef = true;
+                        objcIface = iface;
+                        varSize = 8;
+                    }
                 }
             } else if (auto arrType = cast(ArrayType)varDecl.type) {
                 if (arrType.arraySize is null) {
@@ -1353,9 +1383,9 @@ class NativeCompiledFunction : CompiledFunction {
             }
             
             // Allocate stack slot for this variable
-            // Slices contain a 64-bit pointer and need 8-byte alignment
+            // Slices and ObjC refs contain a 64-bit pointer and need 8-byte alignment
             // for STR x0, [sp, #imm] encoding (imm must be multiple of 8)
-            if (isSlice) {
+            if (isSlice || isObjCRef) {
                 nextLocalOffset = (nextLocalOffset + 7) & ~7;
             }
             NativeLocalInfo nli;
@@ -1374,6 +1404,9 @@ class NativeCompiledFunction : CompiledFunction {
             } else if (classType) {
                 nli.kind = VarKind.class_;
                 nli.classDecl = classType;
+            } else if (objcIface) {
+                // ObjC interface: opaque 8-byte pointer, not a D class
+                nli.interfaceDecl = objcIface;
             } else if (staticArrayLength > 0) {
                 nli.kind = VarKind.staticArray;
                 nli.staticArraySize = staticArrayLength;
@@ -1386,16 +1419,22 @@ class NativeCompiledFunction : CompiledFunction {
                 }
             }
             // else: kind stays VarKind.scalar (default)
+            if (isObjCRef)
+                nli.isObjCRef = true;
             localVars[varDecl.name] = nli;
 
             // Zero-initialize variables without explicit initializer
             // (D guarantees .init = 0 for int types, null for slices)
             if (!varDecl.initializer && varSize > 0) {
-                if (nli.isStaticArray || nli.isStruct || nli.isSlice || nli.isClass) {
+                if (nli.isStaticArray || nli.isStruct || nli.isSlice || (nli.isClass && !isObjCRef)) {
                     gen.emitImm32(stencil_load_imm32, 0);
                     for (size_t off = 0; off < varSize; off += 4) {
                         gen.emitStoreLocal32(nli.offset + off);
                     }
+                } else if (isObjCRef) {
+                    // ObjC ref: zero 8-byte pointer
+                    gen.emitLoadImm64(0);
+                    gen.emitStorePtr(nli.offset);
                 } else if (nli.kind == VarKind.scalar) {
                     gen.emitImm32(stencil_load_imm32, 0);
                     gen.emitStoreLocal32(nli.offset);
@@ -1403,7 +1442,8 @@ class NativeCompiledFunction : CompiledFunction {
             }
 
             // Class vtable pointer initialization: store table base index at offset 0
-            if (nli.isClass && classType) {
+            // Skip for ObjC classes — they use objc_msgSend, not D vtables
+            if (nli.isClass && classType && !isObjCRef) {
                 log(2, "native: class var '", varDecl.name, "' type=", classType.name, " size=", classType.classSize);
                 ensureNativeVtable(classType);
                 uint tableBase = classTableBases[classType.name];
@@ -1413,7 +1453,12 @@ class NativeCompiledFunction : CompiledFunction {
 
             // Compile initializer if present
             if (varDecl.initializer) {
-                if (nli.isStruct) {
+                if (isObjCRef) {
+                    // ObjC ref: compile expression (objc_msgSend returns pointer in x0)
+                    // and store as 8-byte pointer
+                    compileExpression(varDecl.initializer);
+                    gen.emitStorePtr(nli.offset);
+                } else if (nli.isStruct) {
                     // Unwrap lowered operator overload calls
                     Expression effectiveInit = varDecl.initializer;
                     if (auto binary = cast(BinaryExpression)effectiveInit) {
@@ -2283,6 +2328,11 @@ class NativeCompiledFunction : CompiledFunction {
             // Load variable from stack
             if (auto info = ident.name in localVars) {
                 log(3, "native:     -> local (kind=", info.kind, ", offset=", info.offset, ")");
+                // ObjC refs are 8-byte opaque pointers — load full 64-bit value
+                if (info.isObjCRef) {
+                    gen.emitLoadPtr(info.offset);
+                    return;
+                }
                 final switch (info.kind) {
                     case VarKind.class_:
                         // Class references: load the stored pointer
@@ -3456,16 +3506,83 @@ class NativeCompiledFunction : CompiledFunction {
         }
 
         auto objIdent = cast(IdentifierExpression)memberExpr.object;
-        if (!objIdent)
+
+        // ObjC chained call: expression receiver (e.g., NSObject.alloc().init_())
+        if (!objIdent) {
+            if (memberExpr.object.type !is null) {
+                auto resolved = memberExpr.object.type.resolve();
+                if (auto ifaceDecl = resolved.asInterface()) {
+                    if (ifaceDecl.isObjC) {
+                        emitObjCCall(ifaceDecl, memberExpr.object, memberExpr.memberName, args, false);
+                        return;
+                    }
+                }
+                if (auto classDecl2 = resolved.asClass()) {
+                    if (classDecl2.isObjC) {
+                        // ObjC class as expression receiver — look up synthetic interface
+                        auto sym = symbolTable.lookupSymbol(classDecl2.name);
+                        if (sym) {
+                            if (auto iface = cast(InterfaceDecl)sym.declaration) {
+                                if (iface.isObjC) {
+                                    emitObjCCall(iface, memberExpr.object, memberExpr.memberName, args, false);
+                                    return;
+                                }
+                            }
+                        }
+                        // Fallback: create ad-hoc interface from class methods
+                        emitObjCCallFromClass(classDecl2, memberExpr.object, memberExpr.memberName, args, false);
+                        return;
+                    }
+                }
+            }
             throw new Exception("Method call on non-identifier object not yet supported in native backend");
+        }
+
+        // ObjC static call: type name as receiver (e.g., NSObject.alloc())
+        if (objIdent.name !in localVars) {
+            auto sym = symbolTable.lookupSymbol(objIdent.name);
+            if (sym && sym.kind == SymbolKind.Type) {
+                if (auto ifaceDecl = cast(InterfaceDecl)sym.declaration) {
+                    if (ifaceDecl.isObjC) {
+                        emitObjCCall(ifaceDecl, null, memberExpr.memberName, args, true);
+                        return;
+                    }
+                }
+                if (auto classDecl2 = cast(ClassDecl)sym.declaration) {
+                    if (classDecl2.isObjC) {
+                        emitObjCCallFromClass(classDecl2, null, memberExpr.memberName, args, true);
+                        return;
+                    }
+                }
+            }
+        }
 
         // Look up the object to find its type
         auto info = objIdent.name in localVars;
         if (info is null)
             throw new Exception("Unknown variable for method call in native backend: " ~ objIdent.name);
 
-        // Class method call — virtual dispatch
+        // ObjC interface variable: dispatch via objc_msgSend
+        if (info.isObjCRef && info.interfaceDecl) {
+            emitObjCCall(info.interfaceDecl, memberExpr.object, memberExpr.memberName, args, false);
+            return;
+        }
+
+        // ObjC class variable: dispatch via objc_msgSend
+        if (info.isObjCRef && info.classDecl && info.classDecl.isObjC) {
+            emitObjCCallFromClass(info.classDecl,
+                memberExpr.object, memberExpr.memberName, args, false);
+            return;
+        }
+
+        // Class method call
         if (info.isClass) {
+            // ObjC class variables use objc_msgSend, not D vtable
+            if (info.classDecl && info.classDecl.isObjC) {
+                emitObjCCallFromClass(info.classDecl,
+                    memberExpr.object, memberExpr.memberName, args, false);
+                return;
+            }
             emitClassMethodCall(info.classDecl, *info, memberExpr.memberName, args);
             return;
         }
@@ -4894,6 +5011,184 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitMoveX0ToX9();
         compileExpression(member.object);
         gen.emitStoreToPointerFromX9(field.offset);
+    }
+
+    // ---- ObjC runtime dispatch (objc_msgSend) ----
+
+    /// Find ObjC method in interface by name
+    private FunctionDecl findObjCMethod(FunctionDecl[] methods, string name) {
+        foreach (m; methods) {
+            if (m.name == name) return m;
+        }
+        return null;
+    }
+
+    /// Store a null-terminated C string in the data section, return its offset.
+    private size_t storeCString(string s) {
+        if (objectMode) {
+            uint off = appendObjectData(cast(ubyte[])(s.dup ~ '\0'));
+            return off;
+        } else {
+            auto bytes = cast(const(ubyte)[])(s ~ '\0');
+            size_t off = dataSection.bytesUsed;
+            dataSection.addData(bytes);
+            return off;
+        }
+    }
+
+    /// Load address of a C string stored in the data section into x0.
+    private void emitLoadCStringAddress(size_t offset, string symName) {
+        if (objectMode) {
+            // Register as data symbol and use ADRP+ADD
+            bool alreadyRegistered = false;
+            foreach (ds; objectDataSymbols)
+                if (ds.name == symName) { alreadyRegistered = true; break; }
+            if (!alreadyRegistered)
+                objectDataSymbols ~= ObjectDataSymbol(symName, cast(uint)offset);
+            emitLoadDataAddress(symName);
+        } else {
+            // JIT mode: compute absolute address from dataSection base
+            ulong addr = cast(ulong)(cast(size_t)dataSection.base + offset);
+            gen.emitLoadImm64(addr);
+        }
+    }
+
+    /// Emit an ObjC method call via objc_msgSend for an InterfaceDecl.
+    private void emitObjCCall(InterfaceDecl ifaceDecl, Expression receiver,
+            string methodName, Expression[] args, bool isStatic) {
+        // Find the method to get its selector
+        auto method = findObjCMethod(ifaceDecl.methods, methodName);
+        if (method is null)
+            throw new Exception("ObjC interface '" ~ ifaceDecl.name ~ "' has no method '" ~ methodName ~ "'");
+
+        string selector = method.objcSelector;
+        if (selector is null || selector.length == 0)
+            selector = method.name;
+
+        emitObjCMsgSend(ifaceDecl.name, selector, receiver, args, isStatic);
+    }
+
+    /// Emit an ObjC method call via objc_msgSend for a ClassDecl.
+    private void emitObjCCallFromClass(ClassDecl classDecl, Expression receiver,
+            string methodName, Expression[] args, bool isStatic) {
+        // Search class members for the method
+        string selector = methodName;
+        foreach (member; classDecl.members) {
+            if (auto funcDecl = cast(FunctionDecl)member) {
+                if (funcDecl.name == methodName) {
+                    if (funcDecl.objcSelector !is null && funcDecl.objcSelector.length > 0)
+                        selector = funcDecl.objcSelector;
+                    break;
+                }
+            }
+        }
+        // Also check parent ObjC interface/class
+        if (classDecl.baseClassDecl && classDecl.baseClassDecl.isObjC) {
+            foreach (member; classDecl.baseClassDecl.members) {
+                if (auto funcDecl = cast(FunctionDecl)member) {
+                    if (funcDecl.name == methodName) {
+                        if (funcDecl.objcSelector !is null && funcDecl.objcSelector.length > 0)
+                            selector = funcDecl.objcSelector;
+                        break;
+                    }
+                }
+            }
+        }
+
+        emitObjCMsgSend(classDecl.name, selector, receiver, args, isStatic);
+    }
+
+    /// Core objc_msgSend emission.
+    /// ARM64 calling convention: objc_msgSend(id self, SEL _cmd, ...args)
+    ///   x0 = receiver (self), x1 = selector (_cmd), x2+ = user args
+    private void emitObjCMsgSend(string className, string selector,
+            Expression receiver, Expression[] args, bool isStatic) {
+        auto mark = temps.save();
+        size_t receiverTemp = temps.alloc(8);
+        size_t selectorTemp = temps.alloc(8);
+
+        // Step 1: Get receiver and save to temp
+        if (isStatic) {
+            // Static call: objc_getClass("ClassName") → x0 = Class pointer
+            string classSymName = "__objc_class_" ~ className;
+            size_t classStrOff = storeCString(className);
+            emitLoadCStringAddress(classStrOff, classSymName);
+            if (objectMode)
+                emitObjectExternalCall("objc_getClass");
+            else
+                emitJITExternalCall("objc_getClass");
+        } else {
+            // Instance call: compile receiver expression
+            compileExpression(receiver);
+        }
+        gen.emitStorePtr(receiverTemp);
+
+        // Step 2: sel_registerName("selector") → x0 = SEL, save to temp
+        string selSymName = "__objc_sel_" ~ selector;
+        // Replace : with _ in symbol name for valid identifiers
+        char[] cleanSym = selSymName.dup;
+        foreach (ref c; cleanSym) if (c == ':') c = '_';
+        size_t selStrOff = storeCString(selector);
+        emitLoadCStringAddress(selStrOff, cast(string)cleanSym);
+        if (objectMode)
+            emitObjectExternalCall("sel_registerName");
+        else
+            emitJITExternalCall("sel_registerName");
+        gen.emitStorePtr(selectorTemp);
+
+        // Step 3: User args in x2, x3, ...
+        if (args.length > 2)
+            throw new Exception("ObjC calls with more than 2 user arguments not yet supported");
+        // Compile args and save to temps, then load into registers
+        size_t[] argTemps;
+        foreach (arg; args) {
+            compileExpression(arg);
+            size_t t = temps.alloc(8);
+            gen.emitStorePtr(t);
+            argTemps ~= t;
+        }
+
+        // Load args into x2, x3
+        foreach (i, t; argTemps) {
+            gen.emitLoadPtr(t);
+            switch (cast(int)i) {
+                case 0: gen.emitMoveX0ToX2(); break;
+                case 1: gen.emitMoveX0ToX3(); break;
+                default: break;
+            }
+        }
+
+        // Step 4: x1 = SEL
+        gen.emitLoadPtr(selectorTemp);
+        gen.emitMoveX0ToX1();
+
+        // Step 5: x0 = receiver
+        gen.emitLoadPtr(receiverTemp);
+
+        // Step 6: Call objc_msgSend
+        if (objectMode)
+            emitObjectExternalCall("objc_msgSend");
+        else
+            emitJITExternalCall("objc_msgSend");
+
+        temps.restore(mark);
+        // Result is in x0
+    }
+
+    /// Emit a call to a runtime function resolved via dlsym (JIT mode only).
+    private void emitJITExternalCall(string funcName) {
+        // Resolve via dlsym at compile time, call via indirect x9
+        import core.sys.posix.dlfcn : dlsym;
+        version (OSX) {
+            import core.sys.darwin.dlfcn : RTLD_DEFAULT;
+        } else {
+            import core.sys.posix.dlfcn : RTLD_DEFAULT;
+        }
+        auto ptr = dlsym(RTLD_DEFAULT, (funcName ~ '\0').ptr);
+        if (ptr is null)
+            throw new Exception("Cannot resolve runtime function: " ~ funcName);
+        gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)ptr);
+        gen.emitCallIndirectX9();
     }
 
     // ---- Vtable infrastructure for class virtual dispatch ----
