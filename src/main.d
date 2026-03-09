@@ -492,6 +492,20 @@ int compileFile(CompilerOptions options) {
                             imports ~= imp;
                         continue;
                     }
+                    // Collect methods from struct/class declarations
+                    if (auto aggDecl = cast(AggregateDecl)decl) {
+                        if (auto classDecl = cast(ClassDecl)decl) {
+                            if (classDecl.isObjC) continue;
+                        }
+                        foreach (member; aggDecl.members) {
+                            auto method = cast(FunctionDecl)member;
+                            if (method is null) continue;
+                            if (method.body_ is null) continue;
+                            if (method.isTemplate) continue;
+                            funcs ~= method;
+                        }
+                        continue;
+                    }
                     auto funcDecl = cast(FunctionDecl)decl;
                     if (funcDecl is null) continue;
                     if (funcDecl.body_ is null) continue;
