@@ -132,6 +132,74 @@ run_test() {
         fi
     fi
 
+    # Handle native_exec type — compile to .o, link, run native binary
+    if [ "$test_type" = "native_exec" ]; then
+        # Only supported on macOS ARM64
+        if [ "$(uname -m)" != "arm64" ] || [ "$(uname)" != "Darwin" ]; then
+            echo -e "${YELLOW}SKIP${NC} $test_name (native_exec requires macOS ARM64)"
+            return 0
+        fi
+
+        local obj_file="$test_dir/test.o"
+        local bin_file="$test_dir/test_bin"
+        rm -f "$obj_file" "$bin_file"
+
+        if [ $VERBOSE -eq 1 ]; then
+            echo "Compiling native: $COMPILER --target arm64-macos $compiler_args -o $obj_file $test_file"
+        fi
+
+        local compile_output
+        compile_output=$("$COMPILER" --target arm64-macos $compiler_args -o "$obj_file" "$test_file" 2>&1)
+        local compile_status=$?
+
+        if [ $compile_status -ne 0 ]; then
+            echo -e "${RED}FAIL${NC} $test_name"
+            echo "  Compilation failed:"
+            echo "$compile_output" | sed 's/^/    /'
+            return 1
+        fi
+
+        # Link with system linker
+        local link_output
+        link_output=$(cc -o "$bin_file" "$obj_file" -lSystem 2>&1)
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}FAIL${NC} $test_name"
+            echo "  Linking failed:"
+            echo "$link_output" | sed 's/^/    /'
+            return 1
+        fi
+
+        # Run and check
+        local run_output
+        run_output=$("$bin_file" 2>&1)
+        local run_exit=$?
+
+        # Check expected_output if specified
+        local expected_output=$(jq -r '.expected_output // "null"' "$config_file")
+        if [ "$expected_output" != "null" ]; then
+            if ! echo "$run_output" | grep -qF "$expected_output"; then
+                echo -e "${RED}FAIL${NC} $test_name"
+                echo "  Expected output: $expected_output"
+                echo "  Actual output: $run_output"
+                return 1
+            fi
+        fi
+
+        # Check expected_exit
+        if [ "$run_exit" -eq "$expected_exit" ]; then
+            echo -e "${GREEN}PASS${NC} $test_name (native exit: $run_exit)"
+            return 0
+        else
+            echo -e "${RED}FAIL${NC} $test_name"
+            echo "  Expected exit code: $expected_exit"
+            echo "  Actual exit code: $run_exit"
+            if [ $VERBOSE -eq 1 ]; then
+                echo "  Output: $run_output"
+            fi
+            return 1
+        fi
+    fi
+
     # Build
     local wasm_file="$test_dir/test.wasm"
     rm -f "$wasm_file"
@@ -434,7 +502,7 @@ passed=0
 failed=0
 skipped=0
 
-for test_dir in $(ls -d "$TESTS_DIR"/milestone_* "$TESTS_DIR"/quality_* 2>/dev/null | sort -V); do
+for test_dir in $(ls -d "$TESTS_DIR"/milestone_* "$TESTS_DIR"/quality_* "$TESTS_DIR"/native_* 2>/dev/null | sort -V); do
     # Filter by name if specified
     if [ -n "$FILTER" ] && [[ "$(basename "$test_dir")" != *"$FILTER"* ]]; then
         continue

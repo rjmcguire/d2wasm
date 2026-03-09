@@ -1,0 +1,6 @@
+{
+  "name": "native_return_constant",
+  "description": "Compile int main() { return 42; } to ARM64 .o, link, and verify exit code",
+  "type": "native_exec",
+  "expected_exit": 42
+}

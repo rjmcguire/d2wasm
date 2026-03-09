@@ -14,6 +14,7 @@ import codegen.native.codegen_interface : Label, NativeDataSection, NativeCTFECo
     HostFunctionPtr, HostFunctionTable, CTFEErrorKind, ctfeErrorMessage, longjmp;
 import core.sys.posix.sys.mman;
 import core.stdc.string : memcpy;
+import core.stdc.stdlib : malloc, free;
 
 // macOS-specific mmap flags
 version (OSX) {
@@ -40,21 +41,32 @@ struct NativeCodeGen {
     ubyte* base;
     size_t capacity;
     size_t offset;
-    
+
     // Label management
     Label[] labels;
     UnresolvedBranch[] unresolved;
     int nextLabelId;
-    
-    /// Allocate a code buffer
+
+    bool relocatable; // true = malloc-based buffer for object file output
+
+    /// Allocate a JIT code buffer (mmap with MAP_JIT)
     static NativeCodeGen alloc(size_t size) {
         void* mem = mmap(null, size,
             PROT_READ | PROT_WRITE,
             MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT,
             -1, 0);
-        
+
         if (mem == MAP_FAILED) return NativeCodeGen.init;
         return NativeCodeGen(cast(ubyte*)mem, size, 0);
+    }
+
+    /// Allocate a relocatable code buffer (malloc, for object file output)
+    static NativeCodeGen allocRelocatable(size_t size) {
+        auto mem = cast(ubyte*)malloc(size);
+        if (mem is null) return NativeCodeGen.init;
+        auto gen = NativeCodeGen(mem, size, 0);
+        gen.relocatable = true;
+        return gen;
     }
     
     /// Current position in buffer
@@ -767,14 +779,65 @@ struct NativeCodeGen {
         return true;
     }
     
+    /// Resolve branches and return code bytes (for object file output).
+    /// Does NOT make code executable — caller writes bytes to .o file.
+    ubyte[] finalizeRelocatable() {
+        foreach (ref br; unresolved) {
+            Label* target;
+            foreach (ref l; labels) {
+                if (l.id == br.labelId) {
+                    target = &l;
+                    break;
+                }
+            }
+
+            if (!target || !target.bound) return null;
+
+            int relOffset = cast(int)(target.offset) - cast(int)(br.offset);
+            uint* instr = cast(uint*)(base + br.offset);
+
+            final switch (br.kind) {
+                case BranchKind.unconditional:
+                    int imm26 = relOffset / 4;
+                    *instr = 0x14000000 | (imm26 & 0x03FFFFFF);
+                    break;
+                case BranchKind.ifZero:
+                    int imm19 = relOffset / 4;
+                    *instr = (*instr & 0x1F) | 0x34000000 | ((imm19 & 0x7FFFF) << 5);
+                    break;
+                case BranchKind.ifNonZero:
+                    int imm19_2 = relOffset / 4;
+                    *instr = (*instr & 0x1F) | 0x35000000 | ((imm19_2 & 0x7FFFF) << 5);
+                    break;
+                case BranchKind.call:
+                    int imm26_call = relOffset / 4;
+                    *instr = 0x94000000 | (imm26_call & 0x03FFFFFF);
+                    break;
+                case BranchKind.conditional:
+                    int imm19_cond = relOffset / 4;
+                    *instr = (*instr & 0xF) | 0x54000000 | ((imm19_cond & 0x7FFFF) << 5);
+                    break;
+            }
+        }
+
+        // Return a copy of the code bytes
+        return base[0 .. offset].dup;
+    }
+
     /// Get function pointer
     T getFunc(T)(size_t off = 0) {
         return cast(T)(base + off);
     }
-    
+
     /// Free the buffer
-    void free() {
-        if (base) munmap(base, capacity);
+    void freeBuffer() {
+        if (base) {
+            if (relocatable)
+                free(base);
+            else
+                munmap(base, capacity);
+            base = null;
+        }
     }
 }
 

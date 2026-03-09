@@ -37,6 +37,7 @@ import semantic.import_resolver : ImportError;
 struct CompilerOptions {
     string inputFile;
     string outputFile;
+    string target = "wasm";   // Target: "wasm" (default), "arm64-macos"
     string backend = "wasm";  // Backend: "wasm" or "native"
     int verbosity = 0;        // 0=quiet, 1=-v, 2=-vv, 3=-vvv
     bool dryRun = false;
@@ -108,6 +109,7 @@ int main(string[] args) {
             "input|i", "Input D source file", &options.inputFile,
             "output|o", "Output WASM file (default: input.wasm)", &options.outputFile,
             "outdir", "Output directory for parallel mode", &options.outputDir,
+            "target|t", "Target: wasm (default), arm64-macos", &options.target,
             "backend|b", "Code generation backend: wasm, native (default: wasm)", &options.backend,
             "run|r", "Compile and run immediately (like rdmd)", &options.run,
             "func|f", "Function to run with --run (default: main)", &options.runFunc,
@@ -174,7 +176,10 @@ int main(string[] args) {
         
         // Set default output file
         if (options.outputFile.length == 0) {
-            options.outputFile = setExtension(options.inputFile, ".wasm");
+            if (options.target == "arm64-macos")
+                options.outputFile = setExtension(options.inputFile, ".o");
+            else
+                options.outputFile = setExtension(options.inputFile, ".wasm");
         }
         
         // Watch mode
@@ -464,7 +469,28 @@ int compileFile(CompilerOptions options) {
             analyzeEscapes(ast, inputModule.symbolTable);
         }
 
-        // 7. Code generation (binary WASM emission)
+        // 7. Code generation
+        if (!options.dryRun && options.target == "arm64-macos") {
+            // Native ARM64 Mach-O object file output
+            log(1, "Generating ARM64 Mach-O object file...");
+
+            import codegen.native.native_emitter : NativeModuleEmitter;
+
+            auto nativeEmitter = new NativeModuleEmitter(inputModule.symbolTable);
+            ubyte[] objBytes = nativeEmitter.emit(ast);
+
+            std.file.write(options.outputFile, objBytes);
+            log(1, "Generated ", objBytes.length, " bytes → ", options.outputFile);
+            writeln("Successfully compiled to ", options.outputFile);
+
+            // Print CTFE stats at verbosity 2+
+            if (options.verbosity >= 2) {
+                controller.printAllStats();
+            }
+
+            return 0;
+        }
+
         if (!options.dryRun) {
             log(1, "Generating binary WASM...");
 

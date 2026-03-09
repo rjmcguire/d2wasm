@@ -269,7 +269,10 @@ class NativeCompiledFunction : CompiledFunction {
     
     // Stack trace option
     private bool enableStackTrace;
-    
+
+    // Object file mode: skip CTFE-only infrastructure (exceptions, host functions, data section)
+    private bool objectMode;
+
     /// Single function constructor (original)
     this(FunctionDecl func, SymbolTable st, bool enableStackTrace = true) {
         import std.stdio : writeln;
@@ -380,6 +383,46 @@ class NativeCompiledFunction : CompiledFunction {
         // Patch vtable entries now that function addresses are resolved
         patchVtableEntries();
 
+    }
+
+    /// Object-mode constructor: compiles functions into a relocatable buffer for .o output.
+    /// Skips CTFE-only infrastructure (exceptions, host functions, data section).
+    this(FunctionDecl[] funcs, SymbolTable st, bool objectModeFlag) {
+        assert(objectModeFlag, "Use other constructors for JIT mode");
+        this.objectMode = true;
+        this.symbolTable = st;
+        this.enableStackTrace = false;
+        this.gen = NativeCodeGen.allocRelocatable(64 * 1024);
+
+        if (!gen.base) {
+            throw new Exception("Failed to allocate relocatable code buffer");
+        }
+
+        // No data section, exception globals, or host functions in object mode
+
+        foreach (func; funcs) {
+            string name = getMangledName(func);
+            functionDecls[name] = func;
+            functionLabels[name] = gen.newLabel();
+        }
+
+        foreach (func; funcs) {
+            compileFunction(func);
+        }
+    }
+
+    /// Get relocatable code bytes (for object mode).
+    /// Resolves internal branches, returns code as ubyte[].
+    ubyte[] getRelocatableCode() {
+        assert(objectMode, "getRelocatableCode only valid in object mode");
+        return gen.finalizeRelocatable();
+    }
+
+    /// Get the offset of a named function within the code buffer.
+    size_t getFunctionOffset(string name) {
+        if (auto p = name in functionLabels)
+            return (*p).offset;
+        return size_t.max;
     }
 
     /// Get the mangled name for a function.
@@ -696,37 +739,35 @@ class NativeCompiledFunction : CompiledFunction {
             }
         }
         
-        // Emit inline call stack push (for error reporting)
-        // Uses inline code to write directly to data section - no FFI overhead
-        string fileName = func.location.filename ? func.location.filename : "";
-        emitInlinePushCall(func.name, fileName, func.location.line);
-        
+        // Emit inline call stack push (for error reporting) — CTFE/JIT only
+        if (!objectMode) {
+            string fileName = func.location.filename ? func.location.filename : "";
+            emitInlinePushCall(func.name, fileName, func.location.line);
+        }
+
         // Compile body
         if (func.body_) {
             compileStatement(func.body_);
         }
-        
+
         // Bind epilogue label - return statements jump here
         gen.bindLabel(epilogueLabel);
-        
-        // Emit inline call stack pop (only on normal return — preserve during exception
-        // propagation so the host can read the call chain for error reporting)
-        // Save return value (x0) to a temp slot — the exception check clobbers x0,
-        // and emitInlinePopCall uses x10 as scratch, so we can't use a register.
-        // Must use temps (not push/pop) because emitInlinePopCall uses SP-relative addressing.
-        auto retSaveMark = temps.save();
-        size_t retSaveSlot = temps.alloc(8);
-        gen.emitStorePtr(retSaveSlot);
-        gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)exceptionPendingAddr);
-        gen.emitLoadFromX9Offset(0);  // w0 = __exception_pending
-        auto skipPopLabel = gen.newLabel();
-        gen.emitBranchIfNonZero(skipPopLabel);
-        emitInlinePopCall();
-        gen.bindLabel(skipPopLabel);
-        // Restore return value
-        gen.emitLoadPtr(retSaveSlot);
-        temps.restore(retSaveMark);
-        
+
+        // Emit inline call stack pop — CTFE/JIT only
+        if (!objectMode) {
+            auto retSaveMark = temps.save();
+            size_t retSaveSlot = temps.alloc(8);
+            gen.emitStorePtr(retSaveSlot);
+            gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)exceptionPendingAddr);
+            gen.emitLoadFromX9Offset(0);  // w0 = __exception_pending
+            auto skipPopLabel = gen.newLabel();
+            gen.emitBranchIfNonZero(skipPopLabel);
+            emitInlinePopCall();
+            gen.bindLabel(skipPopLabel);
+            gen.emitLoadPtr(retSaveSlot);
+            temps.restore(retSaveMark);
+        }
+
         // Emit epilogue
         if (totalLocalBytes > 0) {
             gen.emitEpilogueWithLocals(totalLocalBytes);
@@ -5059,7 +5100,7 @@ class NativeCompiledFunction : CompiledFunction {
 
     override void dispose() {
         if (gen.base) {
-            gen.free();
+            gen.freeBuffer();
         }
         if (dataSection.base) {
             dataSection.free();
