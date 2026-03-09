@@ -659,7 +659,11 @@ class NativeCompiledFunction : CompiledFunction {
                     "ClassDecl '" ~ classDecl.name ~ "' has zero size - layout not computed");
                 nli.kind = VarKind.class_;
                 nli.classDecl = classDecl;
-                paramSize = classDecl.classSize;
+                nli.isReference = true;  // classes use reference semantics
+                // Align to 8 bytes for pointer storage
+                nli.offset = (nextLocalOffset + 7) & ~7;
+                nextLocalOffset = nli.offset;
+                paramSize = 8;           // store pointer, not data copy
             } else if (auto arrayType = cast(ArrayType)param.type) {
                 if (arrayType.arraySize !is null) {
                     nli.kind = VarKind.staticArray;
@@ -753,19 +757,9 @@ class NativeCompiledFunction : CompiledFunction {
                     break;
 
                 case VarKind.class_:
-                    // Register contains pointer to class object - copy data to our stack
-                    switch (paramReg) {
-                        case 0: gen.emitMoveX0ToX9(); break;
-                        case 1: gen.emitMoveX1ToX9(); break;
-                        case 2: gen.emitMoveX2ToX9(); break;
-                        case 3: gen.emitMoveX3ToX9(); break;
-                        default: break;
-                    }
-                    size_t classSize = nli.classDecl.classSize;
-                    for (uint fieldOff = 0; fieldOff < classSize; fieldOff += 4) {
-                        gen.emitLoadFromX9Offset(fieldOff);
-                        gen.emitStoreLocal32(offset + fieldOff);
-                    }
+                    // Class params use reference semantics — just store the pointer
+                    moveRegToX0(paramReg);
+                    gen.emitStorePtr(offset);
                     break;
 
                 case VarKind.staticArray:
@@ -2290,8 +2284,15 @@ class NativeCompiledFunction : CompiledFunction {
             if (auto info = ident.name in localVars) {
                 log(3, "native:     -> local (kind=", info.kind, ", offset=", info.offset, ")");
                 final switch (info.kind) {
-                    case VarKind.struct_:
                     case VarKind.class_:
+                        // Class references: load the stored pointer
+                        // Class locals: emit stack address
+                        if (info.isReference)
+                            gen.emitLoadPtr(info.offset);
+                        else
+                            gen.emitStackAddress(info.offset);
+                        break;
+                    case VarKind.struct_:
                     case VarKind.staticArray:
                     case VarKind.slice:
                     case VarKind.delegate_:
@@ -2805,16 +2806,29 @@ class NativeCompiledFunction : CompiledFunction {
                 throw new Exception("Unknown field '" ~ member.memberName ~ "' on " ~ aggregateDecl.name);
             }
 
-            // For local struct variables, compute address and load field
+            // For local struct/class variables, load field
             if (auto ident = cast(IdentifierExpression)member.object) {
                 if (auto varInfo = ident.name in localVars) {
-                    size_t totalOffset = varInfo.offset + field.offset;
-                    // Aggregate fields: emit address (for nested access or passing)
-                    // Scalar fields: load the value
-                    if (field.type.isAggregate()) {
-                        gen.emitStackAddress(totalOffset);
+                    if (varInfo.isReference) {
+                        // Reference (class param / this): dereference pointer, then access field
+                        gen.emitLoadPtr(varInfo.offset);  // x0 = pointer to instance
+                        if (field.type.isAggregate()) {
+                            if (field.offset > 0) {
+                                gen.emitMoveX0ToX1();
+                                gen.emitImm32(stencil_load_imm32, cast(int)field.offset);
+                                gen.emit(stencil_add_i64);
+                            }
+                        } else {
+                            gen.emitLoadFromPointer(field.offset);
+                        }
                     } else {
-                        gen.emitLoadLocal32(totalOffset);
+                        // Direct instance on stack
+                        size_t totalOffset = varInfo.offset + field.offset;
+                        if (field.type.isAggregate()) {
+                            gen.emitStackAddress(totalOffset);
+                        } else {
+                            gen.emitLoadLocal32(totalOffset);
+                        }
                     }
                     return;
                 }
@@ -4857,11 +4871,20 @@ class NativeCompiledFunction : CompiledFunction {
         if (field is null)
             throw new NativeCompileError("Unknown field '" ~ member.memberName ~ "' on " ~ aggregateDecl.name, assign.location);
 
-        // Local struct variable: direct store at known offset
+        // Local struct/class variable
         if (auto ident = cast(IdentifierExpression)member.object) {
             if (auto varInfo = ident.name in localVars) {
-                compileExpression(assign.right);
-                gen.emitStoreLocal32(varInfo.offset + field.offset);
+                if (varInfo.isReference) {
+                    // Reference (class param / this): dereference pointer, then store
+                    compileExpression(assign.right);
+                    gen.emitMoveX0ToX9();
+                    gen.emitLoadPtr(varInfo.offset);  // x0 = pointer to instance
+                    gen.emitStoreToPointerFromX9(field.offset);
+                } else {
+                    // Direct instance on stack
+                    compileExpression(assign.right);
+                    gen.emitStoreLocal32(varInfo.offset + field.offset);
+                }
                 return;
             }
         }
