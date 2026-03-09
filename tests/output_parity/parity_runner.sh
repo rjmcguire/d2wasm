@@ -64,12 +64,27 @@ run_test_with_backend() {
     
     # Only handle output test types
     case "$test_type" in
-        wasm_exec|compile_only) ;;
+        wasm_exec|compile_only|ffi_exec) ;;
         *)
             echo -e "${YELLOW}SKIP${NC} $test_name [$backend] (not an output test type: $test_type)"
             return 0
             ;;
     esac
+
+    # ffi_exec requires macOS
+    if [ "$test_type" = "ffi_exec" ] && [ "$(uname)" != "Darwin" ]; then
+        echo -e "${YELLOW}SKIP${NC} $test_name [$backend] (ffi_exec requires macOS)"
+        return 0
+    fi
+
+    # Build framework flags for ffi_exec tests
+    local fw_args=""
+    if [ "$test_type" = "ffi_exec" ]; then
+        local frameworks=$(jq -r '.link_frameworks // [] | .[]' "$config_file")
+        for fw in $frameworks; do
+            fw_args="$fw_args --link-framework $fw"
+        done
+    fi
 
     if [ "$backend" = "native-jit" ]; then
         # Native ARM64 JIT: compile and run directly in-process
@@ -88,7 +103,7 @@ run_test_with_backend() {
         fi
 
         local run_output
-        run_output=$("$COMPILER" --run --target arm64-macos "$test_file" 2>&1)
+        run_output=$("$COMPILER" --run --target arm64-macos $fw_args "$test_file" 2>&1)
         local actual=$?
 
         local expected_result=$(jq -r '.expected_result // "null"' "$config_file")
@@ -122,7 +137,7 @@ run_test_with_backend() {
         fi
 
         local compile_output
-        compile_output=$("$COMPILER" --target arm64-macos "$test_file" -o "$obj_file" 2>&1)
+        compile_output=$("$COMPILER" --target arm64-macos $fw_args "$test_file" -o "$obj_file" 2>&1)
         local compile_status=$?
 
         if [ $compile_status -ne 0 ]; then
@@ -132,15 +147,24 @@ run_test_with_backend() {
             return 1
         fi
 
+        # Build linker framework flags
+        local link_fw_args=""
+        if [ "$test_type" = "ffi_exec" ]; then
+            local frameworks=$(jq -r '.link_frameworks // [] | .[]' "$config_file")
+            for fw in $frameworks; do
+                link_fw_args="$link_fw_args -framework $fw"
+            done
+        fi
+
         case "$test_type" in
             compile_only)
                 echo -e "${GREEN}PASS${NC} $test_name [$backend] (compiled)"
                 return 0
                 ;;
-            wasm_exec)
+            wasm_exec|ffi_exec)
                 # Link with system linker
                 local link_output
-                link_output=$(cc -o "$bin_file" "$obj_file" -lSystem 2>&1)
+                link_output=$(cc -o "$bin_file" "$obj_file" -lSystem $link_fw_args 2>&1)
                 if [ $? -ne 0 ]; then
                     echo -e "${RED}FAIL${NC} $test_name [$backend]"
                     echo "  Linking failed:"
@@ -168,6 +192,31 @@ run_test_with_backend() {
     fi
 
     # WASM output backend
+    if [ "$test_type" = "ffi_exec" ]; then
+        # FFI tests use --run with framework loading (dlopen/dlsym)
+        if [ $VERBOSE -eq 1 ]; then
+            echo "  Compiling and running WASM with FFI..."
+        fi
+
+        local run_output
+        run_output=$("$COMPILER" --run $fw_args "$test_file" 2>&1)
+        local actual=$?
+
+        local expected_result=$(jq -r '.expected_result // "null"' "$config_file")
+
+        if [ "$expected_result" != "null" ] && [ "$actual" != "$expected_result" ]; then
+            echo -e "${RED}FAIL${NC} $test_name [$backend]"
+            echo "  Expected: $expected_result, Actual: $actual"
+            if [ $VERBOSE -eq 1 ]; then
+                echo "  Output: $run_output"
+            fi
+            return 1
+        fi
+
+        echo -e "${GREEN}PASS${NC} $test_name [$backend] (result: $actual)"
+        return 0
+    fi
+
     local wasm_file="$test_dir/test.wasm"
     rm -f "$wasm_file"
 
