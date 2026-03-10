@@ -338,9 +338,10 @@ private FunctionDecl resolveCallTarget(CallExpression call, Declaration[] declar
         }
     }
 
-    // Method call: obj.method()
+    // Method call: obj.method() — check struct methods and UFCS free functions
     if (auto member = cast(MemberExpression)call.function_) {
         string methodName = member.memberName;
+        // Struct/class methods
         foreach (decl; declarations) {
             if (auto sd = cast(StructDecl)decl) {
                 foreach (m; sd.members) {
@@ -348,6 +349,12 @@ private FunctionDecl resolveCallTarget(CallExpression call, Declaration[] declar
                         if (func.name == methodName && func.isMethod) return func;
                     }
                 }
+            }
+        }
+        // UFCS: obj.func() → func(obj) — search free functions by name
+        foreach (decl; declarations) {
+            if (auto func = cast(FunctionDecl)decl) {
+                if (func.name == methodName && func.body_ !is null) return func;
             }
         }
     }

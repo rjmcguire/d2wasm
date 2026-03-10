@@ -96,7 +96,7 @@ class NativeModuleEmitter {
         if (code is null)
             throw new Exception("Failed to finalize native code");
 
-        ubyte[] wrapper = emitMainWrapper(code.length, mainOffset);
+        ubyte[] wrapper = emitMainWrapper(code.length, mainOffset, mainFunc.needsArena);
 
         // Combine: user functions + _main wrapper
         ubyte[] fullCode = code ~ wrapper;
@@ -157,35 +157,41 @@ private:
         return func.name;
     }
 
-    /// Emit a minimal C ABI _main wrapper:
+    /// Emit a C ABI _main wrapper that optionally zeroes x0 for the arena parameter:
     ///   STP x29, x30, [SP, #-16]!
     ///   MOV x29, SP
+    ///   [MOV x0, #0]          — only if mainNeedsArena
     ///   BL  <user_main>
     ///   LDP x29, x30, [SP], #16
     ///   RET
-    static ubyte[] emitMainWrapper(size_t codeSize, size_t mainFuncOffset) {
-        ubyte[] buf = new ubyte[20]; // 5 instructions × 4 bytes
+    static ubyte[] emitMainWrapper(size_t codeSize, size_t mainFuncOffset, bool mainNeedsArena) {
+        uint instrCount = mainNeedsArena ? 6 : 5;
+        ubyte[] buf = new ubyte[instrCount * 4];
         uint* instrs = cast(uint*)buf.ptr;
 
+        uint idx = 0;
+
         // STP x29, x30, [SP, #-16]!
-        instrs[0] = 0xA9BF7BFD;
+        instrs[idx++] = 0xA9BF7BFD;
 
         // MOV x29, SP  (ADD x29, SP, #0)
-        instrs[1] = 0x910003FD;
+        instrs[idx++] = 0x910003FD;
 
-        // BL <mainFuncOffset>  — relative offset from wrapper instruction to main
-        // The wrapper is at codeSize, the BL is at codeSize + 8
-        // Target is at mainFuncOffset
-        // Relative offset in bytes = mainFuncOffset - (codeSize + 8)
-        long relOffset = cast(long)mainFuncOffset - cast(long)(codeSize + 8);
+        // MOV x0, #0  (arena = null) — only if main expects arena parameter
+        if (mainNeedsArena)
+            instrs[idx++] = 0xD2800000;  // MOVZ x0, #0
+
+        // BL <mainFuncOffset>  — relative offset from this instruction to main
+        size_t blOffset = codeSize + idx * 4;
+        long relOffset = cast(long)mainFuncOffset - cast(long)blOffset;
         int imm26 = cast(int)(relOffset / 4);
-        instrs[2] = 0x94000000 | (imm26 & 0x03FFFFFF);
+        instrs[idx++] = 0x94000000 | (imm26 & 0x03FFFFFF);
 
         // LDP x29, x30, [SP], #16
-        instrs[3] = 0xA8C17BFD;
+        instrs[idx++] = 0xA8C17BFD;
 
         // RET
-        instrs[4] = 0xD65F03C0;
+        instrs[idx++] = 0xD65F03C0;
 
         return buf;
     }

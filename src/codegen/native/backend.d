@@ -324,7 +324,7 @@ class NativeCompiledFunction : CompiledFunction {
 
         // Store parameter count for call()
         this.paramCount = func.parameters.length;
-        this.entryNeedsArena = func.needsArena && func.name != "main";
+        this.entryNeedsArena = func.needsArena;
 
         // Compile the function
         compileFunction(func);
@@ -1946,7 +1946,7 @@ class NativeCompiledFunction : CompiledFunction {
                     size_t varOffset = nli.offset;
                     nextLocalOffset += varSize;  // advance past variable before compiling initializer
                     compileExpression(varDecl.initializer);
-                    if (nli.isRawPointer)
+                    if (nli.isRawPointer || nli.isObjCRef)
                         gen.emitStorePtr(varOffset);
                     else
                         gen.emitStoreLocal32(varOffset);
@@ -3689,7 +3689,8 @@ class NativeCompiledFunction : CompiledFunction {
             return;
         }
 
-        // ObjC class variable: dispatch via objc_msgSend
+        // ObjC class variable: dispatch via emitObjCCallFromClass
+        log(2, "native: method dispatch isObjCRef=", info.isObjCRef, " classDecl=", info.classDecl !is null, " isObjC=", info.classDecl ? info.classDecl.isObjC : false, " isClass=", info.isClass);
         if (info.isObjCRef && info.classDecl && info.classDecl.isObjC) {
             emitObjCCallFromClass(info.classDecl,
                 memberExpr.object, memberExpr.memberName, args, false);
@@ -5260,6 +5261,7 @@ class NativeCompiledFunction : CompiledFunction {
     /// Emit a UFCS call: obj.func(args...) → func(obj, args...)
     /// The object becomes the first argument to the free function.
     private void emitUFCSCall(MemberExpression memberExpr, Expression[] args) {
+        log(2, "native: UFCS call .", memberExpr.memberName, " with ", args.length, " extra args");
         // Build combined argument list: [object, args...]
         Expression[] allArgs = [memberExpr.object] ~ args;
 
@@ -5381,12 +5383,13 @@ class NativeCompiledFunction : CompiledFunction {
         if (dBodyMethod !is null) {
             string mangledName = getMangledName(dBodyMethod);
             auto labelPtr = mangledName in functionLabels;
+            log(2, "native: ObjC D-body method '", methodName, "' mangled='", mangledName, "' found=", labelPtr !is null);
             if (labelPtr !is null) {
                 // Direct call: x0 = this (receiver)
                 if (receiver !is null)
                     compileExpression(receiver);
                 gen.emitCall(*labelPtr);
-                emitNativeExceptionCheck();
+                emitNativeExceptionCheckWithValue();
                 return;
             }
         }
