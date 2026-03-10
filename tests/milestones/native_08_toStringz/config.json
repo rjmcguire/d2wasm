@@ -1,0 +1,7 @@
+{
+  "name": "native_toStringz",
+  "description": "toStringz using concat + .ptr on expression, compiled to ARM64 .o",
+  "type": "native_exec",
+  "expected_exit": 0,
+  "expected_output": "hello"
+}

@@ -145,11 +145,11 @@ run_test() {
         rm -f "$obj_file" "$bin_file"
 
         if [ $VERBOSE -eq 1 ]; then
-            echo "Compiling native: $COMPILER --target arm64-macos $compiler_args -o $obj_file $test_file"
+            echo "Compiling native: $COMPILER --target arm64-macos -c $compiler_args -o $obj_file $test_file"
         fi
 
         local compile_output
-        compile_output=$("$COMPILER" --target arm64-macos $compiler_args -o "$obj_file" "$test_file" 2>&1)
+        compile_output=$("$COMPILER" --target arm64-macos -c $compiler_args -o "$obj_file" "$test_file" 2>&1)
         local compile_status=$?
 
         if [ $compile_status -ne 0 ]; then

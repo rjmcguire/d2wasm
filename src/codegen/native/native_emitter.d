@@ -12,6 +12,7 @@ import codegen.target : sliceInfo, SliceInfo;
 import codegen.mangle : computeMangledName;
 import ast.nodes;
 import semantic.symbol_table;
+import semantic.modules_context : ModulesContext;
 
 class NativeModuleEmitter {
     private SymbolTable symbolTable;
@@ -20,6 +21,14 @@ class NativeModuleEmitter {
         this.symbolTable = st;
         // Native backend uses 8-byte pointers (ARM64)
         sliceInfo = SliceInfo(8);
+    }
+
+    /// Compile all modules to a Mach-O .o file.
+    ubyte[] emit(ModulesContext modulesCtx) {
+        Declaration[] allDecls;
+        foreach (mod; modulesCtx.modulesInOrder())
+            allDecls ~= mod.ast;
+        return emit(allDecls);
     }
 
     /// Compile declarations to a Mach-O .o file.
@@ -39,7 +48,16 @@ class NativeModuleEmitter {
             // Collect methods from struct/class declarations
             if (auto aggDecl = cast(AggregateDecl)decl) {
                 if (auto classDecl = cast(ClassDecl)decl) {
-                    if (classDecl.isObjC) continue;
+                    if (classDecl.isObjC) {
+                        // ObjC classes: only collect methods with D bodies
+                        foreach (member; classDecl.members) {
+                            auto method = cast(FunctionDecl)member;
+                            if (method is null) continue;
+                            if (method.body_ is null) continue;
+                            funcs ~= method;
+                        }
+                        continue;
+                    }
                 }
                 foreach (member; aggDecl.members) {
                     auto method = cast(FunctionDecl)member;

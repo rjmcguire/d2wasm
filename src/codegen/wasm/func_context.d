@@ -986,10 +986,12 @@ class FuncContext {
     }
 
     /// Returns true if this function's return type contains pointers to arena memory
-    /// (dynamic slices). Static arrays are on the shadow stack, so they're safe to drop.
+    /// (dynamic slices or raw pointers). Static arrays are on the shadow stack, so they're safe to drop.
     private bool returnsArenaData() {
         if (auto arrType = cast(ArrayType)func.decl.returnType)
             return arrType.arraySize is null;  // Dynamic slice, not static array
+        if (cast(PointerType)func.decl.returnType)
+            return true;  // Raw pointer may alias arena memory (e.g. toStringz)
         return false;
     }
 

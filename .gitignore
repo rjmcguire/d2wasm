@@ -2,3 +2,7 @@
 # Build artifacts
 *.wasm
 d2wasm
+*.o
+tests/output_parity/**/test_bin
+tests/milestones/**/test_bin
+

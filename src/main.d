@@ -465,7 +465,17 @@ int compileFile(CompilerOptions options) {
         {
             import semantic.arena_analyzer : analyzeArenaNeeds;
             log(2, "Analyzing arena allocation needs...");
-            analyzeArenaNeeds(ast);
+            if (options.target == "arm64-macos") {
+                // Native backend compiles all modules — analyze cross-module
+                Declaration[] allModuleDecls;
+                foreach (mod; modulesCtx.modulesInOrder())
+                    allModuleDecls ~= mod.ast;
+                analyzeArenaNeeds(allModuleDecls);
+            } else {
+                // WASM backend: analyze user AST only (runtime functions
+                // handle allocation internally without arena threading)
+                analyzeArenaNeeds(ast);
+            }
         }
 
         // 6e. Escape analysis (optional)
@@ -488,12 +498,13 @@ int compileFile(CompilerOptions options) {
 
                 sliceInfo = SliceInfo(8); // ARM64: 8-byte pointers
 
-                // Collect functions and extern(C) imports from AST
+                // Collect functions and extern(C) imports from all modules
                 FunctionDecl[] funcs;
                 ImportedFunctionDecl[] imports;
                 string entryName;
 
-                foreach (decl; ast) {
+                foreach (mod; modulesCtx.modulesInOrder()) {
+                foreach (decl; mod.ast) {
                     if (auto imp = cast(ImportedFunctionDecl)decl) {
                         if (imp.moduleName == "ffi")
                             imports ~= imp;
@@ -502,7 +513,16 @@ int compileFile(CompilerOptions options) {
                     // Collect methods from struct/class declarations
                     if (auto aggDecl = cast(AggregateDecl)decl) {
                         if (auto classDecl = cast(ClassDecl)decl) {
-                            if (classDecl.isObjC) continue;
+                            if (classDecl.isObjC) {
+                                // ObjC classes: only collect methods with D bodies
+                                foreach (member; classDecl.members) {
+                                    auto method = cast(FunctionDecl)member;
+                                    if (method is null) continue;
+                                    if (method.body_ is null) continue;
+                                    funcs ~= method;
+                                }
+                                continue;
+                            }
                         }
                         foreach (member; aggDecl.members) {
                             auto method = cast(FunctionDecl)member;
@@ -523,7 +543,8 @@ int compileFile(CompilerOptions options) {
                         entryName = funcDecl.mangledName ? funcDecl.mangledName
                             : computeMangledName([], funcDecl);
                     }
-                }
+                } // foreach decl
+                } // foreach mod
 
                 if (entryName.length == 0)
                     throw new Exception("No " ~ options.runFunc ~ "() function found");
@@ -548,7 +569,7 @@ int compileFile(CompilerOptions options) {
             import codegen.native.native_emitter : NativeModuleEmitter;
 
             auto nativeEmitter = new NativeModuleEmitter(inputModule.symbolTable);
-            ubyte[] objBytes = nativeEmitter.emit(ast);
+            ubyte[] objBytes = nativeEmitter.emit(modulesCtx);
 
             if (options.compileOnly) {
                 // -c: write .o and stop

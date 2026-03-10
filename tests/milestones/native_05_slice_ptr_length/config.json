@@ -1,0 +1,6 @@
+{
+  "name": "native_slice_ptr_length",
+  "description": "Dynamic array .length on local variables and params, compiled to ARM64 .o",
+  "type": "native_exec",
+  "expected_exit": 3
+}

@@ -153,6 +153,7 @@ class NativeCompiledFunction : CompiledFunction {
         uint sliceElemSize;       // Element byte size when kind == slice
         bool isReference;         // true for 'this' pointers (stores address, not inline data)
         bool isObjCRef;           // true for ObjC opaque pointers (8-byte, no vtable)
+        bool isRawPointer;        // true for raw pointer types (char*, int*, etc.) — 8 bytes on ARM64
 
         bool isStruct() const { return kind == VarKind.struct_; }
         bool isClass() const { return kind == VarKind.class_; }
@@ -501,6 +502,27 @@ class NativeCompiledFunction : CompiledFunction {
         uint blOff = gen.pos;
         gen.emitExternalBranchLink();  // BL #0 (placeholder)
         objectRelocations ~= ObjectReloc(blOff, funcName, RelocType.branch26);
+    }
+
+    /// Store data and emit code to load its address into x0.
+    /// JIT: stores in dataSection, emits absolute pointer load.
+    /// Object: appends to objectData with symbol, emits ADRP+ADD relocation.
+    private void emitDataLoad(const(ubyte)[] data, string nameHint = "__data_") {
+        import std.conv : to;
+        if (objectMode) {
+            string symName = nameHint ~ to!string(objectDataSymCount++);
+            uint dataOff = appendObjectData(data);
+            objectDataSymbols ~= ObjectDataSymbol(symName, dataOff);
+            emitLoadDataAddress(symName);
+        } else {
+            ubyte* dataPtr = dataSection.addData(data.dup);
+            gen.emitLoadImm64(cast(ulong)dataPtr);
+        }
+    }
+
+    /// Store a string and emit code to load its address into x0.
+    private void emitStringLoad(string str, string nameHint = "__str_") {
+        emitDataLoad(cast(const(ubyte)[])str, nameHint);
     }
 
     /// Get the mangled name for a function.
@@ -1161,6 +1183,8 @@ class NativeCompiledFunction : CompiledFunction {
             if (lit.value.type == typeid(string))
                 bytes += 8 + sliceInfo.totalSize;
         } else if (auto binOp = cast(BinaryExpression)expr) {
+            if (binOp.operator == BinaryExpression.Operator.Concat)
+                bytes += 8 + sliceInfo.totalSize;  // result slice struct
             bytes += countExpressionBytes(binOp.left);
             bytes += countExpressionBytes(binOp.right);
             bytes += countExpressionBytes(binOp.loweredCall);
@@ -1380,12 +1404,16 @@ class NativeCompiledFunction : CompiledFunction {
                     varSize = length * elemSz;
                     staticArrayLength = length;
                 }
+            } else if (cast(PointerType)varDecl.type !is null) {
+                // Raw pointer: 8 bytes on ARM64
+                varSize = 8;
             }
             
             // Allocate stack slot for this variable
-            // Slices and ObjC refs contain a 64-bit pointer and need 8-byte alignment
+            // Slices, ObjC refs, and raw pointers contain a 64-bit value and need 8-byte alignment
             // for STR x0, [sp, #imm] encoding (imm must be multiple of 8)
-            if (isSlice || isObjCRef) {
+            bool isPtr = cast(PointerType)varDecl.type !is null;
+            if (isSlice || isObjCRef || isPtr) {
                 nextLocalOffset = (nextLocalOffset + 7) & ~7;
             }
             NativeLocalInfo nli;
@@ -1421,6 +1449,8 @@ class NativeCompiledFunction : CompiledFunction {
             // else: kind stays VarKind.scalar (default)
             if (isObjCRef)
                 nli.isObjCRef = true;
+            if (isPtr)
+                nli.isRawPointer = true;
             localVars[varDecl.name] = nli;
 
             // Zero-initialize variables without explicit initializer
@@ -1431,8 +1461,8 @@ class NativeCompiledFunction : CompiledFunction {
                     for (size_t off = 0; off < varSize; off += 4) {
                         gen.emitStoreLocal32(nli.offset + off);
                     }
-                } else if (isObjCRef) {
-                    // ObjC ref: zero 8-byte pointer
+                } else if (isObjCRef || isPtr) {
+                    // ObjC ref / raw pointer: zero 8-byte value
                     gen.emitLoadImm64(0);
                     gen.emitStorePtr(nli.offset);
                 } else if (nli.kind == VarKind.scalar) {
@@ -1730,45 +1760,80 @@ class NativeCompiledFunction : CompiledFunction {
                             if (auto manifest = cast(ManifestConstantDecl)sym.declaration) {
                                 manifest.ensureEvaluated();
                                 if (manifest.isNestedArrayType) {
-                                    // Build nested array data in native data section
+                                    // Build nested array data in data section
                                     uint outerCount = cast(uint)manifest.ctfeNestedElements.length;
                                     uint innerElemSize = manifest.ctfeInnerElementSize;
 
-                                    // Add each inner array's data to data section
-                                    ubyte*[] innerDataPtrs = new ubyte*[outerCount];
-                                    uint[] innerLens = new uint[outerCount];
-                                    foreach (i; 0 .. outerCount) {
-                                        ubyte[] innerBytes = manifest.ctfeNestedElements[i];
-                                        innerDataPtrs[i] = dataSection.addData(innerBytes);
-                                        innerLens[i] = innerElemSize > 0
-                                            ? cast(uint)innerBytes.length / innerElemSize
-                                            : cast(uint)innerBytes.length;
+                                    if (objectMode) {
+                                        // Object mode: need unsigned64 relocations for inner pointers
+                                        // Store each inner array, collect offsets and symbols
+                                        import std.conv : to;
+                                        string[] innerSyms = new string[outerCount];
+                                        uint[] innerLens = new uint[outerCount];
+                                        foreach (i; 0 .. outerCount) {
+                                            ubyte[] innerBytes = manifest.ctfeNestedElements[i];
+                                            innerSyms[i] = "__nested_inner_" ~ to!string(objectDataSymCount++);
+                                            uint off = appendObjectData(innerBytes);
+                                            objectDataSymbols ~= ObjectDataSymbol(innerSyms[i], off);
+                                            innerLens[i] = innerElemSize > 0
+                                                ? cast(uint)innerBytes.length / innerElemSize
+                                                : cast(uint)innerBytes.length;
+                                        }
+
+                                        // Build inner slice structs with zero pointers (will be relocated)
+                                        ubyte[] innerStructsData = new ubyte[outerCount * sliceInfo.totalSize];
+                                        foreach (i; 0 .. outerCount) {
+                                            size_t base = i * sliceInfo.totalSize;
+                                            // pointer slot left as zero — relocation fills it
+                                            *cast(uint*)&innerStructsData[base + sliceInfo.lengthOffset] = innerLens[i];
+                                            *cast(uint*)&innerStructsData[base + sliceInfo.capacityOffset] = innerLens[i];
+                                        }
+                                        string outerSym = "__nested_outer_" ~ to!string(objectDataSymCount++);
+                                        uint outerOff = appendObjectData(innerStructsData);
+                                        objectDataSymbols ~= ObjectDataSymbol(outerSym, outerOff);
+
+                                        // Add unsigned64 relocations for each inner pointer slot
+                                        foreach (i; 0 .. outerCount) {
+                                            uint slotOff = outerOff + cast(uint)(i * sliceInfo.totalSize);
+                                            objectRelocations ~= ObjectReloc(slotOff, innerSyms[i], RelocType.unsigned64, 1);
+                                        }
+
+                                        emitLoadDataAddress(outerSym);
+                                    } else {
+                                        // JIT mode: embed absolute pointers directly
+                                        ubyte*[] innerDataPtrs = new ubyte*[outerCount];
+                                        uint[] innerLens = new uint[outerCount];
+                                        foreach (i; 0 .. outerCount) {
+                                            ubyte[] innerBytes = manifest.ctfeNestedElements[i];
+                                            innerDataPtrs[i] = dataSection.addData(innerBytes);
+                                            innerLens[i] = innerElemSize > 0
+                                                ? cast(uint)innerBytes.length / innerElemSize
+                                                : cast(uint)innerBytes.length;
+                                        }
+
+                                        ubyte[] innerStructsData = new ubyte[outerCount * sliceInfo.totalSize];
+                                        foreach (i; 0 .. outerCount) {
+                                            size_t base = i * sliceInfo.totalSize;
+                                            *cast(ulong*)&innerStructsData[base] = cast(ulong)innerDataPtrs[i];
+                                            *cast(uint*)&innerStructsData[base + sliceInfo.lengthOffset] = innerLens[i];
+                                            *cast(uint*)&innerStructsData[base + sliceInfo.capacityOffset] = innerLens[i];
+                                        }
+                                        ubyte* innerStructsPtr = dataSection.addData(innerStructsData);
+                                        gen.emitLoadImm64(cast(ulong)innerStructsPtr);
                                     }
 
-                                    // Build inner slice structs in data section
-                                    ubyte[] innerStructsData = new ubyte[outerCount * sliceInfo.totalSize];
-                                    foreach (i; 0 .. outerCount) {
-                                        size_t base = i * sliceInfo.totalSize;
-                                        *cast(ulong*)&innerStructsData[base] = cast(ulong)innerDataPtrs[i];
-                                        *cast(uint*)&innerStructsData[base + sliceInfo.lengthOffset] = innerLens[i];
-                                        *cast(uint*)&innerStructsData[base + sliceInfo.capacityOffset] = innerLens[i];
-                                    }
-                                    ubyte* innerStructsPtr = dataSection.addData(innerStructsData);
-
-                                    // Initialize local slice: ptr = innerStructsPtr, len = outerCount, cap = outerCount
-                                    gen.emitLoadImm64(cast(ulong)innerStructsPtr);
+                                    // Initialize local slice: ptr = address in x0, len = outerCount, cap = outerCount
                                     gen.emitStorePtr(nli.offset);
                                     gen.emitImm32(stencil_load_imm32, cast(int)outerCount);
                                     gen.emitStoreLocal32(nli.offset + sliceInfo.lengthOffset);
                                     gen.emitImm32(stencil_load_imm32, cast(int)outerCount);
                                     gen.emitStoreLocal32(nli.offset + sliceInfo.capacityOffset);
                                 } else if (manifest.isArrayType) {
-                                    // Flat array manifest: build data in native data section
-                                    ubyte* dataPtr = dataSection.addData(manifest.ctfeArrayBytes);
+                                    // Flat array manifest: build data in data section
                                     uint elemSize = manifest.ctfeElementSize > 0 ? manifest.ctfeElementSize : 4;
                                     uint elemCount = cast(uint)manifest.ctfeArrayBytes.length / elemSize;
 
-                                    gen.emitLoadImm64(cast(ulong)dataPtr);
+                                    emitDataLoad(manifest.ctfeArrayBytes, "__manifest_");
                                     gen.emitStorePtr(nli.offset);
                                     gen.emitImm32(stencil_load_imm32, cast(int)elemCount);
                                     gen.emitStoreLocal32(nli.offset + sliceInfo.lengthOffset);
@@ -1794,6 +1859,21 @@ class NativeCompiledFunction : CompiledFunction {
                             }
                         } else {
                             throw new NativeCompileError("unknown identifier for slice init: " ~ identInit.name, varDecl.location);
+                        }
+                    } else if (auto binExpr = cast(BinaryExpression)sliceInit) {
+                        if (binExpr.operator == BinaryExpression.Operator.Concat) {
+                            // Advance past slice var before concat (concat allocates frame space too)
+                            nextLocalOffset += varSize;
+                            // Concat produces slice struct address in x0
+                            compileArrayConcat(binExpr);
+                            gen.emitMoveX0ToX9();
+                            for (size_t off = 0; off < sliceInfo.totalSize; off += 4) {
+                                gen.emitLoadFromX9Offset(off);
+                                gen.emitStoreLocal32(nli.offset + off);
+                            }
+                            varSize = 0;  // already advanced
+                        } else {
+                            throw new NativeCompileError("unsupported binary operator for slice init", varDecl.location);
                         }
                     } else {
                         throw new NativeCompileError("slice variable '" ~ varDecl.name
@@ -1863,11 +1943,17 @@ class NativeCompiledFunction : CompiledFunction {
                         throw new Exception("Static array can only be initialized from array literal or function call");
                     }
                 } else {
+                    size_t varOffset = nli.offset;
+                    nextLocalOffset += varSize;  // advance past variable before compiling initializer
                     compileExpression(varDecl.initializer);
-                    gen.emitStoreLocal32(nextLocalOffset);
+                    if (nli.isRawPointer)
+                        gen.emitStorePtr(varOffset);
+                    else
+                        gen.emitStoreLocal32(varOffset);
+                    varSize = 0;  // already advanced
                 }
             }
-            
+
             nextLocalOffset += varSize;
             assert(nextLocalOffset <= temps.tempBase(),
                 "Frame overflow in var decl: nextLocalOffset exceeds temp zone");
@@ -2156,6 +2242,12 @@ class NativeCompiledFunction : CompiledFunction {
                 return;
             }
 
+            // Array/string concatenation: a ~ b
+            if (binOp.operator == BinaryExpression.Operator.Concat) {
+                compileArrayConcat(binOp);
+                return;
+            }
+
             // f64 floating-point path: computation in d0/d1
             if (isF64Expression(binOp.left)) {
                 // Evaluate right → d0, save to temp
@@ -2276,7 +2368,7 @@ class NativeCompiledFunction : CompiledFunction {
                 case BinaryExpression.Operator.LogicalOr:
                     assert(0, "LogicalOr should be handled by short-circuit above");
                 case BinaryExpression.Operator.Concat:
-                    throw new Exception("Operator not yet supported in native backend");
+                    assert(0, "Concat should be handled by compileArrayConcat above");
             }
         } else if (auto unaryOp = cast(UnaryExpression)expr) {
             if (unaryOp.loweredCall) {
@@ -2328,8 +2420,8 @@ class NativeCompiledFunction : CompiledFunction {
             // Load variable from stack
             if (auto info = ident.name in localVars) {
                 log(3, "native:     -> local (kind=", info.kind, ", offset=", info.offset, ")");
-                // ObjC refs are 8-byte opaque pointers — load full 64-bit value
-                if (info.isObjCRef) {
+                // ObjC refs and raw pointers are 8-byte values — load full 64-bit
+                if (info.isObjCRef || info.isRawPointer) {
                     gen.emitLoadPtr(info.offset);
                     return;
                 }
@@ -2507,19 +2599,28 @@ class NativeCompiledFunction : CompiledFunction {
             if (assign.loweredCall) {
                 // Lowered shift compound assignment: emit call, store result
                 compileExpression(assign.loweredCall);
-                gen.emitStoreLocal32(info.offset);
+                if (info.isRawPointer || info.isObjCRef)
+                    gen.emitStorePtr(info.offset);
+                else
+                    gen.emitStoreLocal32(info.offset);
             } else if (assign.operator == AssignmentExpression.Operator.Assign) {
                 // Simple assignment: x = expr
                 compileExpression(assign.right);
-                gen.emitStoreLocal32(info.offset);
+                if (info.isRawPointer || info.isObjCRef)
+                    gen.emitStorePtr(info.offset);
+                else
+                    gen.emitStoreLocal32(info.offset);
             } else {
                 // Compound assignment: x op= expr
                 // First compile right side to x0
                 compileExpression(assign.right);
                 gen.emitMoveX0ToX1();  // x1 = right value
-                
+
                 // Load current value to x0
-                gen.emitLoadLocal32(info.offset);
+                if (info.isRawPointer || info.isObjCRef)
+                    gen.emitLoadPtr(info.offset);
+                else
+                    gen.emitLoadLocal32(info.offset);
                 // Now x0 = current (left), x1 = right
                 
                 // Apply operation based on operator
@@ -2562,7 +2663,10 @@ class NativeCompiledFunction : CompiledFunction {
                 }
                 
                 // Store result back
-                gen.emitStoreLocal32(info.offset);
+                if (info.isRawPointer || info.isObjCRef)
+                    gen.emitStorePtr(info.offset);
+                else
+                    gen.emitStoreLocal32(info.offset);
             }
             // Result of assignment is the assigned value (already in x0)
         } else if (auto call = cast(CallExpression)expr) {
@@ -2724,12 +2828,15 @@ class NativeCompiledFunction : CompiledFunction {
             throw new Exception("Function calls not yet supported in native backend: " ~
                 (cast(IdentifierExpression)call.function_ ? (cast(IdentifierExpression)call.function_).name : "unknown"));
         } else if (auto member = cast(MemberExpression)expr) {
-            // Check for slice.length first
-            if (member.memberName == "length") {
+            // Check for slice.length / slice.ptr first
+            if (member.memberName == "length" || member.memberName == "ptr") {
                 if (auto ident = cast(IdentifierExpression)member.object) {
                     if (auto varInfo = ident.name in localVars) {
                         if (varInfo.isSlice) {
-                            gen.emitLoadLocal32(varInfo.offset + sliceInfo.lengthOffset);
+                            if (member.memberName == "length")
+                                gen.emitLoadLocal32(varInfo.offset + sliceInfo.lengthOffset);
+                            else
+                                gen.emitLoadPtr(varInfo.offset);  // ptr is at offset 0 (64-bit)
                             return;
                         }
                     }
@@ -2829,21 +2936,30 @@ class NativeCompiledFunction : CompiledFunction {
                     if (litExpr.value.peek!string() !is null) {
                         string strVal = litExpr.value.get!string();
                         if (member.memberName == "ptr") {
-                            if (objectMode) {
-                                import std.conv : to;
-                                string symName = "__str_" ~ to!string(objectDataSymCount++);
-                                uint dataOff = appendObjectData(cast(const(ubyte)[])strVal);
-                                objectDataSymbols ~= ObjectDataSymbol(symName, dataOff);
-                                emitLoadDataAddress(symName);
-                            } else {
-                                ubyte[] strData = cast(ubyte[])strVal.dup;
-                                ubyte* dataPtr = dataSection.addData(strData);
-                                gen.emitLoadImm64(cast(ulong)dataPtr);
-                            }
+                            emitStringLoad(strVal);
                             return;
                         } else {
                             // .length
                             gen.emitLoadImm(cast(int)strVal.length);
+                            return;
+                        }
+                    }
+                }
+            }
+
+            // Generic .ptr/.length/.capacity on any expression producing a dynamic array
+            if (member.memberName == "ptr" || member.memberName == "length" || member.memberName == "capacity") {
+                if (member.object.type !is null) {
+                    auto objType = member.object.type.resolve();
+                    if (auto arrType = cast(ArrayType)objType) {
+                        if (!arrType.isStaticArray) {
+                            compileExpression(member.object);  // x0 = address of slice struct
+                            if (member.memberName == "ptr")
+                                gen.emit(stencil_load_i64);  // 64-bit pointer at offset 0
+                            else if (member.memberName == "length")
+                                gen.emitLoadFromPointer(sliceInfo.lengthOffset);
+                            else
+                                gen.emitLoadFromPointer(sliceInfo.capacityOffset);
                             return;
                         }
                     }
@@ -4105,11 +4221,8 @@ class NativeCompiledFunction : CompiledFunction {
      * Preserves: x0 (index)
      */
     private void emitBoundsCheck(size_t sliceOffset, string fileName, uint line, uint column) {
-        import codegen.native.arm64_codegen : ErrorLocData;
-        
-        auto errorLabel = gen.newLabel();
         auto okLabel = gen.newLabel();
-        
+
         auto mark = temps.save();
         size_t myTempSlot = temps.alloc(8);
 
@@ -4127,21 +4240,7 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emit(stencil_lt_u32);  // x0 = (index < length) ? 1 : 0
         gen.emitBranchIfNonZero(okLabel);  // branch if index < length
 
-        // Out of bounds - call trap with location
-        ubyte* filePtr = dataSection.addString(fileName);
-        ErrorLocData errData;
-        errData.filePtr = cast(ulong)filePtr;
-        errData.fileLen = cast(uint)fileName.length;
-        errData.line = line;
-        errData.column = column;
-        errData.errorKind = cast(uint)CTFEErrorKind.OutOfBounds;
-
-        ubyte* errLocPtr = dataSection.addData((cast(ubyte*)&errData)[0..ErrorLocData.sizeof]);
-        gen.emitLoadImm64(cast(ulong)errLocPtr);
-
-        ulong trapSlot = hostFunctions.getFunctionSlotAddress("__ctfe_trap");
-        ulong contextSlot = hostFunctions.getContextSlotAddress();
-        gen.emitHostCall(trapSlot, contextSlot);
+        emitRuntimeError("array index out of bounds", fileName, line);
 
         gen.bindLabel(okLabel);
         // Restore index to x0
@@ -4156,8 +4255,6 @@ class NativeCompiledFunction : CompiledFunction {
      * Result: quotient in x0
      */
     private void emitCheckedDiv(string fileName, uint line, uint column) {
-        import codegen.native.arm64_codegen : ErrorLocData;
-        
         auto errorLabel = gen.newLabel();
         auto doneLabel = gen.newLabel();
         
@@ -4173,29 +4270,7 @@ class NativeCompiledFunction : CompiledFunction {
         // .Ldiv_error:
         gen.bindLabel(errorLabel);
 
-        if (objectMode) {
-            emitRuntimeError("division by zero", fileName, line);
-        } else {
-            // Build ErrorLocData in data section
-            ubyte* filePtr = dataSection.addString(fileName);
-            ErrorLocData errData;
-            errData.filePtr = cast(ulong)filePtr;
-            errData.fileLen = cast(uint)fileName.length;
-            errData.line = line;
-            errData.column = column;
-            errData.errorKind = cast(uint)CTFEErrorKind.DivByZero;
-
-            ubyte* errLocPtr = dataSection.addData((cast(ubyte*)&errData)[0..ErrorLocData.sizeof]);
-
-            // Load error location pointer into x0
-            gen.emitLoadImm64(cast(ulong)errLocPtr);
-
-            // Call __ctfe_trap(ctx, errorLocPtr)
-            ulong trapSlot = hostFunctions.getFunctionSlotAddress("__ctfe_trap");
-            ulong contextSlot = hostFunctions.getContextSlotAddress();
-            gen.emitHostCall(trapSlot, contextSlot);
-            // longjmp happens inside __ctfe_trap, we never return here
-        }
+        emitRuntimeError("division by zero", fileName, line);
 
         // .Ldiv_done:
         gen.bindLabel(doneLabel);
@@ -4207,8 +4282,6 @@ class NativeCompiledFunction : CompiledFunction {
      * Result: remainder in x0
      */
     private void emitCheckedMod(string fileName, uint line, uint column) {
-        import codegen.native.arm64_codegen : ErrorLocData;
-        
         auto errorLabel = gen.newLabel();
         auto doneLabel = gen.newLabel();
         
@@ -4218,25 +4291,7 @@ class NativeCompiledFunction : CompiledFunction {
         
         gen.bindLabel(errorLabel);
 
-        if (objectMode) {
-            emitRuntimeError("modulo by zero", fileName, line);
-        } else {
-            // Build ErrorLocData in data section
-            ubyte* filePtr = dataSection.addString(fileName);
-            ErrorLocData errData;
-            errData.filePtr = cast(ulong)filePtr;
-            errData.fileLen = cast(uint)fileName.length;
-            errData.line = line;
-            errData.column = column;
-            errData.errorKind = cast(uint)CTFEErrorKind.DivByZero;
-
-            ubyte* errLocPtr = dataSection.addData((cast(ubyte*)&errData)[0..ErrorLocData.sizeof]);
-            gen.emitLoadImm64(cast(ulong)errLocPtr);
-
-            ulong trapSlot = hostFunctions.getFunctionSlotAddress("__ctfe_trap");
-            ulong contextSlot = hostFunctions.getContextSlotAddress();
-            gen.emitHostCall(trapSlot, contextSlot);
-        }
+        emitRuntimeError("modulo by zero", fileName, line);
 
         gen.bindLabel(doneLabel);
     }
@@ -4297,23 +4352,42 @@ class NativeCompiledFunction : CompiledFunction {
     private void emitRuntimeError(string errorKind, string fileName, uint line) {
         import std.conv : to;
         string msg = "Runtime Error: " ~ errorKind ~ " at " ~ fileName ~ ":" ~ to!string(line) ~ "\n";
-        string symName = "__err_" ~ to!string(objectDataSymCount++);
-        uint dataOff = appendObjectData(cast(const(ubyte)[])msg);
-        objectDataSymbols ~= ObjectDataSymbol(symName, dataOff);
 
-        // Load msg address: ADRP x0, sym@PAGE + ADD x0, x0, sym@PAGEOFF
-        emitLoadDataAddress(symName);
+        // Load msg address into x0
+        emitStringLoad(msg, "__err_");
 
         // Set up write(2, msg, len): x0=fd, x1=buf, x2=len
         gen.emitMoveX0ToX1();                  // x1 = msg pointer
         gen.emitLoadImm(cast(int)msg.length);  // x0 = msg length
         gen.emitMoveX0ToX2();                  // x2 = msg length
         gen.emitLoadImm(2);                    // x0 = 2 (stderr)
-        emitObjectExternalCall("write");
+        emitExternalOrHostCall("write");
 
         // _exit(1)
         gen.emitLoadImm(1);                    // x0 = 1 (exit code)
-        emitObjectExternalCall("_exit");
+        emitExternalOrHostCall("_exit");
+    }
+
+    /// Emit a call to an external function. Works in both modes:
+    /// Object: BL with BRANCH26 relocation.
+    /// JIT: resolve via dlsym and call indirectly via x9.
+    private void emitExternalOrHostCall(string funcName) {
+        if (objectMode) {
+            emitObjectExternalCall(funcName);
+        } else {
+            // JIT mode: resolve via dlsym and call directly
+            import core.sys.posix.dlfcn : dlsym;
+            version (OSX) {
+                import core.sys.darwin.dlfcn : RTLD_DEFAULT;
+            } else {
+                import core.sys.posix.dlfcn : RTLD_DEFAULT;
+            }
+            auto ptr = dlsym(RTLD_DEFAULT, (funcName ~ "\0").ptr);
+            if (ptr !is null) {
+                gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)ptr);
+                gen.emitCallIndirectX9();
+            }
+        }
     }
 
     /**
@@ -4415,54 +4489,27 @@ class NativeCompiledFunction : CompiledFunction {
         // Read the file
         ubyte[] fileData = cast(ubyte[])read(fullPath);
         uint len = cast(uint)fileData.length;
-        
-        // Add file data to the data section (returns host pointer)
-        ubyte* dataPtr = dataSection.addData(fileData);
-        if (dataPtr is null) {
-            throw new Exception("import(): data section full");
-        }
-        
-        // Initialize slice struct at sliceOffset
-        // Native slice layout: { ptr: i64, length: i32, capacity: i32 } = sliceInfo.totalSize bytes
-        
-        // ptr = dataPtr (64-bit host pointer)
-        gen.emitLoadImm64(cast(ulong)dataPtr);
-        gen.emitStorePtr(sliceOffset);  // store 64-bit ptr
-        
+
+        // Store file data and load its address into x0
+        emitDataLoad(fileData, "__import_");
+        gen.emitStorePtr(sliceOffset);
+
         // length = len (32-bit at offset 8)
         gen.emitImm32(stencil_load_imm32, cast(int)len);
-        gen.emitStoreLocal32(sliceOffset + sliceInfo.lengthOffset);  // store length
-        
+        gen.emitStoreLocal32(sliceOffset + sliceInfo.lengthOffset);
+
         // capacity = len (32-bit at offset 12)
         gen.emitImm32(stencil_load_imm32, cast(int)len);
-        gen.emitStoreLocal32(sliceOffset + sliceInfo.capacityOffset);  // store capacity
+        gen.emitStoreLocal32(sliceOffset + sliceInfo.capacityOffset);
     }
 
     /// Initialize a slice from a string literal by storing bytes in the data section.
     private void compileStringLiteralInit(size_t sliceOffset, string strVal) {
-        import std.conv : to;
-
         uint len = cast(uint)strVal.length;
 
-        if (objectMode) {
-            // Store string bytes in __DATA,__const
-            string symName = "__str_" ~ to!string(objectDataSymCount++);
-            uint dataOff = appendObjectData(cast(const(ubyte)[])strVal);
-            objectDataSymbols ~= ObjectDataSymbol(symName, dataOff);
-
-            // ptr = ADRP+ADD (address of string data in data section)
-            emitLoadDataAddress(symName);
-            gen.emitStorePtr(sliceOffset);
-        } else {
-            ubyte[] strData = cast(ubyte[])strVal.dup;
-            ubyte* dataPtr = dataSection.addData(strData);
-            if (dataPtr is null)
-                throw new Exception("String literal: data section full");
-
-            // ptr = dataPtr (64-bit host pointer)
-            gen.emitLoadImm64(cast(ulong)dataPtr);
-            gen.emitStorePtr(sliceOffset);
-        }
+        // Store string data and load its address into x0
+        emitStringLoad(strVal);
+        gen.emitStorePtr(sliceOffset);
 
         // length (32-bit at offset 8)
         gen.emitImm32(stencil_load_imm32, cast(int)len);
@@ -4474,10 +4521,177 @@ class NativeCompiledFunction : CompiledFunction {
     }
 
     /**
+     * Compile array/string concatenation: a ~ b
+     *
+     * Both operands produce addresses of slice structs (ptr:i64, len:i32, cap:i32).
+     * Allocates a new buffer of (leftLen + rightLen) bytes, copies both halves,
+     * builds a result slice struct on the stack, returns its address in x0.
+     */
+    private void compileArrayConcat(BinaryExpression binOp) {
+        auto mark = temps.save();
+
+        // Temps for slice struct addresses and extracted fields
+        size_t tempLeftSlice  = temps.alloc(8);
+        size_t tempRightSlice = temps.alloc(8);
+        size_t tempLeftPtr    = temps.alloc(8);
+        size_t tempLeftLen    = temps.alloc(8);
+        size_t tempRightPtr   = temps.alloc(8);
+        size_t tempRightLen   = temps.alloc(8);
+        size_t tempTotalLen   = temps.alloc(8);
+        size_t tempNewBuf     = temps.alloc(8);
+        size_t tempLoopIdx    = temps.alloc(8);
+
+        // 1. Evaluate left operand → x0 = address of left slice struct
+        compileExpression(binOp.left);
+        gen.emitStorePtr(tempLeftSlice);
+
+        // 2. Evaluate right operand → x0 = address of right slice struct
+        compileExpression(binOp.right);
+        gen.emitStorePtr(tempRightSlice);
+
+        // 3. Extract left.ptr (8-byte at offset 0) and left.length (4-byte at lengthOffset)
+        gen.emitLoadPtr(tempLeftSlice);         // x0 = &leftSlice
+        gen.emit(stencil_load_i64);             // x0 = leftSlice.ptr (64-bit)
+        gen.emitStorePtr(tempLeftPtr);
+
+        gen.emitLoadPtr(tempLeftSlice);         // x0 = &leftSlice
+        gen.emitLoadFromPointer(sliceInfo.lengthOffset);  // x0 = leftSlice.length (32-bit)
+        gen.emitStoreLocal32(tempLeftLen);
+
+        // 4. Extract right.ptr and right.length
+        gen.emitLoadPtr(tempRightSlice);
+        gen.emit(stencil_load_i64);
+        gen.emitStorePtr(tempRightPtr);
+
+        gen.emitLoadPtr(tempRightSlice);
+        gen.emitLoadFromPointer(sliceInfo.lengthOffset);
+        gen.emitStoreLocal32(tempRightLen);
+
+        // 5. totalLen = leftLen + rightLen
+        gen.emitLoadLocal32(tempLeftLen);
+        gen.emitMoveX0ToX1();
+        gen.emitLoadLocal32(tempRightLen);
+        gen.emit(stencil_add_i32);              // x0 = leftLen + rightLen
+        gen.emitStoreLocal32(tempTotalLen);
+
+        // 6. Allocate buffer of totalLen bytes
+        gen.emitLoadLocal32(tempTotalLen);       // x0 = size
+        ulong allocSlot = hostFunctions.getFunctionSlotAddress("__ctfe_alloc");
+        if (allocSlot != 0) {
+            ulong contextSlot = hostFunctions.getContextSlotAddress();
+            gen.emitHostCall(allocSlot, contextSlot);
+        } else {
+            emitExternalOrHostCall("malloc");
+        }
+        gen.emitStorePtr(tempNewBuf);            // save new buffer ptr
+
+        // 7. Copy left half: leftLen bytes from leftPtr to newBuf
+        gen.emitImm32(stencil_load_imm32, 0);
+        gen.emitStoreLocal32(tempLoopIdx);       // i = 0
+
+        auto copyLeftStart = gen.newLabel();
+        auto copyLeftEnd   = gen.newLabel();
+        gen.bindLabel(copyLeftStart);
+
+        // if (i >= leftLen) break
+        gen.emitLoadLocal32(tempLoopIdx);
+        gen.emitMoveX0ToX1();
+        gen.emitLoadLocal32(tempLeftLen);
+        gen.emitMoveX0ToX2();
+        gen.emit(stencil_move_arg1_to_result);   // x0 = i
+        gen.emit(stencil_move_arg2_to_arg1);     // x1 = leftLen
+        gen.emit(stencil_ge_i32);                // x0 = (i >= leftLen)
+        gen.emitBranchIfNonZero(copyLeftEnd);
+
+        // Load byte from leftPtr + i
+        gen.emitLoadLocal32(tempLoopIdx);        // x0 = i
+        gen.emitMoveX0ToX1();
+        gen.emitLoadPtr(tempLeftPtr);            // x0 = leftPtr
+        gen.emit(stencil_add_i64);               // x0 = leftPtr + i
+        gen.emitLoadByteFromPointer(0);          // x0 = byte at [leftPtr + i]
+        gen.emitMoveX0ToX2();                    // x2 = byte value
+
+        // Store byte to newBuf + i
+        gen.emitLoadLocal32(tempLoopIdx);        // x0 = i
+        gen.emitMoveX0ToX1();
+        gen.emitLoadPtr(tempNewBuf);             // x0 = newBuf
+        gen.emit(stencil_add_i64);               // x0 = newBuf + i
+        gen.emit(stencil_move_arg2_to_arg1);     // x1 = byte value
+        gen.emitStoreByteToPointer(0);           // [newBuf + i] = byte
+
+        gen.emitIncLocal32(tempLoopIdx);
+        gen.emitBranch(copyLeftStart);
+        gen.bindLabel(copyLeftEnd);
+
+        // 8. Copy right half: rightLen bytes from rightPtr to newBuf + leftLen
+        gen.emitImm32(stencil_load_imm32, 0);
+        gen.emitStoreLocal32(tempLoopIdx);       // i = 0
+
+        auto copyRightStart = gen.newLabel();
+        auto copyRightEnd   = gen.newLabel();
+        gen.bindLabel(copyRightStart);
+
+        // if (i >= rightLen) break
+        gen.emitLoadLocal32(tempLoopIdx);
+        gen.emitMoveX0ToX1();
+        gen.emitLoadLocal32(tempRightLen);
+        gen.emitMoveX0ToX2();
+        gen.emit(stencil_move_arg1_to_result);
+        gen.emit(stencil_move_arg2_to_arg1);
+        gen.emit(stencil_ge_i32);
+        gen.emitBranchIfNonZero(copyRightEnd);
+
+        // Load byte from rightPtr + i
+        gen.emitLoadLocal32(tempLoopIdx);
+        gen.emitMoveX0ToX1();
+        gen.emitLoadPtr(tempRightPtr);
+        gen.emit(stencil_add_i64);
+        gen.emitLoadByteFromPointer(0);
+        gen.emitMoveX0ToX2();                    // x2 = byte value
+
+        // Store byte to newBuf + leftLen + i
+        gen.emitLoadLocal32(tempLeftLen);         // x0 = leftLen
+        gen.emitMoveX0ToX1();
+        gen.emitLoadLocal32(tempLoopIdx);         // x0 = i
+        gen.emit(stencil_add_i32);                // x0 = leftLen + i (32-bit offset)
+        gen.emitMoveX0ToX1();                     // x1 = leftLen + i
+        gen.emitLoadPtr(tempNewBuf);              // x0 = newBuf
+        gen.emit(stencil_add_i64);                // x0 = newBuf + leftLen + i
+        gen.emit(stencil_move_arg2_to_arg1);      // x1 = byte value
+        gen.emitStoreByteToPointer(0);
+
+        gen.emitIncLocal32(tempLoopIdx);
+        gen.emitBranch(copyRightStart);
+        gen.bindLabel(copyRightEnd);
+
+        // 9. Allocate result slice struct on stack (permanent frame space, not temp)
+        size_t resultOffset = (nextLocalOffset + 7) & ~7;  // 8-byte align
+        nextLocalOffset = resultOffset + sliceInfo.totalSize;
+
+        // Store ptr (64-bit) — read tempNewBuf before temps.restore
+        gen.emitLoadPtr(tempNewBuf);
+        gen.emitStorePtr(resultOffset);
+
+        // Store length (32-bit)
+        gen.emitLoadLocal32(tempTotalLen);
+        gen.emitStoreLocal32(resultOffset + sliceInfo.lengthOffset);
+
+        // Store capacity (32-bit)
+        gen.emitLoadLocal32(tempTotalLen);
+        gen.emitStoreLocal32(resultOffset + sliceInfo.capacityOffset);
+
+        // Now safe to release temp slots
+        temps.restore(mark);
+
+        // Return address of result slice struct
+        gen.emitStackAddress(resultOffset);
+    }
+
+    /**
      * Compile slice append: arr ~= element
-     * 
+     *
      * Native slice layout: { ptr: i64, length: i32, capacity: i32 } = sliceInfo.totalSize bytes
-     * 
+     *
      * Algorithm (mirrors WASM emitter):
      * 1. Evaluate element, store to temp
      * 2. Check if length >= capacity
@@ -4559,10 +4773,14 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitLoadLocal32(tempNewCap);        // x0 = newCapacity
         gen.emit(stencil_mul_i32);              // x0 = newCapacity * elemSize (bytes)
 
-        // Call __ctfe_alloc(size) - size is in x0, will be shifted to x1
+        // Allocate new buffer: __ctfe_alloc if available, else malloc
         ulong allocSlot = hostFunctions.getFunctionSlotAddress("__ctfe_alloc");
-        ulong contextSlot = hostFunctions.getContextSlotAddress();
-        gen.emitHostCall(allocSlot, contextSlot);  // x0 = new buffer ptr
+        if (allocSlot != 0) {
+            ulong contextSlot = hostFunctions.getContextSlotAddress();
+            gen.emitHostCall(allocSlot, contextSlot);  // x0 = new buffer ptr
+        } else {
+            emitExternalOrHostCall("malloc");  // x0 = size → x0 = ptr
+        }
         gen.emitStorePtr(tempNewPtr);         // save new ptr (64-bit)
 
         // Copy loop: for i = 0 to length: newPtr[i] = oldPtr[i]
@@ -4892,69 +5110,88 @@ class NativeCompiledFunction : CompiledFunction {
     }
 
     private void compileWriteln(Expression[] args) {
-        import std.variant : Variant;
-        
         foreach (arg; args) {
-            // Determine argument type and emit appropriate write call
             if (auto literal = cast(LiteralExpression)arg) {
                 if (literal.value.type == typeid(string)) {
-                    // String literal: store in data section, call __ctfe_write_str(ptr, len)
                     string strVal = literal.value.get!string();
-                    ubyte* strPtr = dataSection.addString(strVal);
-                    if (strPtr is null) {
-                        throw new Exception("__writeln: data section full");
+                    if (objectMode) {
+                        emitWriteString(strVal);
+                    } else {
+                        // JIT: use host function for string output
+                        ubyte* strPtr = dataSection.addString(strVal);
+                        gen.emitLoadImm64(cast(ulong)strPtr);
+                        gen.emitMoveX0ToX1();
+                        gen.emitImm32(stencil_load_imm32, cast(int)strVal.length);
+                        gen.emitMoveX0ToX2();
+                        gen.emitMoveX1ToX0();
+                        gen.emitMoveX2ToX1();
+                        ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_write_str");
+                        ulong ctxSlot = hostFunctions.getContextSlotAddress();
+                        gen.emitHostCall(slot, ctxSlot);
                     }
-                    
-                    // Load ptr into x0
-                    gen.emitLoadImm64(cast(ulong)strPtr);
-                    // Load len into x1
-                    gen.emitMoveX0ToX1();  // Save ptr to x1 temporarily
-                    gen.emitImm32(stencil_load_imm32, cast(int)strVal.length);
-                    // Swap: x0=len, x1=ptr -> need x0=ptr, x1=len
-                    gen.emitMoveX0ToX2();  // x2 = len
-                    gen.emitMoveX1ToX0();  // x0 = ptr (restore)
-                    gen.emitMoveX2ToX1();  // x1 = len
-                    
-                    // Call __ctfe_write_str (args in x0=ptr, x1=len)
-                    ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_write_str");
-                    ulong ctxSlot = hostFunctions.getContextSlotAddress();
-                    gen.emitHostCall(slot, ctxSlot);
                 }
                 else if (literal.value.type == typeid(long) || literal.value.type == typeid(int)) {
-                    // Integer literal: call __ctfe_write_i32(value)
-                    long val = literal.value.type == typeid(long) 
-                        ? literal.value.get!long() 
+                    long val = literal.value.type == typeid(long)
+                        ? literal.value.get!long()
                         : literal.value.get!int();
-                    gen.emitImm32(stencil_load_imm32, cast(int)val);
-                    
+                    if (objectMode) {
+                        import std.conv : to;
+                        emitWriteString(to!string(val));
+                    } else {
+                        gen.emitImm32(stencil_load_imm32, cast(int)val);
+                        ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_write_i32");
+                        ulong ctxSlot = hostFunctions.getContextSlotAddress();
+                        gen.emitHostCall(slot, ctxSlot);
+                    }
+                }
+                else if (literal.value.type == typeid(bool)) {
+                    bool val = literal.value.get!bool();
+                    if (objectMode) {
+                        emitWriteString(val ? "true" : "false");
+                    } else {
+                        gen.emitImm32(stencil_load_imm32, val ? 1 : 0);
+                        ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_write_bool");
+                        ulong ctxSlot = hostFunctions.getContextSlotAddress();
+                        gen.emitHostCall(slot, ctxSlot);
+                    }
+                }
+            }
+            else {
+                // Non-literal expression: evaluate and print
+                compileExpression(arg);
+                if (objectMode) {
+                    // Object mode: no host functions, write placeholder
+                    // TODO: implement runtime itoa for proper integer output
+                    emitWriteString("<val>");
+                } else {
                     ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_write_i32");
                     ulong ctxSlot = hostFunctions.getContextSlotAddress();
                     gen.emitHostCall(slot, ctxSlot);
                 }
-                else if (literal.value.type == typeid(bool)) {
-                    // Boolean literal: call __ctfe_write_bool(0 or 1)
-                    bool val = literal.value.get!bool();
-                    gen.emitImm32(stencil_load_imm32, val ? 1 : 0);
-                    
-                    ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_write_bool");
-                    ulong ctxSlot = hostFunctions.getContextSlotAddress();
-                    gen.emitHostCall(slot, ctxSlot);
-                }
-            }
-            else {
-                // Non-literal expression: evaluate and print as i32
-                compileExpression(arg);
-                
-                ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_write_i32");
-                ulong ctxSlot = hostFunctions.getContextSlotAddress();
-                gen.emitHostCall(slot, ctxSlot);
             }
         }
-        
-        // Emit newline at the end
-        ulong newlineSlot = hostFunctions.getFunctionSlotAddress("__ctfe_write_newline");
-        ulong ctxSlot = hostFunctions.getContextSlotAddress();
-        gen.emitHostCall(newlineSlot, ctxSlot);
+
+        // Emit newline
+        if (objectMode) {
+            emitWriteString("\n");
+        } else {
+            ulong newlineSlot = hostFunctions.getFunctionSlotAddress("__ctfe_write_newline");
+            ulong ctxSlot = hostFunctions.getContextSlotAddress();
+            gen.emitHostCall(newlineSlot, ctxSlot);
+        }
+    }
+
+    /// Emit write(1, str, len) to stdout for a compile-time string.
+    /// Works in both JIT and object mode.
+    private void emitWriteString(string str) {
+        // Store string data and load address into x0
+        emitStringLoad(str);
+        // Set up write(1, buf, len): x0=fd, x1=buf, x2=len
+        gen.emitMoveX0ToX1();                  // x1 = buf pointer
+        gen.emitLoadImm(cast(int)str.length);  // x0 = len
+        gen.emitMoveX0ToX2();                  // x2 = len
+        gen.emitLoadImm(1);                    // x0 = 1 (stdout)
+        emitExternalOrHostCall("write");
     }
     
     /**
@@ -5089,34 +5326,10 @@ class NativeCompiledFunction : CompiledFunction {
         return null;
     }
 
-    /// Store a null-terminated C string in the data section, return its offset.
-    private size_t storeCString(string s) {
-        if (objectMode) {
-            uint off = appendObjectData(cast(ubyte[])(s.dup ~ '\0'));
-            return off;
-        } else {
-            auto bytes = cast(const(ubyte)[])(s ~ '\0');
-            size_t off = dataSection.bytesUsed;
-            dataSection.addData(bytes);
-            return off;
-        }
-    }
-
-    /// Load address of a C string stored in the data section into x0.
-    private void emitLoadCStringAddress(size_t offset, string symName) {
-        if (objectMode) {
-            // Register as data symbol and use ADRP+ADD
-            bool alreadyRegistered = false;
-            foreach (ds; objectDataSymbols)
-                if (ds.name == symName) { alreadyRegistered = true; break; }
-            if (!alreadyRegistered)
-                objectDataSymbols ~= ObjectDataSymbol(symName, cast(uint)offset);
-            emitLoadDataAddress(symName);
-        } else {
-            // JIT mode: compute absolute address from dataSection base
-            ulong addr = cast(ulong)(cast(size_t)dataSection.base + offset);
-            gen.emitLoadImm64(addr);
-        }
+    /// Store a null-terminated C string in the data section and load its address into x0.
+    private void emitCStringLoad(string s) {
+        auto bytes = cast(const(ubyte)[])(s ~ '\0');
+        emitDataLoad(bytes, "__cstr_");
     }
 
     /// Emit an ObjC method call via objc_msgSend for an InterfaceDecl.
@@ -5193,13 +5406,8 @@ class NativeCompiledFunction : CompiledFunction {
         // Step 1: Get receiver and save to temp
         if (isStatic) {
             // Static call: objc_getClass("ClassName") → x0 = Class pointer
-            string classSymName = "__objc_class_" ~ className;
-            size_t classStrOff = storeCString(className);
-            emitLoadCStringAddress(classStrOff, classSymName);
-            if (objectMode)
-                emitObjectExternalCall("objc_getClass");
-            else
-                emitJITExternalCall("objc_getClass");
+            emitCStringLoad(className);
+            emitExternalOrHostCall("objc_getClass");
         } else {
             // Instance call: compile receiver expression
             compileExpression(receiver);
@@ -5207,16 +5415,8 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitStorePtr(receiverTemp);
 
         // Step 2: sel_registerName("selector") → x0 = SEL, save to temp
-        string selSymName = "__objc_sel_" ~ selector;
-        // Replace : with _ in symbol name for valid identifiers
-        char[] cleanSym = selSymName.dup;
-        foreach (ref c; cleanSym) if (c == ':') c = '_';
-        size_t selStrOff = storeCString(selector);
-        emitLoadCStringAddress(selStrOff, cast(string)cleanSym);
-        if (objectMode)
-            emitObjectExternalCall("sel_registerName");
-        else
-            emitJITExternalCall("sel_registerName");
+        emitCStringLoad(selector);
+        emitExternalOrHostCall("sel_registerName");
         gen.emitStorePtr(selectorTemp);
 
         // Step 3: User args in x2, x3, ...
@@ -5249,10 +5449,7 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitLoadPtr(receiverTemp);
 
         // Step 6: Call objc_msgSend
-        if (objectMode)
-            emitObjectExternalCall("objc_msgSend");
-        else
-            emitJITExternalCall("objc_msgSend");
+        emitExternalOrHostCall("objc_msgSend");
 
         temps.restore(mark);
         // Result is in x0

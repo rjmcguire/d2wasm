@@ -1,0 +1,6 @@
+{
+  "name": "native_string_concat",
+  "description": "String concatenation with ~ operator, compiled to ARM64 .o",
+  "type": "native_exec",
+  "expected_exit": 10
+}

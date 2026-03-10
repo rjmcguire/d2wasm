@@ -1,0 +1,6 @@
+{
+  "name": "native_generic_ptr_on_expr",
+  "description": "Generic .ptr/.length on expression results (not just identifiers), compiled to ARM64 .o",
+  "type": "native_exec",
+  "expected_exit": 4
+}
