@@ -1,0 +1,8 @@
+{
+  "name": "arena_safety_global_store",
+  "description": "Arena safety detects storing arena-derived value into a global",
+  "type": "compile_output",
+  "compiler_args": ["--arena-safety"],
+  "expected_output": "arena-derived value stored into global",
+  "capability": "arena memory safety — global store produces error"
+}

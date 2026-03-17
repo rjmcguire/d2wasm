@@ -64,6 +64,7 @@ struct CompilerOptions {
 
     // Optimization options
     bool escapeAnalysis = false;  // Enable escape analysis for stack promotion of new (default: off)
+    bool arenaSafety = false;     // Enable arena safety checks (default: off)
 
     // Import paths
     string[] importPaths;         // -I flags for module search paths
@@ -134,6 +135,7 @@ int main(string[] args) {
             "stack-trace", "Emit call stack tracking for CTFE errors (default: on)", &options.stackTrace,
             // Optimization options
             "escape-analysis", "Enable escape analysis for stack promotion of new (default: off)", &options.escapeAnalysis,
+            "arena-safety", "Enable arena memory safety checks (default: off)", &options.arenaSafety,
             // Import paths
             "import-path", "Add import search path (can be specified multiple times)", &options.importPaths,
             // Dependency graph
@@ -482,7 +484,15 @@ int compileFile(CompilerOptions options) {
             }
         }
 
-        // 6e. Escape analysis (optional)
+        // 6e. Arena safety analysis (optional)
+        // Checks for unsafe stores of arena-derived values (globals, cross-generation)
+        if (options.arenaSafety) {
+            import semantic.arena_taint : analyzeArenaSafety;
+            log(2, "Analyzing arena memory safety...");
+            analyzeArenaSafety(ast);
+        }
+
+        // 6f. Escape analysis (optional)
         // Stack-promotes non-escaping `new` allocations and warns on escaping &local
         if (options.escapeAnalysis) {
             import semantic.escape_analyzer : analyzeEscapes;

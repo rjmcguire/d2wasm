@@ -98,12 +98,15 @@ struct DeclAttrs {
 
     // Non-bitfield attributes
     string gcStrategy;  // @gc(strategy) — null if not present
+    string[] escapesParams;  // @escapes("param1", "param2") — null if not present
 
     /// Merge another DeclAttrs into this one (OR all flags)
     void merge(DeclAttrs other) {
         (cast(uint*)&this)[0] |= (cast(const uint*)&other)[0];
         if (other.gcStrategy !is null)
             gcStrategy = other.gcStrategy;
+        if (other.escapesParams !is null)
+            escapesParams = other.escapesParams;
     }
 }
 
@@ -308,6 +311,7 @@ class FunctionDecl : Declaration {
     Declaration parent;  // enclosing struct/class, null for free functions
     private string _mangledName;  // D ABI mangled name, set during symbol collection
     string gcStrategy;   // @gc(heap) etc. — null if not set
+    string[] escapesParams;  // @escapes("param") — parameter names allowed to escape
     string objcSelector;  // ObjC selector string, e.g. "sharedApplication", "setTitle:"
 
     /// Get the mangled name.

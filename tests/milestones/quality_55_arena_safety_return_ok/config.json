@@ -1,0 +1,9 @@
+{
+  "name": "arena_safety_return_ok",
+  "description": "Arena safety allows returning arena-derived values (safe by design)",
+  "type": "wasm_exec",
+  "compiler_args": ["--arena-safety"],
+  "mangled_entry": "_D4test4mainFZi",
+  "expected_result": "0",
+  "capability": "arena memory safety — returning arena-derived values is safe"
+}

@@ -360,6 +360,31 @@ class TreeSitterBridge {
                             }
                         }
                         break;
+                    case "escapes":
+                        // @escapes("param1", "param2") — extract parameter names that may escape
+                        log(3, "extractAtAttribute: found @escapes, scanning for arguments");
+                        for (uint j = i + 1; j < childCount; j++) {
+                            TSNode argNode = TreeSitterParser.getChild(node, j);
+                            string argNodeType = TreeSitterParser.getNodeType(argNode);
+                            if (argNodeType == "arguments") {
+                                uint argCount = TreeSitterParser.getChildCount(argNode);
+                                for (uint k = 0; k < argCount; k++) {
+                                    TSNode arg = TreeSitterParser.getChild(argNode, k);
+                                    string at = TreeSitterParser.getNodeType(arg);
+                                    if (at == "string_literal" || at == "identifier" ||
+                                        (at != "(" && at != ")" && at != ",")) {
+                                        string raw = TreeSitterParser.getNodeText(arg, sourceText);
+                                        // Strip quotes from string literals: "param" -> param
+                                        if (raw.length >= 2 && raw[0] == '"' && raw[$-1] == '"')
+                                            raw = raw[1 .. $-1];
+                                        dattrs.escapesParams ~= raw;
+                                        log(3, "extractAtAttribute: added escapes param '", raw, "'");
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        break;
                     default: break; // Unknown @attributes silently ignored
                 }
             }
@@ -483,6 +508,7 @@ class TreeSitterBridge {
         funcDecl.visibility = vis;
         funcDecl.attrs = dattrs;
         funcDecl.gcStrategy = dattrs.gcStrategy;
+        funcDecl.escapesParams = dattrs.escapesParams;
 
         // If this is a template function, wrap in TemplateDecl
         if (templateParams.length > 0) {
