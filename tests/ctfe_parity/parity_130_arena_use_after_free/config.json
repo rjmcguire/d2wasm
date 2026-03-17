@@ -1,0 +1,7 @@
+{
+  "name": "arena_use_after_free",
+  "description": "CTFE parity: arena safety detects use of variable after __arena_drop()",
+  "type": "compile_error",
+  "compiler_args": ["--arena-safety"],
+  "expected_error": "use of 'data' after __arena_drop()"
+}

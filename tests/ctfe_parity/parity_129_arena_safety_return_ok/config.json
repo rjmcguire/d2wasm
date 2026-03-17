@@ -1,0 +1,8 @@
+{
+  "name": "arena_safety_return_ok",
+  "description": "CTFE parity: returning arena-derived values is safe",
+  "type": "wasm_exec",
+  "compiler_args": ["--arena-safety"],
+  "entry": "_D4test4mainFZi",
+  "expected_result": "6"
+}

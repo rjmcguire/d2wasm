@@ -1,0 +1,8 @@
+{
+  "name": "arena_pre_new_survives",
+  "description": "CTFE parity: variables from parent generation survive sub-generation drop",
+  "type": "wasm_exec",
+  "compiler_args": ["--arena-safety"],
+  "entry": "_D4test4mainFZi",
+  "expected_result": "42"
+}
