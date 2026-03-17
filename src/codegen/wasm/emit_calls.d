@@ -366,6 +366,18 @@ mixin template CallEmitter() {
             return;
         }
 
+        // __arena_new() / __arena_drop() — arena sub-generation management
+        if (ident.name == "__arena_new") {
+            emitArenaPointer(out_);
+            emitWasmCall(out_, emitter.arenaNewFuncIndex);
+            return;
+        }
+        if (ident.name == "__arena_drop") {
+            emitArenaPointer(out_);
+            emitWasmCall(out_, emitter.arenaDropFuncIndex);
+            return;
+        }
+
         // Compiler intrinsics — emit raw opcodes, no function call
         if (ident.name.length > 12 && ident.name[0..12] == "__intrinsic_") {
             emitIntrinsicCall(out_, ident.name, expr.arguments);

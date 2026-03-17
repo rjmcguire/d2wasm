@@ -2688,6 +2688,13 @@ class NativeCompiledFunction : CompiledFunction {
                     return;
                 }
 
+                // __arena_new() / __arena_drop() — arena sub-generation management
+                if (funcIdent.name == "__arena_new" || funcIdent.name == "__arena_drop") {
+                    // TODO: emit native arena new/drop calls when arena runtime is available
+                    log(2, "native: ", funcIdent.name, "() — not yet implemented");
+                    return;
+                }
+
                 // Compiler intrinsics — emit raw opcodes, no function call
                 if (funcIdent.name.length > 12 && funcIdent.name[0..12] == "__intrinsic_") {
                     compileIntrinsicCall(funcIdent.name, call.arguments);

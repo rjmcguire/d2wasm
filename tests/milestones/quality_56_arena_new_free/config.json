@@ -1,0 +1,8 @@
+{
+  "name": "arena_new_free",
+  "description": "Test __arena.new() and __arena.free() sub-generation calls",
+  "type": "wasm_exec",
+  "mangled_entry": "_D4test4mainFZi",
+  "expected_result": "0",
+  "capability": "arena sub-generation management via __arena.new() / __arena.free()"
+}

@@ -1195,6 +1195,22 @@ class TypeChecker {
     }
     
     Type checkCallExpression(CallExpression expr) {
+        // Handle __arena_new() / __arena_drop() — arena sub-generation management
+        if (auto identExpr = cast(IdentifierExpression)expr.function_) {
+            if (identExpr.name == "__arena_new" || identExpr.name == "__arena_drop") {
+                if (currentFunctionDecl is null)
+                    throw new TypeError(
+                        format("%s can only be used inside a function", identExpr.name),
+                        expr.location);
+                if (expr.arguments.length != 0)
+                    throw new TypeError(
+                        format("%s() takes no arguments", identExpr.name),
+                        expr.location);
+                currentFunctionDecl.needsArena = true;
+                return new BasicType(expr.location, BasicType.Kind.Void);
+            }
+        }
+
         // Handle __ctfe_runtime magic module calls
         if (auto memberExpr = cast(MemberExpression)expr.function_) {
             if (auto objIdent = cast(IdentifierExpression)memberExpr.object) {
