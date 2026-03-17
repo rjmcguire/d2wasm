@@ -1,0 +1,6 @@
+// EXPECTED: 1
+int main() {
+    static if (__traits(isArithmetic, ubyte)) __writeln(1);
+    else __writeln(0);
+    return 0;
+}

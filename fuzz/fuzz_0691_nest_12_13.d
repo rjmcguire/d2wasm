@@ -1,0 +1,11 @@
+// EXPECTED: 156
+int main() {
+    int count = 0;
+    for (int i = 0; i < 12; i++) {
+        for (int j = 0; j < 13; j++) {
+            count++;
+        }
+    }
+    __writeln(count);
+    return 0;
+}

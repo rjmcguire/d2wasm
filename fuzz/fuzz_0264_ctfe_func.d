@@ -1,0 +1,12 @@
+// EXPECTED: 120
+int factorial(int n) {
+    if (n <= 1) return 1;
+    return n * factorial(n - 1);
+}
+
+enum fact5 = factorial(5);
+
+int main() {
+    __writeln(fact5);
+    return 0;
+}
