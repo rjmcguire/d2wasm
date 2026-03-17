@@ -2624,6 +2624,26 @@ class TypeChecker {
             return new BasicType(loc, BasicType.Kind.Bool);
         }
 
+        // Special case: isRef checks if argument is a ref parameter
+        if (expr.traitName == "isRef") {
+            expr.boolResult = false;
+            if (expr.arguments.length > 0) {
+                if (auto ident = cast(IdentifierExpression)expr.arguments[0]) {
+                    // Look up the symbol — check if it's a ref parameter
+                    if (currentFunctionDecl !is null) {
+                        foreach (ref p; currentFunctionDecl.parameters) {
+                            if (p.name == ident.name) {
+                                expr.boolResult = p.isRef;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            expr.evaluated = true;
+            return new BasicType(loc, BasicType.Kind.Bool);
+        }
+
         // Special case: identifier returns string type
         if (expr.traitName == "identifier") {
             expr.evaluate();
