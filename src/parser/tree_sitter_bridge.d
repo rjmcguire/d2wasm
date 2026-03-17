@@ -934,12 +934,14 @@ class TreeSitterBridge {
      */
     Parameter[] parseParameterList(TSNode parametersNode) {
         Parameter[] parameters;
-        
+
         uint childCount = TreeSitterParser.getChildCount(parametersNode);
         for (uint i = 0; i < childCount; i++) {
             TSNode child = TreeSitterParser.getChild(parametersNode, i);
             string nodeType = TreeSitterParser.getNodeType(child);
-            
+            log(3, "  paramList child ", i, ": type='", nodeType,
+                "' text='", TreeSitterParser.getNodeText(child, sourceText), "'");
+
             if (nodeType == "parameter") {
                 parameters ~= parseParameter(child);
             }
@@ -952,32 +954,43 @@ class TreeSitterBridge {
      * Parse a single parameter
      */
     Parameter parseParameter(TSNode parameterNode) {
-        // Parameter structure: type identifier [default_value]
+        // Parameter structure: [parameter_attribute...] type identifier [default_value]
         TSNode typeNode, nameNode, defaultNode;
-        
+        bool isRef = false;
+
         uint childCount = TreeSitterParser.getChildCount(parameterNode);
         for (uint i = 0; i < childCount; i++) {
             TSNode child = TreeSitterParser.getChild(parameterNode, i);
             string nodeType = TreeSitterParser.getNodeType(child);
-            
+            log(3, "  parseParameter child ", i, ": type='", nodeType,
+                "' text='", TreeSitterParser.getNodeText(child, sourceText), "'");
+
             if (nodeType == "type" && !TreeSitterParser.isValid(typeNode)) {
                 typeNode = child;
             } else if (nodeType == "identifier" && !TreeSitterParser.isValid(nameNode)) {
                 nameNode = child;
             } else if (nodeType == "default_value") {
                 defaultNode = child;
+            } else if (nodeType == "ref") {
+                isRef = true;
+            } else if (nodeType == "parameter_attribute") {
+                // parameter_attribute wraps ref, out, in, lazy, scope, etc.
+                string attrText = TreeSitterParser.getNodeText(child, sourceText);
+                if (attrText == "ref") isRef = true;
             }
         }
-        
+
         if (!TreeSitterParser.isValid(typeNode) || !TreeSitterParser.isValid(nameNode)) {
             throw new ParseError("Parameter missing type or name", makeSourceLocation(parameterNode));
         }
-        
+
         Type paramType = parseType(typeNode);
         string paramName = TreeSitterParser.getNodeText(nameNode, sourceText);
         Expression defaultValue = TreeSitterParser.isValid(defaultNode) ? parseExpression(defaultNode) : null;
-        
-        return Parameter(paramType, paramName, defaultValue);
+
+        auto param = Parameter(paramType, paramName, defaultValue);
+        param.isRef = isRef;
+        return param;
     }
     
     /**

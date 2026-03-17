@@ -353,7 +353,8 @@ struct Parameter {
     Type type;
     string name;
     Expression defaultValue;  // null if no default
-    
+    bool isRef;  // true for `ref` parameters (pass by reference)
+
     // Assigned by type checker - unique ID for this parameter
     uint uniqueLocalId = uint.max;  // uint.max = unassigned
     bool isCaptured;  // true if captured by a delegate/lambda

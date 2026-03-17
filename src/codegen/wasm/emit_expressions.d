@@ -1808,6 +1808,10 @@ mixin template ExpressionEmitter() {
                     return;
                 case AddrMode.paramPointer:
                     emitLocalGet(out_, info.wasmLocalIdx);
+                    // ref scalar param: deref pointer to get value
+                    if (info.kind == VarKind.scalar) {
+                        emitI32Load(out_);
+                    }
                     return;
             }
         }
@@ -2408,6 +2412,23 @@ mixin template ExpressionEmitter() {
 
         // Unified variable resolution for locals and params
         if (auto info = resolveVar(ident.resolvedLocalId, ident.name)) {
+            // ref param assignment: store through pointer
+            if (info.addrMode == AddrMode.paramPointer && info.kind == VarKind.scalar) {
+                emitLocalGet(out_, info.wasmLocalIdx);  // push ref pointer
+                if (expr.operator != AssignmentExpression.Operator.Assign) {
+                    // Compound assignment: load current value, compute, store
+                    emitLocalGet(out_, info.wasmLocalIdx);
+                    emitI32Load(out_);                  // current value
+                    emitExpression(out_, expr.right);    // RHS value
+                    emitCompoundOp(out_, expr.operator, false, false, expr.location);
+                } else {
+                    emitExpression(out_, expr.right);    // RHS value
+                }
+                emitLocalTee(out_, tempLocalB);         // save result for expression value
+                emitI32Store(out_);                     // [ptr, val] → store through pointer
+                emitLocalGet(out_, tempLocalB);         // leave result on stack
+                return;
+            }
             if (info.addrMode == AddrMode.wasmLocal) {
                 // Scalar local/param — local_set/local_tee
                 auto wasmIdx = info.wasmLocalIdx;

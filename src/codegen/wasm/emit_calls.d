@@ -419,6 +419,13 @@ mixin template CallEmitter() {
             emitArenaPointer(out_);
         }
 
+        // Track ref scalar spills — need to reload values from shadow stack after the call
+        static struct RefSpillInfo {
+            uint wasmLocalIdx;  // WASM local to reload into
+            uint spOffset;      // offset from post-spill SP to the spilled value
+        }
+        RefSpillInfo[] refSpills;
+
         // Emit arguments (copy structs for pass-by-value semantics)
         uint totalCopySize = 0;
         foreach (argIdx, arg; expr.arguments) {
@@ -659,6 +666,42 @@ mixin template CallEmitter() {
                 continue;
             }
 
+            // ref parameter: pass address of the argument variable
+            // For WASM locals (scalars), spill to shadow stack temp to get an address
+            if (calleeDecl && argIdx < calleeDecl.parameters.length &&
+                calleeDecl.parameters[argIdx].isRef) {
+                if (auto argIdent = cast(IdentifierExpression)arg) {
+                    if (auto argInfo = resolveVar(argIdent.resolvedLocalId, argIdent.name)) {
+                        if (argInfo.addrMode == AddrMode.wasmLocal) {
+                            // Scalar in WASM local — spill to shadow stack temp
+                            // Allocate 4 bytes: SP = SP - 4
+                            emitGlobalGet(out_, emitter.spGlobal);
+                            emitI32Const(out_, 4);
+                            out_ ~= Op.i32_sub;
+                            emitGlobalSet(out_, emitter.spGlobal);
+
+                            // Store current value: *SP = local_get
+                            emitGlobalGet(out_, emitter.spGlobal);
+                            emitLocalGet(out_, argInfo.wasmLocalIdx);
+                            emitI32Store(out_);
+
+                            // Push SP as the ref address argument
+                            emitGlobalGet(out_, emitter.spGlobal);
+
+                            // Track for post-call reload and SP restore
+                            refSpills ~= RefSpillInfo(argInfo.wasmLocalIdx, totalCopySize);
+                            totalCopySize += 4;
+                            continue;
+                        } else {
+                            // Already has a memory address (shadow stack or param pointer)
+                            emitVarAddress(out_, argInfo);
+                            continue;
+                        }
+                    }
+                }
+                throw new EmitError("ref argument must be a variable", arg.location);
+            }
+
             // Non-struct argument
             emitExpression(out_, arg);
             // Implicit f64→f32 for float params passed double arguments
@@ -674,8 +717,20 @@ mixin template CallEmitter() {
         string callName = expr.resolvedInstantiation ? expr.resolvedInstantiation.name : ident.name;
         uint funcIdx = emitter.getFuncIndex(callName, expr.location);
         emitWasmCall(out_, funcIdx);
-        
-        // Restore SP after call (deallocate arg copies only, not result temp)
+
+        // Reload ref-spilled scalars: callee may have modified them through the pointer
+        foreach (ref spill; refSpills) {
+            // Load modified value from shadow stack back into the WASM local
+            emitGlobalGet(out_, emitter.spGlobal);
+            if (spill.spOffset > 0) {
+                emitI32Const(out_, spill.spOffset);
+                out_ ~= Op.i32_add;
+            }
+            emitI32Load(out_);
+            emitLocalSet(out_, spill.wasmLocalIdx);
+        }
+
+        // Restore SP after call (deallocate arg copies and ref spill temps)
         if (totalCopySize > 0) {
             emitGlobalGet(out_, emitter.spGlobal);
             emitI32Const(out_, totalCopySize);

@@ -1,7 +1,9 @@
-@escapes("x") int add(int x, int y) {
-    return x + y;
+void inc(ref int x) {
+    x = x + 1;
 }
 
 int main() {
-    return add(19, 23);
+    int a = 41;
+    inc(a);
+    return a;
 }

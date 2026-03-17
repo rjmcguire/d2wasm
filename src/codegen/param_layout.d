@@ -143,9 +143,11 @@ ParamLayout computeParamLayout(FunctionDecl decl, ParamLayoutContext ctx) {
             isIface = p.type.asInterface() !is null;
         }
 
-        auto vt = ctx.typeMapper ? ctx.typeMapper(p.type) : ValType.i32;
+        // ref params are always pointer-sized (pass by reference)
+        auto vt = p.isRef ? ValType.i32
+                          : (ctx.typeMapper ? ctx.typeMapper(p.type) : ValType.i32);
         uint bsize = ctx.ptrSize;  // default for pointers
-        if (p.type) {
+        if (!p.isRef && p.type) {
             auto sz = p.type.size();
             if (sz > 0) bsize = cast(uint)sz;
         }

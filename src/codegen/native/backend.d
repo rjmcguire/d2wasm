@@ -154,6 +154,7 @@ class NativeCompiledFunction : CompiledFunction {
         bool isReference;         // true for 'this' pointers (stores address, not inline data)
         bool isObjCRef;           // true for ObjC opaque pointers (8-byte, no vtable)
         bool isRawPointer;        // true for raw pointer types (char*, int*, etc.) — 8 bytes on ARM64
+        bool isRef;               // true for `ref` parameters (stores pointer, deref on read/write)
 
         bool isStruct() const { return kind == VarKind.struct_; }
         bool isClass() const { return kind == VarKind.class_; }
@@ -676,7 +677,14 @@ class NativeCompiledFunction : CompiledFunction {
             nli.offset = nextLocalOffset;
 
             size_t paramSize = 4;  // default for scalar
-            if (auto structDecl = param.type.asStruct()) {
+            // ref params: store pointer (8 bytes on ARM64), deref on read/write
+            if (param.isRef) {
+                nli.kind = VarKind.scalar;
+                nli.isRef = true;
+                nli.offset = (nextLocalOffset + 7) & ~7;  // 8-byte aligned for pointer
+                nextLocalOffset = nli.offset;
+                paramSize = 8;
+            } else if (auto structDecl = param.type.asStruct()) {
                 assert(structDecl.structSize > 0,
                     "StructDecl '" ~ structDecl.name ~ "' has zero size - layout not computed");
                 nli.kind = VarKind.struct_;
@@ -2425,6 +2433,12 @@ class NativeCompiledFunction : CompiledFunction {
                     gen.emitLoadPtr(info.offset);
                     return;
                 }
+                // ref params: load pointer from stack, then deref to get value
+                if (info.isRef) {
+                    gen.emitLoadPtr(info.offset);       // x0 = pointer
+                    gen.emitLoadFromPointer(0);          // x0 = *x0
+                    return;
+                }
                 final switch (info.kind) {
                     case VarKind.class_:
                         // Class references: load the stored pointer
@@ -2586,6 +2600,48 @@ class NativeCompiledFunction : CompiledFunction {
                 throw new NativeCompileError("Unknown variable in native backend: " ~ targetIdent.name, targetIdent.location);
             }
 
+            // ref param assignment: store through pointer
+            if (info.isRef) {
+                if (assign.operator == AssignmentExpression.Operator.Assign) {
+                    // Simple: x = expr → compile value, store through pointer
+                    compileExpression(assign.right);     // x0 = value
+                    gen.emitMoveX0ToX1();                // x1 = value
+                    gen.emitLoadPtr(info.offset);        // x0 = pointer
+                    gen.emitStoreToPointer(0);           // STR w1, [x0] — *ptr = value
+                } else {
+                    // Compound: x op= expr → same pattern as regular compound,
+                    // but load/store through the ref pointer instead of stack slot
+                    compileExpression(assign.right);     // x0 = RHS
+                    gen.emitMoveX0ToX1();                // x1 = RHS
+
+                    // Load current value: deref the ref pointer
+                    gen.emitLoadPtr(info.offset);        // x0 = pointer
+                    gen.emitMoveX0ToX9();                // x9 = pointer (save for store)
+                    gen.emitLoadFromPointer(0);          // x0 = *pointer (current value)
+
+                    // Apply compound op (x0 = left, x1 = right → x0 = result)
+                    // Reuses the same switch that regular compound assignment uses below
+                    switch (assign.operator) {
+                        case AssignmentExpression.Operator.AddAssign:
+                            gen.emit(stencil_add_i32); break;
+                        case AssignmentExpression.Operator.SubtractAssign:
+                            gen.emit(stencil_sub_i32); break;
+                        case AssignmentExpression.Operator.MultiplyAssign:
+                            gen.emit(stencil_mul_i32); break;
+                        default:
+                            throw new NativeCompileError(
+                                "Compound operator not yet supported on ref parameters",
+                                assign.location);
+                    }
+
+                    // Store result through saved pointer
+                    gen.emitMoveX0ToX1();                // x1 = result
+                    gen.emitMoveX9ToX0();                // x0 = pointer
+                    gen.emitStoreToPointer(0);           // STR w1, [x0]
+                }
+                return;
+            }
+
             // Handle slice append specially (~=)
             if (assign.operator == AssignmentExpression.Operator.ConcatAssign) {
                 if (info.isSlice) {
@@ -2726,13 +2782,32 @@ class NativeCompiledFunction : CompiledFunction {
                         }
                     }
 
+                    // Resolve callee FunctionDecl for ref param checking
+                    FunctionDecl calleeFunc = null;
+                    if (auto cd = callName in functionDecls)
+                        calleeFunc = *cd;
+
                     if (hasNestedCalls && call.arguments.length > 1) {
                         // Save arguments to temp slots, then load into registers
                         // This prevents register clobbering from nested calls
                         auto mark = temps.save();
                         size_t[] argSlots;
                         foreach (i, arg; call.arguments) {
-                            compileExpression(arg);
+                            // ref param: push address instead of value
+                            if (calleeFunc && i < calleeFunc.parameters.length &&
+                                calleeFunc.parameters[i].isRef) {
+                                if (auto argIdent = cast(IdentifierExpression)arg) {
+                                    if (auto argInfo = argIdent.name in localVars) {
+                                        gen.emitStackAddress(argInfo.offset);
+                                    } else {
+                                        throw new NativeCompileError("ref argument must be a variable", arg.location);
+                                    }
+                                } else {
+                                    throw new NativeCompileError("ref argument must be a variable", arg.location);
+                                }
+                            } else {
+                                compileExpression(arg);
+                            }
                             size_t slot = temps.alloc(8);
                             gen.emitStorePtr(slot);
                             argSlots ~= slot;
@@ -2754,7 +2829,23 @@ class NativeCompiledFunction : CompiledFunction {
                         // No nested calls - use the faster direct approach
                         // Compile arguments in reverse order into their target registers
                         for (long i = cast(long)call.arguments.length - 1; i >= 0; i--) {
-                            compileExpression(call.arguments[i]);
+                            // ref param: push address instead of value
+                            if (calleeFunc && i < calleeFunc.parameters.length &&
+                                calleeFunc.parameters[cast(size_t)i].isRef) {
+                                if (auto argIdent = cast(IdentifierExpression)call.arguments[cast(size_t)i]) {
+                                    if (auto argInfo = argIdent.name in localVars) {
+                                        gen.emitStackAddress(argInfo.offset);
+                                    } else {
+                                        throw new NativeCompileError("ref argument must be a variable",
+                                            call.arguments[cast(size_t)i].location);
+                                    }
+                                } else {
+                                    throw new NativeCompileError("ref argument must be a variable",
+                                        call.arguments[cast(size_t)i].location);
+                                }
+                            } else {
+                                compileExpression(call.arguments[cast(size_t)i]);
+                            }
                             // Move x0 to target register (shifted by arena)
                             switch (cast(int)i + arenaShift) {
                                 case 0: break;  // already in x0

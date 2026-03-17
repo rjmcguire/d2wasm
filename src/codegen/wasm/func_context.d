@@ -384,7 +384,11 @@ class FuncContext {
                         uvi.wasmLocalIdx = wasmIdx;
                         uvi.type = p.type;
 
-                        if (auto structDecl = p.type.asStruct()) {
+                        // ref params: the WASM local holds a pointer, reads deref it
+                        if (p.isRef) {
+                            uvi.kind = VarKind.scalar;
+                            uvi.addrMode = AddrMode.paramPointer;
+                        } else if (auto structDecl = p.type.asStruct()) {
                             uvi.kind = VarKind.struct_;
                             uvi.addrMode = AddrMode.paramPointer;
                             uvi.structDecl = structDecl;
