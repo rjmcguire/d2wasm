@@ -1,0 +1,9 @@
+{
+  "name": "arena_pre_new_survives",
+  "description": "Variables allocated before __arena_new() survive __arena_drop()",
+  "type": "wasm_exec",
+  "compiler_args": ["--arena-safety"],
+  "mangled_entry": "_D4test4mainFZi",
+  "expected_result": "42",
+  "capability": "arena memory safety — parent generation variables survive sub-generation drop"
+}

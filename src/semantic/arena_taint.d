@@ -6,6 +6,8 @@
  * 2. Errors on unsafe stores: tainted values stored into globals or
  *    fields of parameter-received structs (cross-generation escapes)
  * 3. Respects @escapes("paramName") annotations to suppress specific errors
+ * 4. Tracks __arena_new()/__arena_drop() sub-generations and detects
+ *    use-after-free (reading a variable whose generation was dropped)
  *
  * A variable is "arena-tainted" if it:
  *   - Is initialized from a `new` expression
@@ -22,6 +24,9 @@
  *   - Storing into a global variable
  *   - Storing into a field of a parameter-received struct/class
  *
+ * Use-after-free: after __arena_drop(), any tainted variable allocated
+ * since the matching __arena_new() is "poisoned". Reading it is an error.
+ *
  * Runs after arena analysis (needsArena), before escape analysis.
  * Enabled via --arena-safety CLI flag.
  */
@@ -31,28 +36,107 @@ import ast.nodes;
 import ast.statements;
 import ast.expressions;
 
+import std.format : format;
 import diagnostic.log : log;
+import diagnostic.error_format : formatError;
+
+import std.stdio : stderr;
+
+/// A single arena safety diagnostic.
+private struct ArenaDiagnostic {
+    string message;
+    SourceLocation location;
+}
+
+/// Arena safety error — thrown to stop compilation.
+/// All individual errors have already been printed.
+class ArenaSafetyError : Exception {
+    SourceLocation location;
+
+    this(string message, SourceLocation location,
+         string file = __FILE__, size_t line = __LINE__) {
+        this.location = location;
+        super(message, file, line);
+    }
+}
 
 /**
  * Entry point: analyze all declarations for arena safety violations.
  */
 void analyzeArenaSafety(Declaration[] declarations) {
+    ArenaDiagnostic[] allErrors;
+
     foreach (decl; declarations) {
         if (auto func = cast(FunctionDecl)decl) {
-            analyzeFunction(func, declarations);
+            allErrors ~= analyzeFunction(func, declarations);
         } else if (auto sd = cast(StructDecl)decl) {
             foreach (member; sd.members) {
                 if (auto method = cast(FunctionDecl)member) {
-                    analyzeFunction(method, declarations);
+                    allErrors ~= analyzeFunction(method, declarations);
                 }
             }
         } else if (auto cd = cast(ClassDecl)decl) {
             foreach (member; cd.members) {
                 if (auto method = cast(FunctionDecl)member) {
-                    analyzeFunction(method, declarations);
+                    allErrors ~= analyzeFunction(method, declarations);
                 }
             }
         }
+    }
+
+    uint errorCount = cast(uint)allErrors.length;
+
+    if (errorCount > 0) {
+        // Print all errors with rustc-style formatting
+        foreach (ref diag; allErrors)
+            stderr.write(formatError("ArenaSafetyError", diag.message, diag.location));
+
+        throw new ArenaSafetyError(
+            format("arena safety: %d error%s found", errorCount, errorCount > 1 ? "s" : ""),
+            SourceLocation.init);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-function analysis state
+// ---------------------------------------------------------------------------
+
+/// Mutable state threaded through the sequential walk.
+private struct AnalysisState {
+    bool[uint] tainted;        // uniqueLocalId → true if arena-tainted
+    string[uint] localNames;   // uniqueLocalId → variable name (for diagnostics)
+    uint[uint] localGeneration; // uniqueLocalId → generation when allocated
+    bool[uint] poisoned;       // uniqueLocalId → true if generation was dropped
+
+    uint currentGeneration;    // 0 = base (function-level), incremented by __arena_new
+    uint[] generationStack;    // stack of generation IDs for nesting
+
+    uint[string] paramIds;     // parameter name → uniqueLocalId
+    string[] escapesParams;    // @escapes parameter names
+    string funcName;           // for diagnostics
+    Declaration[] declarations; // all declarations (for call target resolution)
+    ArenaDiagnostic[] errors;  // collected errors
+
+    uint errorCount() const { return cast(uint)errors.length; }
+    bool hasErrors() const { return errors.length > 0; }
+
+    /// Report an arena safety error with location.
+    void reportError(string message, SourceLocation loc) {
+        errors ~= ArenaDiagnostic(message, loc);
+    }
+
+    /// Snapshot for branching (if/else): captures poison state.
+    bool[uint] snapshotPoison() {
+        bool[uint] copy;
+        foreach (k, v; poisoned)
+            copy[k] = v;
+        return copy;
+    }
+
+    /// Merge poison sets from two branches (conservative union).
+    void mergePoison(bool[uint] other) {
+        foreach (k, v; other)
+            poisoned[k] = true;
     }
 }
 
@@ -60,88 +144,235 @@ void analyzeArenaSafety(Declaration[] declarations) {
 // Per-function analysis
 // ---------------------------------------------------------------------------
 
-private void analyzeFunction(FunctionDecl func, Declaration[] declarations) {
-    if (func.body_ is null || func.isTemplate) return;
+/// Returns collected diagnostics.
+private ArenaDiagnostic[] analyzeFunction(FunctionDecl func, Declaration[] declarations) {
+    if (func.body_ is null || func.isTemplate) return null;
 
-    // Phase 1: Seed tainted locals from direct allocations
-    bool[uint] tainted;       // uniqueLocalId → true if arena-tainted
-    string[uint] localNames;  // uniqueLocalId → variable name (for diagnostics)
-    collectTaintedLocals(func.body_, tainted, localNames, declarations);
+    AnalysisState state;
+    state.funcName = func.name;
+    state.declarations = declarations;
+    state.escapesParams = func.escapesParams;
 
-    // Phase 2: Propagate taint through assignments (fixed-point)
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        propagateTaint(func.body_, tainted, localNames, changed);
-    }
-
-    if (tainted.length == 0) return;
-
-    log(2, "  arena-safety: ", func.name, " has ", tainted.length, " tainted locals");
-
-    // Build set of parameter uniqueLocalIds and names
-    uint[string] paramIds;   // name → uniqueLocalId
+    // Build parameter ID map
     foreach (p; func.parameters) {
-        if (p.uniqueLocalId != uint.max) {
-            paramIds[p.name] = p.uniqueLocalId;
-        }
+        if (p.uniqueLocalId != uint.max)
+            state.paramIds[p.name] = p.uniqueLocalId;
     }
 
-    // Phase 3: Check for unsafe stores
-    checkUnsafeStores(func.body_, tainted, paramIds, func.escapesParams, func.name);
+    // Single sequential walk: seed taint, propagate, check stores, track generations
+    walkStatement(func.body_, state);
+
+    if (state.tainted.length > 0)
+        log(2, "  arena-safety: ", func.name, " has ", state.tainted.length, " tainted locals");
+
+    return state.errors;
 }
 
 // ---------------------------------------------------------------------------
-// Phase 1: Seed tainted locals
+// Sequential statement walker
 // ---------------------------------------------------------------------------
 
 /**
- * Walk function body and find locals initialized from arena-allocating expressions.
+ * Walk statements in execution order. This handles:
+ * - Taint seeding and propagation (Phases 1+2)
+ * - Unsafe store detection (Phase 3)
+ * - Generation tracking and use-after-free (Phase 4)
  */
-private void collectTaintedLocals(Statement stmt, ref bool[uint] tainted,
-        ref string[uint] localNames, Declaration[] declarations) {
+private void walkStatement(Statement stmt, ref AnalysisState state) {
     if (stmt is null) return;
 
     if (auto compound = cast(CompoundStatement)stmt) {
         foreach (s; compound.statements)
-            collectTaintedLocals(s, tainted, localNames, declarations);
+            walkStatement(s, state);
+
     } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
+        // Check initializer for use-after-free before processing the declaration
+        if (varDecl.initializer !is null)
+            checkExprForPoisonedUse(varDecl.initializer, state);
+
+        // Seed taint from initializer
         if (varDecl.uniqueLocalId != uint.max && varDecl.initializer !is null) {
-            if (isArenaAllocatingExpr(varDecl.initializer, tainted, declarations)) {
-                tainted[varDecl.uniqueLocalId] = true;
-                localNames[varDecl.uniqueLocalId] = varDecl.name;
-                log(2, "  arena-safety: tainted '", varDecl.name, "' (direct allocation)");
+            if (isArenaAllocatingExpr(varDecl.initializer, state)) {
+                state.tainted[varDecl.uniqueLocalId] = true;
+                state.localNames[varDecl.uniqueLocalId] = varDecl.name;
+                state.localGeneration[varDecl.uniqueLocalId] = state.currentGeneration;
+                log(2, "  arena-safety: tainted '", varDecl.name,
+                    "' (gen ", state.currentGeneration, ")");
             }
         }
+
+    } else if (auto exprStmt = cast(ExpressionStatement)stmt) {
+        // Check for __arena_new() / __arena_drop()
+        if (auto call = cast(CallExpression)exprStmt.expression) {
+            if (auto ident = cast(IdentifierExpression)call.function_) {
+                if (ident.name == "__arena_new") {
+                    state.currentGeneration++;
+                    state.generationStack ~= state.currentGeneration;
+                    log(2, "  arena-safety: __arena_new() → generation ",
+                        state.currentGeneration);
+                    return;
+                }
+                if (ident.name == "__arena_drop") {
+                    if (state.generationStack.length == 0) {
+                        state.reportError(
+                            format("in '%s', __arena_drop() without matching __arena_new()",
+                                state.funcName),
+                            exprStmt.location);
+                    } else {
+                        uint droppedGen = state.generationStack[$ - 1];
+                        state.generationStack = state.generationStack[0 .. $ - 1];
+                        // Poison all tainted locals from the dropped generation
+                        foreach (id, gen; state.localGeneration) {
+                            if (gen == droppedGen && id in state.tainted) {
+                                state.poisoned[id] = true;
+                                log(2, "  arena-safety: poisoned '",
+                                    id in state.localNames ? state.localNames[id] : "?",
+                                    "' (gen ", droppedGen, " dropped)");
+                            }
+                        }
+                    }
+                    log(2, "  arena-safety: __arena_drop() → generation ",
+                        state.currentGeneration);
+                    return;
+                }
+            }
+        }
+
+        // Check expression for poisoned reads and unsafe stores
+        checkExprForPoisonedUse(exprStmt.expression, state);
+        checkExprForUnsafeStore(exprStmt.expression, state);
+
+        // Propagate taint through assignments: x = taintedVar
+        if (auto assign = cast(AssignmentExpression)exprStmt.expression) {
+            if (assign.operator == AssignmentExpression.Operator.Assign) {
+                if (auto lhsIdent = cast(IdentifierExpression)assign.left) {
+                    if (lhsIdent.resolvedLocalId != uint.max &&
+                        lhsIdent.resolvedLocalId !in state.tainted &&
+                        exprReferencesAnyTainted(assign.right, state.tainted)) {
+                        state.tainted[lhsIdent.resolvedLocalId] = true;
+                        state.localNames[lhsIdent.resolvedLocalId] = lhsIdent.name;
+                        state.localGeneration[lhsIdent.resolvedLocalId] = state.currentGeneration;
+                        log(2, "  arena-safety: tainted '", lhsIdent.name, "' (assignment)");
+                    }
+                }
+            }
+        }
+
+    } else if (auto returnStmt = cast(ReturnStatement)stmt) {
+        if (returnStmt.value !is null)
+            checkExprForPoisonedUse(returnStmt.value, state);
+
     } else if (auto ifStmt = cast(IfStatement)stmt) {
-        collectTaintedLocals(ifStmt.thenStatement, tainted, localNames, declarations);
-        if (ifStmt.elseStatement)
-            collectTaintedLocals(ifStmt.elseStatement, tainted, localNames, declarations);
+        // Check condition for poisoned reads
+        checkExprForPoisonedUse(ifStmt.condition, state);
+
+        // Walk both branches, merge poison sets (conservative)
+        auto beforePoison = state.snapshotPoison();
+        walkStatement(ifStmt.thenStatement, state);
+        auto thenPoison = state.snapshotPoison();
+
+        if (ifStmt.elseStatement) {
+            // Reset to pre-branch state for else
+            state.poisoned = beforePoison;
+            walkStatement(ifStmt.elseStatement, state);
+            // Merge: poisoned if poisoned in EITHER branch
+            state.mergePoison(thenPoison);
+        } else {
+            // No else: merge then-poison with before-poison
+            // (the "no else" path doesn't poison anything new)
+            state.mergePoison(thenPoison);
+        }
+
     } else if (auto whileStmt = cast(WhileStatement)stmt) {
-        collectTaintedLocals(whileStmt.body_, tainted, localNames, declarations);
+        checkExprForPoisonedUse(whileStmt.condition, state);
+        // Walk body — loop iterations reset at __arena_new()
+        walkStatement(whileStmt.body_, state);
+
     } else if (auto forStmt = cast(ForStatement)stmt) {
         if (forStmt.init)
-            collectTaintedLocals(forStmt.init, tainted, localNames, declarations);
-        collectTaintedLocals(forStmt.body_, tainted, localNames, declarations);
+            walkStatement(forStmt.init, state);
+        if (forStmt.condition)
+            checkExprForPoisonedUse(forStmt.condition, state);
+        // Walk body
+        walkStatement(forStmt.body_, state);
+        if (forStmt.update)
+            checkExprForPoisonedUse(forStmt.update, state);
+
     } else if (auto tryStmt = cast(TryStatement)stmt) {
-        collectTaintedLocals(tryStmt.tryBody, tainted, localNames, declarations);
+        walkStatement(tryStmt.tryBody, state);
         foreach (c; tryStmt.catches)
-            collectTaintedLocals(c.body_, tainted, localNames, declarations);
+            walkStatement(c.body_, state);
         if (tryStmt.finallyBody !is null)
-            collectTaintedLocals(tryStmt.finallyBody, tainted, localNames, declarations);
+            walkStatement(tryStmt.finallyBody, state);
+
     } else if (auto mixinStmt = cast(MixinStatement)stmt) {
         if (mixinStmt.isExpanded) {
             foreach (s; mixinStmt.expandedStatements)
-                collectTaintedLocals(s, tainted, localNames, declarations);
+                walkStatement(s, state);
         }
     }
-    // ExpressionStatement, ReturnStatement, etc. don't declare locals
 }
+
+// ---------------------------------------------------------------------------
+// Use-after-free detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Check if an expression reads any poisoned (use-after-free) variable.
+ */
+private void checkExprForPoisonedUse(Expression expr, ref AnalysisState state) {
+    if (expr is null) return;
+
+    if (auto ident = cast(IdentifierExpression)expr) {
+        if (ident.resolvedLocalId != uint.max && ident.resolvedLocalId in state.poisoned) {
+            string varName = ident.resolvedLocalId in state.localNames
+                ? state.localNames[ident.resolvedLocalId] : ident.name;
+            state.reportError(
+                format("in '%s', use of '%s' after __arena_drop() " ~
+                    "— variable was allocated in a dropped arena generation",
+                    state.funcName, varName),
+                expr.location);
+        }
+    }
+    if (auto member = cast(MemberExpression)expr) {
+        checkExprForPoisonedUse(member.object, state);
+    }
+    if (auto binary = cast(BinaryExpression)expr) {
+        checkExprForPoisonedUse(binary.left, state);
+        checkExprForPoisonedUse(binary.right, state);
+    }
+    if (auto unary = cast(UnaryExpression)expr) {
+        checkExprForPoisonedUse(unary.operand, state);
+    }
+    if (auto assign = cast(AssignmentExpression)expr) {
+        checkExprForPoisonedUse(assign.right, state);
+    }
+    if (auto call = cast(CallExpression)expr) {
+        if (auto callFunc = cast(MemberExpression)call.function_)
+            checkExprForPoisonedUse(callFunc.object, state);
+        foreach (arg; call.arguments)
+            checkExprForPoisonedUse(arg, state);
+    }
+    if (auto index = cast(IndexExpression)expr) {
+        checkExprForPoisonedUse(index.array, state);
+        checkExprForPoisonedUse(index.index, state);
+    }
+    if (auto cast_ = cast(CastExpression)expr) {
+        checkExprForPoisonedUse(cast_.expression, state);
+    }
+    if (auto slice = cast(SliceExpression)expr) {
+        checkExprForPoisonedUse(slice.array, state);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Taint detection
+// ---------------------------------------------------------------------------
 
 /**
  * Check if an expression produces an arena-derived value.
  */
-private bool isArenaAllocatingExpr(Expression expr, ref bool[uint] tainted, Declaration[] declarations) {
+private bool isArenaAllocatingExpr(Expression expr, ref AnalysisState state) {
     if (expr is null) return false;
 
     // Direct allocations
@@ -158,7 +389,7 @@ private bool isArenaAllocatingExpr(Expression expr, ref bool[uint] tainted, Decl
 
     // Assigned from another tainted local
     if (auto ident = cast(IdentifierExpression)expr) {
-        if (ident.resolvedLocalId != uint.max && ident.resolvedLocalId in tainted)
+        if (ident.resolvedLocalId != uint.max && ident.resolvedLocalId in state.tainted)
             return true;
     }
 
@@ -166,80 +397,13 @@ private bool isArenaAllocatingExpr(Expression expr, ref bool[uint] tainted, Decl
     if (auto call = cast(CallExpression)expr) {
         if (call.resolvedInstantiation !is null && call.resolvedInstantiation.needsArena)
             return true;
-        if (auto callTarget = resolveCallTarget(call, declarations)) {
+        if (auto callTarget = resolveCallTarget(call, state.declarations)) {
             if (callTarget.needsArena)
                 return true;
         }
     }
 
     return false;
-}
-
-// ---------------------------------------------------------------------------
-// Phase 2: Propagate taint through assignments
-// ---------------------------------------------------------------------------
-
-/**
- * Scan assignments where RHS references a tainted local → taint the LHS local.
- */
-private void propagateTaint(Statement stmt, ref bool[uint] tainted,
-        ref string[uint] localNames, ref bool changed) {
-    if (stmt is null) return;
-
-    if (auto compound = cast(CompoundStatement)stmt) {
-        foreach (s; compound.statements)
-            propagateTaint(s, tainted, localNames, changed);
-    } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
-        // Already handled in Phase 1 for initial values, but check
-        // if initializer references a tainted local (transitive)
-        if (varDecl.uniqueLocalId != uint.max &&
-            varDecl.uniqueLocalId !in tainted &&
-            varDecl.initializer !is null) {
-            if (exprReferencesAnyTainted(varDecl.initializer, tainted)) {
-                tainted[varDecl.uniqueLocalId] = true;
-                localNames[varDecl.uniqueLocalId] = varDecl.name;
-                log(2, "  arena-safety: tainted '", varDecl.name, "' (transitive)");
-                changed = true;
-            }
-        }
-    } else if (auto exprStmt = cast(ExpressionStatement)stmt) {
-        // Check x = taintedVar assignments
-        if (auto assign = cast(AssignmentExpression)exprStmt.expression) {
-            if (assign.operator == AssignmentExpression.Operator.Assign) {
-                if (auto lhsIdent = cast(IdentifierExpression)assign.left) {
-                    if (lhsIdent.resolvedLocalId != uint.max &&
-                        lhsIdent.resolvedLocalId !in tainted &&
-                        exprReferencesAnyTainted(assign.right, tainted)) {
-                        tainted[lhsIdent.resolvedLocalId] = true;
-                        localNames[lhsIdent.resolvedLocalId] = lhsIdent.name;
-                        log(2, "  arena-safety: tainted '", lhsIdent.name, "' (assignment)");
-                        changed = true;
-                    }
-                }
-            }
-        }
-    } else if (auto ifStmt = cast(IfStatement)stmt) {
-        propagateTaint(ifStmt.thenStatement, tainted, localNames, changed);
-        if (ifStmt.elseStatement)
-            propagateTaint(ifStmt.elseStatement, tainted, localNames, changed);
-    } else if (auto whileStmt = cast(WhileStatement)stmt) {
-        propagateTaint(whileStmt.body_, tainted, localNames, changed);
-    } else if (auto forStmt = cast(ForStatement)stmt) {
-        if (forStmt.init)
-            propagateTaint(forStmt.init, tainted, localNames, changed);
-        propagateTaint(forStmt.body_, tainted, localNames, changed);
-    } else if (auto tryStmt = cast(TryStatement)stmt) {
-        propagateTaint(tryStmt.tryBody, tainted, localNames, changed);
-        foreach (c; tryStmt.catches)
-            propagateTaint(c.body_, tainted, localNames, changed);
-        if (tryStmt.finallyBody !is null)
-            propagateTaint(tryStmt.finallyBody, tainted, localNames, changed);
-    } else if (auto mixinStmt = cast(MixinStatement)stmt) {
-        if (mixinStmt.isExpanded) {
-            foreach (s; mixinStmt.expandedStatements)
-                propagateTaint(s, tainted, localNames, changed);
-        }
-    }
 }
 
 /**
@@ -276,63 +440,18 @@ private bool exprReferencesAnyTainted(Expression expr, ref bool[uint] tainted) {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 3: Check for unsafe stores
+// Unsafe store detection
 // ---------------------------------------------------------------------------
-
-import std.format : format;
-
-/**
- * Walk function body looking for assignments that store tainted values
- * into globals or parameter-received struct fields.
- */
-private void checkUnsafeStores(Statement stmt, ref bool[uint] tainted,
-        ref uint[string] paramIds, string[] escapesParams, string funcName) {
-    if (stmt is null) return;
-
-    if (auto compound = cast(CompoundStatement)stmt) {
-        foreach (s; compound.statements)
-            checkUnsafeStores(s, tainted, paramIds, escapesParams, funcName);
-    } else if (auto exprStmt = cast(ExpressionStatement)stmt) {
-        checkExprForUnsafeStore(exprStmt.expression, tainted, paramIds, escapesParams, funcName);
-    } else if (auto ifStmt = cast(IfStatement)stmt) {
-        checkUnsafeStores(ifStmt.thenStatement, tainted, paramIds, escapesParams, funcName);
-        if (ifStmt.elseStatement)
-            checkUnsafeStores(ifStmt.elseStatement, tainted, paramIds, escapesParams, funcName);
-    } else if (auto whileStmt = cast(WhileStatement)stmt) {
-        checkUnsafeStores(whileStmt.body_, tainted, paramIds, escapesParams, funcName);
-    } else if (auto forStmt = cast(ForStatement)stmt) {
-        if (forStmt.init)
-            checkUnsafeStores(forStmt.init, tainted, paramIds, escapesParams, funcName);
-        checkUnsafeStores(forStmt.body_, tainted, paramIds, escapesParams, funcName);
-    } else if (auto tryStmt = cast(TryStatement)stmt) {
-        checkUnsafeStores(tryStmt.tryBody, tainted, paramIds, escapesParams, funcName);
-        foreach (c; tryStmt.catches)
-            checkUnsafeStores(c.body_, tainted, paramIds, escapesParams, funcName);
-        if (tryStmt.finallyBody !is null)
-            checkUnsafeStores(tryStmt.finallyBody, tainted, paramIds, escapesParams, funcName);
-    } else if (auto mixinStmt = cast(MixinStatement)stmt) {
-        if (mixinStmt.isExpanded) {
-            foreach (s; mixinStmt.expandedStatements)
-                checkUnsafeStores(s, tainted, paramIds, escapesParams, funcName);
-        }
-    }
-}
 
 /**
  * Check a single expression for unsafe store patterns.
  */
-private void checkExprForUnsafeStore(Expression expr, ref bool[uint] tainted,
-        ref uint[string] paramIds, string[] escapesParams, string funcName) {
+private void checkExprForUnsafeStore(Expression expr, ref AnalysisState state) {
     if (expr is null) return;
 
     if (auto assign = cast(AssignmentExpression)expr) {
         // Only check if RHS is tainted
-        if (!exprReferencesAnyTainted(assign.right, tainted) &&
-            assign.operator != AssignmentExpression.Operator.ConcatAssign)
-            return;
-
-        // For ~= the LHS itself is the target being modified with arena data
-        bool rhsTainted = exprReferencesAnyTainted(assign.right, tainted) ||
+        bool rhsTainted = exprReferencesAnyTainted(assign.right, state.tainted) ||
             assign.operator == AssignmentExpression.Operator.ConcatAssign;
         if (!rhsTainted) return;
 
@@ -340,14 +459,11 @@ private void checkExprForUnsafeStore(Expression expr, ref bool[uint] tainted,
         if (auto lhsIdent = cast(IdentifierExpression)assign.left) {
             if (lhsIdent.declaration !is null) {
                 if (cast(VariableDecl)lhsIdent.declaration) {
-                    // VariableDecl = top-level/global variable declaration
-                    import ast.nodes : SourceLocation;
-                    log(0, format("arena-safety error: in '%s', arena-derived value " ~
-                        "stored into global '%s' — value may outlive arena generation",
-                        funcName, lhsIdent.name));
-                    if (assign.location != SourceLocation.init)
-                        log(0, format("  at %s:%d:%d",
-                            assign.location.filename, assign.location.line, assign.location.column));
+                    state.reportError(
+                        format("in '%s', arena-derived value stored into global '%s' " ~
+                            "— value may outlive arena generation",
+                            state.funcName, lhsIdent.name),
+                        assign.location);
                 }
             }
         }
@@ -355,12 +471,11 @@ private void checkExprForUnsafeStore(Expression expr, ref bool[uint] tainted,
         // Rule 2: Storing into a field of a parameter-received struct
         if (auto lhsMember = cast(MemberExpression)assign.left) {
             if (auto objIdent = cast(IdentifierExpression)lhsMember.object) {
-                // Check if the object is a function parameter
-                if (auto pId = objIdent.name in paramIds) {
+                if (auto pId = objIdent.name in state.paramIds) {
                     // Check if @escapes suppresses this
                     bool suppressed = false;
-                    if (escapesParams !is null) {
-                        foreach (ep; escapesParams) {
+                    if (state.escapesParams !is null) {
+                        foreach (ep; state.escapesParams) {
                             if (ep == objIdent.name) {
                                 suppressed = true;
                                 break;
@@ -368,15 +483,12 @@ private void checkExprForUnsafeStore(Expression expr, ref bool[uint] tainted,
                         }
                     }
                     if (!suppressed) {
-                        import ast.nodes : SourceLocation;
-                        log(0, format("arena-safety error: in '%s', arena-derived value " ~
-                            "stored into field '%s' of parameter '%s' — " ~
-                            "value may outlive arena generation. " ~
-                            "Annotate with @escapes(\"%s\") to allow this",
-                            funcName, lhsMember.memberName, objIdent.name, objIdent.name));
-                        if (assign.location != SourceLocation.init)
-                            log(0, format("  at %s:%d:%d",
-                                assign.location.filename, assign.location.line, assign.location.column));
+                        state.reportError(
+                            format("in '%s', arena-derived value stored into field '%s' " ~
+                                "of parameter '%s' — value may outlive arena generation. " ~
+                                "Annotate with @escapes(\"%s\") to allow this",
+                                state.funcName, lhsMember.memberName, objIdent.name, objIdent.name),
+                            assign.location);
                     }
                 }
             }
@@ -385,12 +497,11 @@ private void checkExprForUnsafeStore(Expression expr, ref bool[uint] tainted,
 }
 
 // ---------------------------------------------------------------------------
-// Helpers (reuse arena_analyzer patterns)
+// Helpers
 // ---------------------------------------------------------------------------
 
 /**
  * Resolve a CallExpression to its FunctionDecl target.
- * Replicates arena_analyzer.resolveCallTarget logic.
  */
 private FunctionDecl resolveCallTarget(CallExpression call, Declaration[] declarations) {
     if (auto ident = cast(IdentifierExpression)call.function_) {

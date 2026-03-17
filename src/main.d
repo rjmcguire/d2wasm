@@ -32,6 +32,7 @@ import codegen.emitter;
 import codegen.backend;
 import diagnostic.error_format : printError;
 import semantic.ctfe : CTFEError;
+import semantic.arena_taint : ArenaSafetyError;
 import semantic.import_resolver : ImportError;
 
 struct CompilerOptions {
@@ -827,6 +828,9 @@ int compileFile(CompilerOptions options) {
         return 1;
     } catch (SemanticError e) {
         printError(e);
+        return 1;
+    } catch (ArenaSafetyError e) {
+        // Individual errors already printed with formatError in analyzeArenaSafety
         return 1;
     } catch (TypeError e) {
         printError(e);

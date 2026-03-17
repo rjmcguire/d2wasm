@@ -1,0 +1,8 @@
+{
+  "name": "arena_drop_no_new",
+  "description": "Arena safety detects __arena_drop() without matching __arena_new()",
+  "type": "compile_output",
+  "compiler_args": ["--arena-safety"],
+  "expected_output": "__arena_drop() without matching __arena_new()",
+  "capability": "arena memory safety — unbalanced drop detection"
+}
