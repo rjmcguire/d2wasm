@@ -5589,6 +5589,18 @@ class NativeCompiledFunction : CompiledFunction {
      * Get the StructDecl from an expression (for member access type resolution)
      */
     private StructDecl getStructDeclFromExpr(Expression expr) {
+        // Check expr.type first (set by type checker) — handles all cases
+        // including pointer-to-struct auto-deref
+        if (expr.type !is null) {
+            if (auto sd = expr.type.asStruct())
+                return sd;
+            // Pointer-to-struct auto-deref: Container* → Container
+            if (auto ptrType = cast(PointerType)expr.type) {
+                if (auto sd = ptrType.pointeeType.asStruct())
+                    return sd;
+            }
+        }
+
         // For identifier expressions, check our local struct types first
         if (auto ident = cast(IdentifierExpression)expr) {
             // Check local variables
@@ -5598,7 +5610,12 @@ class NativeCompiledFunction : CompiledFunction {
             // Fall back to symbol table
             auto symbol = symbolTable.lookupSymbol(ident.name);
             if (symbol) {
-                return symbol.type.asStruct();
+                if (auto sd = symbol.type.asStruct())
+                    return sd;
+                // Pointer-to-struct auto-deref: Container* → Container
+                if (auto ptrType = cast(PointerType)symbol.type) {
+                    return ptrType.pointeeType.asStruct();
+                }
             }
         }
         // For member expressions (nested struct access like o.inner),
@@ -5637,13 +5654,31 @@ class NativeCompiledFunction : CompiledFunction {
 
     /// Get ClassDecl from an expression (parallel to getStructDeclFromExpr).
     private ClassDecl getClassDeclFromExpr(Expression expr) {
+        // Check expr.type first (set by type checker) — handles all cases
+        // including pointer-to-class auto-deref
+        if (expr.type !is null) {
+            if (auto cd = expr.type.asClass())
+                return cd;
+            // Pointer-to-class auto-deref: MyClass* → MyClass
+            if (auto ptrType = cast(PointerType)expr.type) {
+                if (auto cd = ptrType.pointeeType.asClass())
+                    return cd;
+            }
+        }
+
         if (auto ident = cast(IdentifierExpression)expr) {
             if (auto info = ident.name in localVars) {
                 if (info.isClass) return info.classDecl;
             }
+            // Fall back to symbol table
             auto symbol = symbolTable.lookupSymbol(ident.name);
             if (symbol) {
-                return symbol.type.asClass();
+                if (auto cd = symbol.type.asClass())
+                    return cd;
+                // Pointer-to-class auto-deref
+                if (auto ptrType = cast(PointerType)symbol.type) {
+                    return ptrType.pointeeType.asClass();
+                }
             }
         }
         if (auto member = cast(MemberExpression)expr) {
