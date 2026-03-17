@@ -830,13 +830,19 @@ class NativeCompiledFunction : CompiledFunction {
                     break;
 
                 case VarKind.scalar:
-                    // Simple scalar - store the register value
-                    switch (paramReg) {
-                        case 0: gen.emitStoreLocal32(offset); break;        // x0
-                        case 1: gen.emitStoreLocal32FromX1(offset); break;  // x1
-                        case 2: gen.emitStoreLocal32FromX2(offset); break;  // x2
-                        case 3: gen.emitStoreLocal32FromX3(offset); break;  // x3
-                        default: break;
+                    if (nli.isRef) {
+                        // ref param: store 64-bit pointer (address from caller)
+                        moveRegToX0(paramReg);
+                        gen.emitStorePtr(offset);
+                    } else {
+                        // Simple scalar - store the 32-bit register value
+                        switch (paramReg) {
+                            case 0: gen.emitStoreLocal32(offset); break;        // x0
+                            case 1: gen.emitStoreLocal32FromX1(offset); break;  // x1
+                            case 2: gen.emitStoreLocal32FromX2(offset); break;  // x2
+                            case 3: gen.emitStoreLocal32FromX3(offset); break;  // x3
+                            default: break;
+                        }
                     }
                     break;
                 case VarKind.delegate_:
@@ -2427,7 +2433,8 @@ class NativeCompiledFunction : CompiledFunction {
             log(3, "native:   ident '", ident.name, "'");
             // Load variable from stack
             if (auto info = ident.name in localVars) {
-                log(3, "native:     -> local (kind=", info.kind, ", offset=", info.offset, ")");
+                log(3, "native:     -> local (kind=", info.kind, ", offset=", info.offset,
+                    ", isRef=", info.isRef, ")");
                 // ObjC refs and raw pointers are 8-byte values — load full 64-bit
                 if (info.isObjCRef || info.isRawPointer) {
                     gen.emitLoadPtr(info.offset);
@@ -2601,6 +2608,7 @@ class NativeCompiledFunction : CompiledFunction {
             }
 
             // ref param assignment: store through pointer
+            log(3, "native: assign to '", targetIdent.name, "' isRef=", info.isRef);
             if (info.isRef) {
                 if (assign.operator == AssignmentExpression.Operator.Assign) {
                     // Simple: x = expr → compile value, store through pointer
@@ -2786,6 +2794,8 @@ class NativeCompiledFunction : CompiledFunction {
                     FunctionDecl calleeFunc = null;
                     if (auto cd = callName in functionDecls)
                         calleeFunc = *cd;
+                    log(3, "native: call '", callName, "' calleeFunc=",
+                        calleeFunc !is null ? calleeFunc.name : "null");
 
                     if (hasNestedCalls && call.arguments.length > 1) {
                         // Save arguments to temp slots, then load into registers
@@ -2832,8 +2842,10 @@ class NativeCompiledFunction : CompiledFunction {
                             // ref param: push address instead of value
                             if (calleeFunc && i < calleeFunc.parameters.length &&
                                 calleeFunc.parameters[cast(size_t)i].isRef) {
+                                log(2, "native: ref arg ", i, " for '", calleeFunc.name, "'");
                                 if (auto argIdent = cast(IdentifierExpression)call.arguments[cast(size_t)i]) {
                                     if (auto argInfo = argIdent.name in localVars) {
+                                        log(2, "native:   emitting stack address at offset ", argInfo.offset);
                                         gen.emitStackAddress(argInfo.offset);
                                     } else {
                                         throw new NativeCompileError("ref argument must be a variable",
