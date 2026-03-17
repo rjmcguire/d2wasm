@@ -381,7 +381,7 @@ class NativeCompiledFunction : CompiledFunction {
         // Find entry function and store its param count
         if (auto entryFunc = entryFuncName in functionDecls) {
             this.paramCount = (*entryFunc).parameters.length;
-            this.entryNeedsArena = (*entryFunc).needsArena && (*entryFunc).name != "main";
+            this.entryNeedsArena = (*entryFunc).needsArena;
         } else {
             assert(0, "Entry function not found: " ~ entryFuncName);
         }
@@ -5314,7 +5314,7 @@ class NativeCompiledFunction : CompiledFunction {
         }
 
         gen.emitCall(*labelPtr);
-        emitNativeExceptionCheck();
+        emitNativeExceptionCheckWithValue();
         temps.restore(mark);
     }
 

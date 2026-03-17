@@ -75,6 +75,9 @@ struct CompilerOptions {
     string[] linkFrameworks;      // --link-framework: macOS frameworks to dlopen for FFI
     string[] linkDylibs;          // --link-dylib: shared libraries to dlopen for FFI
 
+    // Libraries from pragma(lib, ...) — collected for linker
+    string[] pragmaLibs;
+
     // Compile-only flag
     bool compileOnly = false;     // -c: compile to .o only, don't link
 }
@@ -348,6 +351,7 @@ int compileFile(CompilerOptions options) {
                             } else {
                                 log(2, "Loaded pragma(lib): ", libPath);
                             }
+                            options.pragmaLibs ~= libPath;
                         }
                     }
                 }
@@ -588,6 +592,17 @@ int compileFile(CompilerOptions options) {
                     ccArgs ~= ["-framework", fw];
                 foreach (lib; options.linkDylibs)
                     ccArgs ~= ["-l" ~ lib];
+                foreach (lib; options.pragmaLibs) {
+                    // Detect framework paths: .../Foo.framework/Foo → -framework Foo
+                    import std.string : indexOf;
+                    auto fwIdx = indexOf(lib, ".framework/");
+                    if (fwIdx >= 0) {
+                        string fwName = lib[fwIdx + 11 .. $]; // after ".framework/"
+                        ccArgs ~= ["-framework", fwName];
+                    } else {
+                        ccArgs ~= lib;
+                    }
+                }
 
                 import std.process : execute;
                 log(1, "Linking: ", ccArgs);
