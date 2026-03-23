@@ -336,7 +336,10 @@ class IdentifierExpression : Expression {
  */
 class LiteralExpression : Expression {
     Variant value;  // Stores the actual constant value
-    
+    bool hasFloatSuffix;    // true if literal had 'f'/'F' suffix (e.g. 2.0f)
+    bool hasLongSuffix;     // true if literal had 'L'/'l' suffix (e.g. 42L)
+    bool hasUnsignedSuffix; // true if literal had 'u'/'U' suffix (e.g. 10u)
+
     this(SourceLocation loc, Variant value) {
         super(loc);
         this.value = value;

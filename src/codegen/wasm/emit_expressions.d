@@ -1719,6 +1719,8 @@ mixin template ExpressionEmitter() {
             out_ ~= Op.f64_store;
             out_ ~= cast(ubyte)0x03;  // alignment log2(8)
             leb128u(out_, 0);
+        } else if (elemSize == 8) {
+            emitI64Store(out_);
         } else if (elemSize == 4 && isFloat) {
             out_ ~= Op.f32_store;
             out_ ~= cast(ubyte)0x02;  // alignment log2(4)

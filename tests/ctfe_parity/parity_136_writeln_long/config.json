@@ -1,0 +1,6 @@
+{
+  "name": "writeln_long",
+  "description": "CTFE parity: __writeln outputs correct i64 value",
+  "type": "compile_output",
+  "expected_output": "3000000000"
+}

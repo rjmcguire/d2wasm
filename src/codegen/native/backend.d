@@ -5275,7 +5275,14 @@ class NativeCompiledFunction : CompiledFunction {
                     // TODO: implement runtime itoa for proper integer output
                     emitWriteString("<val>");
                 } else {
-                    ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_write_i32");
+                    // Check if expression type is i64 (long/ulong)
+                    bool argIsI64 = false;
+                    if (arg.type) {
+                        if (auto bt = cast(BasicType)arg.type.resolve())
+                            argIsI64 = bt.kind == BasicType.Kind.Int64 || bt.kind == BasicType.Kind.UInt64;
+                    }
+                    string hostFunc = argIsI64 ? "__ctfe_write_i64" : "__ctfe_write_i32";
+                    ulong slot = hostFunctions.getFunctionSlotAddress(hostFunc);
                     ulong ctxSlot = hostFunctions.getContextSlotAddress();
                     gen.emitHostCall(slot, ctxSlot);
                 }

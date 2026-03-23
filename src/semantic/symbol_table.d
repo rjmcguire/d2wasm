@@ -622,6 +622,7 @@ class SymbolTable {
         
         // CTFE print intrinsics - typed variants (all become WASM imports)
         auto i32Type = new BasicType(loc, BasicType.Kind.Int32);
+        auto i64Type = new BasicType(loc, BasicType.Kind.Int64);
         auto voidType = new BasicType(loc, BasicType.Kind.Void);
         
         // __ctfe_print_i32: void(int) - standalone debug, prints "CTFE: <value>\n"
@@ -638,6 +639,12 @@ class SymbolTable {
         writeI32Symbol.isCTFEOnly = true;
         globalScope.addSymbol(writeI32Symbol);
         
+        // __ctfe_write_i64: void(long)
+        auto writeI64Type = new FunctionType(loc, voidType, [i64Type]);
+        auto writeI64Symbol = new Symbol("__ctfe_write_i64", SymbolKind.Function, writeI64Type, null, loc, true);
+        writeI64Symbol.isCTFEOnly = true;
+        globalScope.addSymbol(writeI64Symbol);
+
         // __ctfe_write_str: void(ptr: i32, len: i32) - string from memory
         auto writeStrType = new FunctionType(loc, voidType, [i32Type, i32Type]);
         auto writeStrSymbol = new Symbol("__ctfe_write_str", SymbolKind.Function, writeStrType, null, loc, true);

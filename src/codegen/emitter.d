@@ -2068,6 +2068,7 @@ class BinaryEmitter {
                         neededCTFEImports["__ctfe_write_newline"] = true;
                         neededCTFEImports["__ctfe_write_str"] = true;
                         neededCTFEImports["__ctfe_write_i32"] = true;
+                        neededCTFEImports["__ctfe_write_i64"] = true;
                         neededCTFEImports["__ctfe_write_f64"] = true;
                         neededCTFEImports["__ctfe_write_bool"] = true;
                     } else {
@@ -2671,6 +2672,9 @@ class BinaryEmitter {
                 // Building blocks for __writeln
                 case "__ctfe_write_i32":
                     sig.params = [ValType.i32];
+                    break;
+                case "__ctfe_write_i64":
+                    sig.params = [ValType.i64];
                     break;
                 case "__ctfe_write_str":
                     sig.params = [ValType.i32, ValType.i32];  // ptr, len

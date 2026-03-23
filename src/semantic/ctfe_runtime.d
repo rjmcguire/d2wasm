@@ -193,6 +193,17 @@ extern(C) const(void)* hostWriteBool(IM3Runtime runtime, IM3ImportContext ctx, u
 }
 
 /**
+ * Host implementation of __ctfe_write_i64
+ * Building block for __writeln - prints i64 value.
+ */
+extern(C) const(void)* hostWriteI64(IM3Runtime runtime, IM3ImportContext ctx, uint* stack, void* mem) {
+    // wasm3 raw stack: i64 occupies two 32-bit slots
+    long value = *(cast(long*)&stack[0]);
+    write(value);
+    return null;
+}
+
+/**
  * Host implementation of __ctfe_write_f64
  * Building block for __writeln - prints f64 value.
  */
@@ -365,6 +376,12 @@ class CTFERuntime {
             throw new CTFERuntimeError("Failed to link __ctfe_write_str: " ~ fromStringz(result).idup);
         }
         
+        // __ctfe_write_i64: void(i64)
+        result = m3_LinkRawFunction(mod, "ctfe".ptr, "__ctfe_write_i64".ptr, "v(I)".ptr, &hostWriteI64);
+        if (result !is null && result != m3Err_functionLookupFailed) {
+            throw new CTFERuntimeError("Failed to link __ctfe_write_i64: " ~ fromStringz(result).idup);
+        }
+
         // __ctfe_write_f64: void(f64)
         result = m3_LinkRawFunction(mod, "ctfe".ptr, "__ctfe_write_f64".ptr, "v(F)".ptr, &hostWriteF64);
         if (result !is null && result != m3Err_functionLookupFailed) {

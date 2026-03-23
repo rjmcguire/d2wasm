@@ -71,35 +71,62 @@ private int hexDigit(char c) {
     return -1;
 }
 
+/// Result of parsing an integer literal, including suffix info.
+private struct IntLiteralResult {
+    long value;
+    bool hasLongSuffix;
+    bool hasUnsignedSuffix;
+}
+
 /**
  * Parse an integer literal, handling hex (0x), binary (0b), octal (0o), and decimal formats.
- * Also strips underscores (D allows 1_000_000).
+ * Also strips underscores (D allows 1_000_000) and suffixes (L, u, U, LU, UL, etc.).
  */
-private long parseIntLiteral(string text) {
+private IntLiteralResult parseIntLiteralFull(string text) {
     import std.string : replace;
     import std.algorithm : startsWith;
     import std.conv : parse;
-    
+
     // Strip underscores (D allows them for readability)
     string clean = text.replace("_", "");
-    
+
+    // Strip and detect suffixes (u, U, L, l — in any order at end)
+    bool longSuffix = false;
+    bool unsignedSuffix = false;
+    while (clean.length > 0) {
+        char last = clean[$ - 1];
+        if (last == 'L' || last == 'l') {
+            longSuffix = true;
+            clean = clean[0 .. $ - 1];
+        } else if (last == 'u' || last == 'U') {
+            unsignedSuffix = true;
+            clean = clean[0 .. $ - 1];
+        } else
+            break;
+    }
+
+    long value;
     // Handle hex (0x/0X)
     if (clean.startsWith("0x") || clean.startsWith("0X")) {
         string digits = clean[2..$];
-        return parse!long(digits, 16);
+        value = parse!long(digits, 16);
     }
     // Handle binary (0b/0B)
-    if (clean.startsWith("0b") || clean.startsWith("0B")) {
+    else if (clean.startsWith("0b") || clean.startsWith("0B")) {
         string digits = clean[2..$];
-        return parse!long(digits, 2);
+        value = parse!long(digits, 2);
     }
     // Handle octal (0o) - D uses 0o prefix, not bare 0
-    if (clean.startsWith("0o") || clean.startsWith("0O")) {
+    else if (clean.startsWith("0o") || clean.startsWith("0O")) {
         string digits = clean[2..$];
-        return parse!long(digits, 8);
+        value = parse!long(digits, 8);
     }
     // Decimal
-    return parse!long(clean);
+    else {
+        value = parse!long(clean);
+    }
+
+    return IntLiteralResult(value, longSuffix, unsignedSuffix);
 }
 
 /**
@@ -3096,10 +3123,34 @@ class TreeSitterBridge {
                 return new IdentifierExpression(loc, TreeSitterParser.getNodeText(node, sourceText));
             case "this":
                 return new IdentifierExpression(loc, "this");
-            case "int_literal":
-                return LiteralExpression.integer(loc, parseIntLiteral(TreeSitterParser.getNodeText(node, sourceText)));
-            case "float_literal":
-                return LiteralExpression.floating(loc, to!double(TreeSitterParser.getNodeText(node, sourceText)));
+            case "int_literal": {
+                auto r = parseIntLiteralFull(TreeSitterParser.getNodeText(node, sourceText));
+                auto lit = LiteralExpression.integer(loc, r.value);
+                lit.hasLongSuffix = r.hasLongSuffix;
+                lit.hasUnsignedSuffix = r.hasUnsignedSuffix;
+                return lit;
+            }
+            case "float_literal": {
+                string ftext = TreeSitterParser.getNodeText(node, sourceText);
+                // Strip underscores
+                import std.string : replace;
+                ftext = ftext.replace("_", "");
+                // Strip and detect suffixes
+                bool fSuffix = false;
+                while (ftext.length > 0) {
+                    char last = ftext[$ - 1];
+                    if (last == 'f' || last == 'F') {
+                        fSuffix = true;
+                        ftext = ftext[0 .. $ - 1];
+                    } else if (last == 'L' || last == 'i') {
+                        ftext = ftext[0 .. $ - 1];
+                    } else
+                        break;
+                }
+                auto lit = LiteralExpression.floating(loc, to!double(ftext));
+                lit.hasFloatSuffix = fSuffix;
+                return lit;
+            }
             case "string_literal": {
                 string text = TreeSitterParser.getNodeText(node, sourceText);
                 // Remove quotes and unescape the string

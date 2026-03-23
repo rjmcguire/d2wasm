@@ -1,0 +1,8 @@
+{
+  "name": "cast_long_to_int",
+  "description": "CTFE parity: cast(int) on long expression emits i32.wrap_i64",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 0,
+  "skip_backends": ["native"]
+}

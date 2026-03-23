@@ -868,6 +868,9 @@ mixin template CallEmitter() {
                 emitExpression(out_, arg);
                 out_ ~= Op.f64_promote_f32;
                 emitWritelnHostCall(out_, "__ctfe_write_f64");
+            } else if (isI64Expression(arg)) {
+                emitExpression(out_, arg);
+                emitWritelnHostCall(out_, "__ctfe_write_i64");
             } else {
                 auto bt = cast(BasicType)argType;
                 if (bt && bt.kind == BasicType.Kind.Bool) {

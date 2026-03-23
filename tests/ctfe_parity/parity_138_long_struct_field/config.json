@@ -1,0 +1,7 @@
+{
+  "name": "long_struct_field",
+  "description": "CTFE parity: struct with long field, large value init",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 10
+}

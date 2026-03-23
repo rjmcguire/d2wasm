@@ -904,6 +904,12 @@ private extern(C) long _native_ctfe_write_i32(NativeCTFEContext* ctx, long val, 
     return 0;
 }
 
+private extern(C) long _native_ctfe_write_i64(NativeCTFEContext* ctx, long val, long, long) nothrow {
+    import std.stdio : write;
+    try { write(val); } catch (Exception) {}
+    return 0;
+}
+
 private extern(C) long _native_ctfe_write_str(NativeCTFEContext* ctx, long ptr, long len, long) nothrow {
     import std.stdio : write;
     try {
@@ -1000,6 +1006,7 @@ HostFunctionTable createCTFEHostFunctions() {
     
     table.registerFunction("__ctfe_alloc", &_native_ctfe_alloc);
     table.registerFunction("__ctfe_write_i32", &_native_ctfe_write_i32);
+    table.registerFunction("__ctfe_write_i64", &_native_ctfe_write_i64);
     table.registerFunction("__ctfe_write_str", &_native_ctfe_write_str);
     table.registerFunction("__ctfe_write_bool", &_native_ctfe_write_bool);
     table.registerFunction("__ctfe_write_newline", &_native_ctfe_write_newline);
@@ -1045,7 +1052,7 @@ unittest {
     
     // Test CTFE functions
     auto ctfeTable = createCTFEHostFunctions();
-    assert(ctfeTable.count == 9, "Should have 9 CTFE functions");
+    assert(ctfeTable.count == 10, "Should have 10 CTFE functions");
     assert(ctfeTable.getFunction("__ctfe_write_i32") !is null);
     assert(ctfeTable.getFunction("__ctfe_write_str") !is null);
     assert(ctfeTable.getFunction("__ctfe_write_bool") !is null);

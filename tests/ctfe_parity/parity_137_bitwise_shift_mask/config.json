@@ -1,0 +1,7 @@
+{
+  "name": "bitwise_shift_mask",
+  "description": "CTFE parity: bitwise shift and mask on hex literals",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 171
+}

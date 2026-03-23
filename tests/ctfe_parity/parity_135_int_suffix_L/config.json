@@ -1,0 +1,7 @@
+{
+  "name": "int_suffix_L",
+  "description": "CTFE parity: integer L suffix forces Int64 type",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 42
+}

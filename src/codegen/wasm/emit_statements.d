@@ -105,10 +105,15 @@ mixin template StatementEmitter() {
             // Regular return
             if (stmt.value) {
                 emitExpression(out_, stmt.value);
-                // Implicit f64→f32 for float-returning functions
-                if (auto retBt = cast(BasicType)func.decl.returnType.resolve())
+                if (auto retBt = cast(BasicType)func.decl.returnType.resolve()) {
+                    // Implicit f64→f32 for float-returning functions
                     if (retBt.kind == BasicType.Kind.Float32 && isF64Expression(stmt.value))
                         out_ ~= Op.f32_demote_f64;
+                    // Implicit i32→i64 for long-returning functions
+                    if ((retBt.kind == BasicType.Kind.Int64 || retBt.kind == BasicType.Kind.UInt64)
+                        && !isI64Expression(stmt.value))
+                        out_ ~= Op.i64_extend_i32_s;
+                }
             }
 
             // Call destructors for all scopes being unwound (RAII)

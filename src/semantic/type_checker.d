@@ -3361,6 +3361,9 @@ class TypeChecker {
         // Narrow float literals to Float32 when target is float
         if (fromExpr !is null && narrowFloatLiteral(fromExpr, to))
             from = to;
+        // Widen integer literals to Int64/UInt64 when target is long/ulong
+        if (fromExpr !is null && widenIntLiteral(fromExpr, to))
+            from = to;
         from = resolveAliasType(from.resolve());
         to = resolveAliasType(to.resolve());
         // Exact type match
@@ -3502,6 +3505,37 @@ class TypeChecker {
             if (unary.operator == UnaryExpression.Operator.Minus ||
                 unary.operator == UnaryExpression.Operator.Plus) {
                 if (narrowFloatLiteral(unary.operand, targetType)) {
+                    unary.type = targetType;
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Widen an integer literal to Int64/UInt64 when the target type requires it.
+     * Analogous to narrowFloatLiteral but in the other direction.
+     */
+    bool widenIntLiteral(Expression expr, Type targetType) {
+        auto targetBt = cast(BasicType)targetType;
+        if (!targetBt)
+            return false;
+        if (targetBt.kind != BasicType.Kind.Int64 && targetBt.kind != BasicType.Kind.UInt64)
+            return false;
+
+        // Direct literal
+        if (auto lit = cast(LiteralExpression)expr) {
+            if (lit.value.type == typeid(long)) {
+                lit.type = targetType;
+                return true;
+            }
+        }
+        // Unary +/- wrapping a literal: -5000000000
+        if (auto unary = cast(UnaryExpression)expr) {
+            if (unary.operator == UnaryExpression.Operator.Minus ||
+                unary.operator == UnaryExpression.Operator.Plus) {
+                if (widenIntLiteral(unary.operand, targetType)) {
                     unary.type = targetType;
                     return true;
                 }
@@ -3689,10 +3723,28 @@ class TypeChecker {
         import std.variant;
         
         if (literal.value.type == typeid(long)) {
-            // Integer literal
+            // Integer literal — check suffix and value range for type promotion
+            if (literal.hasLongSuffix && literal.hasUnsignedSuffix)
+                return new BasicType(literal.location, BasicType.Kind.UInt64);
+            if (literal.hasLongSuffix)
+                return new BasicType(literal.location, BasicType.Kind.Int64);
+            if (literal.hasUnsignedSuffix) {
+                long val = literal.value.get!long();
+                if (val > uint.max || val < 0)
+                    return new BasicType(literal.location, BasicType.Kind.UInt64);
+                return new BasicType(literal.location, BasicType.Kind.UInt32);
+            }
+            // No suffix — auto-promote to Int64 only if value exceeds u32 range.
+            // Values in (int.max, uint.max] are valid unsigned 32-bit bit patterns
+            // (e.g. 0xEDB88320) and stay as Int32 — emitter handles two's complement.
+            long val = literal.value.get!long();
+            if (val > uint.max || val < int.min)
+                return new BasicType(literal.location, BasicType.Kind.Int64);
             return new BasicType(literal.location, BasicType.Kind.Int32);
         } else if (literal.value.type == typeid(double)) {
-            // Floating point literal
+            // Floating point literal — f suffix means Float32
+            if (literal.hasFloatSuffix)
+                return new BasicType(literal.location, BasicType.Kind.Float32);
             return new BasicType(literal.location, BasicType.Kind.Float64);
         } else if (literal.value.type == typeid(bool)) {
             // Boolean literal
