@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: 12345
 int main() {
     string s = "";

@@ -1,3 +1,4 @@
+// STATUS: wontfix — new requires @gc annotation
 // EXPECTED: 200
 class Shape {
     int area() { return 0; }

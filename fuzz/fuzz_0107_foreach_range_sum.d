@@ -1,3 +1,4 @@
+// STATUS: maybeLater — foreach not parsed
 // EXPECTED: 55
 int main() {
     int sum = 0;

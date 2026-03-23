@@ -1,3 +1,4 @@
+// STATUS: maybeLater — nested functions not parsed
 // EXPECTED: 7
 int main() {
     int add(int a, int b) {

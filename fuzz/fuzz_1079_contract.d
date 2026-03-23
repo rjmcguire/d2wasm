@@ -1,3 +1,4 @@
+// STATUS: maybeLater — in_statement not implemented
 // EXPECTED: 4
 int sqrt_floor(int n)
 in {

@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: 55
 int main() {
     int n = 10;

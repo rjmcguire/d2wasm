@@ -1,3 +1,4 @@
+// STATUS: bug — wrong output
 // EXPECTED: 5
 struct Inner {
     int val;

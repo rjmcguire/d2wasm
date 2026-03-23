@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: 104
 int main() {
     string s = "hello";

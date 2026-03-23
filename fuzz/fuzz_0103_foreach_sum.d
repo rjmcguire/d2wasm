@@ -1,3 +1,4 @@
+// STATUS: maybeLater — foreach not parsed
 // EXPECTED: 150
 int main() {
     int[5] arr = [10, 20, 30, 40, 50];

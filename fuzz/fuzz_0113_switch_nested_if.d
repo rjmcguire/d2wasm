@@ -1,3 +1,4 @@
+// STATUS: maybeLater — switch not parsed
 // EXPECTED: even-two
 int main() {
     int x = 2;

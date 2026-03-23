@@ -1,3 +1,4 @@
+// STATUS: maybeLater — feature not implemented
 // EXPECTED: ok
 static assert(1 + 1 == 2);
 static assert(true);

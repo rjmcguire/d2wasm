@@ -1,3 +1,4 @@
+// STATUS: wontfix — new requires @gc annotation
 // EXPECTED: 1
 class BoolBox {
     bool val;

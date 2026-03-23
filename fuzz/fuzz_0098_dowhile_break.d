@@ -1,3 +1,4 @@
+// STATUS: maybeLater — do-while not parsed
 // EXPECTED: 0
 // EXPECTED: 1
 int main() {

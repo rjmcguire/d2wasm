@@ -1,3 +1,4 @@
+// STATUS: maybeLater — foreach not parsed
 // EXPECTED: 45
 int main() {
     int[] arr;

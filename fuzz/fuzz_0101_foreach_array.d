@@ -1,3 +1,4 @@
+// STATUS: maybeLater — foreach not parsed
 // EXPECTED: 10
 // EXPECTED: 20
 // EXPECTED: 30

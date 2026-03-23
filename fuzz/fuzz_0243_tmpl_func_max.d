@@ -1,3 +1,4 @@
+// STATUS: maybeLater — ternary not parsed
 // EXPECTED: 10
 // EXPECTED: 7
 T max(T)(T a, T b) {

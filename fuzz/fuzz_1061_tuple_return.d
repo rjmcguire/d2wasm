@@ -1,3 +1,4 @@
+// STATUS: bug — wrong output
 // EXPECTED: 3
 // EXPECTED: 4
 // Simulated tuple return via struct

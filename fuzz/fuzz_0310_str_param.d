@@ -1,3 +1,4 @@
+// STATUS: bug — void function not collected by emitter
 // EXPECTED: hi
 void say(string msg) {
     __writeln(msg);

@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: 3
 int maxOf(int[4] arr) {
     int m = arr[0];

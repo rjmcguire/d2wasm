@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: 42
 int main() {
     int x = 42;

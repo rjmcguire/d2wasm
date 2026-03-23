@@ -1,3 +1,4 @@
+// STATUS: bug — wrong output
 // EXPECTED: 171
 // EXPECTED: 10
 // EXPECTED: 11

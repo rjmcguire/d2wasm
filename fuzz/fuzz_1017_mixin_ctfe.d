@@ -1,3 +1,4 @@
+// STATUS: bug — wrong output
 // EXPECTED: 10
 enum code = "__writeln(10);";
 

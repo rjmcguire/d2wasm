@@ -1,3 +1,4 @@
+// STATUS: maybeLater — ternary not parsed
 // EXPECTED: 1
 // EXPECTED: 0
 int main() {

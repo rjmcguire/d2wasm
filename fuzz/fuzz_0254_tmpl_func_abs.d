@@ -1,3 +1,4 @@
+// STATUS: maybeLater — ternary not parsed
 // EXPECTED: 5
 // EXPECTED: 5
 T abs(T)(T x) {

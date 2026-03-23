@@ -1,3 +1,4 @@
+// STATUS: maybeLater — super not implemented
 // EXPECTED: base=10
 // EXPECTED: derived=20
 class Base {

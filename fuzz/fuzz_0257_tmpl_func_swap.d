@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: 20
 // EXPECTED: 10
 void swap(T)(ref T a, ref T b) {

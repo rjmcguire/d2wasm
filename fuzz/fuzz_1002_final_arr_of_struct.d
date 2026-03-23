@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: 10
 // EXPECTED: 40
 // EXPECTED: 90

@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: 50
 int sumArr(int[5] arr) {
     int s = 0;

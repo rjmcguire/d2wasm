@@ -1,3 +1,4 @@
+// STATUS: maybeLater — literal narrowing not implemented
 // EXPECTED: 1000
 int main() {
     short a = 1000;

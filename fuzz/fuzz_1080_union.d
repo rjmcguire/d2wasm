@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: 42
 union IntOrFloat {
     int i;

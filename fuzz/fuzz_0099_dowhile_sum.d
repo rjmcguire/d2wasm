@@ -1,3 +1,4 @@
+// STATUS: maybeLater — do-while not parsed
 // EXPECTED: 15
 int main() {
     int sum = 0;

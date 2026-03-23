@@ -1,3 +1,4 @@
+// STATUS: wontfix — new requires @gc annotation
 // EXPECTED: dog
 class Animal {
     void speak() {

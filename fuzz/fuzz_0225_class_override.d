@@ -1,3 +1,4 @@
+// STATUS: wontfix — new requires @gc annotation
 // EXPECTED: hello from Derived
 class Base {
     void greet() {

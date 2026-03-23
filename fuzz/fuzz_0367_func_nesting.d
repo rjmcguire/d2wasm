@@ -1,3 +1,4 @@
+// STATUS: maybeLater — nested functions not parsed
 // EXPECTED: 42
 int main() {
     int a(int x) { return x + 2; }

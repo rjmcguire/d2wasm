@@ -1,3 +1,4 @@
+// STATUS: maybeLater — feature not implemented
 // EXPECTED: 20
 struct R { int w; int h; int area() { return w * h; } }
 

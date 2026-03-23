@@ -1,3 +1,4 @@
+// STATUS: wontfix — new requires @gc annotation
 // EXPECTED: 25
 abstract class Shape {
     abstract int area();

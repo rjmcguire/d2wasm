@@ -1,3 +1,4 @@
+// STATUS: maybeLater — type not implemented
 // EXPECTED: 3
 // EXPECTED: 5
 struct Sized(int N) {

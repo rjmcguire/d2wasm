@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: 30
 struct MyArr {
     int[5] data;

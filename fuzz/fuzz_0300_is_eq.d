@@ -1,3 +1,4 @@
+// STATUS: maybeLater — static if not parsed in function bodies
 // EXPECTED: 1
 // EXPECTED: 0
 int main() {

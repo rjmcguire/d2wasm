@@ -1,3 +1,4 @@
+// STATUS: maybeLater — switch not parsed
 // EXPECTED: greeting
 int main() {
     string s = "hello";

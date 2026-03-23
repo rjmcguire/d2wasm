@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: release
 debug {
     enum mode = "debug";

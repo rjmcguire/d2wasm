@@ -1,3 +1,4 @@
+// STATUS: maybeLater — null not implemented
 // EXPECTED: null
 // EXPECTED: not null
 class Foo {

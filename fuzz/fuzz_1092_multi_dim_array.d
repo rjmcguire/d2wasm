@@ -1,3 +1,4 @@
+// STATUS: maybeLater — literal narrowing not implemented
 // EXPECTED: 5
 int main() {
     int[2][3] m = [[1, 2], [3, 4], [5, 6]];

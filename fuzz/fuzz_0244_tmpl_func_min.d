@@ -1,3 +1,4 @@
+// STATUS: maybeLater — ternary not parsed
 // EXPECTED: 3
 // EXPECTED: 1
 T min(T)(T a, T b) {

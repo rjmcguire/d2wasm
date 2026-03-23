@@ -1,3 +1,4 @@
+// STATUS: wontfix — braceless if not parsed
 // EXPECTED: else
 int main() {
     if (false) __writeln("if");

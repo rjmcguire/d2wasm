@@ -1,3 +1,4 @@
+// STATUS: wontfix — new requires @gc annotation
 // EXPECTED: 10
 // EXPECTED: 20
 interface Sizable {

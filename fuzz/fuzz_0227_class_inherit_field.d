@@ -1,3 +1,4 @@
+// STATUS: maybeLater — super not implemented
 // EXPECTED: 10
 // EXPECTED: 20
 class Base {

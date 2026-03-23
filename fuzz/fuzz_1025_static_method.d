@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: 42
 struct Foo {
     static int value() {

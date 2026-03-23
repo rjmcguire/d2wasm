@@ -1,3 +1,4 @@
+// STATUS: maybeLater — feature not implemented
 // EXPECTED: 15
 int apply(int delegate(int) fn, int x) {
     return fn(x);

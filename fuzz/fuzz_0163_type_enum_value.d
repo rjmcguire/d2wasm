@@ -1,3 +1,4 @@
+// STATUS: maybeLater — named enum member access not implemented
 // EXPECTED: 10
 // EXPECTED: 20
 // EXPECTED: 30

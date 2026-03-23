@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: 6
 // EXPECTED: 60
 int compute(int a, int b = 2, int c = 3) {

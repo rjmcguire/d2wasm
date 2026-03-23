@@ -1,3 +1,4 @@
+// STATUS: maybeLater — static if not parsed in function bodies
 // EXPECTED: 1
 void foo(ref int x) {
     static if (__traits(isRef, x)) __writeln(1);

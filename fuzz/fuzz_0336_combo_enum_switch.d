@@ -1,3 +1,4 @@
+// STATUS: maybeLater — switch not parsed
 // EXPECTED: green
 enum Color { red, green, blue }
 

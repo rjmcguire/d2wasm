@@ -1,3 +1,4 @@
+// STATUS: bug — wrong output
 // EXPECTED: 45
 struct Acc {
     int total;

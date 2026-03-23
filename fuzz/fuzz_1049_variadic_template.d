@@ -1,3 +1,4 @@
+// STATUS: maybeLater — foreach not parsed
 // EXPECTED: 6
 // Tests variadic templates (probably not implemented)
 int sum(T...)(T args) {

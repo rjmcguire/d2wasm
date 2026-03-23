@@ -1,3 +1,4 @@
+// STATUS: bug — void function not collected by emitter
 // EXPECTED: a
 // EXPECTED: b
 // EXPECTED: c

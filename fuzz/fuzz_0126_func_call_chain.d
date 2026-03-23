@@ -1,3 +1,4 @@
+// STATUS: bug — wrong output
 // EXPECTED: 9
 int double_(int x) {
     return x * 2;

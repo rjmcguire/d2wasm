@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: 25
 int square(int x) { return x * x; }
 

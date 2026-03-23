@@ -1,3 +1,4 @@
+// STATUS: maybeLater — switch not parsed
 // EXPECTED: other
 int main() {
     int x = 99;

@@ -1,3 +1,4 @@
+// STATUS: maybeLater — with_statement not implemented
 // EXPECTED: 10
 // EXPECTED: 20
 struct Point {

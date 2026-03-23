@@ -1,3 +1,4 @@
+// STATUS: maybeLater — nested functions not parsed
 // EXPECTED: 30
 int main() {
     int double_(int x) { return x * 2; }

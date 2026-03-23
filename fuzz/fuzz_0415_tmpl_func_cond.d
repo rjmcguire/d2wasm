@@ -1,3 +1,4 @@
+// STATUS: maybeLater — ternary not parsed
 // EXPECTED: 5
 T myMax(T)(T a, T b) if (__traits(isArithmetic, T)) {
     return a > b ? a : b;

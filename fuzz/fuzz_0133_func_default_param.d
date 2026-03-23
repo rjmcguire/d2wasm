@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: 15
 // EXPECTED: 50
 int scale(int x, int factor = 5) {

@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: 3
 void increment(ref int x) {
     x++;

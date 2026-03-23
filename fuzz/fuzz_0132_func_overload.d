@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: 3
 // EXPECTED: 6
 int add(int a, int b) {

@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: 120
 int factorial(int N)() if (N <= 1) {
     return 1;

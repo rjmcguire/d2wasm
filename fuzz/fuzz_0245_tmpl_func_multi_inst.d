@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: 5
 // EXPECTED: 5000000000
 T identity(T)(T x) {

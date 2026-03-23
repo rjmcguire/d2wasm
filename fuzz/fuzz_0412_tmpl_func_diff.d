@@ -1,3 +1,4 @@
+// STATUS: maybeLater — ternary not parsed
 // EXPECTED: 5
 T diff(T)(T a, T b) { return a > b ? a - b : b - a; }
 

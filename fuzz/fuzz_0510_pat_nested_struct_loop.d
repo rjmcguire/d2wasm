@@ -1,3 +1,4 @@
+// STATUS: bug — wrong output
 // EXPECTED: 3
 struct P { int x; int y; }
 

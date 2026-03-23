@@ -1,3 +1,4 @@
+// STATUS: bug — wrong output
 // EXPECTED: 42
 // EXPECTED: 100
 struct Box(T) {

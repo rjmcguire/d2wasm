@@ -1,3 +1,4 @@
+// STATUS: bug — wrong output
 // EXPECTED: 10
 // EXPECTED: 3
 void divmod(int a, int b, out int quot, out int rem) {

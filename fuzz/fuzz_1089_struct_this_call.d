@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: 10
 // EXPECTED: 20
 struct Point {

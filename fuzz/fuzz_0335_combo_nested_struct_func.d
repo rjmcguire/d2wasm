@@ -1,3 +1,4 @@
+// STATUS: bug — wrong output
 // EXPECTED: 7
 struct Point { int x; int y; }
 

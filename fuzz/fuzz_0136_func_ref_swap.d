@@ -1,3 +1,4 @@
+// STATUS: bug — wrong output
 // EXPECTED: 20
 // EXPECTED: 10
 void swap(ref int a, ref int b) {

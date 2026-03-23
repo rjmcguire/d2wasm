@@ -1,3 +1,4 @@
+// STATUS: wontfix — new requires @gc annotation
 // EXPECTED: 0
 // EXPECTED: 1
 // EXPECTED: 2

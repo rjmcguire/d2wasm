@@ -1,3 +1,4 @@
+// STATUS: maybeLater — identity_expression not implemented
 // EXPECTED: 3
 // Linked-list-like structure
 class Node {

@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: 10
 struct Outer(T) {
     struct Inner {

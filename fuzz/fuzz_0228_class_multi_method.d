@@ -1,3 +1,4 @@
+// STATUS: wontfix — new requires @gc annotation
 // EXPECTED: 3
 // EXPECTED: 5
 class Counter {

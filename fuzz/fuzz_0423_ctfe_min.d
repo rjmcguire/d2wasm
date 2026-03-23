@@ -1,3 +1,4 @@
+// STATUS: maybeLater — ternary not parsed
 // EXPECTED: 3
 int myMin(int a, int b) { return a < b ? a : b; }
 enum m = myMin(3, 7);

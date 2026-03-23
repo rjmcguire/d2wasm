@@ -1,3 +1,4 @@
+// STATUS: maybeLater — scope_guard_statement not implemented
 // EXPECTED: hello
 // EXPECTED: cleanup
 // Tests scope(exit)

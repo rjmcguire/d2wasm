@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: 5
 class Num {
     int val;

@@ -1,3 +1,4 @@
+// STATUS: maybeLater — static if not parsed in function bodies
 // EXPECTED: 1
 int main() {
     static if (__traits(isUnsigned, ubyte)) __writeln(1);

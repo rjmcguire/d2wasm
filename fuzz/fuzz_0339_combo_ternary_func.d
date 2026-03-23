@@ -1,3 +1,4 @@
+// STATUS: maybeLater — ternary not parsed
 // EXPECTED: even
 // EXPECTED: odd
 string parity(int n) {

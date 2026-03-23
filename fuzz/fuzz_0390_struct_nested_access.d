@@ -1,3 +1,4 @@
+// STATUS: bug — wrong output
 // EXPECTED: 42
 struct Inner { int v; }
 struct Outer { Inner i; }

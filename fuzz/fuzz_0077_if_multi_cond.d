@@ -1,3 +1,4 @@
+// STATUS: bug — wrong output
 // EXPECTED: both
 // EXPECTED: either
 // EXPECTED: neither

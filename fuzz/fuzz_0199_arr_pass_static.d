@@ -1,3 +1,4 @@
+// STATUS: maybeLater — foreach not parsed
 // EXPECTED: 6
 int sumArr(int[3] arr) {
     int s = 0;

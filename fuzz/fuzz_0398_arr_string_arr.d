@@ -1,3 +1,4 @@
+// STATUS: bug — wrong output
 // EXPECTED: hello
 // EXPECTED: world
 int main() {

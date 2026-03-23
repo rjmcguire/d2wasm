@@ -1,3 +1,4 @@
+// STATUS: maybeLater — final_switch_statement not implemented
 // EXPECTED: b
 enum E { a, b, c }
 

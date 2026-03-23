@@ -1,3 +1,4 @@
+// STATUS: bug — wrong output
 // EXPECTED: 285
 int main() {
     int sum = 0;

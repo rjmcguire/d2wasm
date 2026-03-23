@@ -1,3 +1,4 @@
+// STATUS: wontfix — new requires @gc annotation
 // EXPECTED: cat
 // EXPECTED: dog
 class Animal {

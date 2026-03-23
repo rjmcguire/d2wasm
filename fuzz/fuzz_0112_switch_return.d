@@ -1,3 +1,4 @@
+// STATUS: maybeLater — switch not parsed
 // EXPECTED: 2
 // EXPECTED: -1
 int lookup(int x) {

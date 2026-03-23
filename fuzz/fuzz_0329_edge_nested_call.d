@@ -1,3 +1,4 @@
+// STATUS: bug — wrong output
 // EXPECTED: 120
 int a(int x) { return x + 1; }
 int b(int x) { return x * 2; }

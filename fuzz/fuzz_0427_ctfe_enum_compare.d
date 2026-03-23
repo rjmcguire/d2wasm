@@ -1,3 +1,4 @@
+// STATUS: maybeLater — static if not parsed in function bodies
 // EXPECTED: big
 enum VAL = 100;
 

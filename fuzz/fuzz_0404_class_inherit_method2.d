@@ -1,3 +1,4 @@
+// STATUS: maybeLater — super not implemented
 // EXPECTED: 20
 class Base {
     int x;

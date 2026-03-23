@@ -1,3 +1,4 @@
+// STATUS: maybeLater — switch not parsed
 // EXPECTED: small
 // EXPECTED: small
 // EXPECTED: big

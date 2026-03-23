@@ -1,3 +1,4 @@
+// STATUS: wontfix — variable shadowing disallowed by design
 // EXPECTED: 5
 int main() {
     int x = 1;

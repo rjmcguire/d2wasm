@@ -1,3 +1,4 @@
+// STATUS: maybeLater — literal narrowing not implemented
 // EXPECTED: 4294967295
 // EXPECTED: 0
 int main() {

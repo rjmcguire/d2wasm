@@ -1,3 +1,4 @@
+// STATUS: bug — wrong output
 // EXPECTED: x
 int main() {
     int x = 42;

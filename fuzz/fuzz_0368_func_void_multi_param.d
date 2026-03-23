@@ -1,3 +1,4 @@
+// STATUS: bug — compile error
 // EXPECTED: 3-7
 void printSum(int a, int b, int c) {
     __writeln(__itos(a) ~ "-" ~ __itos(b + c));

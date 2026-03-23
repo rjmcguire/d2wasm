@@ -1,3 +1,4 @@
+// STATUS: maybeLater — foreach not parsed
 // EXPECTED: 120
 int main() {
     int[5] a = [1, 2, 3, 4, 5];

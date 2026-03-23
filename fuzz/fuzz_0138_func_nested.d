@@ -1,3 +1,4 @@
+// STATUS: maybeLater — nested functions not parsed
 // EXPECTED: 25
 int main() {
     int square(int x) {

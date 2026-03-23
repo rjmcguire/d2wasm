@@ -1,3 +1,4 @@
+// STATUS: wontfix — variable shadowing disallowed by design
 // EXPECTED: outer
 // EXPECTED: inner
 // EXPECTED: outer

@@ -1,3 +1,4 @@
+// STATUS: maybeLater — ternary not parsed
 // EXPECTED: 20
 int myMax(int a, int b) {
     return a > b ? a : b;

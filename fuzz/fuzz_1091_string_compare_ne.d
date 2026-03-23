@@ -1,3 +1,4 @@
+// STATUS: bug — wrong output
 // EXPECTED: 1
 // EXPECTED: 0
 int main() {
