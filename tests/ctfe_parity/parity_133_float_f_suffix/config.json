@@ -3,6 +3,5 @@
   "description": "CTFE parity: float literal f suffix (2.0f parsed as Float32)",
   "type": "wasm_exec",
   "entry": "_D4test4mainFZi",
-  "expected_result": 5,
-  "skip_backends": ["native"]
+  "expected_result": 5
 }

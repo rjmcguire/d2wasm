@@ -50,9 +50,21 @@ immutable stencil_sub_i32 = Stencil(
     []
 );
 
+immutable stencil_sub_i64 = Stencil(
+    "sub_i64",
+    cast(immutable ubyte[])[0x00, 0x00, 0x01, 0xcb],  // SUB x0, x0, x1 (64-bit)
+    []
+);
+
 immutable stencil_mul_i32 = Stencil(
     "mul_i32",
     cast(immutable ubyte[])[0x20, 0x7c, 0x00, 0x1b],  // MUL w0, w1, w0 (32-bit)
+    []
+);
+
+immutable stencil_mul_i64 = Stencil(
+    "mul_i64",
+    cast(immutable ubyte[])[0x20, 0x7c, 0x00, 0x9b],  // MUL x0, x1, x0 (64-bit)
     []
 );
 
@@ -62,11 +74,26 @@ immutable stencil_div_i32 = Stencil(
     []
 );
 
+immutable stencil_div_i64 = Stencil(
+    "div_i64",
+    cast(immutable ubyte[])[0x00, 0x0c, 0xc1, 0x9a],  // SDIV x0, x0, x1 (64-bit)
+    []
+);
+
 immutable stencil_mod_i32 = Stencil(
     "mod_i32",
     cast(immutable ubyte[])[
         0x08, 0x0c, 0xc1, 0x1a,  // SDIV w8, w0, w1 (32-bit)
         0x00, 0x81, 0x01, 0x1b   // MSUB w0, w8, w1, w0 (32-bit)
+    ],
+    []
+);
+
+immutable stencil_mod_i64 = Stencil(
+    "mod_i64",
+    cast(immutable ubyte[])[
+        0x08, 0x0c, 0xc1, 0x9a,  // SDIV x8, x0, x1 (64-bit)
+        0x00, 0x81, 0x01, 0x9b   // MSUB x0, x8, x1, x0 (64-bit)
     ],
     []
 );
@@ -345,6 +372,62 @@ immutable stencil_ge_i32 = Stencil(
     "ge_i32",
     cast(immutable ubyte[])[
         0x1f, 0x00, 0x01, 0x6b,  // CMP w0, w1 (32-bit for signed comparison)
+        0xe0, 0xb7, 0x9f, 0x1a   // CSET w0, ge
+    ],
+    []
+);
+
+// 64-bit signed comparison stencils
+// Same CSET conditions as i32, but CMP uses x-registers (0xEB instead of 0x6B)
+immutable stencil_eq_i64 = Stencil(
+    "eq_i64",
+    cast(immutable ubyte[])[
+        0x1f, 0x00, 0x01, 0xeb,  // CMP x0, x1 (64-bit)
+        0xe0, 0x17, 0x9f, 0x1a   // CSET w0, eq
+    ],
+    []
+);
+
+immutable stencil_ne_i64 = Stencil(
+    "ne_i64",
+    cast(immutable ubyte[])[
+        0x1f, 0x00, 0x01, 0xeb,  // CMP x0, x1 (64-bit)
+        0xe0, 0x07, 0x9f, 0x1a   // CSET w0, ne
+    ],
+    []
+);
+
+immutable stencil_lt_i64 = Stencil(
+    "lt_i64",
+    cast(immutable ubyte[])[
+        0x1f, 0x00, 0x01, 0xeb,  // CMP x0, x1 (64-bit)
+        0xe0, 0xa7, 0x9f, 0x1a   // CSET w0, lt
+    ],
+    []
+);
+
+immutable stencil_le_i64 = Stencil(
+    "le_i64",
+    cast(immutable ubyte[])[
+        0x1f, 0x00, 0x01, 0xeb,  // CMP x0, x1 (64-bit)
+        0xe0, 0xc7, 0x9f, 0x1a   // CSET w0, le
+    ],
+    []
+);
+
+immutable stencil_gt_i64 = Stencil(
+    "gt_i64",
+    cast(immutable ubyte[])[
+        0x1f, 0x00, 0x01, 0xeb,  // CMP x0, x1 (64-bit)
+        0xe0, 0xd7, 0x9f, 0x1a   // CSET w0, gt
+    ],
+    []
+);
+
+immutable stencil_ge_i64 = Stencil(
+    "ge_i64",
+    cast(immutable ubyte[])[
+        0x1f, 0x00, 0x01, 0xeb,  // CMP x0, x1 (64-bit)
         0xe0, 0xb7, 0x9f, 0x1a   // CSET w0, ge
     ],
     []
@@ -832,9 +915,13 @@ shared static this() {
     stencilTable["add_i32"] = &stencil_add_i32;
     stencilTable["add_i64"] = &stencil_add_i64;
     stencilTable["sub_i32"] = &stencil_sub_i32;
+    stencilTable["sub_i64"] = &stencil_sub_i64;
     stencilTable["mul_i32"] = &stencil_mul_i32;
+    stencilTable["mul_i64"] = &stencil_mul_i64;
     stencilTable["div_i32"] = &stencil_div_i32;
+    stencilTable["div_i64"] = &stencil_div_i64;
     stencilTable["mod_i32"] = &stencil_mod_i32;
+    stencilTable["mod_i64"] = &stencil_mod_i64;
     stencilTable["neg_i32"] = &stencil_neg_i32;
 
     // f64 Floating-Point
@@ -874,6 +961,12 @@ shared static this() {
     stencilTable["le_i32"] = &stencil_le_i32;
     stencilTable["gt_i32"] = &stencil_gt_i32;
     stencilTable["ge_i32"] = &stencil_ge_i32;
+    stencilTable["eq_i64"] = &stencil_eq_i64;
+    stencilTable["ne_i64"] = &stencil_ne_i64;
+    stencilTable["lt_i64"] = &stencil_lt_i64;
+    stencilTable["le_i64"] = &stencil_le_i64;
+    stencilTable["gt_i64"] = &stencil_gt_i64;
+    stencilTable["ge_i64"] = &stencil_ge_i64;
     
     // Comparison (unsigned) - for bounds checking
     stencilTable["lt_u32"] = &stencil_lt_u32;

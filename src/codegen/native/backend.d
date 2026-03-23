@@ -1278,6 +1278,12 @@ class NativeCompiledFunction : CompiledFunction {
                     assert(elemSz > 0, "Static array element type has zero size");
                     bytes = length * elemSz;
                 }
+            } else if (auto bt = cast(BasicType)varDecl.type) {
+                if (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32 ||
+                    bt.kind == BasicType.Kind.Int64 || bt.kind == BasicType.Kind.UInt64)
+                    bytes = 8 + 8;  // 8-byte value + alignment padding
+                else
+                    bytes = 4;
             } else {
                 bytes = 4;  // int, bool, etc.
             }
@@ -1421,13 +1427,23 @@ class NativeCompiledFunction : CompiledFunction {
             } else if (cast(PointerType)varDecl.type !is null) {
                 // Raw pointer: 8 bytes on ARM64
                 varSize = 8;
+            } else if (auto bt = cast(BasicType)varDecl.type) {
+                // Float and long scalars need 8 bytes
+                if (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32 ||
+                    bt.kind == BasicType.Kind.Int64 || bt.kind == BasicType.Kind.UInt64)
+                    varSize = 8;
             }
             
             // Allocate stack slot for this variable
             // Slices, ObjC refs, and raw pointers contain a 64-bit value and need 8-byte alignment
             // for STR x0, [sp, #imm] encoding (imm must be multiple of 8)
             bool isPtr = cast(PointerType)varDecl.type !is null;
-            if (isSlice || isObjCRef || isPtr) {
+            bool is8ByteScalar = false;
+            if (auto bt = cast(BasicType)varDecl.type) {
+                is8ByteScalar = bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32 ||
+                                bt.kind == BasicType.Kind.Int64 || bt.kind == BasicType.Kind.UInt64;
+            }
+            if (isSlice || isObjCRef || isPtr || is8ByteScalar) {
                 nextLocalOffset = (nextLocalOffset + 7) & ~7;
             }
             NativeLocalInfo nli;
@@ -1461,6 +1477,9 @@ class NativeCompiledFunction : CompiledFunction {
                 }
             }
             // else: kind stays VarKind.scalar (default)
+            // Store type info for scalar float/long variables
+            if (nli.kind == VarKind.scalar && varDecl.type !is null)
+                nli.elementType = varDecl.type;
             if (isObjCRef)
                 nli.isObjCRef = true;
             if (isPtr)
@@ -1962,6 +1981,10 @@ class NativeCompiledFunction : CompiledFunction {
                     compileExpression(varDecl.initializer);
                     if (nli.isRawPointer || nli.isObjCRef)
                         gen.emitStorePtr(varOffset);
+                    else if (isF64ElementType(varDecl.type))
+                        gen.emitStoreLocalF64(varOffset);
+                    else if (is8ByteScalar && !isF64ElementType(varDecl.type))
+                        gen.emitStorePtr(varOffset);  // 64-bit integer store
                     else
                         gen.emitStoreLocal32(varOffset);
                     varSize = 0;  // already advanced
@@ -2159,6 +2182,12 @@ class NativeCompiledFunction : CompiledFunction {
     /// Check if an expression produces an f64 value.
     private bool isF64Expression(Expression expr) {
         import std.variant : Variant;
+        // Check expr.type first (set by type checker) — most reliable
+        if (expr.type) {
+            if (auto bt = cast(BasicType)expr.type.resolve())
+                if (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32)
+                    return true;
+        }
         if (auto lit = cast(LiteralExpression)expr)
             return lit.value.type == typeid(double);
         if (auto idx = cast(IndexExpression)expr) {
@@ -2179,13 +2208,27 @@ class NativeCompiledFunction : CompiledFunction {
         return false;
     }
 
+    /// Check if an expression produces an i64 value.
+    private bool isI64Expression(Expression expr) {
+        if (expr.type) {
+            if (auto bt = cast(BasicType)expr.type.resolve())
+                return bt.kind == BasicType.Kind.Int64 || bt.kind == BasicType.Kind.UInt64;
+        }
+        return false;
+    }
+
     private void compileExpression(Expression expr) {
         import std.variant : Variant;
         log(3, "native: expr ", typeid(expr));
         if (auto lit = cast(LiteralExpression)expr) {
             // Handle different literal types via Variant
             if (lit.value.type == typeid(long)) {
-                gen.emitImm32(stencil_load_imm32, cast(int)lit.value.get!long);
+                long val = lit.value.get!long;
+                // Use 64-bit load if value exceeds 32-bit range or expr type is i64
+                if (val > int.max || val < int.min || isI64Expression(lit))
+                    gen.emitLoadImm64(cast(ulong)val);
+                else
+                    gen.emitImm32(stencil_load_imm32, cast(int)val);
             } else if (lit.value.type == typeid(int)) {
                 gen.emitImm32(stencil_load_imm32, lit.value.get!int);
             } else if (lit.value.type == typeid(bool)) {
@@ -2292,6 +2335,45 @@ class NativeCompiledFunction : CompiledFunction {
                 return;
             }
 
+            // i64 integer path: 64-bit arithmetic in x0/x1
+            if (isI64Expression(binOp.left) || isI64Expression(binOp.right)) {
+                bool leftMightClobber64 = containsFunctionCall(binOp.left) ||
+                                          cast(BinaryExpression)binOp.left !is null ||
+                                          cast(IndexExpression)binOp.left !is null ||
+                                          cast(MemberExpression)binOp.left !is null;
+                compileExpression(binOp.right);
+                if (leftMightClobber64) {
+                    auto mark = temps.save();
+                    size_t myTemp64 = temps.alloc(8);
+                    gen.emitStorePtr(myTemp64);
+                    compileExpression(binOp.left);
+                    gen.emitMoveX0ToX8();
+                    gen.emitLoadPtr(myTemp64);
+                    gen.emitMoveX0ToX1();
+                    gen.emitMoveX8ToX0();
+                    temps.restore(mark);
+                } else {
+                    gen.emitMoveX0ToX1();
+                    compileExpression(binOp.left);
+                }
+                switch (binOp.operator) {
+                    case BinaryExpression.Operator.Add: gen.emit(stencil_add_i64); break;
+                    case BinaryExpression.Operator.Subtract: gen.emit(stencil_sub_i64); break;
+                    case BinaryExpression.Operator.Multiply: gen.emit(stencil_mul_i64); break;
+                    case BinaryExpression.Operator.Divide: gen.emit(stencil_div_i64); break;
+                    case BinaryExpression.Operator.Modulo: gen.emit(stencil_mod_i64); break;
+                    case BinaryExpression.Operator.Equal: gen.emit(stencil_eq_i64); break;
+                    case BinaryExpression.Operator.NotEqual: gen.emit(stencil_ne_i64); break;
+                    case BinaryExpression.Operator.Less: gen.emit(stencil_lt_i64); break;
+                    case BinaryExpression.Operator.LessEqual: gen.emit(stencil_le_i64); break;
+                    case BinaryExpression.Operator.Greater: gen.emit(stencil_gt_i64); break;
+                    case BinaryExpression.Operator.GreaterEqual: gen.emit(stencil_ge_i64); break;
+                    default:
+                        throw new Exception("i64 binary operator not yet supported in native backend: " ~ to!string(binOp.operator));
+                }
+                return;
+            }
+
             // Check if left operand might clobber x1 (function call, nested binary expr, index expr,
             // or member expr whose object evaluation uses x1 for address calculation)
             bool leftMightClobber = containsFunctionCall(binOp.left) ||
@@ -2324,7 +2406,7 @@ class NativeCompiledFunction : CompiledFunction {
                 compileExpression(binOp.left);
             }
             // Now x0=left, x1=right
-            
+
             // Emit operation
             final switch (binOp.operator) {
                 case BinaryExpression.Operator.Add:
@@ -2463,7 +2545,17 @@ class NativeCompiledFunction : CompiledFunction {
                         gen.emitStackAddress(info.offset);
                         break;
                     case VarKind.scalar:
-                        gen.emitLoadLocal32(info.offset);
+                        if (isF64ElementType(info.elementType))
+                            gen.emitLoadLocalF64(info.offset);
+                        else if (info.elementType !is null) {
+                            if (auto bt = cast(BasicType)info.elementType)
+                                if (bt.kind == BasicType.Kind.Int64 || bt.kind == BasicType.Kind.UInt64) {
+                                    gen.emitLoadPtr(info.offset);  // 64-bit integer load
+                                    break;
+                                }
+                            gen.emitLoadLocal32(info.offset);
+                        } else
+                            gen.emitLoadLocal32(info.offset);
                         break;
                 }
             } else {
@@ -5248,6 +5340,11 @@ class NativeCompiledFunction : CompiledFunction {
                     if (objectMode) {
                         import std.conv : to;
                         emitWriteString(to!string(val));
+                    } else if (val > int.max || val < int.min || isI64Expression(literal)) {
+                        gen.emitLoadImm64(cast(ulong)val);
+                        ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_write_i64");
+                        ulong ctxSlot = hostFunctions.getContextSlotAddress();
+                        gen.emitHostCall(slot, ctxSlot);
                     } else {
                         gen.emitImm32(stencil_load_imm32, cast(int)val);
                         ulong slot = hostFunctions.getFunctionSlotAddress("__ctfe_write_i32");
