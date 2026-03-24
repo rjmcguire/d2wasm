@@ -1,0 +1,6 @@
+{
+  "name": "ctfe_manifest_cache",
+  "description": "CTFE manifest constant results cached and correctly invalidated",
+  "type": "shell",
+  "script": "run_test.sh"
+}

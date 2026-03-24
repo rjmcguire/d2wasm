@@ -1,0 +1,6 @@
+{
+  "name": "persistent_code_cache",
+  "description": "Per-function code cache persists across compilations with correct invalidation",
+  "type": "shell",
+  "script": "run_test.sh"
+}

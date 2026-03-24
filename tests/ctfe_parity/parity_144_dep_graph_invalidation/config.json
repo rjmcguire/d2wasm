@@ -1,0 +1,6 @@
+{
+  "name": "dep_graph_invalidation",
+  "description": "Dependency graph transitively invalidates cache when dependencies change",
+  "type": "shell",
+  "script": "run_test.sh"
+}

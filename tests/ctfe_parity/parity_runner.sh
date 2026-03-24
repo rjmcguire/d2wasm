@@ -71,12 +71,39 @@ run_test_with_backend() {
 
     # Only handle CTFE-relevant test types
     case "$test_type" in
-        compile_output|wasm_exec|compile_error|ffi_exec) ;;
+        compile_output|wasm_exec|compile_error|ffi_exec|shell) ;;
         *)
             echo -e "${YELLOW}SKIP${NC} $test_name [$backend] (not a CTFE test type: $test_type)"
             return 0
             ;;
     esac
+
+    # Handle shell tests — run a custom script with backend as argument
+    if [ "$test_type" = "shell" ]; then
+        local script_name=$(jq -r '.script // "run_test.sh"' "$config_file")
+        local script_path="$test_dir/$script_name"
+        if [ ! -x "$script_path" ]; then
+            echo -e "${RED}FAIL${NC} $test_name [$backend] (script not executable: $script_name)"
+            return 1
+        fi
+
+        if [ $VERBOSE -eq 1 ]; then
+            echo "  Running shell: $script_path $backend"
+        fi
+
+        local shell_output
+        shell_output=$("$script_path" "$backend" "$COMPILER" 2>&1)
+        local shell_exit=$?
+
+        if [ $shell_exit -eq 0 ]; then
+            echo -e "${GREEN}PASS${NC} $test_name [$backend]"
+            return 0
+        else
+            echo -e "${RED}FAIL${NC} $test_name [$backend]"
+            echo "$shell_output" | sed 's/^/    /'
+            return 1
+        fi
+    fi
 
     # Handle ffi_exec — compile+run with --run and --link-framework
     if [ "$test_type" = "ffi_exec" ]; then
