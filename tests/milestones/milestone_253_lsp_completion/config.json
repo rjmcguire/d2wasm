@@ -1,0 +1,6 @@
+{
+  "name": "lsp_completion",
+  "description": "LSP code completion for identifiers and member access",
+  "type": "shell",
+  "script": "run_test.sh"
+}

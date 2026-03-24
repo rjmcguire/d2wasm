@@ -58,7 +58,8 @@ if echo "$RESPONSE" | grep -q '"diagnostics"'; then
         echo "  OK: Diagnostics published (may contain warnings)"
     fi
 else
-    echo "  WARN: No diagnostics notification received"
+    echo "FAIL: No diagnostics notification received"
+    exit 1
 fi
 
 ###############################################################################
@@ -87,7 +88,9 @@ RESPONSE2=$({
 if echo "$RESPONSE2" | grep -q '"severity":1'; then
     echo "  OK: Error diagnostic received"
 else
-    echo "  WARN: No error diagnostic (may need type checker to catch this)"
+    echo "FAIL: No error diagnostic received"
+    echo "Response: $RESPONSE2"
+    exit 1
 fi
 
 echo "All LSP diagnostics tests passed!"

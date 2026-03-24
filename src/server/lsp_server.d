@@ -159,6 +159,8 @@ class LSPServer {
                 return handleDocumentSymbol(msg);
             case "textDocument/references":
                 return handleReferences(msg);
+            case "textDocument/completion":
+                return handleCompletion(msg);
             default:
                 if (isRequest)
                     return jsonRPCError(msg, -32601, "Method not found: " ~ method);
@@ -183,6 +185,10 @@ class LSPServer {
         JSONValue sigHelp;
         sigHelp["triggerCharacters"] = JSONValue(["("]);
         caps["signatureHelpProvider"] = sigHelp;
+
+        JSONValue completion;
+        completion["triggerCharacters"] = JSONValue(["."]);
+        caps["completionProvider"] = completion;
 
         JSONValue result;
         result["capabilities"] = caps;
@@ -480,6 +486,184 @@ class LSPServer {
         }
 
         return jsonRPCResult(msg, JSONValue(locations));
+    }
+
+    private JSONValue handleCompletion(JSONValue msg) {
+        auto params = msg["params"];
+        string uri = params["textDocument"]["uri"].str;
+        auto pos = Position.fromJSON(params["position"]);
+
+        string path = uriToPath(uri);
+        auto absPath = absolutePath(path);
+
+        string sourceText = (uri in openDocuments) ? openDocuments[uri] : "";
+        if (sourceText.length == 0 && exists(path))
+            sourceText = readText(path);
+
+        uint byteOffset = positionToByteOffset(pos, sourceText);
+
+        // Determine completion context: member access (obj.) or identifier
+        bool isMemberAccess = false;
+        if (byteOffset > 0 && sourceText[byteOffset - 1] == '.')
+            isMemberAccess = true;
+
+        JSONValue[] items;
+
+        if (isMemberAccess) {
+            // Member completion: find the expression before the dot,
+            // resolve its type, iterate childIndex
+            auto pi = absPath in positionIndexes;
+            if (pi !is null) {
+                // Find expression just before the dot
+                auto expr = pi.findExprAt(byteOffset - 2);
+                if (expr !is null) {
+                    auto typedExpr = cast(Expression)expr;
+                    if (typedExpr !is null && typedExpr.type !is null) {
+                        // Resolve to struct/class declaration
+                        if (auto userType = cast(UserType)typedExpr.type) {
+                            if (userType.declaration !is null) {
+                                auto decl = userType.declaration;
+                                // Use childIndex for O(1) member enumeration
+                                foreach (name, child; decl.childIndex) {
+                                    items ~= makeCompletionItem(name, child);
+                                }
+                                // Also check members directly (fields + methods)
+                                if (auto aggDecl = cast(AggregateDecl)decl) {
+                                    foreach (member; aggDecl.members) {
+                                        if (member.name.length > 0
+                                            && member.name !in decl.childIndex)
+                                        {
+                                            items ~= makeCompletionItem(member.name, member);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Identifier completion: collect symbols from module scope
+            import semantic.module_ : Module;
+
+            // Find the module for this file
+            Module mod;
+            if (warmState.moduleRegistry !is null) {
+                foreach (m; warmState.moduleRegistry.allModules()) {
+                    if (m.sourceFilePath == absPath) {
+                        mod = m;
+                        break;
+                    }
+                }
+            }
+
+            if (mod !is null && mod.symbolTable !is null) {
+                // Get prefix (characters before cursor on current line)
+                string prefix = "";
+                if (byteOffset > 0) {
+                    size_t start = byteOffset;
+                    while (start > 0 && isIdentChar(sourceText[start - 1]))
+                        start--;
+                    prefix = sourceText[start .. byteOffset];
+                }
+
+                // Iterate module scope symbols, filter by prefix
+                auto moduleScope = mod.symbolTable.moduleScope;
+                if (moduleScope !is null) {
+                    import semantic.symbol_table : Symbol;
+                    foreach (name, sym; moduleScope.symbols) {
+                        if (prefix.length == 0 || name.startsWith(prefix)) {
+                            items ~= makeCompletionItemFromSymbol(name, sym);
+                        }
+                    }
+                }
+            }
+
+            // Also add symbols from topIndex
+            if (mod !is null && mod.topIndex.length > 0) {
+                foreach (name, decl; mod.topIndex) {
+                    // Avoid duplicates (already in module scope)
+                    if (items.length > 100) break;  // cap for performance
+                    // prefix filter
+                    string prefix2 = "";
+                    if (byteOffset > 0) {
+                        size_t start = byteOffset;
+                        while (start > 0 && isIdentChar(sourceText[start - 1]))
+                            start--;
+                        prefix2 = sourceText[start .. byteOffset];
+                    }
+                    if (prefix2.length > 0 && !name.startsWith(prefix2))
+                        continue;
+                }
+            }
+        }
+
+        JSONValue result;
+        result["isIncomplete"] = false;
+        result["items"] = JSONValue(items);
+        return jsonRPCResult(msg, result);
+    }
+
+    private JSONValue makeCompletionItem(string name, Declaration decl) {
+        JSONValue item;
+        item["label"] = name;
+
+        // Determine kind
+        if (cast(FunctionDecl)decl)
+            item["kind"] = cast(int)CompletionItemKind.Function;
+        else if (cast(StructDecl)decl)
+            item["kind"] = cast(int)CompletionItemKind.Struct;
+        else if (cast(ClassDecl)decl)
+            item["kind"] = cast(int)CompletionItemKind.Class;
+        else if (cast(VariableDecl)decl)
+            item["kind"] = cast(int)CompletionItemKind.Field;
+        else if (cast(ManifestConstantDecl)decl)
+            item["kind"] = cast(int)CompletionItemKind.Constant;
+        else
+            item["kind"] = cast(int)CompletionItemKind.Variable;
+
+        return item;
+    }
+
+    private JSONValue makeCompletionItemFromSymbol(string name, Object symObj) {
+        import semantic.symbol_table : Symbol, SymbolKind;
+        auto sym = cast(Symbol)symObj;
+        if (sym is null) return JSONValue(null);
+
+        JSONValue item;
+        item["label"] = name;
+
+        final switch (sym.kind) {
+            case SymbolKind.Function:
+                item["kind"] = cast(int)CompletionItemKind.Function;
+                break;
+            case SymbolKind.Type:
+                item["kind"] = cast(int)CompletionItemKind.Struct;
+                break;
+            case SymbolKind.Variable:
+                item["kind"] = cast(int)CompletionItemKind.Variable;
+                break;
+            case SymbolKind.Parameter:
+                item["kind"] = cast(int)CompletionItemKind.Variable;
+                break;
+            case SymbolKind.Field:
+                item["kind"] = cast(int)CompletionItemKind.Field;
+                break;
+            case SymbolKind.Template:
+                item["kind"] = cast(int)CompletionItemKind.Function;
+                break;
+        }
+
+        // Add type detail if available
+        if (sym.type !is null)
+            item["detail"] = sym.type.toString();
+
+        return item;
+    }
+
+    private static bool isIdentChar(char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+            || (c >= '0' && c <= '9') || c == '_';
     }
 
     // ── Compilation + Diagnostics ──

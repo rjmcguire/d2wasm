@@ -56,7 +56,7 @@ int main() {
 EOF
 
 # Start server
-"$COMPILER" --server --socket="$SOCKET" --idle-timeout=60 2>"$WORK_DIR/server.log" &
+"$COMPILER" --server --socket="$SOCKET" --idle-timeout=60 -v -v 2>"$WORK_DIR/server.log" &
 SERVER_PID=$!
 
 for i in $(seq 1 50); do
@@ -142,7 +142,8 @@ echo "  OK: result=$RESULT3"
 if grep -q "Using warm module registry" "$WORK_DIR/server.log"; then
     echo "  OK: Warm module registry reused"
 else
-    echo "  WARN: No warm registry evidence in log"
+    echo "FAIL: Warm module registry not reused"
+    exit 1
 fi
 
 ###############################################################################
@@ -177,7 +178,8 @@ echo "  OK: result=$RESULT4 (picked up helper.d change)"
 if grep -q "Re-parsing changed import" "$WORK_DIR/server.log"; then
     echo "  OK: Server re-parsed changed import"
 else
-    echo "  WARN: No re-parse evidence in log"
+    echo "FAIL: Server did not re-parse changed import"
+    exit 1
 fi
 
 # Shutdown

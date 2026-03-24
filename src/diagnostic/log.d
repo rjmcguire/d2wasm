@@ -27,7 +27,7 @@ int getVerbosity() {
 /// Log a message if verbosity is at or above the given level
 void log(T...)(int level, T args) {
     if (g_verbosity >= level) {
-        writeln(args);
+        stderr.writeln(args);
     }
 }
 
@@ -38,5 +38,5 @@ void log3(T...)(T args) { log(3, args); }  // -vvv
 
 /// For debug output that should always print (errors, warnings)
 void logAlways(T...)(T args) {
-    writeln(args);
+    stderr.writeln(args);
 }

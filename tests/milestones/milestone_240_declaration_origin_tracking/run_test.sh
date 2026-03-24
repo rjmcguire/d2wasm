@@ -42,7 +42,9 @@ OUTPUT=$("$COMPILER" "$WORK_DIR/test.d" -o "$WORK_DIR/test.wasm" --dep-graph 2>&
 if echo "$OUTPUT" | grep -q "mixin"; then
     echo "  OK: Dep graph mentions mixin nodes"
 else
-    echo "  WARN: No mixin node evidence in dep graph output"
+    echo "FAIL: No mixin node in dep graph output"
+    echo "Output: $OUTPUT"
+    exit 1
 fi
 
 ###############################################################################

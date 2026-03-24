@@ -134,7 +134,8 @@ if grep -q "AST splice" "$WORK_DIR/server.log"; then
     SPLICE_LINE=$(grep "AST splice" "$WORK_DIR/server.log" | tail -1)
     echo "  OK: $SPLICE_LINE"
 else
-    echo "  WARN: No AST splice evidence in log"
+    echo "FAIL: No AST splice evidence in log"
+    exit 1
 fi
 
 # delta() should be a cache hit (unchanged, not affected by alpha)

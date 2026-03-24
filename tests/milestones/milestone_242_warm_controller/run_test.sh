@@ -163,7 +163,8 @@ if grep -q "regressing" "$WORK_DIR/server.log"; then
 elif grep -q "Using warm compilation controller" "$WORK_DIR/server.log"; then
     echo "  OK: Server log shows warm controller reuse"
 else
-    echo "  WARN: No warm controller evidence in log"
+    echo "FAIL: No warm controller evidence in log"
+    exit 1
 fi
 
 # Shutdown
