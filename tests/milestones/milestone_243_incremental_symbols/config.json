@@ -1,0 +1,6 @@
+{
+  "name": "incremental_symbols",
+  "description": "Incremental symbol re-collection: reuses saved symbol table, tracks dirty declarations",
+  "type": "shell",
+  "script": "run_test.sh"
+}

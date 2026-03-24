@@ -801,9 +801,21 @@ class SymbolTable {
  */
 class SymbolCollector {
     private SymbolTable symbolTable;
-    
+
+    /// When true, use replaceSymbol (upsert) instead of addSymbol.
+    /// Used for incremental re-collection where symbols may already exist.
+    bool useReplaceMode = false;
+
     this(SymbolTable symbolTable) {
         this.symbolTable = symbolTable;
+    }
+
+    /// Add or replace a symbol depending on mode
+    private void addOrReplaceSymbol(Symbol sym) {
+        if (useReplaceMode)
+            symbolTable.currentScope.replaceSymbol(sym);
+        else
+            symbolTable.addSymbol(sym);
     }
     
     /**
@@ -866,7 +878,7 @@ class SymbolCollector {
             symbolTable.inGlobalScope(),
             symbolTable.modulePath
         );
-        symbolTable.addSymbol(symbol);
+        addOrReplaceSymbol(symbol);
     }
 
     private void collectFunctionSymbol(FunctionDecl decl) {
@@ -884,7 +896,7 @@ class SymbolCollector {
             symbolTable.inGlobalScope(),
             symbolTable.modulePath
         );
-        symbolTable.addSymbol(symbol);
+        addOrReplaceSymbol(symbol);
     }
     
     private void collectImportedFunctionSymbol(ImportedFunctionDecl decl) {
@@ -897,7 +909,7 @@ class SymbolCollector {
             true,  // Imported functions are always global
             symbolTable.modulePath
         );
-        symbolTable.addSymbol(symbol);
+        addOrReplaceSymbol(symbol);
     }
     
     private void collectClassSymbol(ClassDecl decl) {
@@ -915,7 +927,7 @@ class SymbolCollector {
                 symbolTable.inGlobalScope(),
                 symbolTable.modulePath
             );
-            symbolTable.addSymbol(symbol);
+            addOrReplaceSymbol(symbol);
             return;
         }
 
@@ -948,7 +960,7 @@ class SymbolCollector {
             symbolTable.inGlobalScope(),
             symbolTable.modulePath
         );
-        symbolTable.addSymbol(symbol);
+        addOrReplaceSymbol(symbol);
     }
     
     private void collectInterfaceSymbol(InterfaceDecl decl) {
@@ -964,7 +976,7 @@ class SymbolCollector {
             symbolTable.inGlobalScope(),
             symbolTable.modulePath
         );
-        symbolTable.addSymbol(symbol);
+        addOrReplaceSymbol(symbol);
     }
     
     package void collectStructSymbol(StructDecl decl) {
@@ -983,7 +995,7 @@ class SymbolCollector {
             symbolTable.inGlobalScope(),
             symbolTable.modulePath
         );
-        symbolTable.addSymbol(symbol);
+        addOrReplaceSymbol(symbol);
     }
     
     /**
@@ -1126,7 +1138,7 @@ class SymbolCollector {
             symbolTable.inGlobalScope(),
             symbolTable.modulePath
         );
-        symbolTable.addSymbol(symbol);
+        addOrReplaceSymbol(symbol);
     }
     
     private void collectEnumSymbol(EnumDecl decl) {
@@ -1139,7 +1151,7 @@ class SymbolCollector {
             symbolTable.inGlobalScope(),
             symbolTable.modulePath
         );
-        symbolTable.addSymbol(symbol);
+        addOrReplaceSymbol(symbol);
     }
     
     private void collectManifestConstant(ManifestConstantDecl decl) {
@@ -1162,7 +1174,7 @@ class SymbolCollector {
             symbolTable.modulePath
         );
         symbol.isConstant = true;  // Mark as constant
-        symbolTable.addSymbol(symbol);
+        addOrReplaceSymbol(symbol);
     }
 
     private void collectAliasSymbol(AliasDecl decl) {

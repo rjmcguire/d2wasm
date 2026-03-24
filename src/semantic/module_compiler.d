@@ -12,7 +12,7 @@ import ast.nodes;
 import semantic.module_ : Module, ModulePhase;
 import semantic.module_registry : ModuleRegistry;
 import semantic.modules_context : ModulesContext;
-import semantic.symbol_table : SymbolTable;
+import semantic.symbol_table : SymbolTable, SymbolCollector;
 import semantic.ctfe : CTFEEvaluator;
 import semantic.type_checker : TypeChecker;
 import semantic.mixin_expander : MixinExpander, MixinError;
@@ -134,8 +134,12 @@ class CompilationController {
 
         log(2, "CompilationController: regressing ", fqn, " to parsed");
 
-        // Remove per-module compiler (will be re-created on next ensurePhase)
-        compilers.remove(fqn);
+        // Save the per-module compiler (preserves symbol table for incremental re-collection)
+        // Don't remove it — getCompiler will return the existing one
+        if (auto mc = fqn in compilers) {
+            mc.savedSymbolTable = mod.symbolTable;
+            mc.ctfeEvaluator_ = null;  // must be recreated (depends on ModulesContext)
+        }
 
         // Reset module state
         mod.phase = ModulePhase.parsed;
@@ -174,6 +178,13 @@ class ModuleCompiler {
     private Module module_;
     private CompilationController controller;
     private CTFEEvaluator ctfeEvaluator_;
+
+    /// Saved from previous compilation (for incremental symbol re-collection)
+    SymbolTable savedSymbolTable;
+
+    /// Declarations identified as dirty after incremental symbol re-collection.
+    /// Used by milestone 244 (selective re-type-check) to skip unchanged declarations.
+    string[] dirtyDeclarationNames;
 
     this(Module mod, CompilationController controller) {
         this.module_ = mod;
@@ -214,6 +225,14 @@ class ModuleCompiler {
     private void advanceToSymbolsCollected() {
         log(2, "ModuleCompiler: collecting symbols for ", module_.fullyQualifiedName());
 
+        if (savedSymbolTable !is null) {
+            // ── Incremental path: reuse saved symbol table ──
+            advanceToSymbolsCollectedIncremental();
+            return;
+        }
+
+        // ── Full path: create fresh symbol table ──
+
         // 1. Create symbol table + module scope + builtins
         module_.symbolTable = new SymbolTable();
         module_.symbolTable.targetPtrSize = 4;
@@ -237,6 +256,85 @@ class ModuleCompiler {
 
         module_.phase = ModulePhase.symbolsCollected;
         log(2, "ModuleCompiler: symbols collected for ", module_.fullyQualifiedName());
+    }
+
+    /**
+     * Incremental symbol re-collection: reuses the saved symbol table,
+     * clears and re-wires imports, re-expands mixins, then replaces
+     * symbols for all declarations (using replaceSymbol to handle
+     * both new and changed declarations).
+     *
+     * Tracks which declarations changed for selective re-type-check (milestone 244).
+     */
+    private void advanceToSymbolsCollectedIncremental() {
+        import incremental.hasher : hashSourceText;
+        import std.array : appender;
+
+        log(2, "ModuleCompiler: incremental symbol re-collection for ", module_.fullyQualifiedName());
+
+        // 1. Reuse the saved symbol table
+        module_.symbolTable = savedSymbolTable;
+        savedSymbolTable = null;
+
+        // 2. Clear and re-wire import scopes (dependencies may have new symbol tables)
+        auto ms = module_.symbolTable.moduleScope;
+        if (ms !is null) {
+            ms.importedModules = null;
+            ms.selectiveImports = null;
+            ms.moduleAliases = null;
+        }
+
+        foreach (impDecl; module_.importDecls) {
+            auto dep = cast(Module)impDecl.resolvedModule;
+            if (dep is null) continue;
+            controller.ensureDepPhase(dep, ModulePhase.symbolsCollected);
+            wireImport(impDecl, dep);
+        }
+
+        // 3. Snapshot old declaration names for dirty tracking
+        string[string] oldDeclHashes;  // name → source hash (as hex string)
+        if (ms !is null) {
+            foreach (name, sym; ms.symbols) {
+                if (sym.declaration !is null) {
+                    auto loc = sym.declaration.location;
+                    if (loc.endOffset > loc.startOffset && sym.declaration.sourceText.length > 0) {
+                        auto h = hashSourceText(sym.declaration.sourceText, loc.startOffset, loc.endOffset);
+                        import std.conv : to;
+                        oldDeclHashes[name] = h.to!string;
+                    }
+                }
+            }
+        }
+
+        // 4. Re-expand mixins with replace mode (may produce new/changed declarations)
+        //    The mixin expander also does symbol collection internally, so
+        //    useReplaceMode ensures existing symbols are updated rather than rejected.
+        auto mixinExpander = new MixinExpander(module_.symbolTable, controller.backend);
+        mixinExpander.useReplaceMode = true;
+        module_.ast = mixinExpander.expandMixins(module_.ast);
+
+        // 6. Track which declarations changed
+        auto dirty = appender!(string[]);
+        if (ms !is null) {
+            foreach (name, sym; ms.symbols) {
+                if (sym.declaration is null) continue;
+                auto loc = sym.declaration.location;
+                if (loc.endOffset <= loc.startOffset) continue;
+                if (sym.declaration.sourceText.length == 0) continue;
+
+                auto h = hashSourceText(sym.declaration.sourceText, loc.startOffset, loc.endOffset);
+                import std.conv : to;
+                auto newHash = h.to!string;
+                auto oldHash = name in oldDeclHashes;
+                if (oldHash is null || *oldHash != newHash)
+                    dirty ~= name;
+            }
+        }
+        dirtyDeclarationNames = dirty[];
+        log(2, "ModuleCompiler: incremental re-collection done — ",
+            dirtyDeclarationNames.length, " dirty declaration(s)");
+
+        module_.phase = ModulePhase.symbolsCollected;
     }
 
     /**

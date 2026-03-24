@@ -56,6 +56,10 @@ class MixinExpander {
     private bool hasExternalSymbolTable;  // true when using caller's symbol table
     private CTFEEvaluator ctfeEvaluator;  // owned evaluator instance
 
+    /// When true, symbol collection uses replaceSymbol (upsert) instead of addSymbol.
+    /// Set for incremental re-collection where symbols may already exist.
+    bool useReplaceMode = false;
+
     /// Maximum mixin expansion depth to prevent infinite recursion
     enum MAX_EXPANSION_DEPTH = 100;
 
@@ -108,6 +112,7 @@ class MixinExpander {
     /// Interleaved collect + expand for external symbol table path.
     private Declaration[] expandMixinsInterleaved(Declaration[] declarations) {
         auto collector = new SymbolCollector(tempSymbolTable);
+        collector.useReplaceMode = useReplaceMode;
 
         // 1. Pre-collect all plain declarations into the ST.
         //    In D, all module-level symbols are visible regardless of order.
