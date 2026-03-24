@@ -93,8 +93,9 @@ struct CompilerOptions {
 
     // Server mode (not parsed by getopt — set programmatically by compile server)
     import server.warm_state : WarmState;
-    WarmState.FileState* warmState;   // non-null when running inside compile server
-    string[] pendingEvictions;        // pre-computed dirty names from incremental fileChanged
+    WarmState.FileState* warmState;       // non-null when running inside compile server
+    string[] pendingEvictions;            // pre-computed dirty names from incremental fileChanged
+    WarmState warmStateObj;               // project-level warm state (for module registry)
 }
 
 int main(string[] args) {
@@ -287,19 +288,60 @@ int compileFile(CompilerOptions options) {
         import semantic.module_registry : ModuleRegistry;
         import semantic.import_resolver : ImportResolver;
         import semantic.modules_context : ModulesContext;
-
-        auto modRegistry = new ModuleRegistry();
-        modRegistry.searchPaths = options.importPaths.dup;
-        // Also search relative to the input file's directory
-        modRegistry.searchPaths ~= dirName(absolutePath(options.inputFile));
+        import server.warm_state : WarmState;
 
         // Parse-on-demand factory shared by import resolver and runtime loading
         ParseFn parseFn = (string filename, string src) {
             return sourceParser.parseSourceFile(filename, src);
         };
 
-        // Register runtime/object.d as its own module (implicit `import object;`)
-        {
+        // Use warm module registry if available (server mode), otherwise create fresh
+        bool warmRegistry = options.warmStateObj !is null
+            && options.warmStateObj.moduleRegistry !is null;
+        ModuleRegistry modRegistry;
+
+        if (warmRegistry) {
+            modRegistry = options.warmStateObj.moduleRegistry;
+            log(2, "Using warm module registry");
+
+            // Reset all non-synthetic module phases to parsed
+            // (CompilationController will re-advance them)
+            foreach (mod; modRegistry.allModules()) {
+                if (!mod.isSynthetic) {
+                    mod.phase = ModulePhase.parsed;
+                    mod.symbolTable = null;
+                    mod.importDecls = null;
+                    mod.imports = null;
+                }
+            }
+
+            // Re-check imported module sources for changes
+            foreach (mod; modRegistry.allModules()) {
+                if (mod.isSynthetic) continue;
+                if (mod.sourceFilePath == absolutePath(options.inputFile)) continue;
+                if (mod.sourceFilePath.length == 0 || !exists(mod.sourceFilePath)) continue;
+
+                auto currentSource = readText(mod.sourceFilePath);
+                if (currentSource != mod.sourceText) {
+                    log(2, "Re-parsing changed import: ", mod.sourceFilePath);
+                    mod.sourceText = currentSource;
+                    mod.ast = parseFn(mod.sourceFilePath, currentSource);
+                    mod.phase = ModulePhase.parsed;
+                }
+            }
+        } else {
+            modRegistry = new ModuleRegistry();
+
+            // Save to warm state for next time
+            if (options.warmStateObj !is null)
+                options.warmStateObj.moduleRegistry = modRegistry;
+        }
+        modRegistry.searchPaths = options.importPaths.dup;
+        // Also search relative to the input file's directory
+        modRegistry.searchPaths ~= dirName(absolutePath(options.inputFile));
+
+        // Register runtime/object.d if not already in registry
+        if (modRegistry.lookupModule("object") is null) {
             string exeDir = dirName(thisExePath());
             string[] rtSearchPaths = [
                 buildPath(exeDir, "..", "runtime", "object.d"),
@@ -321,17 +363,22 @@ int compileFile(CompilerOptions options) {
                         objectMod.isSynthetic = true;
                         modRegistry.registerModule(objectMod);
 
-                        // Add synthetic `import object;` to the user's AST
-                        auto objectImport = new ImportDecl(SourceLocation.init, ["object"]);
-                        objectImport.resolvedModule = objectMod;
-                        ast = [cast(Declaration)objectImport] ~ ast;
-
                         log(2, "Registered runtime module 'object' from ", runtimePath);
                     } catch (Exception e) {
                         log(1, "Warning: failed to parse runtime/object.d: ", e.msg);
                     }
                     break;
                 }
+            }
+        }
+
+        // Add synthetic `import object;` to the user's AST
+        {
+            auto objectMod = modRegistry.lookupModule("object");
+            if (objectMod !is null) {
+                auto objectImport = new ImportDecl(SourceLocation.init, ["object"]);
+                objectImport.resolvedModule = objectMod;
+                ast = [cast(Declaration)objectImport] ~ ast;
             }
         }
 
@@ -346,13 +393,20 @@ int compileFile(CompilerOptions options) {
         if (inputModulePath.length == 0)
             inputModulePath = [baseName(stripExtension(options.inputFile))];
 
-        auto inputModule = new Module();
-        inputModule.modulePath = inputModulePath;
+        // Create or update input module in registry
+        auto inputModule = modRegistry.lookupModule(inputModulePath.join("."));
+        if (inputModule is null) {
+            inputModule = new Module();
+            inputModule.modulePath = inputModulePath;
+            modRegistry.registerModule(inputModule);
+        }
         inputModule.sourceFilePath = absolutePath(options.inputFile);
         inputModule.sourceText = sourceCode;
         inputModule.ast = ast;
         inputModule.phase = ModulePhase.parsed;
-        modRegistry.registerModule(inputModule);
+        inputModule.symbolTable = null;
+        inputModule.importDecls = null;
+        inputModule.imports = null;
 
         // Scan AST for ImportDecls
         foreach (decl; ast) {
@@ -361,6 +415,7 @@ int compileFile(CompilerOptions options) {
         }
 
         // Resolve imports recursively (parse-on-demand)
+        // With warm registry, already-registered modules are skipped (instant)
         auto importResolver = new ImportResolver(modRegistry, parseFn);
         importResolver.resolveImports(inputModule);
 

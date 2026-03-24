@@ -255,6 +255,7 @@ class CompileServer {
         options.cacheDir = socketPath.dirName;
         auto ws = warmState.getOrCreate(absFile);
         options.warmState = ws;
+        options.warmStateObj = warmState;  // project-level (module registry)
 
         // Apply pending dirty names from incremental fileChanged (Phase 2)
         // These were pre-computed via tree-sitter changed ranges + dep graph

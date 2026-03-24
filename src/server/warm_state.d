@@ -11,6 +11,7 @@ module server.warm_state;
 import cache.entry : CacheEntry, SourceHash;
 import incremental.dep_graph : DeclDependencyGraph;
 import parser.tree_sitter_c : TreeSitterParser, TSInputEdit, TSRange, IncrementalParseResult;
+import semantic.module_registry : ModuleRegistry;
 
 class WarmState {
     /// Per-file warm data
@@ -30,6 +31,12 @@ class WarmState {
 
     /// Warm data keyed by absolute input file path
     FileState[string] files;
+
+    /// Project-level warm module registry (shared across all files)
+    ModuleRegistry moduleRegistry;
+
+    /// Source hashes for imported modules (to detect changes)
+    size_t[string] importedSourceHashes;  // absPath → hash
 
     /// Total number of compile requests served
     size_t compilations;

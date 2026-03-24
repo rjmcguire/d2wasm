@@ -1,0 +1,6 @@
+{
+  "name": "module_aware_incremental",
+  "description": "Module-aware incremental compilation: warm module registry skips re-parsing unchanged imports",
+  "type": "shell",
+  "script": "run_test.sh"
+}
