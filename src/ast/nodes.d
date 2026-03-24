@@ -123,6 +123,11 @@ abstract class Declaration : ASTNode {
     /// must be recompiled even if its own source hasn't changed.
     string[] staticIfDependencies;
 
+    /// The mixin that produced this declaration (null for non-mixin declarations).
+    /// Used for incremental compilation - when a mixin's input changes, all
+    /// declarations with this origin are invalidated and re-expanded.
+    MixinDecl originMixin;
+
     this(SourceLocation loc, string name, bool isPublic = false) {
         super(loc);
         this.name = name;

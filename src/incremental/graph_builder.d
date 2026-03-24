@@ -130,12 +130,29 @@ class GraphBuilder {
             ulong srcHash = hashSourceText(source, startByte, endByte);
             id = graph.addNode(filename, startByte, endByte, vd.name, "global", sigHash, srcHash);
         }
+        else if (auto md = cast(MixinDecl)decl) {
+            ulong srcHash = hashSourceText(source, startByte, endByte);
+            id = graph.addNode(filename, startByte, endByte, "<mixin>", "mixin", 0, srcHash);
+            // Register expanded declarations as separate nodes
+            if (md.isExpanded) {
+                foreach (expanded; md.expandedDeclarations)
+                    registerDecl(expanded, filename);
+            }
+        }
         else {
             // ImportDecl, ModuleDecl, AliasDecl, etc. — not tracked as nodes
             return uint.max;
         }
 
         declToNode[key] = id;
+
+        // If this declaration was produced by a mixin, record the dependency edge
+        if (decl.originMixin !is null) {
+            uint mixinId = nodeIdFor(decl.originMixin);
+            if (mixinId != uint.max && id != uint.max)
+                graph.addEdge(id, mixinId, EdgeKind.usesType);
+        }
+
         return id;
     }
 

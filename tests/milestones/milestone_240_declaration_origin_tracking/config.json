@@ -1,0 +1,6 @@
+{
+  "name": "declaration_origin_tracking",
+  "description": "Declarations track their origin mixin; dep graph registers mixin nodes with edges to expanded declarations",
+  "type": "shell",
+  "script": "run_test.sh"
+}

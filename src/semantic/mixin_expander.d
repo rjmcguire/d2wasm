@@ -375,11 +375,18 @@ class MixinExpander {
         }
         
         writeln("Mixin parsed into ", result.length, " declarations");
-        
+
+        // Stamp origin mixin on all expanded declarations
+        // (for incremental compilation — when this mixin's input changes,
+        // all declarations with this origin are invalidated)
+        foreach (decl; result) {
+            decl.originMixin = mixinDecl;
+        }
+
         // Store the expanded declarations in the mixin node (for debugging)
         mixinDecl.expandedDeclarations = result;
         mixinDecl.isExpanded = true;
-        
+
         return result;
     }
     
