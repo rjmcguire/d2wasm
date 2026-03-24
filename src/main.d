@@ -30,6 +30,8 @@ import semantic.symbol_table;
 import semantic.type_checker;
 import codegen.emitter;
 import codegen.backend;
+import incremental.dep_graph : DeclDependencyGraph;
+import incremental.graph_builder : GraphBuilder;
 import diagnostic.error_format : printError;
 import semantic.ctfe : CTFEError;
 import semantic.arena_taint : ArenaSafetyError;
@@ -59,6 +61,12 @@ struct CompilerOptions {
     
     // Watch mode options
     bool watch = false;       // Watch files and recompile on change
+
+    // Server mode options
+    bool serverMode = false;      // --server: start compile server
+    string serverSocket;          // --socket: Unix domain socket path
+    int idleTimeout = 1800;       // --idle-timeout: seconds before auto-shutdown
+    bool useServer = false;       // --use-server: compile via server
     
     // Debug options
     bool stackTrace = true;   // Emit call stack tracking for CTFE errors (default: on)
@@ -82,6 +90,10 @@ struct CompilerOptions {
 
     // Compile-only flag
     bool compileOnly = false;     // -c: compile to .o only, don't link
+
+    // Server mode (not parsed by getopt — set programmatically by compile server)
+    import server.warm_state : WarmState;
+    WarmState.FileState* warmState;   // non-null when running inside compile server
 }
 
 int main(string[] args) {
@@ -132,6 +144,11 @@ int main(string[] args) {
             "jobs|j", "Max parallel compilations (0 = auto)", &options.maxParallel,
             // Watch mode
             "watch|w", "Watch files and recompile on change", &options.watch,
+            // Server mode
+            "server", "Start compile server (long-lived process)", &options.serverMode,
+            "socket", "Unix domain socket path for server", &options.serverSocket,
+            "idle-timeout", "Server idle timeout in seconds (default: 1800)", &options.idleTimeout,
+            "use-server", "Compile via running server (auto-starts if needed)", &options.useServer,
             // Debug options
             "stack-trace", "Emit call stack tracking for CTFE errors (default: on)", &options.stackTrace,
             // Optimization options
@@ -169,22 +186,27 @@ int main(string[] args) {
             options.inputFiles = [options.inputFile] ~ options.inputFiles;
         }
         
+        // Server mode — no input file needed
+        if (options.serverMode) {
+            return runServer(options);
+        }
+
         // Handle multiple input files (parallel mode)
         if (options.inputFiles.length > 1) {
             return runParallel(options);
         }
-        
+
         // Single file mode
         if (options.inputFiles.length == 1) {
             options.inputFile = options.inputFiles[0];
         }
-        
+
         if (options.inputFile.length == 0) {
             writeln("Error: No input file specified");
             writeln("Use --help for usage information");
             return 1;
         }
-        
+
         // Set default output file
         if (options.outputFile.length == 0) {
             if (options.target == "arm64-macos")
@@ -194,12 +216,17 @@ int main(string[] args) {
             else
                 options.outputFile = setExtension(options.inputFile, ".wasm");
         }
-        
+
+        // Client mode — compile via server
+        if (options.useServer) {
+            return runViaServer(options);
+        }
+
         // Watch mode
         if (options.watch) {
             return runWatch(options);
         }
-        
+
         return compileFile(options);
         
     } catch (Exception e) {
@@ -648,11 +675,29 @@ int compileFile(CompilerOptions options) {
 
             auto emitter = new BinaryEmitter(inputModule.symbolTable, options.stackTrace);
             
-            // Load cache if enabled
+            // Load cache if enabled (warm state from server, or disk-based)
             import cache.compiler_cache : CompilerCache;
             import cache.entry : CacheEntry;
+            import server.warm_state : WarmState;
             CompilerCache cache;
-            if (options.cacheDir.length > 0) {
+            bool usingWarmState = options.warmState !is null;
+
+            if (usingWarmState) {
+                // ── Server mode: use in-memory warm state ──
+                emitter.setSourceText(sourceCode);
+
+                auto ws = options.warmState;
+                if (ws.cachedEntries.length > 0) {
+                    emitter.setCodeCache(ws.cachedEntries);
+                    log(2, "Warm state: ", ws.cachedEntries.length, " cached function(s)");
+                }
+
+                // Dep-graph invalidation using warm state's graph as the "old" graph
+                if (graphBuilder !is null && ws.depGraph !is null) {
+                    invalidateFromDepGraph(ws.depGraph, graphBuilder, emitter);
+                }
+            } else if (options.cacheDir.length > 0) {
+                // ── Disk mode: load from CompilerCache ──
                 string moduleName = baseName(stripExtension(options.inputFile));
                 cache = new CompilerCache(options.cacheDir, moduleName);
 
@@ -666,59 +711,12 @@ int compileFile(CompilerOptions options) {
                     log(2, "Loaded ", cachedEntries.length, " cached function(s)");
                 }
 
-                // Dep-graph-based cache invalidation:
-                // Compare new graph against old graph to find transitively dirty
-                // functions, then evict them from the emitter's code cache.
+                // Dep-graph-based cache invalidation from disk
                 if (graphBuilder !is null) {
                     string graphPath = buildPath(options.cacheDir, moduleName ~ "_dep_graph.bin");
                     auto oldGraph = DeclDependencyGraph.loadFromFile(graphPath);
                     if (oldGraph !is null) {
-                        // Build lookup from old graph: mangledName → old node (for functions)
-                        //                              (name, kind) → old node (for others)
-                        ulong[string] oldMangledHash;      // mangledName → sourceHash
-                        ulong[string] oldNameKindHash;     // "name\0kind" → sourceHash
-                        foreach (ref n; oldGraph.nodes) {
-                            if (n.mangledName.length > 0)
-                                oldMangledHash[n.mangledName] = n.sourceHash;
-                            else
-                                oldNameKindHash[n.name ~ "\0" ~ n.kind] = n.sourceHash;
-                        }
-
-                        // Find changed nodes in new graph
-                        auto changedIds = appender!(uint[]);
-                        auto newGraph = graphBuilder.graph;
-                        foreach (ref n; newGraph.nodes) {
-                            bool changed = false;
-                            if (n.mangledName.length > 0) {
-                                auto p = n.mangledName in oldMangledHash;
-                                changed = (p is null || *p != n.sourceHash);
-                            } else {
-                                auto key = n.name ~ "\0" ~ n.kind;
-                                auto p = key in oldNameKindHash;
-                                changed = (p is null || *p != n.sourceHash);
-                            }
-                            if (changed)
-                                changedIds ~= n.id;
-                        }
-
-                        if (changedIds[].length > 0) {
-                            // Compute transitive closure of dirty nodes
-                            auto dirtyIds = newGraph.invalidate(changedIds[]);
-
-                            // Collect mangled names of dirty function nodes
-                            auto dirtyNames = appender!(string[]);
-                            foreach (did; dirtyIds) {
-                                auto node = newGraph.getNode(did);
-                                if (node !is null && node.mangledName.length > 0)
-                                    dirtyNames ~= node.mangledName;
-                            }
-
-                            if (dirtyNames[].length > 0) {
-                                emitter.evictFromCache(dirtyNames[]);
-                                log(2, "Dep-graph invalidation: evicted ",
-                                    dirtyNames[].length, " function(s) from cache");
-                            }
-                        }
+                        invalidateFromDepGraph(oldGraph, graphBuilder, emitter);
                     }
 
                     // Save new graph for next run
@@ -776,19 +774,30 @@ int compileFile(CompilerOptions options) {
                 return result;
             }
             
-            // 9. Cache storage (if enabled)
-            if (cache !is null) {
+            // 9. Cache storage
+            auto emitterStats = emitter.getCacheStats();
+
+            if (usingWarmState) {
+                // ── Server mode: update warm state in memory ──
+                auto ws = options.warmState;
+                ws.cachedEntries = emitter.getEmittedCode();
+                if (graphBuilder !is null)
+                    ws.depGraph = graphBuilder.graph;
+                ws.lastCacheHits = emitterStats.cacheHits;
+                ws.lastCacheMisses = emitterStats.cacheMisses;
+                log(2, "Warm state updated: ", emitterStats.cacheHits, " hits, ",
+                    emitterStats.cacheMisses, " misses");
+            } else if (cache !is null) {
+                // ── Disk mode: flush to staging file ──
                 import std.json;
-                
-                // Store emitted code back to cache
+
                 auto emittedCode = emitter.getEmittedCode();
                 cache.storeEntries(emittedCode);
                 cache.flush();
-                
-                auto emitterStats = emitter.getCacheStats();
-                log(2, "Cache: ", emitterStats.cacheHits, " hits, ", 
+
+                log(2, "Cache: ", emitterStats.cacheHits, " hits, ",
                     emitterStats.cacheMisses, " misses");
-                
+
                 // JSON output mode
                 if (options.jsonOutput) {
                     string moduleName = baseName(stripExtension(options.inputFile));
@@ -805,7 +814,8 @@ int compileFile(CompilerOptions options) {
                 }
             }
             
-            writeln("Successfully compiled to ", options.outputFile);
+            if (!usingWarmState)
+                writeln("Successfully compiled to ", options.outputFile);
         } else {
             writeln("Dry run complete - frontend phases successful");
         }
@@ -977,6 +987,94 @@ private ubyte[32] computeErrorHash(string msg) {
     result[0..16] = h1[];
     result[16..32] = h2[];
     return result;
+}
+
+/**
+ * Dep-graph invalidation: compare old graph against new graph to find
+ * transitively dirty functions, then evict them from the emitter's code cache.
+ * Shared by both disk-based and warm-state cache paths.
+ */
+private void invalidateFromDepGraph(
+    DeclDependencyGraph oldGraph,
+    GraphBuilder graphBuilder,
+    BinaryEmitter emitter)
+{
+    import diagnostic.log : log;
+
+    ulong[string] oldMangledHash;
+    ulong[string] oldNameKindHash;
+    foreach (ref n; oldGraph.nodes) {
+        if (n.mangledName.length > 0)
+            oldMangledHash[n.mangledName] = n.sourceHash;
+        else
+            oldNameKindHash[n.name ~ "\0" ~ n.kind] = n.sourceHash;
+    }
+
+    auto changedIds = appender!(uint[]);
+    auto newGraph = graphBuilder.graph;
+    foreach (ref n; newGraph.nodes) {
+        bool changed = false;
+        if (n.mangledName.length > 0) {
+            auto p = n.mangledName in oldMangledHash;
+            changed = (p is null || *p != n.sourceHash);
+        } else {
+            auto key = n.name ~ "\0" ~ n.kind;
+            auto p = key in oldNameKindHash;
+            changed = (p is null || *p != n.sourceHash);
+        }
+        if (changed)
+            changedIds ~= n.id;
+    }
+
+    if (changedIds[].length > 0) {
+        auto dirtyIds = newGraph.invalidate(changedIds[]);
+
+        auto dirtyNames = appender!(string[]);
+        foreach (did; dirtyIds) {
+            auto node = newGraph.getNode(did);
+            if (node !is null && node.mangledName.length > 0)
+                dirtyNames ~= node.mangledName;
+        }
+
+        if (dirtyNames[].length > 0) {
+            emitter.evictFromCache(dirtyNames[]);
+            log(2, "Dep-graph invalidation: evicted ",
+                dirtyNames[].length, " function(s) from cache");
+        }
+    }
+}
+
+/**
+ * Start the compile server (long-lived process).
+ */
+int runServer(CompilerOptions options) {
+    import server.compile_server : CompileServer;
+
+    // Default socket path
+    string socketPath = options.serverSocket.length > 0
+        ? options.serverSocket
+        : ".d2wasm-cache/compile-server.sock";
+
+    auto server = new CompileServer(
+        socketPath,
+        options.backend,
+        options.verbosity,
+        options.stackTrace,
+        options.escapeAnalysis,
+        options.arenaSafety,
+        options.importPaths,
+        options.idleTimeout
+    );
+
+    return server.run();
+}
+
+/**
+ * Compile via a running server. Auto-starts the server if not running.
+ */
+int runViaServer(CompilerOptions options) {
+    import server.client : compileViaServer;
+    return compileViaServer(options);
 }
 
 /**

@@ -1,0 +1,6 @@
+{
+  "name": "compile_server",
+  "description": "Compile server with warm code cache across compilations",
+  "type": "shell",
+  "script": "run_test.sh"
+}
