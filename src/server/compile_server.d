@@ -253,9 +253,18 @@ class CompileServer {
         // Inject warm state: use in-memory cache dir so compileFile
         // activates the cache path, but we provide entries from warm state
         options.cacheDir = socketPath.dirName;
-        options.warmState = warmState.getOrCreate(absFile);
+        auto ws = warmState.getOrCreate(absFile);
+        options.warmState = ws;
 
-        serverLog("Compiling: ", req.file);
+        // Apply pending dirty names from incremental fileChanged (Phase 2)
+        // These were pre-computed via tree-sitter changed ranges + dep graph
+        if (ws.pendingDirtyNames.length > 0) {
+            options.pendingEvictions = ws.pendingDirtyNames;
+            ws.pendingDirtyNames = null;
+            serverLog("Compiling: ", req.file, " (", options.pendingEvictions.length, " pre-evicted)");
+        } else {
+            serverLog("Compiling: ", req.file);
+        }
 
         // Run compilation
         int exitCode = compileFile(options);
@@ -296,14 +305,37 @@ class CompileServer {
     }
 
     private string handleFileChanged(Request req) {
+        import parser.tree_sitter_c : TSInputEdit, TSPoint;
+
         if (req.file.length == 0)
             return serializeError(req.id, "INVALID_PARAMS", "Missing 'file' parameter");
 
-        string absFile = absolutePath(req.file);
-        auto fs = warmState.getOrCreate(absFile);
+        if (req.newText.length == 0)
+            return serializeError(req.id, "INVALID_PARAMS", "Missing 'newText' parameter");
 
-        if (req.newText.length > 0) {
-            fs.sourceText = req.newText;
+        string absFile = absolutePath(req.file);
+
+        // Build TSInputEdit if incremental edit descriptor provided
+        TSInputEdit* editPtr = null;
+        TSInputEdit edit;
+        if (req.hasEdit) {
+            edit.start_byte = req.editStartByte;
+            edit.old_end_byte = req.editOldEndByte;
+            edit.new_end_byte = req.editNewEndByte;
+            edit.start_point = TSPoint(req.editStartLine, req.editStartCol);
+            edit.old_end_point = TSPoint(req.editOldEndLine, req.editOldEndCol);
+            edit.new_end_point = TSPoint(req.editNewEndLine, req.editNewEndCol);
+            editPtr = &edit;
+        }
+
+        auto directlyAffected = warmState.applyFileChange(absFile, req.newText, editPtr);
+
+        auto fs = warmState.getOrCreate(absFile);
+        if (req.hasEdit && directlyAffected > 0) {
+            serverLog("Incremental change: ", req.file, " — ",
+                      directlyAffected, " declaration(s) affected, ",
+                      fs.pendingDirtyNames.length, " transitively dirty");
+        } else {
             serverLog("Updated source: ", req.file, " (", req.newText.length, " chars)");
         }
 

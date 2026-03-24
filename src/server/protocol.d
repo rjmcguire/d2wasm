@@ -30,6 +30,16 @@ struct Request {
 
     // fileChanged params
     string newText;
+    bool hasEdit;           // true if incremental edit descriptor provided
+    uint editStartByte;
+    uint editOldEndByte;
+    uint editNewEndByte;
+    uint editStartLine;
+    uint editStartCol;
+    uint editOldEndLine;
+    uint editOldEndCol;
+    uint editNewEndLine;
+    uint editNewEndCol;
 
     // Raw JSON for extensibility
     JSONValue raw;
@@ -83,6 +93,19 @@ Request parseRequest(string line) {
                 req.output = params["output"].str;
             if ("newText" in params)
                 req.newText = params["newText"].str;
+            if ("edit" in params) {
+                auto edit = params["edit"];
+                req.hasEdit = true;
+                req.editStartByte = edit["startByte"].get!uint;
+                req.editOldEndByte = edit["oldEndByte"].get!uint;
+                req.editNewEndByte = edit["newEndByte"].get!uint;
+                if ("startLine" in edit) req.editStartLine = edit["startLine"].get!uint;
+                if ("startCol" in edit) req.editStartCol = edit["startCol"].get!uint;
+                if ("oldEndLine" in edit) req.editOldEndLine = edit["oldEndLine"].get!uint;
+                if ("oldEndCol" in edit) req.editOldEndCol = edit["oldEndCol"].get!uint;
+                if ("newEndLine" in edit) req.editNewEndLine = edit["newEndLine"].get!uint;
+                if ("newEndCol" in edit) req.editNewEndCol = edit["newEndCol"].get!uint;
+            }
             if ("importPaths" in params) {
                 foreach (p; params["importPaths"].array)
                     req.importPaths ~= p.str;

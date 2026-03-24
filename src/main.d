@@ -94,6 +94,7 @@ struct CompilerOptions {
     // Server mode (not parsed by getopt — set programmatically by compile server)
     import server.warm_state : WarmState;
     WarmState.FileState* warmState;   // non-null when running inside compile server
+    string[] pendingEvictions;        // pre-computed dirty names from incremental fileChanged
 }
 
 int main(string[] args) {
@@ -692,6 +693,14 @@ int compileFile(CompilerOptions options) {
                     log(2, "Warm state: ", ws.cachedEntries.length, " cached function(s)");
                 }
 
+                // Pre-evict dirty entries from incremental fileChanged (Phase 2)
+                // These were identified via tree-sitter changed ranges + dep graph spatial index
+                if (options.pendingEvictions.length > 0) {
+                    emitter.evictFromCache(options.pendingEvictions);
+                    log(2, "Pre-evicted ", options.pendingEvictions.length,
+                        " function(s) from incremental change detection");
+                }
+
                 // Dep-graph invalidation using warm state's graph as the "old" graph
                 if (graphBuilder !is null && ws.depGraph !is null) {
                     invalidateFromDepGraph(ws.depGraph, graphBuilder, emitter);
@@ -783,8 +792,18 @@ int compileFile(CompilerOptions options) {
                 ws.cachedEntries = emitter.getEmittedCode();
                 if (graphBuilder !is null)
                     ws.depGraph = graphBuilder.graph;
+                ws.sourceText = sourceCode;
                 ws.lastCacheHits = emitterStats.cacheHits;
                 ws.lastCacheMisses = emitterStats.cacheMisses;
+
+                // Seed the tree-sitter parser for incremental reparse on next fileChanged
+                if (ws.parser is null) {
+                    import parser.tree_sitter_c : TreeSitterParser;
+                    ws.parser = new TreeSitterParser();
+                    ws.parser.parseString(sourceCode);
+                    log(2, "Seeded tree-sitter parser for incremental reparse");
+                }
+
                 log(2, "Warm state updated: ", emitterStats.cacheHits, " hits, ",
                     emitterStats.cacheMisses, " misses");
             } else if (cache !is null) {

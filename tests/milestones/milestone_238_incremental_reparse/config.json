@@ -1,0 +1,6 @@
+{
+  "name": "incremental_reparse",
+  "description": "Tree-sitter incremental reparse with dep-graph spatial invalidation via fileChanged",
+  "type": "shell",
+  "script": "run_test.sh"
+}
