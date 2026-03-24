@@ -298,7 +298,40 @@ class ModuleCompiler {
             wireImport(impDecl, dep);
         }
 
-        // 3. Splice AST: keep old (type-checked) nodes for unchanged declarations,
+        // 3. Clean up symbols from old mixin expansions that fall in changed ranges.
+        //    When a mixin's source changes, its old expansion may have produced
+        //    declarations with different names than the new expansion. Remove the
+        //    old symbols so stale names don't persist.
+        if (savedAST.length > 0 && changedRanges.length > 0 && ms !is null) {
+            foreach (decl; savedAST) {
+                auto mixinDecl = cast(MixinDecl)decl;
+                if (mixinDecl is null || !mixinDecl.isExpanded) continue;
+
+                // Check if this mixin overlaps any changed range
+                uint mstart = mixinDecl.location.startOffset;
+                uint mend = mixinDecl.location.endOffset;
+                bool mixinChanged = false;
+                foreach (ref r; changedRanges) {
+                    if (!(mend <= r.start_byte || mstart >= r.end_byte)) {
+                        mixinChanged = true;
+                        break;
+                    }
+                }
+
+                if (mixinChanged) {
+                    // Remove symbols from old expansion
+                    foreach (expanded; mixinDecl.expandedDeclarations) {
+                        if (expanded.name.length > 0 && expanded.name != "<mixin>") {
+                            ms.removeSymbol(expanded.name);
+                            log(2, "ModuleCompiler: removed stale mixin symbol '",
+                                expanded.name, "'");
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Splice AST: keep old (type-checked) nodes for unchanged declarations,
         //    use new (re-parsed) nodes only for declarations in changed byte ranges.
         if (savedAST.length > 0 && changedRanges.length > 0) {
             auto splicedAST = spliceAST(savedAST, module_.ast, changedRanges);
@@ -318,7 +351,9 @@ class ModuleCompiler {
         savedAST = null;
         changedRanges = null;
 
-        // 4. Re-expand mixins with replace mode (may produce new/changed declarations)
+        // 5. Re-expand mixins with replace mode (may produce new/changed declarations)
+        //    The mixin expander uses replaceSymbol for symbols that already exist,
+        //    and addSymbol for genuinely new ones (old symbols removed in step 3).
         auto mixinExpander = new MixinExpander(module_.symbolTable, controller.backend);
         mixinExpander.useReplaceMode = true;
         module_.ast = mixinExpander.expandMixins(module_.ast);

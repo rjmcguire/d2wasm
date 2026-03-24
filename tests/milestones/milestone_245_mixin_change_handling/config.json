@@ -1,0 +1,6 @@
+{
+  "name": "mixin_change_handling",
+  "description": "Incremental mixin change: old expansion symbols removed, new expansion re-collected",
+  "type": "shell",
+  "script": "run_test.sh"
+}
