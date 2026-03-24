@@ -50,6 +50,11 @@ class Module {
     /// True for synthetic modules (e.g., runtime/object.d).
     bool isSynthetic;
 
+    /// Hierarchical index of top-level declarations.
+    /// Populated during symbol collection. Enables O(1) lookup:
+    ///   module.topIndex["MyStruct"].childIndex["method"]
+    Declaration[string] topIndex;
+
     /// Fully qualified name as a string: "animals.dog"
     string fullyQualifiedName() const {
         import std.array : join;

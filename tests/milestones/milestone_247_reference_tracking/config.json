@@ -1,0 +1,7 @@
+{
+  "name": "reference_tracking",
+  "description": "Declaration.references[] populated during type checking for find-references",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 15
+}

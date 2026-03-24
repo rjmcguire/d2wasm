@@ -262,6 +262,10 @@ class ModuleCompiler {
         auto mixinExpander = new MixinExpander(module_.symbolTable, controller.backend);
         module_.ast = mixinExpander.expandMixins(module_.ast);
 
+        // 4. Build hierarchical declaration index
+        auto collector = new SymbolCollector(module_.symbolTable);
+        collector.buildIndex(module_.ast, &module_.topIndex);
+
         module_.phase = ModulePhase.symbolsCollected;
         log(2, "ModuleCompiler: symbols collected for ", module_.fullyQualifiedName());
     }
@@ -357,6 +361,12 @@ class ModuleCompiler {
         auto mixinExpander = new MixinExpander(module_.symbolTable, controller.backend);
         mixinExpander.useReplaceMode = true;
         module_.ast = mixinExpander.expandMixins(module_.ast);
+
+        // 6. Rebuild hierarchical declaration index
+        {
+            auto collector = new SymbolCollector(module_.symbolTable);
+            collector.buildIndex(module_.ast, &module_.topIndex);
+        }
 
         module_.phase = ModulePhase.symbolsCollected;
         log(2, "ModuleCompiler: incremental re-collection done — ",

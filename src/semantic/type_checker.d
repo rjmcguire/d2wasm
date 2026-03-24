@@ -1148,6 +1148,10 @@ class TypeChecker {
         // Store the resolved declaration for downstream passes (dep graph, etc.)
         expr.declaration = symbol.declaration;
 
+        // Record reference for find-references (LSP)
+        if (symbol.declaration !is null)
+            symbol.declaration.addReference(expr);
+
         // Store the resolved uniqueLocalId for codegen
         if (symbol.kind == SymbolKind.Variable || symbol.kind == SymbolKind.Parameter) {
             expr.resolvedLocalId = symbol.uniqueLocalId;

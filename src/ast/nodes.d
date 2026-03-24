@@ -128,6 +128,24 @@ abstract class Declaration : ASTNode {
     /// declarations with this origin are invalidated and re-expanded.
     MixinDecl originMixin;
 
+    /// Hierarchical index of child declarations (populated during symbol collection).
+    /// Enables O(1) scoped lookup: mod.topIndex["Struct"].childIndex["method"]
+    Declaration[string] childIndex;
+
+    /// All expressions that reference this declaration (populated during type checking).
+    /// Enables O(1) find-references without AST walking.
+    ASTNode[] references;
+
+    /// Record a reference to this declaration from an expression or type node.
+    void addReference(ASTNode node) {
+        references ~= node;
+    }
+
+    /// Clear references (for incremental re-type-check)
+    void clearReferences() {
+        references = null;
+    }
+
     this(SourceLocation loc, string name, bool isPublic = false) {
         super(loc);
         this.name = name;

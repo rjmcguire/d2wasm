@@ -1,0 +1,6 @@
+{
+  "name": "lsp_transport",
+  "description": "LSP server: JSON-RPC over stdin/stdout with initialize/shutdown handshake",
+  "type": "shell",
+  "script": "run_test.sh"
+}

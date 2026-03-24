@@ -1,0 +1,7 @@
+{
+  "name": "position_index",
+  "description": "Position index for O(log n) cursor-to-AST-node lookup",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 7
+}

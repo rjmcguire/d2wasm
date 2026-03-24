@@ -1,0 +1,7 @@
+{
+  "name": "declaration_index",
+  "description": "Hierarchical declaration index (topIndex + childIndex) for O(1) scoped lookup",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 32
+}

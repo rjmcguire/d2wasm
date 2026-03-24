@@ -67,7 +67,8 @@ struct CompilerOptions {
     string serverSocket;          // --socket: Unix domain socket path
     int idleTimeout = 1800;       // --idle-timeout: seconds before auto-shutdown
     bool useServer = false;       // --use-server: compile via server
-    
+    bool lspMode = false;         // --lsp: start LSP server (JSON-RPC over stdin/stdout)
+
     // Debug options
     bool stackTrace = true;   // Emit call stack tracking for CTFE errors (default: on)
 
@@ -154,6 +155,7 @@ int main(string[] args) {
             "socket", "Unix domain socket path for server", &options.serverSocket,
             "idle-timeout", "Server idle timeout in seconds (default: 1800)", &options.idleTimeout,
             "use-server", "Compile via running server (auto-starts if needed)", &options.useServer,
+            "lsp", "Start LSP server (JSON-RPC over stdin/stdout)", &options.lspMode,
             // Debug options
             "stack-trace", "Emit call stack tracking for CTFE errors (default: on)", &options.stackTrace,
             // Optimization options
@@ -194,6 +196,11 @@ int main(string[] args) {
         // Server mode — no input file needed
         if (options.serverMode) {
             return runServer(options);
+        }
+
+        // LSP mode — no input file needed
+        if (options.lspMode) {
+            return runLSP(options);
         }
 
         // Handle multiple input files (parallel mode)
@@ -1157,6 +1164,21 @@ int runServer(CompilerOptions options) {
         options.arenaSafety,
         options.importPaths,
         options.idleTimeout
+    );
+
+    return server.run();
+}
+
+/**
+ * Start the LSP server (JSON-RPC over stdin/stdout).
+ */
+int runLSP(CompilerOptions options) {
+    import server.lsp_server : LSPServer;
+
+    auto server = new LSPServer(
+        options.backend,
+        options.stackTrace,
+        options.importPaths
     );
 
     return server.run();
