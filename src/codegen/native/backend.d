@@ -677,6 +677,16 @@ class NativeCompiledFunction : CompiledFunction {
             nli.offset = nextLocalOffset;
 
             size_t paramSize = 4;  // default for scalar
+            // Check for 8-byte scalar types (long, ulong, double, float)
+            if (auto paramBt = cast(BasicType)param.type) {
+                if (paramBt.kind == BasicType.Kind.Int64 || paramBt.kind == BasicType.Kind.UInt64 ||
+                    paramBt.kind == BasicType.Kind.Float64 || paramBt.kind == BasicType.Kind.Float32) {
+                    paramSize = 8;
+                    nli.offset = (nextLocalOffset + 7) & ~7;  // 8-byte aligned
+                    nextLocalOffset = nli.offset;
+                    nli.elementType = param.type;
+                }
+            }
             // ref params: store pointer (8 bytes on ARM64), deref on read/write
             if (param.isRef) {
                 nli.kind = VarKind.scalar;
@@ -832,6 +842,10 @@ class NativeCompiledFunction : CompiledFunction {
                 case VarKind.scalar:
                     if (nli.isRef) {
                         // ref param: store 64-bit pointer (address from caller)
+                        moveRegToX0(paramReg);
+                        gen.emitStorePtr(offset);
+                    } else if (isF64ElementType(nli.elementType) || isI64ElementType(nli.elementType)) {
+                        // 64-bit param (float/double/long/ulong): store full 64-bit register
                         moveRegToX0(paramReg);
                         gen.emitStorePtr(offset);
                     } else {
@@ -1983,8 +1997,8 @@ class NativeCompiledFunction : CompiledFunction {
                         gen.emitStorePtr(varOffset);
                     else if (isF64ElementType(varDecl.type))
                         gen.emitStoreLocalF64(varOffset);
-                    else if (is8ByteScalar && !isF64ElementType(varDecl.type))
-                        gen.emitStorePtr(varOffset);  // 64-bit integer store
+                    else if (isI64ElementType(varDecl.type))
+                        gen.emitStorePtr(varOffset);
                     else
                         gen.emitStoreLocal32(varOffset);
                     varSize = 0;  // already advanced
@@ -2179,6 +2193,13 @@ class NativeCompiledFunction : CompiledFunction {
         return false;
     }
 
+    /// Check if a Type is i64 (long/ulong).
+    private static bool isI64ElementType(Type t) {
+        if (auto bt = cast(BasicType)t)
+            return bt.kind == BasicType.Kind.Int64 || bt.kind == BasicType.Kind.UInt64;
+        return false;
+    }
+
     /// Check if an expression produces an f64 value.
     private bool isF64Expression(Expression expr) {
         import std.variant : Variant;
@@ -2368,6 +2389,9 @@ class NativeCompiledFunction : CompiledFunction {
                     case BinaryExpression.Operator.LessEqual: gen.emit(stencil_le_i64); break;
                     case BinaryExpression.Operator.Greater: gen.emit(stencil_gt_i64); break;
                     case BinaryExpression.Operator.GreaterEqual: gen.emit(stencil_ge_i64); break;
+                    case BinaryExpression.Operator.BitwiseAnd: gen.emit(stencil_and_i64); break;
+                    case BinaryExpression.Operator.BitwiseOr: gen.emit(stencil_or_i64); break;
+                    case BinaryExpression.Operator.BitwiseXor: gen.emit(stencil_xor_i64); break;
                     default:
                         throw new Exception("i64 binary operator not yet supported in native backend: " ~ to!string(binOp.operator));
                 }
@@ -2547,14 +2571,9 @@ class NativeCompiledFunction : CompiledFunction {
                     case VarKind.scalar:
                         if (isF64ElementType(info.elementType))
                             gen.emitLoadLocalF64(info.offset);
-                        else if (info.elementType !is null) {
-                            if (auto bt = cast(BasicType)info.elementType)
-                                if (bt.kind == BasicType.Kind.Int64 || bt.kind == BasicType.Kind.UInt64) {
-                                    gen.emitLoadPtr(info.offset);  // 64-bit integer load
-                                    break;
-                                }
-                            gen.emitLoadLocal32(info.offset);
-                        } else
+                        else if (isI64ElementType(info.elementType))
+                            gen.emitLoadPtr(info.offset);
+                        else
                             gen.emitLoadLocal32(info.offset);
                         break;
                 }
@@ -5304,6 +5323,24 @@ class NativeCompiledFunction : CompiledFunction {
             gen.emitMoveX0ToX1();
             compileExpression(args[0]);
             gen.emit(stencil_lsr_i32);  // unsigned (logical) shift right
+        } else if (name == "__intrinsic_shl_i64") {
+            assert(args.length == 2, "__intrinsic_shl_i64 requires 2 arguments");
+            compileExpression(args[1]);
+            gen.emitMoveX0ToX1();
+            compileExpression(args[0]);
+            gen.emit(stencil_shl_i64);
+        } else if (name == "__intrinsic_shr_s_i64") {
+            assert(args.length == 2, "__intrinsic_shr_s_i64 requires 2 arguments");
+            compileExpression(args[1]);
+            gen.emitMoveX0ToX1();
+            compileExpression(args[0]);
+            gen.emit(stencil_shr_i64);
+        } else if (name == "__intrinsic_shr_u_i64") {
+            assert(args.length == 2, "__intrinsic_shr_u_i64 requires 2 arguments");
+            compileExpression(args[1]);
+            gen.emitMoveX0ToX1();
+            compileExpression(args[0]);
+            gen.emit(stencil_lsr_i64);
         } else if (name == "__intrinsic_unreachable") {
             // BRK #1 — triggers SIGTRAP
             gen.emitRaw32(0xD4200020);

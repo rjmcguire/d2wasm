@@ -1,0 +1,7 @@
+{
+  "name": "long_bitwise_or_xor",
+  "description": "CTFE parity: bitwise OR and XOR on 64-bit long values",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 255
+}

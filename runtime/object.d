@@ -76,3 +76,22 @@ T opUnsignedShiftRight(T)(T value, int amount) {
         __intrinsic_unreachable();
     return __intrinsic_shr_u(value, amount);
 }
+
+// 64-bit checked shift operators
+long opShiftLeft_i64(long value, int amount) {
+    if (amount < 0 || amount >= 64)
+        __intrinsic_unreachable();
+    return __intrinsic_shl_i64(value, cast(long)amount);
+}
+
+long opShiftRight_i64(long value, int amount) {
+    if (amount < 0 || amount >= 64)
+        __intrinsic_unreachable();
+    return __intrinsic_shr_s_i64(value, cast(long)amount);
+}
+
+long opUnsignedShiftRight_i64(long value, int amount) {
+    if (amount < 0 || amount >= 64)
+        __intrinsic_unreachable();
+    return __intrinsic_shr_u_i64(value, cast(long)amount);
+}

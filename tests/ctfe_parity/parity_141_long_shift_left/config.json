@@ -1,0 +1,7 @@
+{
+  "name": "long_shift_left",
+  "description": "CTFE parity: shift left/right on 64-bit long values",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 1
+}

@@ -670,6 +670,9 @@ class SymbolTable {
         addIntrinsicFunction("__intrinsic_shl", loc, i32Type, [i32Type, i32Type]);
         addIntrinsicFunction("__intrinsic_shr_s", loc, i32Type, [i32Type, i32Type]);
         addIntrinsicFunction("__intrinsic_shr_u", loc, i32Type, [i32Type, i32Type]);
+        addIntrinsicFunction("__intrinsic_shl_i64", loc, i64Type, [i64Type, i64Type]);
+        addIntrinsicFunction("__intrinsic_shr_s_i64", loc, i64Type, [i64Type, i64Type]);
+        addIntrinsicFunction("__intrinsic_shr_u_i64", loc, i64Type, [i64Type, i64Type]);
         addIntrinsicFunction("__intrinsic_unreachable", loc, voidType, []);
 
         // Register built-in methods for array/slice types

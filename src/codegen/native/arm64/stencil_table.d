@@ -278,9 +278,21 @@ immutable stencil_shl_i32 = Stencil(
     []
 );
 
+immutable stencil_shl_i64 = Stencil(
+    "shl_i64",
+    cast(immutable ubyte[])[0x00, 0x20, 0xc1, 0x9a],  // LSL x0, x0, x1 (64-bit)
+    []
+);
+
 immutable stencil_shr_i32 = Stencil(
     "shr_i32",
     cast(immutable ubyte[])[0x00, 0x28, 0xc1, 0x1a],  // ASR w0, w0, w1 (32-bit arithmetic shift)
+    []
+);
+
+immutable stencil_shr_i64 = Stencil(
+    "shr_i64",
+    cast(immutable ubyte[])[0x00, 0x28, 0xc1, 0x9a],  // ASR x0, x0, x1 (64-bit arithmetic shift)
     []
 );
 
@@ -293,6 +305,30 @@ immutable stencil_not_i32 = Stencil(
 immutable stencil_lsr_i32 = Stencil(
     "lsr_i32",
     cast(immutable ubyte[])[0x00, 0x24, 0xc1, 0x1a],  // LSR w0, w0, w1 (32-bit logical shift right)
+    []
+);
+
+immutable stencil_lsr_i64 = Stencil(
+    "lsr_i64",
+    cast(immutable ubyte[])[0x00, 0x24, 0xc1, 0x9a],  // LSR x0, x0, x1 (64-bit logical shift right)
+    []
+);
+
+immutable stencil_and_i64 = Stencil(
+    "and_i64",
+    cast(immutable ubyte[])[0x20, 0x00, 0x00, 0x8a],  // AND x0, x1, x0 (64-bit)
+    []
+);
+
+immutable stencil_or_i64 = Stencil(
+    "or_i64",
+    cast(immutable ubyte[])[0x20, 0x00, 0x00, 0xaa],  // ORR x0, x1, x0 (64-bit)
+    []
+);
+
+immutable stencil_xor_i64 = Stencil(
+    "xor_i64",
+    cast(immutable ubyte[])[0x20, 0x00, 0x00, 0xca],  // EOR x0, x1, x0 (64-bit)
     []
 );
 
@@ -946,8 +982,14 @@ shared static this() {
     stencilTable["or_i32"] = &stencil_or_i32;
     stencilTable["xor_i32"] = &stencil_xor_i32;
     stencilTable["shl_i32"] = &stencil_shl_i32;
+    stencilTable["shl_i64"] = &stencil_shl_i64;
     stencilTable["shr_i32"] = &stencil_shr_i32;
+    stencilTable["shr_i64"] = &stencil_shr_i64;
     stencilTable["lsr_i32"] = &stencil_lsr_i32;
+    stencilTable["lsr_i64"] = &stencil_lsr_i64;
+    stencilTable["and_i64"] = &stencil_and_i64;
+    stencilTable["or_i64"] = &stencil_or_i64;
+    stencilTable["xor_i64"] = &stencil_xor_i64;
     stencilTable["not_i32"] = &stencil_not_i32;
     
     // Logical

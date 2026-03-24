@@ -71,10 +71,10 @@ OUTPUT2=$("$COMPILER" "$TEST_DIR/file1.d" "$TEST_DIR/file2.d" "$TEST_DIR/file3.d
 HITS=$(echo "$OUTPUT2" | grep -o '"cacheHits": [0-9]*' | head -1 | grep -o '[0-9]*')
 MISSES=$(echo "$OUTPUT2" | grep -o '"cacheMisses": [0-9]*' | head -1 | grep -o '[0-9]*')
 
-if [ "$HITS" != "24" ] || [ "$MISSES" != "0" ]; then
-    echo "FAIL: Expected 24 hits, 0 misses. Got hits=$HITS misses=$MISSES"
+if [ "$HITS" != "33" ] || [ "$MISSES" != "0" ]; then
+    echo "FAIL: Expected 33 hits, 0 misses. Got hits=$HITS misses=$MISSES"
     exit 1
 fi
-echo "  OK: 24 cache hits, 0 misses"
+echo "  OK: 33 cache hits, 0 misses"
 
 echo "All orchestrator tests passed!"

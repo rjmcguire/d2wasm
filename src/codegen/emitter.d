@@ -4179,6 +4179,12 @@ private class EvalContext {
                 out_ ~= Op.i32_shr_s;
             else if (ident.name == "__intrinsic_shr_u")
                 out_ ~= Op.i32_shr_u;
+            else if (ident.name == "__intrinsic_shl_i64")
+                out_ ~= Op.i64_shl;
+            else if (ident.name == "__intrinsic_shr_s_i64")
+                out_ ~= Op.i64_shr_s;
+            else if (ident.name == "__intrinsic_shr_u_i64")
+                out_ ~= Op.i64_shr_u;
             else if (ident.name == "__intrinsic_unreachable")
                 out_ ~= Op.unreachable;
             else

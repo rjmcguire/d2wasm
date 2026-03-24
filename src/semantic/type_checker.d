@@ -994,13 +994,18 @@ class TypeChecker {
             }
 
             // Lower to checked operator function call
+            // Use i64 variant when left operand is 64-bit
+            bool isI64Shift = false;
+            if (auto leftBt = cast(BasicType)leftType.resolve())
+                isI64Shift = leftBt.kind == BasicType.Kind.Int64 || leftBt.kind == BasicType.Kind.UInt64;
+
             string funcName;
             if (expr.operator == BinaryExpression.Operator.ShiftLeft)
-                funcName = "opShiftLeft";
+                funcName = isI64Shift ? "opShiftLeft_i64" : "opShiftLeft";
             else if (expr.operator == BinaryExpression.Operator.ShiftRight)
-                funcName = "opShiftRight";
+                funcName = isI64Shift ? "opShiftRight_i64" : "opShiftRight";
             else
-                funcName = "opUnsignedShiftRight";
+                funcName = isI64Shift ? "opUnsignedShiftRight_i64" : "opUnsignedShiftRight";
 
             auto callExpr = new CallExpression(expr.location,
                 new IdentifierExpression(expr.location, funcName),
@@ -3261,11 +3266,15 @@ class TypeChecker {
         // Compound shift assignments — lower to checked call but keep operator
         if (expr.operator == AssignmentExpression.Operator.ShiftLeftAssign ||
             expr.operator == AssignmentExpression.Operator.ShiftRightAssign) {
+            bool isI64Assign = false;
+            if (auto leftBt = cast(BasicType)leftType.resolve())
+                isI64Assign = leftBt.kind == BasicType.Kind.Int64 || leftBt.kind == BasicType.Kind.UInt64;
+
             string funcName;
             if (expr.operator == AssignmentExpression.Operator.ShiftLeftAssign)
-                funcName = "opShiftLeft";
+                funcName = isI64Assign ? "opShiftLeft_i64" : "opShiftLeft";
             else
-                funcName = "opShiftRight";
+                funcName = isI64Assign ? "opShiftRight_i64" : "opShiftRight";
             auto callExpr = new CallExpression(expr.location,
                 new IdentifierExpression(expr.location, funcName),
                 [expr.left, expr.right]);
