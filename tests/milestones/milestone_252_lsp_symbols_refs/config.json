@@ -1,0 +1,7 @@
+{
+  "name": "lsp_symbols_refs",
+  "description": "LSP document symbols and find references",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 15
+}

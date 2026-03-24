@@ -929,32 +929,41 @@ int compileFile(CompilerOptions options) {
         
     } catch (ImportError e) {
         printError(e);
+        if (options.warmState !is null) options.warmState.lastError = e;
         return 1;
     } catch (ParseError e) {
         printError(e);
+        if (options.warmState !is null) options.warmState.lastError = e;
         return 1;
     } catch (FeatureValidationError e) {
         printError(e);
+        if (options.warmState !is null) options.warmState.lastError = e;
         return 1;
     } catch (SemanticError e) {
         printError(e);
+        if (options.warmState !is null) options.warmState.lastError = e;
         return 1;
     } catch (ArenaSafetyError e) {
         // Individual errors already printed with formatError in analyzeArenaSafety
+        if (options.warmState !is null) options.warmState.lastError = e;
         return 1;
     } catch (TypeError e) {
         printError(e);
+        if (options.warmState !is null) options.warmState.lastError = e;
         return 1;
     } catch (CTFEError e) {
         printError(e);
+        if (options.warmState !is null) options.warmState.lastError = e;
         return 1;
     } catch (EmitError e) {
         printError(e);
+        if (options.warmState !is null) options.warmState.lastError = e;
         return 1;
     } catch (Exception e) {
         writeln("Internal Error: ", e.msg);
         log(1, "Stack trace:");
         log(1, e.info);
+        if (options.warmState !is null) options.warmState.lastError = e;
         return 1;
     }
 }

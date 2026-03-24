@@ -505,19 +505,18 @@ class LSPServer {
         options.warmStateObj = warmState;
         options.cacheDir = dirName(absPath);
 
-        // Compile — capture stderr for diagnostics
+        // Compile
         Diagnostic[] diagnostics;
-        try {
-            int result = compileFile(options);
-            // Success — clear diagnostics
-        } catch (Exception e) {
-            // Extract location from exception if available
-            auto loc = extractLocation(e);
+        ws.lastError = null;  // clear previous error
+        int result = compileFile(options);
+
+        // Extract diagnostics from compilation errors (stored via warm state pointer)
+        if (result != 0 && ws.lastError !is null) {
+            auto loc = extractLocation(ws.lastError);
             diagnostics ~= Diagnostic(
-                sourceLocationToRange(
-                    loc.startOffset, loc.endOffset, sourceText),
+                sourceLocationToRange(loc.startOffset, loc.endOffset, sourceText),
                 DiagnosticSeverity.Error,
-                e.msg
+                ws.lastError.msg
             );
         }
 
@@ -534,28 +533,43 @@ class LSPServer {
             }
         }
 
-        // Publish diagnostics
+        // Publish diagnostics (empty array clears previous diagnostics on success)
         JSONValue[] diagJSONs;
         foreach (ref d; diagnostics)
             diagJSONs ~= d.toJSON();
 
-        JSONValue params;
-        params["uri"] = uri;
-        params["diagnostics"] = JSONValue(diagJSONs);
-        sendNotification("textDocument/publishDiagnostics", params);
+        JSONValue diagParams;
+        diagParams["uri"] = uri;
+        diagParams["diagnostics"] = JSONValue(diagJSONs);
+        sendNotification("textDocument/publishDiagnostics", diagParams);
     }
 
-    private static auto extractLocation(Exception e) {
-        import ast.nodes : SourceLocation;
-        // Try to extract location from various error types
-        static foreach (ErrorType; [
-            "parser.tree_sitter_bridge.ParseError",
-            "semantic.symbol_table.SemanticError",
-            "semantic.type_checker.TypeError",
-        ]) {
-            // Use runtime type info
-        }
-        // Fallback: no location
+    /// Extract SourceLocation from error exceptions that carry location info.
+    /// All d2wasm error types (ParseError, TypeError, SemanticError, etc.)
+    /// have a .location field.
+    private static SourceLocation extractLocation(Exception e) {
+        // Use the .location field that all d2wasm error types share
+        // (they all implement it via the printError template requirement)
+        try {
+            // Dynamic dispatch: check if the object has a location field
+            if (auto obj = cast(Object)e) {
+                // All our error types inherit from Exception and have .location
+                // Use __traits or manual casting
+                import parser.tree_sitter_bridge : ParseError;
+                import semantic.symbol_table : SemanticError;
+                import semantic.type_checker : TypeError;
+                import semantic.ctfe : CTFEError;
+                import codegen.emitter : EmitError;
+                import semantic.import_resolver : ImportError;
+
+                if (auto pe = cast(ParseError)e) return pe.location;
+                if (auto se = cast(SemanticError)e) return se.location;
+                if (auto te = cast(TypeError)e) return te.location;
+                if (auto ce = cast(CTFEError)e) return ce.location;
+                if (auto ee = cast(EmitError)e) return ee.location;
+                if (auto ie = cast(ImportError)e) return ie.location;
+            }
+        } catch (Exception) {}
         return SourceLocation.init;
     }
 

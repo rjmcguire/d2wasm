@@ -1,0 +1,6 @@
+{
+  "name": "lsp_diagnostics",
+  "description": "LSP publishDiagnostics on save with error location",
+  "type": "shell",
+  "script": "run_test.sh"
+}
