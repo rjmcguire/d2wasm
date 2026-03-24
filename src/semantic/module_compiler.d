@@ -134,10 +134,11 @@ class CompilationController {
 
         log(2, "CompilationController: regressing ", fqn, " to parsed");
 
-        // Save the per-module compiler (preserves symbol table for incremental re-collection)
+        // Save the per-module compiler state (preserves symbol table + AST for incremental)
         // Don't remove it — getCompiler will return the existing one
         if (auto mc = fqn in compilers) {
             mc.savedSymbolTable = mod.symbolTable;
+            mc.savedAST = mod.ast;
             mc.ctfeEvaluator_ = null;  // must be recreated (depends on ModulesContext)
         }
 
@@ -182,8 +183,15 @@ class ModuleCompiler {
     /// Saved from previous compilation (for incremental symbol re-collection)
     SymbolTable savedSymbolTable;
 
+    /// Saved AST from previous compilation (for selective re-type-check)
+    Declaration[] savedAST;
+
+    /// Changed byte ranges from tree-sitter (for AST splicing)
+    import parser.tree_sitter_c : TSRange;
+    TSRange[] changedRanges;
+
     /// Declarations identified as dirty after incremental symbol re-collection.
-    /// Used by milestone 244 (selective re-type-check) to skip unchanged declarations.
+    /// Used by selective re-type-check to skip unchanged declarations.
     string[] dirtyDeclarationNames;
 
     this(Module mod, CompilationController controller) {
@@ -267,7 +275,6 @@ class ModuleCompiler {
      * Tracks which declarations changed for selective re-type-check (milestone 244).
      */
     private void advanceToSymbolsCollectedIncremental() {
-        import incremental.hasher : hashSourceText;
         import std.array : appender;
 
         log(2, "ModuleCompiler: incremental symbol re-collection for ", module_.fullyQualifiedName());
@@ -291,50 +298,34 @@ class ModuleCompiler {
             wireImport(impDecl, dep);
         }
 
-        // 3. Snapshot old declaration names for dirty tracking
-        string[string] oldDeclHashes;  // name → source hash (as hex string)
-        if (ms !is null) {
-            foreach (name, sym; ms.symbols) {
-                if (sym.declaration !is null) {
-                    auto loc = sym.declaration.location;
-                    if (loc.endOffset > loc.startOffset && sym.declaration.sourceText.length > 0) {
-                        auto h = hashSourceText(sym.declaration.sourceText, loc.startOffset, loc.endOffset);
-                        import std.conv : to;
-                        oldDeclHashes[name] = h.to!string;
-                    }
-                }
+        // 3. Splice AST: keep old (type-checked) nodes for unchanged declarations,
+        //    use new (re-parsed) nodes only for declarations in changed byte ranges.
+        if (savedAST.length > 0 && changedRanges.length > 0) {
+            auto splicedAST = spliceAST(savedAST, module_.ast, changedRanges);
+            module_.ast = splicedAST.ast;
+            dirtyDeclarationNames = splicedAST.dirtyNames;
+            log(2, "ModuleCompiler: AST splice — ", dirtyDeclarationNames.length,
+                " dirty, ", module_.ast.length - dirtyDeclarationNames.length, " reused");
+        } else {
+            // No changed ranges or no saved AST → all declarations are dirty
+            auto dirty = appender!(string[]);
+            foreach (decl; module_.ast) {
+                if (decl.name.length > 0 && decl.name != "<mixin>")
+                    dirty ~= decl.name;
             }
+            dirtyDeclarationNames = dirty[];
         }
+        savedAST = null;
+        changedRanges = null;
 
         // 4. Re-expand mixins with replace mode (may produce new/changed declarations)
-        //    The mixin expander also does symbol collection internally, so
-        //    useReplaceMode ensures existing symbols are updated rather than rejected.
         auto mixinExpander = new MixinExpander(module_.symbolTable, controller.backend);
         mixinExpander.useReplaceMode = true;
         module_.ast = mixinExpander.expandMixins(module_.ast);
 
-        // 6. Track which declarations changed
-        auto dirty = appender!(string[]);
-        if (ms !is null) {
-            foreach (name, sym; ms.symbols) {
-                if (sym.declaration is null) continue;
-                auto loc = sym.declaration.location;
-                if (loc.endOffset <= loc.startOffset) continue;
-                if (sym.declaration.sourceText.length == 0) continue;
-
-                auto h = hashSourceText(sym.declaration.sourceText, loc.startOffset, loc.endOffset);
-                import std.conv : to;
-                auto newHash = h.to!string;
-                auto oldHash = name in oldDeclHashes;
-                if (oldHash is null || *oldHash != newHash)
-                    dirty ~= name;
-            }
-        }
-        dirtyDeclarationNames = dirty[];
+        module_.phase = ModulePhase.symbolsCollected;
         log(2, "ModuleCompiler: incremental re-collection done — ",
             dirtyDeclarationNames.length, " dirty declaration(s)");
-
-        module_.phase = ModulePhase.symbolsCollected;
     }
 
     /**
@@ -552,6 +543,66 @@ class ModuleCompiler {
     /**
      * Wire an import's scope into this module's scope.
      */
+    /**
+     * Splice old (type-checked) and new (re-parsed) AST nodes.
+     * Declarations whose byte ranges don't overlap with any changed range
+     * keep the old node (preserving isTypeChecked, expr.type, etc.).
+     * Changed declarations use the new re-parsed node.
+     */
+    private static auto spliceAST(Declaration[] oldAST, Declaration[] newAST, TSRange[] ranges) {
+        import std.array : appender;
+
+        // Build name→old-decl lookup (skip imports, module decls, etc.)
+        Declaration[string] oldByName;
+        foreach (decl; oldAST) {
+            if (decl.name.length > 0 && decl.name != "<mixin>")
+                oldByName[decl.name] = decl;
+        }
+
+        auto result = appender!(Declaration[]);
+        auto dirty = appender!(string[]);
+
+        foreach (newDecl; newAST) {
+            // For declarations without meaningful names (imports, module decls), always use new
+            if (newDecl.name.length == 0 || newDecl.name == "<mixin>") {
+                result ~= newDecl;
+                continue;
+            }
+
+            // Check if this declaration overlaps any changed range
+            bool changed = false;
+            uint start = newDecl.location.startOffset;
+            uint end = newDecl.location.endOffset;
+
+            foreach (ref r; ranges) {
+                // Overlap test: NOT (decl.end <= range.start OR decl.start >= range.end)
+                if (!(end <= r.start_byte || start >= r.end_byte)) {
+                    changed = true;
+                    break;
+                }
+            }
+
+            if (changed) {
+                // Use new re-parsed node
+                result ~= newDecl;
+                dirty ~= newDecl.name;
+            } else if (auto oldDecl = newDecl.name in oldByName) {
+                // Unchanged — reuse old type-checked node
+                result ~= *oldDecl;
+            } else {
+                // New declaration (didn't exist before)
+                result ~= newDecl;
+                dirty ~= newDecl.name;
+            }
+        }
+
+        static struct SpliceResult {
+            Declaration[] ast;
+            string[] dirtyNames;
+        }
+        return SpliceResult(result[], dirty[]);
+    }
+
     private void wireImport(ImportDecl impDecl, Module dep) {
         if (module_.symbolTable is null || module_.symbolTable.moduleScope is null)
             return;

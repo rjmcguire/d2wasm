@@ -25,6 +25,9 @@ class WarmState {
         // Pre-computed dirty mangled names from fileChanged (cleared after compile)
         string[] pendingDirtyNames;
 
+        // Changed byte ranges from tree-sitter incremental reparse (cleared after compile)
+        TSRange[] pendingChangedRanges;
+
         // Stats from last compilation (written by compileFile)
         size_t lastCacheHits;
         size_t lastCacheMisses;
@@ -131,6 +134,7 @@ class WarmState {
         }
 
         fs.pendingDirtyNames = dirtyNames[];
+        fs.pendingChangedRanges = changedRanges;
         return directlyChanged[].length;
     }
 }

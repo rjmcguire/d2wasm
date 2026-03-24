@@ -267,6 +267,12 @@ class CompileServer {
             serverLog("Compiling: ", req.file);
         }
 
+        // Pass changed byte ranges for selective re-type-check (Phase 4)
+        if (ws.pendingChangedRanges.length > 0) {
+            options.changedRanges = ws.pendingChangedRanges;
+            ws.pendingChangedRanges = null;
+        }
+
         // Run compilation
         int exitCode = compileFile(options);
 

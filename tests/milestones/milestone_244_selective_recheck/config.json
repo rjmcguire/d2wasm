@@ -1,0 +1,6 @@
+{
+  "name": "selective_recheck",
+  "description": "Selective re-type-check: tree-sitter changed ranges splice old/new AST, skipping unchanged declarations",
+  "type": "shell",
+  "script": "run_test.sh"
+}

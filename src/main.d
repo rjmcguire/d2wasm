@@ -96,6 +96,9 @@ struct CompilerOptions {
     WarmState.FileState* warmState;       // non-null when running inside compile server
     string[] pendingEvictions;            // pre-computed dirty names from incremental fileChanged
     WarmState warmStateObj;               // project-level warm state (for module registry)
+
+    import parser.tree_sitter_c : TSRange;
+    TSRange[] changedRanges;              // tree-sitter changed byte ranges for selective re-type-check
 }
 
 int main(string[] args) {
@@ -397,7 +400,15 @@ int compileFile(CompilerOptions options) {
         } else if (warmRegistry && options.warmStateObj !is null
                    && options.warmStateObj.compilationController !is null) {
             // Targeted regression for the input module + its dependents
-            options.warmStateObj.compilationController.regressModule(inputModule);
+            import semantic.module_compiler : CompilationController, ModuleCompiler;
+            auto warmCtrl = options.warmStateObj.compilationController;
+            warmCtrl.regressModule(inputModule);
+
+            // Pass changed byte ranges to the module compiler for AST splicing
+            if (options.changedRanges.length > 0) {
+                auto mc = warmCtrl.getCompiler(inputModule);
+                mc.changedRanges = options.changedRanges;
+            }
         }
         inputModule.sourceFilePath = absolutePath(options.inputFile);
         inputModule.sourceText = sourceCode;
