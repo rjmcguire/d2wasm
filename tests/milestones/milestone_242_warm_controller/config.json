@@ -1,0 +1,6 @@
+{
+  "name": "warm_controller",
+  "description": "Warm CompilationController with targeted phase regression for changed modules",
+  "type": "shell",
+  "script": "run_test.sh"
+}

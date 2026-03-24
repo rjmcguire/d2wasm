@@ -1,0 +1,6 @@
+{
+  "name": "symbol_removal",
+  "description": "Scope supports removeSymbol, replaceSymbol, and removeAlias for incremental compilation",
+  "type": "unittest",
+  "module": "semantic.symbol_table"
+}

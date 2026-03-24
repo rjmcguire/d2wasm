@@ -149,6 +149,38 @@ class Scope {
     }
     
     /**
+     * Remove a symbol from this scope.
+     * Returns true if the symbol was found and removed, false if not found.
+     */
+    bool removeSymbol(string symbolName) {
+        if (symbolName in symbols) {
+            symbols.remove(symbolName);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Remove an alias from this scope.
+     * Returns true if the alias was found and removed.
+     */
+    bool removeAlias(string aliasName) {
+        if (aliasName in aliases) {
+            aliases.remove(aliasName);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Replace a symbol in this scope. The new symbol must have the same name.
+     * If the old symbol doesn't exist, adds the new one (upsert).
+     */
+    void replaceSymbol(Symbol newSymbol) {
+        symbols[newSymbol.name] = newSymbol;
+    }
+
+    /**
      * Look up symbol in parent scopes only (not this scope)
      */
     Symbol lookupOuter(string name) {
@@ -1152,4 +1184,49 @@ class SymbolCollector {
         }
         return types;
     }
+}
+
+// --- Unit tests for Scope symbol removal/replacement ---
+
+unittest {
+    // removeSymbol: add a symbol, remove it, verify lookup returns null
+    auto scope_ = new Scope(null, "test");
+    auto sym = new Symbol("foo", SymbolKind.Function, null, null, SourceLocation.init);
+    scope_.addSymbol(sym);
+    assert(scope_.lookupLocal("foo") !is null, "Symbol should exist after add");
+
+    bool removed = scope_.removeSymbol("foo");
+    assert(removed, "removeSymbol should return true");
+    assert(scope_.lookupLocal("foo") is null, "Symbol should be gone after remove");
+
+    // removeSymbol on nonexistent returns false
+    assert(!scope_.removeSymbol("bar"), "removeSymbol on nonexistent should return false");
+}
+
+unittest {
+    // replaceSymbol: add a symbol, replace it, verify new symbol visible
+    auto scope_ = new Scope(null, "test");
+    auto type1 = new BasicType(BasicTypeKind.Int32);
+    auto type2 = new BasicType(BasicTypeKind.Float64);
+
+    auto sym1 = new Symbol("foo", SymbolKind.Function, type1, null, SourceLocation.init);
+    scope_.addSymbol(sym1);
+    assert(scope_.lookupLocal("foo").type is type1);
+
+    // Replace with new type
+    auto sym2 = new Symbol("foo", SymbolKind.Function, type2, null, SourceLocation.init);
+    scope_.replaceSymbol(sym2);
+    assert(scope_.lookupLocal("foo").type is type2, "Should see replaced symbol's type");
+}
+
+unittest {
+    // removeAlias: add an alias, remove it, verify lookup returns null
+    auto scope_ = new Scope(null, "test");
+    auto intType = new BasicType(BasicTypeKind.Int32);
+    scope_.addAlias("MyInt", intType);
+    assert(scope_.lookupAlias("MyInt") !is null);
+
+    bool removed = scope_.removeAlias("MyInt");
+    assert(removed);
+    assert(scope_.lookupAlias("MyInt") is null, "Alias should be gone after remove");
 }

@@ -121,8 +121,48 @@ class CompilationController {
         }
     }
 
+    /**
+     * Regress a module back to `parsed` phase.
+     * Clears its compiler, symbol table, and import wiring so that
+     * ensurePhase() will re-advance it from scratch.
+     * Also regresses any modules that import this one (transitively).
+     */
+    void regressModule(Module mod) {
+        string fqn = mod.fullyQualifiedName();
+        if (mod.phase <= ModulePhase.parsed)
+            return;  // already at or before parsed
+
+        log(2, "CompilationController: regressing ", fqn, " to parsed");
+
+        // Remove per-module compiler (will be re-created on next ensurePhase)
+        compilers.remove(fqn);
+
+        // Reset module state
+        mod.phase = ModulePhase.parsed;
+        mod.symbolTable = null;
+        mod.importDecls = null;
+        mod.imports = null;
+
+        // Invalidate shared modules context (force rebuild)
+        modulesCtx_ = null;
+
+        // Regress dependents: any module that imports this one
+        foreach (otherMod; registry.allModules()) {
+            if (otherMod is mod) continue;
+            if (otherMod.phase <= ModulePhase.parsed) continue;
+            // Check if otherMod imports mod
+            foreach (imp; otherMod.imports) {
+                if (imp is mod) {
+                    regressModule(otherMod);
+                    break;
+                }
+            }
+        }
+    }
+
     /// Accessors for shared state
     string backend() const { return backendName; }
+    ModuleRegistry getRegistry() { return registry; }
 }
 
 /**

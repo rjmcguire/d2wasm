@@ -304,18 +304,9 @@ int compileFile(CompilerOptions options) {
             modRegistry = options.warmStateObj.moduleRegistry;
             log(2, "Using warm module registry");
 
-            // Reset all non-synthetic module phases to parsed
-            // (CompilationController will re-advance them)
-            foreach (mod; modRegistry.allModules()) {
-                if (!mod.isSynthetic) {
-                    mod.phase = ModulePhase.parsed;
-                    mod.symbolTable = null;
-                    mod.importDecls = null;
-                    mod.imports = null;
-                }
-            }
+            auto warmController = options.warmStateObj.compilationController;
 
-            // Re-check imported module sources for changes
+            // Re-check imported module sources for changes — only regress changed ones
             foreach (mod; modRegistry.allModules()) {
                 if (mod.isSynthetic) continue;
                 if (mod.sourceFilePath == absolutePath(options.inputFile)) continue;
@@ -326,7 +317,11 @@ int compileFile(CompilerOptions options) {
                     log(2, "Re-parsing changed import: ", mod.sourceFilePath);
                     mod.sourceText = currentSource;
                     mod.ast = parseFn(mod.sourceFilePath, currentSource);
-                    mod.phase = ModulePhase.parsed;
+                    // Use targeted regression if warm controller exists
+                    if (warmController !is null)
+                        warmController.regressModule(mod);
+                    else
+                        mod.phase = ModulePhase.parsed;
                 }
             }
         } else {
@@ -399,6 +394,10 @@ int compileFile(CompilerOptions options) {
             inputModule = new Module();
             inputModule.modulePath = inputModulePath;
             modRegistry.registerModule(inputModule);
+        } else if (warmRegistry && options.warmStateObj !is null
+                   && options.warmStateObj.compilationController !is null) {
+            // Targeted regression for the input module + its dependents
+            options.warmStateObj.compilationController.regressModule(inputModule);
         }
         inputModule.sourceFilePath = absolutePath(options.inputFile);
         inputModule.sourceText = sourceCode;
@@ -475,8 +474,17 @@ int compileFile(CompilerOptions options) {
         import semantic.module_compiler : CompilationController;
         import semantic.mixin_expander : MixinError;
 
-        auto controller = new CompilationController(
-            modRegistry, parseFn, options.backend, options.stackTrace, options.cacheDir);
+        CompilationController controller;
+        if (options.warmStateObj !is null && options.warmStateObj.compilationController !is null) {
+            // Reuse warm controller — only changed modules will be re-advanced
+            controller = options.warmStateObj.compilationController;
+            log(2, "Using warm compilation controller");
+        } else {
+            controller = new CompilationController(
+                modRegistry, parseFn, options.backend, options.stackTrace, options.cacheDir);
+            if (options.warmStateObj !is null)
+                options.warmStateObj.compilationController = controller;
+        }
 
         try {
             controller.ensurePhase(inputModule, ModulePhase.typeChecked);

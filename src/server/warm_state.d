@@ -12,6 +12,7 @@ import cache.entry : CacheEntry, SourceHash;
 import incremental.dep_graph : DeclDependencyGraph;
 import parser.tree_sitter_c : TreeSitterParser, TSInputEdit, TSRange, IncrementalParseResult;
 import semantic.module_registry : ModuleRegistry;
+import semantic.module_compiler : CompilationController;
 
 class WarmState {
     /// Per-file warm data
@@ -34,6 +35,9 @@ class WarmState {
 
     /// Project-level warm module registry (shared across all files)
     ModuleRegistry moduleRegistry;
+
+    /// Project-level warm compilation controller (shared across all files)
+    CompilationController compilationController;
 
     /// Source hashes for imported modules (to detect changes)
     size_t[string] importedSourceHashes;  // absPath → hash
