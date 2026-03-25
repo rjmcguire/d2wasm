@@ -1,0 +1,7 @@
+{
+  "name": "double_struct_param",
+  "description": "Struct-with-doubles passed as function parameter",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 42
+}

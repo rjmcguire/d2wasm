@@ -3534,6 +3534,13 @@ class NativeCompiledFunction : CompiledFunction {
                                 gen.emitImm32(stencil_load_imm32, cast(int)field.offset);
                                 gen.emit(stencil_add_i64);
                             }
+                        } else if (isF64ElementType(field.type)) {
+                            if (field.offset > 0) {
+                                gen.emitMoveX0ToX1();
+                                gen.emitImm32(stencil_load_imm32, cast(int)field.offset);
+                                gen.emit(stencil_add_i64);
+                            }
+                            gen.emit(stencil_load_f64);
                         } else {
                             gen.emitLoadFromPointer(field.offset);
                         }
@@ -3542,6 +3549,10 @@ class NativeCompiledFunction : CompiledFunction {
                         size_t totalOffset = varInfo.offset + field.offset;
                         if (field.type.isAggregate()) {
                             gen.emitStackAddress(totalOffset);
+                        } else if (isF64ElementType(field.type)) {
+                            gen.emitLoadLocalF64(totalOffset);
+                        } else if (isI64ElementType(field.type)) {
+                            gen.emitLoadLocal(totalOffset);  // 64-bit integer
                         } else {
                             gen.emitLoadLocal32(totalOffset);
                         }
@@ -3564,6 +3575,13 @@ class NativeCompiledFunction : CompiledFunction {
                     gen.emit(stencil_add_i64);  // 64-bit ptr arithmetic
                 }
                 // x0 now has address of nested aggregate
+            } else if (isF64ElementType(field.type)) {
+                if (fieldOffset > 0) {
+                    gen.emitMoveX0ToX1();
+                    gen.emitImm32(stencil_load_imm32, cast(int)fieldOffset);
+                    gen.emit(stencil_add_i64);
+                }
+                gen.emit(stencil_load_f64);
             } else {
                 gen.emitLoadFromPointer(fieldOffset);
             }
@@ -5936,7 +5954,14 @@ class NativeCompiledFunction : CompiledFunction {
                 } else {
                     // Direct instance on stack
                     compileExpression(assign.right);
-                    gen.emitStoreLocal32(varInfo.offset + field.offset);
+                    size_t totalOffset = varInfo.offset + field.offset;
+                    if (isF64ElementType(field.type)) {
+                        gen.emitStoreLocalF64(totalOffset);
+                    } else if (isI64ElementType(field.type)) {
+                        gen.emitStoreLocal(totalOffset);  // 64-bit integer
+                    } else {
+                        gen.emitStoreLocal32(totalOffset);
+                    }
                 }
                 return;
             }

@@ -816,8 +816,14 @@ class ArrayType : Type {
         // Dynamic arrays are just pointers (8 bytes on 64-bit)
         if (!arraySize) return 8;
         // Static arrays: element_size * count
-        // TODO: evaluate size expression during semantic analysis
-        return elementType.size() * 1;  // Placeholder
+        import ast.expressions : LiteralExpression;
+        if (auto lit = cast(LiteralExpression)cast()arraySize) {
+            if (lit.value.type == typeid(long))
+                return elementType.size() * cast(size_t)lit.value.get!long();
+            if (lit.value.type == typeid(int))
+                return elementType.size() * cast(size_t)lit.value.get!int();
+        }
+        return elementType.size() * 1;  // Fallback for non-literal sizes
     }
     
     

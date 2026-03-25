@@ -443,8 +443,12 @@ mixin template CallEmitter() {
                         out_ ~= Op.i32_sub;
                         emitGlobalSet(out_, emitter.spGlobal);
 
-                        // Copy fields from source to SP
+                        // Copy fields from source to SP (blit — type-aware load/store)
                         foreach (field; structDecl.fields) {
+                            auto fbt = cast(BasicType)field.type;
+                            bool fIsFloat = fbt && (fbt.kind == BasicType.Kind.Float64 || fbt.kind == BasicType.Kind.Float32);
+                            uint fSize = cast(uint)field.size;
+
                             // Dest: SP + fieldOffset
                             emitGlobalGet(out_, emitter.spGlobal);
                             if (field.offset > 0) {
@@ -458,10 +462,10 @@ mixin template CallEmitter() {
                                 emitI32Const(out_, cast(int)field.offset);
                                 out_ ~= Op.i32_add;
                             }
-                            emitI32Load(out_);
+                            emitLoadForSize(out_, fSize, fIsFloat);
 
                             // Store
-                            emitI32Store(out_);
+                            emitStoreForSize(out_, fSize, fIsFloat);
                         }
 
                         // Push SP (address of copy) as argument
@@ -1471,8 +1475,12 @@ mixin template CallEmitter() {
                     out_ ~= Op.i32_sub;
                     emitGlobalSet(out_, emitter.spGlobal);
 
-                    // Copy fields from source to temp
+                    // Copy fields from source to temp (type-aware blit)
                     foreach (field; argStructDecl.fields) {
+                        auto fbt = cast(BasicType)field.type;
+                        bool fIsFloat = fbt && (fbt.kind == BasicType.Kind.Float64 || fbt.kind == BasicType.Kind.Float32);
+                        uint fSize = cast(uint)field.size;
+
                         emitGlobalGet(out_, emitter.spGlobal);
                         if (field.offset > 0) {
                             emitI32Const(out_, cast(int)field.offset);
@@ -1483,8 +1491,8 @@ mixin template CallEmitter() {
                             emitI32Const(out_, cast(int)field.offset);
                             out_ ~= Op.i32_add;
                         }
-                        emitI32Load(out_);
-                        emitI32Store(out_);
+                        emitLoadForSize(out_, fSize, fIsFloat);
+                        emitStoreForSize(out_, fSize, fIsFloat);
                     }
 
                     emitGlobalGet(out_, emitter.spGlobal);

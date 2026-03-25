@@ -1,0 +1,7 @@
+{
+  "name": "large_stack_struct",
+  "description": "Large struct (~260 bytes) on stack — field access after array",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 42
+}
