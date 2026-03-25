@@ -37,6 +37,7 @@ import diagnostic.error_format : printError;
 import semantic.ctfe : CTFEError;
 import semantic.arena_taint : ArenaSafetyError;
 import semantic.import_resolver : ImportError;
+import codegen.native.backend : NativeCompileError;
 
 struct CompilerOptions {
     string inputFile;
@@ -1019,6 +1020,10 @@ int compileFile(CompilerOptions options) {
         if (options.warmState !is null) options.warmState.lastError = e;
         return 1;
     } catch (EmitError e) {
+        printError(e);
+        if (options.warmState !is null) options.warmState.lastError = e;
+        return 1;
+    } catch (NativeCompileError e) {
         printError(e);
         if (options.warmState !is null) options.warmState.lastError = e;
         return 1;

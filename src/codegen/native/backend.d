@@ -911,12 +911,13 @@ class NativeCompiledFunction : CompiledFunction {
         size_t bodyLocalBytes = countLocalBytesInStatement(func.body_);
 
         // Reserve temp zone for expression evaluation scratch space.
-        // All temp offsets are managed by `temps` allocator (no magic arithmetic).
+        // Compute capacity from AST rather than using a fixed constant.
         size_t tempSlotOffset = nextLocalOffset + bodyLocalBytes;
         size_t tempBase = (tempSlotOffset + 7) & ~cast(size_t)7;
-        enum TEMP_CAPACITY = 128;  // 8-byte-aligned slots; covers slice append (5x8=40), struct construction, expression nesting
-        temps.initialize(tempBase, TEMP_CAPACITY);
-        size_t totalNeeded = tempBase + TEMP_CAPACITY;
+        size_t tempCapacity = computeTempCapacity(func.body_) + 128;  // +128 for leaf temps not tracked by walker
+        if (tempCapacity < 256) tempCapacity = 256;
+        temps.initialize(tempBase, tempCapacity);
+        size_t totalNeeded = tempBase + tempCapacity;
         totalLocalBytes = (totalNeeded + 15) & ~15;  // 16-byte aligned
         
         // Create epilogue label for return statements
@@ -1399,6 +1400,75 @@ class NativeCompiledFunction : CompiledFunction {
 
         return bytes;
     }
+
+    /// Compute the temp allocator capacity needed for a function body.
+    /// Walks the expression tree to find the max depth of temp-consuming operations.
+    /// Each concat allocates 72 bytes and can recurse. Call args allocate 8 bytes each.
+    private size_t computeTempCapacity(Statement stmt) {
+        if (stmt is null) return 0;
+        size_t maxExpr = 0;
+        // Walk all statements, find the expression with deepest temp usage
+        void walkStmt(Statement s) {
+            if (s is null) return;
+            if (auto compound = cast(CompoundStatement) s) {
+                foreach (sub; compound.statements) walkStmt(sub);
+            } else if (auto ifS = cast(IfStatement) s) {
+                walkStmt(ifS.thenStatement);
+                walkStmt(ifS.elseStatement);
+            } else if (auto whileS = cast(WhileStatement) s) {
+                walkStmt(whileS.body_);
+            } else if (auto forS = cast(ForStatement) s) {
+                walkStmt(forS.body_);
+            } else if (auto retS = cast(ReturnStatement) s) {
+                if (retS.value) { auto d = exprTempDepth(retS.value); if (d > maxExpr) maxExpr = d; }
+            } else if (auto exprS = cast(ExpressionStatement) s) {
+                auto d = exprTempDepth(exprS.expression);
+                if (d > maxExpr) maxExpr = d;
+            } else if (auto varS = cast(VariableDeclarationStatement) s) {
+                if (varS.initializer) { auto d = exprTempDepth(varS.initializer); if (d > maxExpr) maxExpr = d; }
+            }
+        }
+        walkStmt(stmt);
+        // Round up to 8-byte alignment, add baseline for call args etc.
+        return (maxExpr + 7) & ~cast(size_t)7;
+    }
+
+    /// Estimate temp bytes needed for an expression (recursive).
+    /// concat = 72 + max(left, right), call = 8*nargs + callee, binary = 8 + max(l,r)
+    private static size_t exprTempDepth(Expression expr) {
+        if (expr is null) return 0;
+        if (auto bin = cast(BinaryExpression) expr) {
+            if (bin.operator == BinaryExpression.Operator.Concat) {
+                // compileArrayConcat allocates 9*8=72 bytes, then recurses
+                return 72 + exprTempDepth(bin.left) + exprTempDepth(bin.right);
+            }
+            return 8 + max(exprTempDepth(bin.left), exprTempDepth(bin.right));
+        }
+        if (auto call = cast(CallExpression) expr) {
+            size_t args = call.arguments.length * 8;
+            size_t inner = 0;
+            foreach (a; call.arguments) {
+                auto d = exprTempDepth(a);
+                if (d > inner) inner = d;
+            }
+            return args + 8 + inner;
+        }
+        if (auto unary = cast(UnaryExpression) expr) {
+            return exprTempDepth(unary.operand);
+        }
+        if (auto assign = cast(AssignmentExpression) expr) {
+            return 8 + max(exprTempDepth(assign.left), exprTempDepth(assign.right));
+        }
+        if (auto cast_ = cast(CastExpression) expr) {
+            return exprTempDepth(cast_.expression);
+        }
+        if (auto index = cast(IndexExpression) expr) {
+            return 16 + max(exprTempDepth(index.array), exprTempDepth(index.index));
+        }
+        return 0;
+    }
+
+    private static size_t max(size_t a, size_t b) { return a > b ? a : b; }
 
     private size_t countLocalBytesInStatement(Statement stmt) {
         if (stmt is null) return 0;
@@ -2837,7 +2907,7 @@ class NativeCompiledFunction : CompiledFunction {
 
             auto targetIdent = cast(IdentifierExpression)assign.left;
             if (targetIdent is null) {
-                throw new NativeCompileError("Assignment to non-identifier not yet supported in native backend", assign.location);
+                throw new NativeCompileError("Assignment to " ~ typeid(assign.left).name ~ " not supported in native backend", assign.location);
             }
             
             auto info = targetIdent.name in localVars;
@@ -3296,7 +3366,36 @@ class NativeCompiledFunction : CompiledFunction {
             // Field access: obj.field (for structs and classes)
             AggregateDecl aggregateDecl = getAggregateDeclFromExpr(member.object);
             if (aggregateDecl is null) {
-                throw new Exception("Cannot determine struct/class type for member access: " ~ member.memberName);
+                // Handle .ptr/.length on static array fields: obj.arr.ptr
+                if (member.memberName == "ptr" || member.memberName == "length") {
+                    if (auto innerMember = cast(MemberExpression) member.object) {
+                        auto innerAgg = getAggregateDeclFromExpr(innerMember.object);
+                        if (innerAgg) {
+                            auto innerField = innerAgg.getField(innerMember.memberName);
+                            if (innerField) {
+                                if (auto arrType = cast(ArrayType) innerField.type) {
+                                    if (arrType.isStaticArray) {
+                                        // obj.arr.ptr → address of arr field
+                                        compileExpression(innerMember.object);
+                                        if (innerField.offset > 0) {
+                                            gen.emitMoveX0ToX1();
+                                            gen.emitImm32(stencil_load_imm32, cast(int)innerField.offset);
+                                            gen.emit(stencil_add_i64);
+                                        }
+                                        if (member.memberName == "length") {
+                                            if (auto sizeLit = cast(LiteralExpression) arrType.arraySize) {
+                                                int elemCount = cast(int) sizeLit.value.get!long();
+                                                gen.emitImm32(stencil_load_imm32, elemCount);
+                                            }
+                                        }
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                throw new NativeCompileError("Cannot determine struct/class type for member access: " ~ member.memberName, member.location);
             }
 
             auto field = aggregateDecl.getField(member.memberName);
