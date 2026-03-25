@@ -385,33 +385,7 @@ class EditorView : NSView {
 // Font buffer: 1520 bytes of 8x16 bitmap data for ASCII 32-126
 
 string shaderSource() {
-    return "#include <metal_stdlib>\n" ~
-        "using namespace metal;\n" ~
-        "struct VertexOut {\n" ~
-        "  float4 position [[position]];\n" ~
-        "  float2 texcoord;\n" ~
-        "  float4 color;\n" ~
-        "  float glyphIndex;\n" ~
-        "};\n" ~
-        "vertex VertexOut vertex_main(uint vid [[vertex_id]],\n" ~
-        "  const device float *data [[buffer(0)]]) {\n" ~
-        "  uint b = vid * 9;\n" ~
-        "  VertexOut o;\n" ~
-        "  o.position = float4(data[b], data[b+1], 0.0, 1.0);\n" ~
-        "  o.texcoord = float2(data[b+2], data[b+3]);\n" ~
-        "  o.color = float4(data[b+4], data[b+5], data[b+6], data[b+7]);\n" ~
-        "  o.glyphIndex = data[b+8];\n" ~
-        "  return o;\n" ~
-        "}\n" ~
-        "fragment float4 fragment_main(VertexOut in [[stage_in]],\n" ~
-        "  const device uchar *font [[buffer(0)]]) {\n" ~
-        "  int gi = int(in.glyphIndex);\n" ~
-        "  int row = clamp(int(in.texcoord.y * 16.0), 0, 15);\n" ~
-        "  int col = clamp(int(in.texcoord.x * 8.0), 0, 7);\n" ~
-        "  uchar bits = font[gi * 16 + row];\n" ~
-        "  if (!((bits >> (7 - col)) & 1)) discard_fragment();\n" ~
-        "  return in.color;\n" ~
-        "}\n";
+    return "#include <metal_stdlib>\nusing namespace metal;\nstruct VertexOut { float4 position [[position]]; float2 texcoord; float4 color; float glyphIndex; };\nvertex VertexOut vertex_main(uint vid [[vertex_id]], const device float *data [[buffer(0)]]) { uint b = vid * 9; VertexOut o; o.position = float4(data[b], data[b+1], 0.0, 1.0); o.texcoord = float2(data[b+2], data[b+3]); o.color = float4(data[b+4], data[b+5], data[b+6], data[b+7]); o.glyphIndex = data[b+8]; return o; }\nfragment float4 fragment_main(VertexOut in [[stage_in]], const device uchar *font [[buffer(0)]]) { int gi = int(in.glyphIndex); int row = clamp(int(in.texcoord.y * 16.0), 0, 15); int col = clamp(int(in.texcoord.x * 8.0), 0, 7); uchar bits = font[gi * 16 + row]; if (!((bits >> (7 - col)) & 1)) discard_fragment(); return in.color; }\n";
 }
 
 // Emit one vertex (9 floats) into the batch. Returns new write offset.
@@ -783,7 +757,7 @@ int main() {
     float charH = cast(float)(2.0 / cast(float) rows);
 
     // Vertex batch (500 chars per batch)
-    float[27000] vertexBatch;
+    float[2700] vertexBatch;  // 50 chars per batch (50 * 6 verts * 9 floats)
 
     // Event loop
     NSString runLoopMode = NSString.stringWithUTF8String("kCFRunLoopDefaultMode".toStringz());
@@ -889,7 +863,7 @@ int main() {
                         charW, charH, ch, 0xDBDBDB);
 
                     // Flush batch if full
-                    if (vertCount >= 2994) {  // 499 chars * 6 verts
+                    if (vertCount >= 294) {  // 49 chars * 6 verts
                         long vbuf = device.newBufferWithBytes(
                             cast(ubyte*) vertexBatch.ptr,
                             cast(long)(vertCount * 9 * 4), 0);

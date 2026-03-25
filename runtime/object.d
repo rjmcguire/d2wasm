@@ -95,3 +95,4 @@ long opUnsignedShiftRight_i64(long value, int amount) {
         __intrinsic_unreachable();
     return __intrinsic_shr_u_i64(value, cast(long)amount);
 }
+

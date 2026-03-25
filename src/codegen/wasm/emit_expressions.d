@@ -116,25 +116,38 @@ mixin template ExpressionEmitter() {
             // emitMember leaves slice address on stack for slice fields
             auto memberType = getMemberExpressionType(memberExpr);
             if (auto arrType = cast(ArrayType)memberType) {
+                uint elemSize = wasmElementSize(arrType.elementType);
                 if (!arrType.isStaticArray) {
                     // Emit address of the slice struct
                     emitMember(out_, memberExpr);
                     // Load ptr from slice struct (offset 0)
                     emitI32Load(out_);
-                    // Add index * elemSize
-                    uint elemSize = wasmElementSize(arrType.elementType);
-                    emitExpression(out_, expr.index);
-                    emitI32Const(out_, elemSize);
-                    out_ ~= Op.i32_mul;
-                    out_ ~= Op.i32_add;
-                    // Load value for scalar elements
-                    bool isFloat = isF64ElementType(arrType.elementType) || isF32ElementType(arrType.elementType);
-                    if (elemSize <= 4 || isFloat)
-                        emitLoadForSize(out_, elemSize, isFloat);
-                    return;
+                } else {
+                    // Static array field: emit base address of the array
+                    if (memberExpr.isAutoDereference) {
+                        auto aggDecl = resolvePointeeAggregate(memberExpr.object);
+                        auto field = aggDecl.getField(memberExpr.memberName);
+                        emitExpression(out_, memberExpr.object);
+                        if (field.offset > 0) {
+                            emitI32Const(out_, cast(int)field.offset);
+                            out_ ~= Op.i32_add;
+                        }
+                    } else {
+                        emitMemberAddress(out_, memberExpr);
+                    }
                 }
+                // Add index * elemSize
+                emitExpression(out_, expr.index);
+                emitI32Const(out_, elemSize);
+                out_ ~= Op.i32_mul;
+                out_ ~= Op.i32_add;
+                // Load value for scalar elements
+                bool isFloat = isF64ElementType(arrType.elementType) || isF32ElementType(arrType.elementType);
+                if (elemSize <= 4 || isFloat)
+                    emitLoadForSize(out_, elemSize, isFloat);
+                return;
             }
-            throw new EmitError("Cannot index member expression of non-slice type", memberExpr.location);
+            throw new EmitError("Cannot index member expression of non-array type", memberExpr.location);
         }
 
         // Get the array identifier
@@ -282,30 +295,43 @@ mixin template ExpressionEmitter() {
         if (auto memberExpr = cast(MemberExpression)indexExpr.array) {
             auto memberType = getMemberExpressionType(memberExpr);
             if (auto arrType = cast(ArrayType)memberType) {
+                uint elemSize = wasmElementSize(arrType.elementType);
                 if (!arrType.isStaticArray) {
-                    uint elemSize = wasmElementSize(arrType.elementType);
                     // Emit address of slice struct, load ptr
                     emitMember(out_, memberExpr);
                     emitI32Load(out_);
-                    // Add index * elemSize
-                    emitExpression(out_, indexExpr.index);
-                    emitI32Const(out_, elemSize);
-                    out_ ~= Op.i32_mul;
-                    out_ ~= Op.i32_add;
-                    // Store value
-                    emitExpression(out_, value);
-                    bool isFloatElem = isF64ElementType(arrType.elementType) || isF32ElementType(arrType.elementType);
-                    if (isF32ElementType(arrType.elementType) && isF64Expression(value))
-                        out_ ~= Op.f32_demote_f64;
-                    emitStoreForSize(out_, elemSize, isFloatElem);
-                    // Leave assigned value on stack (assignment is an expression)
-                    emitExpression(out_, value);
-                    if (isF32ElementType(arrType.elementType) && isF64Expression(value))
-                        out_ ~= Op.f32_demote_f64;
-                    return;
+                } else {
+                    // Static array field: emit base address of the array
+                    if (memberExpr.isAutoDereference) {
+                        auto aggDecl = resolvePointeeAggregate(memberExpr.object);
+                        auto field = aggDecl.getField(memberExpr.memberName);
+                        emitExpression(out_, memberExpr.object);
+                        if (field.offset > 0) {
+                            emitI32Const(out_, cast(int)field.offset);
+                            out_ ~= Op.i32_add;
+                        }
+                    } else {
+                        emitMemberAddress(out_, memberExpr);
+                    }
                 }
+                // Add index * elemSize
+                emitExpression(out_, indexExpr.index);
+                emitI32Const(out_, elemSize);
+                out_ ~= Op.i32_mul;
+                out_ ~= Op.i32_add;
+                // Store value
+                emitExpression(out_, value);
+                bool isFloatElem = isF64ElementType(arrType.elementType) || isF32ElementType(arrType.elementType);
+                if (isF32ElementType(arrType.elementType) && isF64Expression(value))
+                    out_ ~= Op.f32_demote_f64;
+                emitStoreForSize(out_, elemSize, isFloatElem);
+                // Leave assigned value on stack (assignment is an expression)
+                emitExpression(out_, value);
+                if (isF32ElementType(arrType.elementType) && isF64Expression(value))
+                    out_ ~= Op.f32_demote_f64;
+                return;
             }
-            throw new EmitError("Cannot index-assign member expression of non-slice type", memberExpr.location);
+            throw new EmitError("Cannot index-assign member expression of non-array type", memberExpr.location);
         }
 
         // Get the array identifier
@@ -1599,6 +1625,14 @@ mixin template ExpressionEmitter() {
             StructDecl sd;
             if (auto info = resolveVar(ident.resolvedLocalId, ident.name)) {
                 if (info.isStruct) sd = info.structDecl;
+                else if (expr.isAutoDereference) {
+                    if (auto ptrType = cast(PointerType)info.type) {
+                        if (auto userType = cast(UserType)ptrType.pointeeType) {
+                            userType.ensureResolved(emitter.symbolTable);
+                            sd = cast(StructDecl)userType.declaration;
+                        }
+                    }
+                }
             }
             if (sd) {
                 objType = new UserType(SourceLocation(), sd.name);

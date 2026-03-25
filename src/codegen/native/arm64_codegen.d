@@ -235,9 +235,9 @@ struct NativeCodeGen {
         if (offset < 4096) {
             emitRaw32(0x910003E0 | (cast(uint)offset << 10));
         } else {
-            // For larger offsets, use MOV + ADD
-            emitLoadImm64(offset);          // x0 = offset
-            emitRaw32(0x8B0003E0);           // ADD x0, sp, x0
+            // For larger offsets, load into x9 and use extended register ADD
+            emitLoadImm64ToX9(offset);       // x9 = offset
+            emitRaw32(0x8B2963E0);           // ADD x0, SP, x9, UXTX
         }
     }
     
@@ -444,6 +444,26 @@ struct NativeCodeGen {
         emitRaw32(0xAA0303E0);
     }
 
+    /// Move x4 to x0
+    void emitMoveX4ToX0() {
+        emitRaw32(0xAA0403E0);
+    }
+
+    /// Move x5 to x0
+    void emitMoveX5ToX0() {
+        emitRaw32(0xAA0503E0);
+    }
+
+    /// Move x6 to x0
+    void emitMoveX6ToX0() {
+        emitRaw32(0xAA0603E0);
+    }
+
+    /// Move x7 to x0
+    void emitMoveX7ToX0() {
+        emitRaw32(0xAA0703E0);
+    }
+
     /// Move x2 to x1
     void emitMoveX2ToX1() {
         // MOV x1, x2: ORR x1, xzr, x2 = 0xAA0203E1
@@ -596,68 +616,137 @@ struct NativeCodeGen {
         // Align to 16 bytes
         uint frameSize = cast(uint)(((localBytes + 15) & ~15) + 16);  // +16 for x29,x30
 
-        // SUB sp, sp, #frameSize
-        emitRaw32(0xD10003FF | (frameSize << 10));
+        // SUB sp, sp, #frameSize — use multiple steps if > 4095
+        emitSubSPLarge(frameSize);
         // STP x29, x30, [sp, #localBytes]
         uint offset = frameSize - 16;
-        emitRaw32(0xA9007BFD | ((offset / 8) << 15));
-        // ADD x29, sp, #localBytes (set frame pointer)
-        emitRaw32(0x910003FD | (offset << 10));
+        if (offset / 8 < 64) {
+            emitRaw32(0xA9007BFD | ((offset / 8) << 15));
+        } else {
+            // Large offset: compute address in x9, store via x9
+            emitLoadImm64ToX9(cast(ulong) offset);
+            // ADD x9, SP, x9 (extended register — shifted register treats reg31 as XZR)
+            emitRaw32(0x8B2963E9);  // ADD x9, SP, x9, UXTX
+            // STP x29, x30, [x9]
+            emitRaw32(0xA900793D);  // STP x29, x30, [x9]
+        }
+        // ADD x29, sp, #offset (set frame pointer)
+        if (offset <= 4095) {
+            emitRaw32(0x910003FD | (offset << 10));
+        } else {
+            // Large offset: x29 = SP + offset (extended register form)
+            emitLoadImm64ToX9(cast(ulong) offset);
+            emitRaw32(0x8B2963FD);  // ADD x29, SP, x9, UXTX
+        }
     }
 
     /// Emit epilogue that deallocates stack frame
     void emitEpilogueWithLocals(size_t localBytes) {
         uint frameSize = cast(uint)(((localBytes + 15) & ~15) + 16);
         uint offset = frameSize - 16;
-        
-        // LDP x29, x30, [sp, #localBytes]
-        emitRaw32(0xA9407BFD | ((offset / 8) << 15));
+
+        // LDP x29, x30, [sp, #offset]
+        if (offset / 8 < 64) {
+            emitRaw32(0xA9407BFD | ((offset / 8) << 15));
+        } else {
+            emitLoadImm64ToX9(cast(ulong) offset);
+            emitRaw32(0x8B2963E9);  // ADD x9, SP, x9, UXTX
+            emitRaw32(0xA940793D);  // LDP x29, x30, [x9]
+        }
         // ADD sp, sp, #frameSize
-        emitRaw32(0x910003FF | (frameSize << 10));
+        emitAddSPLarge(frameSize);
         // RET
         emitRaw32(0xD65F03C0);
     }
+
+    /// SUB SP by a potentially large value (>4095). Uses x9 as scratch if needed.
+    void emitSubSPLarge(uint amount) {
+        if (amount <= 4095) {
+            emitSubSPImm(amount);
+        } else {
+            // Load amount into x9, then SUB SP, SP, x9 (extended register form)
+            // Shifted register form treats reg 31 as XZR; extended register treats it as SP
+            emitLoadImm64ToX9(cast(ulong) amount);
+            emitRaw32(0xCB2963FF);  // SUB SP, SP, x9, UXTX
+        }
+    }
+
+    /// ADD SP by a potentially large value (>4095). Uses x9 as scratch if needed.
+    void emitAddSPLarge(uint amount) {
+        if (amount <= 4095) {
+            emitAddSPImm(amount);
+        } else {
+            emitLoadImm64ToX9(cast(ulong) amount);
+            emitRaw32(0x8B2963FF);  // ADD SP, SP, x9, UXTX
+        }
+    }
     
+    /// Compute x9 = SP + offset using extended register ADD (handles any offset).
+    /// Used internally when offset exceeds imm12 range.
+    /// Uses x9 as scratch via emitLoadImm64ToX9 — does NOT clobber x0.
+    private void emitComputeSPOffset(size_t offset) {
+        emitLoadImm64ToX9(offset);
+        emitRaw32(0x8B2963E9);  // ADD x9, SP, x9, UXTX
+    }
+
     /// Store x0 to local at offset (64-bit)
     void emitStoreLocal(size_t offset) {
-        // STR x0, [sp, #offset]
-        uint imm12 = cast(uint)(offset / 8);
-        emitRaw32(0xF90003E0 | (imm12 << 10));
+        if (offset / 8 < 4096) {
+            emitRaw32(0xF90003E0 | (cast(uint)(offset / 8) << 10));
+        } else {
+            emitComputeSPOffset(offset);
+            emitRaw32(0xF9000120);  // STR x0, [x9]
+        }
     }
 
     /// Load from local to x0 (64-bit)
     void emitLoadLocal(size_t offset) {
-        // LDR x0, [sp, #offset]
-        uint imm12 = cast(uint)(offset / 8);
-        emitRaw32(0xF94003E0 | (imm12 << 10));
+        if (offset / 8 < 4096) {
+            emitRaw32(0xF94003E0 | (cast(uint)(offset / 8) << 10));
+        } else {
+            emitComputeSPOffset(offset);
+            emitRaw32(0xF9400120);  // LDR x0, [x9]
+        }
     }
 
     /// Store x0 to local at offset (32-bit)
     void emitStoreLocal32(size_t offset) {
-        // STR w0, [sp, #offset]
-        uint imm12 = cast(uint)(offset / 4);
-        emitRaw32(0xB90003E0 | (imm12 << 10));
+        if (offset / 4 < 4096) {
+            emitRaw32(0xB90003E0 | (cast(uint)(offset / 4) << 10));
+        } else {
+            emitComputeSPOffset(offset);
+            emitRaw32(0xB9000120);  // STR w0, [x9]
+        }
     }
 
     /// Store x1 to local at offset (32-bit) - for second parameter
     void emitStoreLocal32FromX1(size_t offset) {
-        // STR w1, [sp, #offset]
-        uint imm12 = cast(uint)(offset / 4);
-        emitRaw32(0xB90003E1 | (imm12 << 10));
+        if (offset / 4 < 4096) {
+            emitRaw32(0xB90003E1 | (cast(uint)(offset / 4) << 10));
+        } else {
+            emitComputeSPOffset(offset);
+            emitRaw32(0xB9000121);  // STR w1, [x9]
+        }
     }
 
     /// Store x2 to local at offset (32-bit) - for third parameter
     void emitStoreLocal32FromX2(size_t offset) {
-        // STR w2, [sp, #offset]
-        uint imm12 = cast(uint)(offset / 4);
-        emitRaw32(0xB90003E2 | (imm12 << 10));
+        if (offset / 4 < 4096) {
+            emitRaw32(0xB90003E2 | (cast(uint)(offset / 4) << 10));
+        } else {
+            emitComputeSPOffset(offset);
+            emitRaw32(0xB9000122);  // STR w2, [x9]
+        }
     }
 
     /// Store x3 to local at offset (32-bit) - for fourth parameter
     void emitStoreLocal32FromX3(size_t offset) {
-        // STR w3, [sp, #offset]
-        uint imm12 = cast(uint)(offset / 4);
-        emitRaw32(0xB90003E3 | (imm12 << 10));
+        if (offset / 4 < 4096) {
+            emitRaw32(0xB90003E3 | (cast(uint)(offset / 4) << 10));
+        } else {
+            emitComputeSPOffset(offset);
+            emitRaw32(0xB9000123);  // STR w3, [x9]
+        }
     }
 
     // Abstract aliases for parameter spilling
@@ -706,9 +795,12 @@ struct NativeCodeGen {
 
     /// Load from local to x0 (32-bit, zero-extended)
     void emitLoadLocal32(size_t offset) {
-        // LDR w0, [sp, #offset]
-        uint imm12 = cast(uint)(offset / 4);
-        emitRaw32(0xB94003E0 | (imm12 << 10));
+        if (offset / 4 < 4096) {
+            emitRaw32(0xB94003E0 | (cast(uint)(offset / 4) << 10));
+        } else {
+            emitComputeSPOffset(offset);
+            emitRaw32(0xB9400120);  // LDR w0, [x9]
+        }
     }
 
     // ========== f64 Floating-Point Locals ==========
@@ -717,16 +809,22 @@ struct NativeCodeGen {
 
     /// Store d0 to local at offset (64-bit f64)
     void emitStoreLocalF64(size_t offset) {
-        // STR d0, [sp, #offset] — imm12 scaled by 8
-        uint imm12 = cast(uint)(offset / 8);
-        emitRaw32(0xFD0003E0 | (imm12 << 10));
+        if (offset / 8 < 4096) {
+            emitRaw32(0xFD0003E0 | (cast(uint)(offset / 8) << 10));
+        } else {
+            emitComputeSPOffset(offset);
+            emitRaw32(0xFD000120);  // STR d0, [x9]
+        }
     }
 
     /// Load from local to d0 (64-bit f64)
     void emitLoadLocalF64(size_t offset) {
-        // LDR d0, [sp, #offset] — imm12 scaled by 8
-        uint imm12 = cast(uint)(offset / 8);
-        emitRaw32(0xFD4003E0 | (imm12 << 10));
+        if (offset / 8 < 4096) {
+            emitRaw32(0xFD4003E0 | (cast(uint)(offset / 8) << 10));
+        } else {
+            emitComputeSPOffset(offset);
+            emitRaw32(0xFD400120);  // LDR d0, [x9]
+        }
     }
 
     /// Load from local to d1 (64-bit f64, for binary right operand)

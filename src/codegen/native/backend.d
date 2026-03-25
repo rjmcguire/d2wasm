@@ -352,9 +352,10 @@ class NativeCompiledFunction : CompiledFunction {
         }
     }
     
-    /// Multi-function constructor for CTFE with dependencies
+    /// Multi-function constructor for CTFE with dependencies (or --run JIT)
+    /// Set ctfeMode = false for --run JIT to enable mutable global access.
     this(FunctionDecl[] funcs, string entryFuncName, SymbolTable st, bool enableStackTrace = true,
-            ImportedFunctionDecl[] imports = null) {
+            ImportedFunctionDecl[] imports = null, bool ctfeMode = true) {
         import std.stdio : writeln;
         
         this.funcName = entryFuncName;
@@ -402,9 +403,10 @@ class NativeCompiledFunction : CompiledFunction {
         } else {
             assert(0, "Entry function not found: " ~ entryFuncName);
         }
-        
-        // Collect global variables
-        collectGlobalVariables(funcs);
+
+        // Collect global variables (only for --run JIT, not CTFE)
+        if (!ctfeMode)
+            collectGlobalVariables(funcs);
 
         // Compile all functions
         log(1, "native: JIT compiling ", funcs.length, " functions");
@@ -440,7 +442,7 @@ class NativeCompiledFunction : CompiledFunction {
         this.objectMode = true;
         this.symbolTable = st;
         this.enableStackTrace = false;
-        this.gen = NativeCodeGen.allocRelocatable(64 * 1024);
+        this.gen = NativeCodeGen.allocRelocatable(2 * 1024 * 1024);  // 2MB for large programs
 
         if (!gen.base) {
             throw new Exception("Failed to allocate relocatable code buffer");
@@ -559,6 +561,10 @@ class NativeCompiledFunction : CompiledFunction {
         if (moduleScope is null) return;
 
         foreach (name, sym; moduleScope.symbols) {
+            // Skip manifest constants (enums) — they're compile-time values, not globals
+            if (sym.isConstant) continue;
+            // Skip functions, types, templates — only collect mutable variables
+            if (sym.kind != SymbolKind.Variable) continue;
             if (auto varDecl = cast(VariableDecl) sym.declaration) {
                 int size = 4;
                 auto bt = cast(BasicType) sym.type;
@@ -684,7 +690,11 @@ class NativeCompiledFunction : CompiledFunction {
             case 1: gen.emitMoveX1ToX0(); break;
             case 2: gen.emitMoveX2ToX0(); break;
             case 3: gen.emitMoveX3ToX0(); break;
-            default: break;  // stack params handled separately
+            case 4: gen.emitMoveX4ToX0(); break;
+            case 5: gen.emitMoveX5ToX0(); break;
+            case 6: gen.emitMoveX6ToX0(); break;
+            case 7: gen.emitMoveX7ToX0(); break;
+            default: break;  // stack params (8+) handled by loadParamToX0
         }
     }
 
@@ -902,6 +912,17 @@ class NativeCompiledFunction : CompiledFunction {
                     nli.sliceElemSize = nativeElementSize(arrayType.elementType);
                     paramSize = sliceInfo.totalSize;
                 }
+            } else if (cast(PointerType)param.type) {
+                // Pointer parameter: 8-byte value on ARM64
+                nli.kind = VarKind.scalar;
+                nli.isRawPointer = true;
+                nli.offset = (nextLocalOffset + 7) & ~7;
+                nextLocalOffset = nli.offset;
+                paramSize = 8;
+            } else if (param.type !is null && !cast(BasicType)param.type) {
+                throw new NativeCompileError(
+                    "Unsupported parameter type for '" ~ param.name ~ "': " ~ param.type.toString(),
+                    func.location);
             }
             localVars[param.name] = nli;
             nextLocalOffset += paramSize;
@@ -994,7 +1015,8 @@ class NativeCompiledFunction : CompiledFunction {
                     break;
 
                 case VarKind.scalar:
-                    if (nli.isRef || isF64ElementType(nli.elementType) || isI64ElementType(nli.elementType)) {
+                    if (nli.isRef || nli.isRawPointer || nli.isObjCRef ||
+                        isF64ElementType(nli.elementType) || isI64ElementType(nli.elementType)) {
                         loadParamToX0(paramReg);
                         gen.emitStorePtr(offset);
                     } else {
@@ -2905,6 +2927,22 @@ class NativeCompiledFunction : CompiledFunction {
                 return;
             }
 
+            // Pointer dereference assignment: *ptr = value
+            if (auto derefUnary = cast(UnaryExpression)assign.left) {
+                if (derefUnary.operator == UnaryExpression.Operator.Dereference) {
+                    auto mark = temps.save();
+                    size_t addrTemp = temps.alloc(8);
+                    compileExpression(derefUnary.operand);  // x0 = ptr
+                    gen.emitStorePtr(addrTemp);
+                    compileExpression(assign.right);  // x0 = value
+                    gen.emitMoveX0ToX9();
+                    gen.emitLoadPtr(addrTemp);  // x0 = ptr
+                    gen.emitStoreToPointerFromX9(0);
+                    temps.restore(mark);
+                    return;
+                }
+            }
+
             auto targetIdent = cast(IdentifierExpression)assign.left;
             if (targetIdent is null) {
                 throw new NativeCompileError("Assignment to " ~ typeid(assign.left).name ~ " not supported in native backend", assign.location);
@@ -3126,33 +3164,65 @@ class NativeCompiledFunction : CompiledFunction {
                     log(3, "native: call '", callName, "' calleeFunc=",
                         calleeFunc !is null ? calleeFunc.name : "null");
 
-                    // Compile all args to temp slots, then dispatch to registers/stack
-                    auto mark = temps.save();
-                    size_t[] argSlots;
-                    foreach (i, arg; call.arguments) {
-                        if (calleeFunc && i < calleeFunc.parameters.length &&
-                            calleeFunc.parameters[i].isRef) {
-                            if (auto argIdent = cast(IdentifierExpression)arg) {
-                                if (auto argInfo = argIdent.name in localVars) {
-                                    gen.emitStackAddress(argInfo.offset);
+                    int totalArgs = cast(int)call.arguments.length + arenaShift;
+                    uint stackArgBytes = 0;
+
+                    // Check if any argument contains a nested call
+                    bool hasNestedCalls = false;
+                    foreach (arg; call.arguments) {
+                        if (containsCall(arg)) {
+                            hasNestedCalls = true;
+                            break;
+                        }
+                    }
+
+                    if (hasNestedCalls || totalArgs > 8) {
+                        // Temp-slot path: safe for nested calls and stack args
+                        auto mark = temps.save();
+                        size_t[] argSlots;
+                        foreach (i, arg; call.arguments) {
+                            if (calleeFunc && i < calleeFunc.parameters.length &&
+                                calleeFunc.parameters[i].isRef) {
+                                if (auto argIdent = cast(IdentifierExpression)arg) {
+                                    if (auto argInfo = argIdent.name in localVars) {
+                                        gen.emitStackAddress(argInfo.offset);
+                                    } else {
+                                        throw new NativeCompileError("ref argument must be a variable", arg.location);
+                                    }
                                 } else {
                                     throw new NativeCompileError("ref argument must be a variable", arg.location);
                                 }
                             } else {
-                                throw new NativeCompileError("ref argument must be a variable", arg.location);
+                                compileExpression(arg);
                             }
-                        } else {
-                            compileExpression(arg);
+                            size_t slot = temps.alloc(8);
+                            gen.emitStorePtr(slot);
+                            argSlots ~= slot;
                         }
-                        size_t slot = temps.alloc(8);
-                        gen.emitStorePtr(slot);
-                        argSlots ~= slot;
+                        stackArgBytes = emitCallArgs(argSlots, arenaShift, totalArgs);
+                        temps.restore(mark);
+                    } else {
+                        // Direct path: compile args in reverse order into registers
+                        for (long i = cast(long)call.arguments.length - 1; i >= 0; i--) {
+                            if (calleeFunc && i < calleeFunc.parameters.length &&
+                                calleeFunc.parameters[cast(size_t)i].isRef) {
+                                if (auto argIdent = cast(IdentifierExpression)call.arguments[cast(size_t)i]) {
+                                    if (auto argInfo = argIdent.name in localVars) {
+                                        gen.emitStackAddress(argInfo.offset);
+                                    } else {
+                                        throw new NativeCompileError("ref argument must be a variable",
+                                            call.arguments[cast(size_t)i].location);
+                                    }
+                                } else {
+                                    throw new NativeCompileError("ref argument must be a variable",
+                                        call.arguments[cast(size_t)i].location);
+                                }
+                            } else {
+                                compileExpression(call.arguments[cast(size_t)i]);
+                            }
+                            emitMoveX0ToArgRegister(cast(int)i + arenaShift);
+                        }
                     }
-
-                    // Emit stack overflow args (8+ after arena shift)
-                    int totalArgs = cast(int)call.arguments.length + arenaShift;
-                    uint stackArgBytes = emitCallArgs(argSlots, arenaShift, totalArgs);
-                    temps.restore(mark);
 
                     // Load arena into x0 if callee needs it
                     if (calleeNeedsArena) {
@@ -3344,12 +3414,24 @@ class NativeCompiledFunction : CompiledFunction {
                 }
             }
 
-            // Generic .ptr/.length/.capacity on any expression producing a dynamic array
+            // Generic .ptr/.length/.capacity on any expression producing an array
             if (member.memberName == "ptr" || member.memberName == "length" || member.memberName == "capacity") {
                 if (member.object.type !is null) {
                     auto objType = member.object.type.resolve();
                     if (auto arrType = cast(ArrayType)objType) {
-                        if (!arrType.isStaticArray) {
+                        if (arrType.isStaticArray) {
+                            // Static array .ptr → stack address, .length → compile-time constant
+                            if (member.memberName == "ptr") {
+                                compileExpression(member.object);  // x0 = address of array
+                                return;
+                            }
+                            if (member.memberName == "length") {
+                                if (auto sizeLit = cast(LiteralExpression) arrType.arraySize) {
+                                    gen.emitImm32(stencil_load_imm32, cast(int) sizeLit.value.get!long());
+                                }
+                                return;
+                            }
+                        } else {
                             compileExpression(member.object);  // x0 = address of slice struct
                             if (member.memberName == "ptr")
                                 gen.emit(stencil_load_i64);  // 64-bit pointer at offset 0
@@ -3406,8 +3488,8 @@ class NativeCompiledFunction : CompiledFunction {
             // For local struct/class variables, load field
             if (auto ident = cast(IdentifierExpression)member.object) {
                 if (auto varInfo = ident.name in localVars) {
-                    if (varInfo.isReference) {
-                        // Reference (class param / this): dereference pointer, then access field
+                    if (varInfo.isReference || varInfo.isRawPointer) {
+                        // Pointer/reference: load pointer, then access field
                         gen.emitLoadPtr(varInfo.offset);  // x0 = pointer to instance
                         if (field.type.isAggregate()) {
                             if (field.offset > 0) {
@@ -4849,31 +4931,38 @@ class NativeCompiledFunction : CompiledFunction {
     /// totalArgs = total args including arena shift.
     /// Returns bytes of stack space allocated for overflow args (caller must clean up).
     private uint emitCallArgs(size_t[] argSlots, int arenaShift, int totalArgs) {
-        // Calculate stack overflow
+        assert(totalArgs == cast(int)argSlots.length + arenaShift,
+            "emitCallArgs: totalArgs mismatch with argSlots.length + arenaShift");
+
         int stackArgs = totalArgs > 8 ? totalArgs - 8 : 0;
         uint stackBytes = 0;
         if (stackArgs > 0) {
             stackBytes = cast(uint)((stackArgs * 8 + 15) & ~15);  // 16-byte aligned
+            assert(stackBytes % 16 == 0, "stack arg space must be 16-byte aligned");
             gen.emitSubSPImm(stackBytes);
         }
 
-        // Store stack args (positions 8+) first — they reference SP which we just adjusted
+        // After SUB SP, all temp slot offsets are relative to the OLD SP.
+        // With the new SP, the same data is at offset + stackBytes.
+        // Compensate when loading from temp slots.
+
+        // Store stack args (positions 8+)
         for (int i = 0; i < stackArgs; i++) {
-            int argIdx = 8 - arenaShift + i;  // index into argSlots
-            if (argIdx >= 0 && argIdx < cast(int)argSlots.length) {
-                gen.emitLoadPtr(argSlots[argIdx]);
-                gen.emitStorePtrToSP(cast(uint)(i * 8));
-            }
+            int argIdx = 8 - arenaShift + i;
+            assert(argIdx >= 0 && argIdx < cast(int)argSlots.length,
+                "stack arg index out of bounds");
+            gen.emitLoadPtr(argSlots[argIdx] + stackBytes);
+            gen.emitStorePtrToSP(cast(uint)(i * 8));
         }
 
-        // Load register args (0-7) from temp slots in reverse order
+        // Load register args (0-7) in reverse order
         int regArgs = totalArgs > 8 ? 8 : totalArgs;
         for (int i = regArgs - 1; i >= arenaShift; i--) {
             int argIdx = i - arenaShift;
-            if (argIdx >= 0 && argIdx < cast(int)argSlots.length) {
-                gen.emitLoadPtr(argSlots[argIdx]);
-                emitMoveX0ToArgRegister(i);
-            }
+            assert(argIdx >= 0 && argIdx < cast(int)argSlots.length,
+                "register arg index out of bounds");
+            gen.emitLoadPtr(argSlots[argIdx] + stackBytes);
+            emitMoveX0ToArgRegister(i);
         }
 
         return stackBytes;
@@ -4925,33 +5014,26 @@ class NativeCompiledFunction : CompiledFunction {
      */
     private void compileStructConstruction(StructDecl structDecl, Expression[] args) {
         size_t structSize = structDecl.structSize;
-        auto mark = temps.save();
         size_t structOffset = temps.alloc(structSize);
         assert(structDecl.fields.length > 0,
             "Struct '" ~ structDecl.name ~ "' has no fields");
-        
+
         // Initialize each field from arguments
         for (size_t i = 0; i < structDecl.fields.length && i < args.length; i++) {
             auto field = structDecl.fields[i];
             size_t fieldOffset = structOffset + field.offset;
-            
+
             // Compile the argument value (into x0)
             compileExpression(args[i]);
-            
+
             // Store to the field's stack location
             gen.emitStoreLocal32(fieldOffset);
         }
-        
-        // Leave pointer to struct in x0 (stack pointer + offset)
-        // For now, we use the stack offset directly since our loads expect offsets
-        // Actually, for member access to work, we need the actual pointer
-        // Let's compute: x0 = sp + structOffset
-        gen.emitLoadStackPointer();
-        gen.emitMoveX0ToX1();
-        gen.emitImm32(stencil_load_imm32, cast(int)structOffset);
-        gen.emit(stencil_add_i64);  // 64-bit ptr arithmetic
-        // Now x0 = pointer to struct (stack memory persists; caller copies before next alloc)
-        temps.restore(mark);
+
+        // Leave pointer to struct in x0: x0 = SP + structOffset
+        gen.emitStackAddress(structOffset);
+        // Struct data stays allocated in temp zone — caller's temps.restore() frees it
+        // after the struct pointer has been consumed (e.g., passed to a function call).
     }
     
     /**
@@ -5793,8 +5875,8 @@ class NativeCompiledFunction : CompiledFunction {
         // Local struct/class variable
         if (auto ident = cast(IdentifierExpression)member.object) {
             if (auto varInfo = ident.name in localVars) {
-                if (varInfo.isReference) {
-                    // Reference (class param / this): dereference pointer, then store
+                if (varInfo.isReference || varInfo.isRawPointer) {
+                    // Pointer/reference: load pointer, store through it
                     compileExpression(assign.right);
                     gen.emitMoveX0ToX9();
                     gen.emitLoadPtr(varInfo.offset);  // x0 = pointer to instance
