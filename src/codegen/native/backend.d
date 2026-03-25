@@ -983,13 +983,20 @@ class NativeCompiledFunction : CompiledFunction {
 
             final switch (nli.kind) {
                 case VarKind.struct_:
-                    // Register/stack contains pointer to struct - copy struct data to our stack
-                    loadParamToX9(paramReg);
+                    // Register/stack contains pointer to struct - copy struct data to our stack.
+                    // Save source pointer to temp — emitStoreLocal32 with large offsets
+                    // clobbers x9 via emitComputeSPOffset.
+                    loadParamToX0(paramReg);
+                    auto structSpillMark = temps.save();
+                    size_t structSpillTemp = temps.alloc(8);
+                    gen.emitStorePtr(structSpillTemp);
                     size_t structSize = nli.structDecl.structSize;
                     for (uint fieldOff = 0; fieldOff < structSize; fieldOff += 4) {
-                        gen.emitLoadFromX9Offset(fieldOff);
+                        gen.emitLoadPtr(structSpillTemp);
+                        gen.emitLoadFromPointer(fieldOff);
                         gen.emitStoreLocal32(offset + fieldOff);
                     }
+                    temps.restore(structSpillMark);
                     break;
 
                 case VarKind.class_:
@@ -998,20 +1005,34 @@ class NativeCompiledFunction : CompiledFunction {
                     break;
 
                 case VarKind.staticArray:
-                    loadParamToX9(paramReg);
+                    // Save source pointer to temp — emitStoreLocal32 with large offsets
+                    // clobbers x9 via emitComputeSPOffset.
+                    loadParamToX0(paramReg);
+                    auto saSpillMark = temps.save();
+                    size_t saSpillTemp = temps.alloc(8);
+                    gen.emitStorePtr(saSpillTemp);
                     uint arrBytes = nli.staticArraySize * nli.staticArrayElemSize;
                     for (uint off = 0; off < arrBytes; off += 4) {
-                        gen.emitLoadFromX9Offset(off);
+                        gen.emitLoadPtr(saSpillTemp);
+                        gen.emitLoadFromPointer(off);
                         gen.emitStoreLocal32(offset + off);
                     }
+                    temps.restore(saSpillMark);
                     break;
 
                 case VarKind.slice:
-                    loadParamToX9(paramReg);
+                    // Save source pointer to temp — emitStoreLocal32 with large offsets
+                    // clobbers x9 via emitComputeSPOffset.
+                    loadParamToX0(paramReg);
+                    auto sliceSpillMark = temps.save();
+                    size_t sliceSpillTemp = temps.alloc(8);
+                    gen.emitStorePtr(sliceSpillTemp);
                     for (size_t off = 0; off < sliceInfo.totalSize; off += 4) {
-                        gen.emitLoadFromX9Offset(off);
+                        gen.emitLoadPtr(sliceSpillTemp);
+                        gen.emitLoadFromPointer(off);
                         gen.emitStoreLocal32(offset + off);
                     }
+                    temps.restore(sliceSpillMark);
                     break;
 
                 case VarKind.scalar:
@@ -2144,12 +2165,19 @@ class NativeCompiledFunction : CompiledFunction {
                         } else if (auto srcInfo = identInit.name in localVars) {
                             if (srcInfo.isSlice) {
                                 // Copy slice struct from local/param variable
+                                // Save source address to temp — emitStoreLocal32 with large
+                                // offsets clobbers x9 via emitComputeSPOffset, so we can't
+                                // hold the source pointer in x9 across the loop.
+                                auto copyMark = temps.save();
+                                size_t srcAddrTemp = temps.alloc(8);
                                 gen.emitStackAddress(srcInfo.offset);
-                                gen.emitMoveX0ToX9();
+                                gen.emitStorePtr(srcAddrTemp);
                                 for (size_t off = 0; off < sliceInfo.totalSize; off += 4) {
-                                    gen.emitLoadFromX9Offset(off);
+                                    gen.emitLoadPtr(srcAddrTemp);   // x0 = source address
+                                    gen.emitLoadFromPointer(off);   // x0 = *(source + off)
                                     gen.emitStoreLocal32(nli.offset + off);
                                 }
+                                temps.restore(copyMark);
                             } else {
                                 throw new NativeCompileError("identifier '" ~ identInit.name ~ "' is not a slice variable", varDecl.location);
                             }
@@ -2162,11 +2190,17 @@ class NativeCompiledFunction : CompiledFunction {
                             nextLocalOffset += varSize;
                             // Concat produces slice struct address in x0
                             compileArrayConcat(binExpr);
-                            gen.emitMoveX0ToX9();
+                            // Save source address to temp — emitStoreLocal32 with large
+                            // offsets clobbers x9 via emitComputeSPOffset.
+                            auto concatMark = temps.save();
+                            size_t concatSrcTemp = temps.alloc(8);
+                            gen.emitStorePtr(concatSrcTemp);
                             for (size_t off = 0; off < sliceInfo.totalSize; off += 4) {
-                                gen.emitLoadFromX9Offset(off);
+                                gen.emitLoadPtr(concatSrcTemp);
+                                gen.emitLoadFromPointer(off);
                                 gen.emitStoreLocal32(nli.offset + off);
                             }
+                            temps.restore(concatMark);
                             varSize = 0;  // already advanced
                         } else {
                             throw new NativeCompileError("unsupported binary operator for slice init", varDecl.location);
