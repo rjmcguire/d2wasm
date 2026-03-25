@@ -389,7 +389,31 @@ struct NativeCodeGen {
         // MOV x3, x0: ORR x3, xzr, x0 = 0xAA0003E3
         emitRaw32(0xAA0003E3);
     }
-    
+
+    /// Move x0 to x4 (for function arg 4)
+    void emitMoveX0ToX4() {
+        // MOV x4, x0: ORR x4, xzr, x0 = 0xAA0003E4
+        emitRaw32(0xAA0003E4);
+    }
+
+    /// Move x0 to x5 (for function arg 5)
+    void emitMoveX0ToX5() {
+        // MOV x5, x0: ORR x5, xzr, x0 = 0xAA0003E5
+        emitRaw32(0xAA0003E5);
+    }
+
+    /// Move x0 to x6 (for function arg 6)
+    void emitMoveX0ToX6() {
+        // MOV x6, x0: ORR x6, xzr, x0 = 0xAA0003E6
+        emitRaw32(0xAA0003E6);
+    }
+
+    /// Move x0 to x7 (for function arg 7)
+    void emitMoveX0ToX7() {
+        // MOV x7, x0: ORR x7, xzr, x0 = 0xAA0003E7
+        emitRaw32(0xAA0003E7);
+    }
+
     /// Move x0 to x8 (for saving across calls)
     void emitMoveX0ToX8() {
         // MOV x8, x0: ORR x8, xzr, x0 = 0xAA0003E8
@@ -699,6 +723,31 @@ struct NativeCodeGen {
     void emitMoveX0ToD0() {
         // FMOV d0, x0 = 0x9E670000
         emitRaw32(0x9E670000);
+    }
+
+    /// Bitwise transfer x0 to d1 (for HFA struct field passing)
+    void emitMoveX0ToD1() {
+        // FMOV d1, x0 = 0x9E670001
+        emitRaw32(0x9E670001);
+    }
+
+    /// Bitwise transfer x0 to d2 (for HFA struct field passing)
+    void emitMoveX0ToD2() {
+        // FMOV d2, x0 = 0x9E670002
+        emitRaw32(0x9E670002);
+    }
+
+    /// Bitwise transfer x0 to d3 (for HFA struct field passing)
+    void emitMoveX0ToD3() {
+        // FMOV d3, x0 = 0x9E670003
+        emitRaw32(0x9E670003);
+    }
+
+    /// Load 64-bit value from [x0 + offset] into x0 (for reading struct fields via pointer)
+    void emitLoadPtrFromX0Offset(uint offset) {
+        // LDR x0, [x0, #imm12] where imm12 is offset/8 (scaled by 8 for 64-bit)
+        uint imm12 = offset / 8;
+        emitRaw32(0xF9400000 | (imm12 << 10));
     }
 
     /// Increment 32-bit local in place: [fp + offset]++

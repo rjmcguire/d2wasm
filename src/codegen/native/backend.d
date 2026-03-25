@@ -5648,7 +5648,7 @@ class NativeCompiledFunction : CompiledFunction {
         if (selector is null || selector.length == 0)
             selector = method.name;
 
-        emitObjCMsgSend(ifaceDecl.name, selector, receiver, args, isStatic);
+        emitObjCMsgSend(ifaceDecl.name, selector, receiver, args, isStatic, method);
     }
 
     /// Emit an ObjC method call via objc_msgSend for a ClassDecl.
@@ -5657,9 +5657,11 @@ class NativeCompiledFunction : CompiledFunction {
         // Search class members for the method
         string selector = methodName;
         FunctionDecl dBodyMethod = null;
+        FunctionDecl method = null;
         foreach (member; classDecl.members) {
             if (auto funcDecl = cast(FunctionDecl)member) {
                 if (funcDecl.name == methodName) {
+                    method = funcDecl;
                     if (funcDecl.body_ !is null)
                         dBodyMethod = funcDecl;  // Has D implementation
                     if (funcDecl.objcSelector !is null && funcDecl.objcSelector.length > 0)
@@ -5673,6 +5675,7 @@ class NativeCompiledFunction : CompiledFunction {
             foreach (member; classDecl.baseClassDecl.members) {
                 if (auto funcDecl = cast(FunctionDecl)member) {
                     if (funcDecl.name == methodName) {
+                        if (method is null) method = funcDecl;
                         if (funcDecl.objcSelector !is null && funcDecl.objcSelector.length > 0)
                             selector = funcDecl.objcSelector;
                         break;
@@ -5696,25 +5699,38 @@ class NativeCompiledFunction : CompiledFunction {
             }
         }
 
-        emitObjCMsgSend(classDecl.name, selector, receiver, args, isStatic);
+        emitObjCMsgSend(classDecl.name, selector, receiver, args, isStatic, method);
     }
 
-    /// Core objc_msgSend emission.
+    /// Check if a struct is an HFA (Homogeneous Float Aggregate) of Float64.
+    /// ARM64 ABI: HFA with ≤4 same-type float fields passed in d0-d3.
+    /// Returns field count if HFA, 0 otherwise.
+    private int detectHFA(StructDecl sd) {
+        if (sd is null || sd.fields.length == 0 || sd.fields.length > 4)
+            return 0;
+        foreach (f; sd.fields) {
+            auto bt = cast(BasicType) f.type;
+            if (bt is null || bt.kind != BasicType.Kind.Float64)
+                return 0;
+        }
+        return cast(int) sd.fields.length;
+    }
+
+    /// Core objc_msgSend emission with HFA struct support.
     /// ARM64 calling convention: objc_msgSend(id self, SEL _cmd, ...args)
-    ///   x0 = receiver (self), x1 = selector (_cmd), x2+ = user args
+    ///   x0 = receiver, x1 = selector, x2-x7 = integer user args, d0-d3 = HFA float args
     private void emitObjCMsgSend(string className, string selector,
-            Expression receiver, Expression[] args, bool isStatic) {
+            Expression receiver, Expression[] args, bool isStatic,
+            FunctionDecl method) {
         auto mark = temps.save();
         size_t receiverTemp = temps.alloc(8);
         size_t selectorTemp = temps.alloc(8);
 
         // Step 1: Get receiver and save to temp
         if (isStatic) {
-            // Static call: objc_getClass("ClassName") → x0 = Class pointer
             emitCStringLoad(className);
             emitExternalOrHostCall("objc_getClass");
         } else {
-            // Instance call: compile receiver expression
             compileExpression(receiver);
         }
         gen.emitStorePtr(receiverTemp);
@@ -5724,36 +5740,78 @@ class NativeCompiledFunction : CompiledFunction {
         emitExternalOrHostCall("sel_registerName");
         gen.emitStorePtr(selectorTemp);
 
-        // Step 3: User args in x2, x3, ...
-        if (args.length > 2)
-            throw new Exception("ObjC calls with more than 2 user arguments not yet supported");
-        // Compile args and save to temps, then load into registers
-        size_t[] argTemps;
-        foreach (arg; args) {
-            compileExpression(arg);
-            size_t t = temps.alloc(8);
-            gen.emitStorePtr(t);
-            argTemps ~= t;
+        // Step 3: Compile all user args, classify as HFA (d-registers) or integer (x-registers)
+        size_t[] intArgTemps;   // temps for integer/pointer args → x2-x7
+        int floatArgIdx = 0;    // next d-register to use (d0-d3)
+
+        foreach (i, arg; args) {
+            // Check if this parameter is an HFA struct
+            StructDecl paramStruct = null;
+            int hfaCount = 0;
+            if (method !is null && i < method.parameters.length) {
+                auto paramType = method.parameters[i].type.resolve();
+                paramStruct = paramType.asStruct();
+                hfaCount = detectHFA(paramStruct);
+            }
+
+            if (hfaCount > 0 && floatArgIdx + hfaCount <= 4) {
+                // HFA struct: compile expression → x0 = struct address,
+                // then load each 8-byte double field into d-registers
+                compileExpression(arg);
+                size_t baseTemp = temps.alloc(8);
+                gen.emitStorePtr(baseTemp);
+
+                foreach (fi, field; paramStruct.fields) {
+                    gen.emitLoadPtr(baseTemp);
+                    if (field.offset > 0) {
+                        gen.emitLoadPtrFromX0Offset(cast(uint) field.offset);
+                    } else {
+                        // offset 0: LDR x0, [x0] — load first field
+                        gen.emitLoadPtrFromX0Offset(0);
+                    }
+                    switch (floatArgIdx) {
+                        case 0: gen.emitMoveX0ToD0(); break;
+                        case 1: gen.emitMoveX0ToD1(); break;
+                        case 2: gen.emitMoveX0ToD2(); break;
+                        case 3: gen.emitMoveX0ToD3(); break;
+                        default: break;
+                    }
+                    floatArgIdx++;
+                }
+            } else {
+                // Integer/pointer arg: compile and save to temp
+                compileExpression(arg);
+                size_t t = temps.alloc(8);
+                gen.emitStorePtr(t);
+                intArgTemps ~= t;
+            }
         }
 
-        // Load args into x2, x3
-        foreach (i, t; argTemps) {
+        // Step 4: Load integer args into x2-x7
+        if (intArgTemps.length > 6)
+            throw new Exception("ObjC calls with more than 6 integer user arguments not supported");
+
+        foreach (i, t; intArgTemps) {
             gen.emitLoadPtr(t);
-            switch (cast(int)i) {
+            switch (cast(int) i) {
                 case 0: gen.emitMoveX0ToX2(); break;
                 case 1: gen.emitMoveX0ToX3(); break;
+                case 2: gen.emitMoveX0ToX4(); break;
+                case 3: gen.emitMoveX0ToX5(); break;
+                case 4: gen.emitMoveX0ToX6(); break;
+                case 5: gen.emitMoveX0ToX7(); break;
                 default: break;
             }
         }
 
-        // Step 4: x1 = SEL
+        // Step 5: x1 = SEL
         gen.emitLoadPtr(selectorTemp);
         gen.emitMoveX0ToX1();
 
-        // Step 5: x0 = receiver
+        // Step 6: x0 = receiver
         gen.emitLoadPtr(receiverTemp);
 
-        // Step 6: Call objc_msgSend
+        // Step 7: Call objc_msgSend
         emitExternalOrHostCall("objc_msgSend");
 
         temps.restore(mark);
