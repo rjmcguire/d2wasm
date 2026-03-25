@@ -26,6 +26,7 @@ struct Request {
     // compile params
     string file;
     string output;
+    string target;          // "wasm" (default) or "arm64-macos"
     string[] importPaths;
 
     // fileChanged params
@@ -91,6 +92,8 @@ Request parseRequest(string line) {
                 req.file = params["file"].str;
             if ("output" in params)
                 req.output = params["output"].str;
+            if ("target" in params)
+                req.target = params["target"].str;
             if ("newText" in params)
                 req.newText = params["newText"].str;
             if ("edit" in params) {

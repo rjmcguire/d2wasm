@@ -238,9 +238,22 @@ class CompileServer {
         // Build CompilerOptions from request + server defaults
         CompilerOptions options;
         options.inputFile = req.file;
-        options.outputFile = req.output.length > 0
-            ? req.output
-            : setExtension(req.file, ".wasm");
+        string reqTarget = req.target.length > 0 ? req.target : "wasm";
+        options.target = reqTarget;
+        if (reqTarget == "arm64-macos") {
+            options.outputFile = req.output.length > 0
+                ? req.output
+                : (options.compileOnly
+                    ? setExtension(req.file, ".o")
+                    : stripExtension(req.file));
+            options.compileOnly = req.output.length > 0
+                ? req.output.endsWith(".o")
+                : true;  // default to compile-only for native via server
+        } else {
+            options.outputFile = req.output.length > 0
+                ? req.output
+                : setExtension(req.file, ".wasm");
+        }
         options.backend = backend;
         options.verbosity = verbosity;
         options.stackTrace = stackTrace;

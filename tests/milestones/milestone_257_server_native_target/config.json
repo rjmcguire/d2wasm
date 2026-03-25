@@ -1,0 +1,6 @@
+{
+  "name": "server_native_target",
+  "description": "Compile server supports arm64-macos target with warm cache",
+  "type": "shell",
+  "script": "run_test.sh"
+}
