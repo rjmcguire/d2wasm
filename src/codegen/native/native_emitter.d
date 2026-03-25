@@ -178,23 +178,36 @@ class NativeModuleEmitter : EmitterCache {
         auto writer = new MachOWriter();
         writer.setTextSection(fullCode);
 
-        // Data section (error messages, constant data → __DATA,__const)
+        // Constant data section (error messages, C strings → __DATA,__const)
         auto objData = compiled.getObjectData();
-        bool hasDataSection = objData.length > 0;
-        if (hasDataSection)
+        bool hasConstData = objData.length > 0;
+        if (hasConstData)
             writer.setDataConstSection(objData);
+
+        // Writable data section (mutable globals → __DATA,__data)
+        auto globData = compiled.getGlobalData();
+        bool hasGlobalData = globData.length > 0;
+        if (hasGlobalData)
+            writer.setDataSection(globData);
 
         // External undefined symbols (write, _exit, etc. — resolved by linker)
         foreach (sym; compiled.getObjectExternalSymbols())
             writer.addExternalSymbol(sym);
 
-        // Data symbols (local symbols in __DATA,__const = section 2)
-        // Symbol value = virtual address = dataSectionBase + offset within data section.
-        // In MH_OBJECT, __DATA,__const vmAddr = textSizePadded (8-byte aligned, follows __text).
-        if (hasDataSection) {
-            ulong dataVmBase = (fullCode.length + 7) & ~7;  // match MachOWriter padding
+        // Const data symbols (section 2: __DATA,__const)
+        ulong dataVmBase = (fullCode.length + 7) & ~7;
+        if (hasConstData) {
             foreach (ds; compiled.getObjectDataSymbols())
                 writer.addLocalSymbol(ds.name, 2, dataVmBase + ds.offset);
+        }
+
+        // Global data symbols (section 2 or 3 depending on whether const data exists)
+        if (hasGlobalData) {
+            ubyte globalSectIdx = hasConstData ? 3 : 2;
+            ulong constSizePadded = hasConstData ? ((objData.length + 7) & ~7) : 0;
+            ulong globalVmBase = dataVmBase + constSizePadded;
+            foreach (ds; compiled.getGlobalDataSymbols())
+                writer.addLocalSymbol(ds.name, globalSectIdx, globalVmBase + ds.offset);
         }
 
         // Relocations (ADRP/ADD for data refs, BL for external calls, unsigned64 for vtable)

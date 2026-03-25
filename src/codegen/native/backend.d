@@ -306,6 +306,13 @@ class NativeCompiledFunction : CompiledFunction {
     private uint objectDataSymCount;
     private bool[string] objectExternFunctions;  // extern(C) function names for object mode
 
+    // Global variable support
+    private string[string] globalVarSymbols;    // name → data section symbol (object mode)
+    private ulong[string] globalVarAddrs;       // name → absolute address (JIT mode)
+    private int[string] globalVarSizes;          // bytes per global (4 for int, 8 for long/ptr)
+    private ubyte[] globalData;                  // writable __DATA,__data (object mode)
+    private ObjectDataSymbol[] globalDataSymbols;
+
     /// Single function constructor (original)
     this(FunctionDecl func, SymbolTable st, bool enableStackTrace = true) {
         import std.stdio : writeln;
@@ -396,6 +403,9 @@ class NativeCompiledFunction : CompiledFunction {
             assert(0, "Entry function not found: " ~ entryFuncName);
         }
         
+        // Collect global variables
+        collectGlobalVariables(funcs);
+
         // Compile all functions
         log(1, "native: JIT compiling ", funcs.length, " functions");
         foreach (func; funcs) {
@@ -450,6 +460,9 @@ class NativeCompiledFunction : CompiledFunction {
             functionLabels[name] = gen.newLabel();
         }
 
+        // Collect and allocate module-level global variables in data section
+        collectGlobalVariables(funcs);
+
         log(1, "native: object mode compiling ", funcs.length, " functions");
         foreach (func; funcs) {
             string name = getMangledName(func);
@@ -484,6 +497,10 @@ class NativeCompiledFunction : CompiledFunction {
 
     /// Get the object-mode data section bytes (for __DATA,__const).
     const(ubyte)[] getObjectData() { return objectData; }
+
+    /// Get writable global data (for __DATA,__data).
+    const(ubyte)[] getGlobalData() { return globalData; }
+    const(ObjectDataSymbol)[] getGlobalDataSymbols() { return globalDataSymbols; }
 
     /// Get data symbols (local symbols in __DATA,__const).
     const(ObjectDataSymbol)[] getObjectDataSymbols() { return objectDataSymbols; }
@@ -532,6 +549,84 @@ class NativeCompiledFunction : CompiledFunction {
         uint blOff = gen.pos;
         gen.emitExternalBranchLink();  // BL #0 (placeholder)
         objectRelocations ~= ObjectReloc(blOff, funcName, RelocType.branch26);
+    }
+
+    /// Collect module-level global variables and allocate storage.
+    /// Object mode: allocates in objectData with relocatable symbols.
+    /// JIT mode: allocates in dataSection with absolute addresses.
+    private void collectGlobalVariables(FunctionDecl[] funcs) {
+        auto moduleScope = symbolTable.moduleScope;
+        if (moduleScope is null) return;
+
+        foreach (name, sym; moduleScope.symbols) {
+            if (auto varDecl = cast(VariableDecl) sym.declaration) {
+                int size = 4;
+                auto bt = cast(BasicType) sym.type;
+                if (bt) {
+                    if (bt.kind == BasicType.Kind.Int64 || bt.kind == BasicType.Kind.UInt64 ||
+                        bt.kind == BasicType.Kind.Float64)
+                        size = 8;
+                }
+                globalVarSizes[name] = size;
+
+                if (objectMode) {
+                    ubyte[] zeros = new ubyte[size];
+                    string symName = "__global_" ~ name;
+                    uint dataOff = cast(uint) globalData.length;
+                    globalData ~= zeros;
+                    while (globalData.length % 8 != 0) globalData ~= 0;
+                    globalDataSymbols ~= ObjectDataSymbol(symName, dataOff);
+                    globalVarSymbols[name] = symName;
+                    log(2, "native: global '", name, "' -> ", symName, " (", size, " bytes, object mode)");
+                } else {
+                    // JIT mode: allocate in writable dataSection
+                    ubyte[] zeros = new ubyte[size];
+                    ubyte* ptr = dataSection.addData(zeros);
+                    globalVarAddrs[name] = cast(ulong) cast(size_t) ptr;
+                    log(2, "native: global '", name, "' -> addr ", globalVarAddrs[name], " (", size, " bytes, JIT mode)");
+                }
+            }
+        }
+    }
+
+    /// Emit code to load the address of a global variable into x0.
+    private bool emitGlobalAddress(string name) {
+        if (objectMode) {
+            if (auto symName = name in globalVarSymbols) {
+                emitLoadDataAddress(*symName);
+                return true;
+            }
+        } else {
+            if (auto addr = name in globalVarAddrs) {
+                gen.emitLoadImm64(*addr);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Emit code to read a global variable into x0.
+    private bool emitGlobalRead(string name) {
+        if (!emitGlobalAddress(name)) return false;
+        int size = globalVarSizes[name];
+        if (size == 8)
+            gen.emit(stencil_load_i64);
+        else
+            gen.emitLoadFromPointer(0);
+        return true;
+    }
+
+    /// Emit code to write x0 to a global variable. Value must already be in x0.
+    private bool emitGlobalWrite(string name) {
+        if (!(name in globalVarSizes)) return false;
+        gen.emitMoveX0ToX9();
+        if (!emitGlobalAddress(name)) return false;
+        int size = globalVarSizes[name];
+        if (size == 8)
+            gen.emitStoreToPointerFromX9_64(0);
+        else
+            gen.emitStoreToPointerFromX9(0);
+        return true;
     }
 
     /// Store data and emit code to load its address into x0.
@@ -2579,6 +2674,17 @@ class NativeCompiledFunction : CompiledFunction {
                 } else {
                     gen.emitLoadFromPointer(0);
                 }
+            } else if (unaryOp.operator == UnaryExpression.Operator.AddressOf) {
+                // &var — take address of a local variable
+                if (auto addrIdent = cast(IdentifierExpression)unaryOp.operand) {
+                    if (auto info = addrIdent.name in localVars) {
+                        gen.emitStackAddress(info.offset);
+                    } else {
+                        throw new Exception("AddressOf: unknown variable '" ~ addrIdent.name ~ "'");
+                    }
+                } else {
+                    throw new Exception("AddressOf only supported for local variables");
+                }
             } else {
                 assert(0, "Unsupported unary operator: " ~ to!string(unaryOp.operator));
             }
@@ -2676,15 +2782,17 @@ class NativeCompiledFunction : CompiledFunction {
                         gen.emitLoadFromPointer(field.offset);  // x0 = this.field
                         return;
                     }
+                    if (emitGlobalRead(ident.name)) return;
                     if (symbol && cast(VariableDecl)symbol.declaration)
                         throw new NativeCompileError(
-                            "Cannot access module-level variable '" ~ ident.name ~ "' during CTFE",
+                            "Cannot access module-level variable '" ~ ident.name ~ "' in native backend (not collected as global)",
                             ident.location);
                     throw new NativeCompileError("Unknown variable in native backend: " ~ ident.name, ident.location);
                 } else {
+                    if (emitGlobalRead(ident.name)) return;
                     if (symbol && cast(VariableDecl)symbol.declaration)
                         throw new NativeCompileError(
-                            "Cannot access module-level variable '" ~ ident.name ~ "' during CTFE",
+                            "Cannot access module-level variable '" ~ ident.name ~ "' in native backend (not collected as global)",
                             ident.location);
                     throw new NativeCompileError("Unknown variable in native backend: " ~ ident.name, ident.location);
                 }
@@ -2757,10 +2865,16 @@ class NativeCompiledFunction : CompiledFunction {
                         }
                     }
                 }
+                // Global variable write
+                if (targetIdent.name in globalVarSizes) {
+                    compileExpression(assign.right);
+                    emitGlobalWrite(targetIdent.name);
+                    return;
+                }
                 auto symbol = symbolTable.lookupSymbol(targetIdent.name);
                 if (symbol && cast(VariableDecl)symbol.declaration)
                     throw new NativeCompileError(
-                        "Cannot access module-level variable '" ~ targetIdent.name ~ "' during CTFE",
+                        "Cannot access module-level variable '" ~ targetIdent.name ~ "' in native backend (not collected as global)",
                         targetIdent.location);
                 throw new NativeCompileError("Unknown variable in native backend: " ~ targetIdent.name, targetIdent.location);
             }
@@ -3357,7 +3471,21 @@ class NativeCompiledFunction : CompiledFunction {
                         case VarKind.delegate_:
                             assert(0, "Cannot index delegate variable: " ~ ident.name);
                         case VarKind.scalar:
-                            assert(0, "Cannot index scalar variable: " ~ ident.name);
+                            // Pointer index read: ptr[i]
+                            compileExpression(indexExpr.index);
+                            if (info.elemSize > 1) {
+                                gen.emitMoveX0ToX1();
+                                gen.emitImm32(stencil_load_imm32, info.elemSize);
+                                gen.emit(stencil_mul_i32);
+                            }
+                            gen.emitMoveX0ToX1();
+                            gen.emitLoadPtr(info.offset);
+                            gen.emit(stencil_add_i64);
+                            if (info.elemSize == 1)
+                                gen.emitLoadByteFromPointer(0);
+                            else
+                                gen.emitLoadFromPointer(0);
+                            return;
                     }
                 }
             }
@@ -3368,6 +3496,38 @@ class NativeCompiledFunction : CompiledFunction {
                     auto mField = mAggDecl.getField(memberExpr.memberName);
                     if (mField) {
                         if (auto arrType = cast(ArrayType)mField.type) {
+                            if (arrType.isStaticArray) {
+                                // Static array field read: obj.arr[i]
+                                import codegen.type_marshal : TypeReader;
+                                uint elemSize = TypeReader.forNative().elementSizeOf(arrType.elementType);
+                                auto mark = temps.save();
+                                size_t baseTemp = temps.alloc(8);
+                                // Get struct address + field offset = array base
+                                compileExpression(memberExpr.object);
+                                if (mField.offset > 0) {
+                                    gen.emitMoveX0ToX1();
+                                    gen.emitImm32(stencil_load_imm32, cast(int)mField.offset);
+                                    gen.emit(stencil_add_i64);
+                                }
+                                gen.emitStorePtr(baseTemp);
+                                // Compute target address: base + index * elemSize
+                                compileExpression(indexExpr.index);
+                                if (elemSize > 1) {
+                                    gen.emitMoveX0ToX1();
+                                    gen.emitImm32(stencil_load_imm32, elemSize);
+                                    gen.emit(stencil_mul_i32);
+                                }
+                                gen.emitMoveX0ToX1();
+                                gen.emitLoadPtr(baseTemp);
+                                gen.emit(stencil_add_i64);
+                                // Load value
+                                if (elemSize == 1)
+                                    gen.emitLoadByteFromPointer(0);
+                                else
+                                    gen.emitLoadFromPointer(0);
+                                temps.restore(mark);
+                                return;
+                            }
                             if (!arrType.isStaticArray) {
                                 import codegen.type_marshal : TypeReader;
                                 uint elemSize = TypeReader.forNative().elementSizeOf(arrType.elementType);
@@ -3592,6 +3752,43 @@ class NativeCompiledFunction : CompiledFunction {
                 auto mField = mAggDecl.getField(memberExpr.memberName);
                 if (mField) {
                     if (auto arrType = cast(ArrayType)mField.type) {
+                        if (arrType.isStaticArray) {
+                            // Static array field: obj.arr[i] = value
+                            import codegen.type_marshal : TypeReader;
+                            uint elemSize = TypeReader.forNative().elementSizeOf(arrType.elementType);
+                            auto mark = temps.save();
+                            size_t valTemp = temps.alloc(8);
+                            size_t baseTemp = temps.alloc(8);
+                            // Compile value, save
+                            compileExpression(value);
+                            gen.emitStorePtr(valTemp);
+                            // Get struct address + field offset = array base
+                            compileExpression(memberExpr.object);
+                            if (mField.offset > 0) {
+                                gen.emitMoveX0ToX1();
+                                gen.emitImm32(stencil_load_imm32, cast(int)mField.offset);
+                                gen.emit(stencil_add_i64);
+                            }
+                            gen.emitStorePtr(baseTemp);
+                            // Compute target address: base + index * elemSize
+                            compileExpression(indexExpr.index);
+                            if (elemSize > 1) {
+                                gen.emitMoveX0ToX1();
+                                gen.emitImm32(stencil_load_imm32, elemSize);
+                                gen.emit(stencil_mul_i32);
+                            }
+                            gen.emitMoveX0ToX1();
+                            gen.emitLoadPtr(baseTemp);
+                            gen.emit(stencil_add_i64);
+                            // Store value through pointer
+                            gen.emitMoveX0ToX1();
+                            gen.emitLoadPtr(valTemp);
+                            gen.emitMoveX0ToX9();
+                            gen.emitMoveX1ToX0();
+                            gen.emitStoreToPointerFromX9(0);
+                            temps.restore(mark);
+                            return;
+                        }
                         if (!arrType.isStaticArray) {
                             import codegen.type_marshal : TypeReader;
                             uint elemSize = TypeReader.forNative().elementSizeOf(arrType.elementType);
@@ -3780,7 +3977,21 @@ class NativeCompiledFunction : CompiledFunction {
             case VarKind.delegate_:
                 assert(0, "Cannot index-assign delegate variable: " ~ ident.name);
             case VarKind.scalar:
-                assert(0, "Cannot index-assign scalar variable: " ~ ident.name);
+                // Pointer index assignment: ptr[i] = value
+                // The scalar holds a pointer (e.g. ubyte* font), treat like slice
+                compileExpression(value);  // x0 = value
+                gen.emitMoveX0ToX9();      // x9 = value to store
+                compileExpression(indexExpr.index);  // x0 = index
+                if (es > 1) {
+                    gen.emitMoveX0ToX1();
+                    gen.emitImm32(stencil_load_imm32, es);
+                    gen.emit(stencil_mul_i32);  // x0 = index * elemSize
+                }
+                gen.emitMoveX0ToX1();
+                gen.emitLoadPtr(info.offset);  // x0 = pointer value (64-bit)
+                gen.emit(stencil_add_i64);     // x0 = target address
+                gen.emitStoreToPointerFromX9(0);
+                return;
         }
     }
 

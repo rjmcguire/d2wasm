@@ -820,7 +820,14 @@ struct NativeCodeGen {
         uint imm12 = cast(uint)(offset / 4);
         emitRaw32(0xB9000009 | (imm12 << 10));  // Rt = w9 = 9
     }
-    
+
+    /// Store 64-bit value from x9 to pointer in x0 with offset: STR x9, [x0, #offset]
+    void emitStoreToPointerFromX9_64(size_t offset) {
+        // STR x9, [x0, #offset] where offset is scaled by 8
+        uint imm12 = cast(uint)(offset / 8);
+        emitRaw32(0xF9000009 | (imm12 << 10));  // Rt = x9 = 9
+    }
+
     // ========== Finalization ==========
     
     /// Resolve all branch targets and make code executable

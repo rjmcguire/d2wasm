@@ -686,9 +686,10 @@ int main() {
 
     // Seed with some content
     string hello = "Hello, editor!\nType here...\nLine 3\n";
+    ubyte[] helloBytes = cast(ubyte[]) hello;
     int hi = 0;
     while (hi < 34) {
-        buf.data[hi] = cast(ubyte) hello[hi];
+        buf.data[hi] = helloBytes[hi];
         hi = hi + 1;
     }
     buf.len = 34;
@@ -778,8 +779,8 @@ int main() {
     // Character cell size in NDC
     int cols = winW / 8;   // 128 columns
     int rows = winH / 16;  // 48 rows
-    float charW = 2.0 / cast(float) cols;
-    float charH = 2.0 / cast(float) rows;
+    float charW = cast(float)(2.0 / cast(float) cols);
+    float charH = cast(float)(2.0 / cast(float) rows);
 
     // Vertex batch (500 chars per batch)
     float[27000] vertexBatch;
@@ -880,8 +881,8 @@ int main() {
                 int col = 0;
                 while (col < lineLen && col < cols) {
                     int ch = cast(int) buf.data[lineOff + col];
-                    float sx = -1.0 + cast(float) col * charW;
-                    float sy = 1.0 - cast(float) screenRow * charH;
+                    float sx = cast(float)(-1.0 + cast(float) col * charW);
+                    float sy = cast(float)(1.0 - cast(float) screenRow * charH);
 
                     // Default text color: light gray (0xDBDBDB)
                     addCharQuad(vertexBatch.ptr, &vertCount, sx, sy,
@@ -906,8 +907,8 @@ int main() {
             // Render cursor using solid block glyph (index 95 → charCode 127)
             int cursorScreenRow = buf.cursorLine - buf.scrollLine;
             if (cursorScreenRow >= 0 && cursorScreenRow < visRows) {
-                float cx = -1.0 + cast(float) buf.cursorCol * charW;
-                float cy = 1.0 - cast(float) cursorScreenRow * charH;
+                float cx = cast(float)(-1.0 + cast(float) buf.cursorCol * charW);
+                float cy = cast(float)(1.0 - cast(float) cursorScreenRow * charH);
                 // Use glyph 95 (solid block), charCode 127 maps to 127-32=95
                 addCharQuad(vertexBatch.ptr, &vertCount, cx, cy,
                     charW, charH, 127, 0xCCCC33);

@@ -153,6 +153,7 @@ class MachOWriter {
     // Sections
     private const(ubyte)[] textCode;
     private const(ubyte)[] dataConst;
+    private const(ubyte)[] dataData;  // writable __DATA,__data for mutable globals
 
     // Symbols: (name, sectionIndex 1-based, offset, isExported)
     private SymbolEntry[] symbols;
@@ -179,9 +180,14 @@ class MachOWriter {
         textCode = code;
     }
 
-    /// Set the __DATA,__const section content (Phase 3+)
+    /// Set the __DATA,__const section content (read-only constant data)
     void setDataConstSection(const(ubyte)[] data) {
         dataConst = data;
+    }
+
+    /// Set the __DATA,__data section content (writable mutable globals)
+    void setDataSection(const(ubyte)[] data) {
+        dataData = data;
     }
 
     /// Add an exported symbol (defined in a section)
@@ -209,6 +215,7 @@ class MachOWriter {
         // Count sections
         uint nSections = 1; // always have __text
         if (dataConst.length > 0) nSections++;
+        if (dataData.length > 0) nSections++;
 
         // Sort symbols: locals first, then external defined, then undefined
         SymbolEntry[] locals, extDef, undef;
@@ -290,9 +297,13 @@ class MachOWriter {
 
         uint dataConstOffset = textOffset + textSizePadded;
         uint dataConstSize = cast(uint)dataConst.length;
+        uint dataConstSizePadded = (dataConstSize + 7) & ~7;
+
+        uint dataDataOffset = dataConstOffset + dataConstSizePadded;
+        uint dataDataSize = cast(uint)dataData.length;
 
         // Relocations follow section data
-        uint relocStart = dataConstOffset + dataConstSize;
+        uint relocStart = dataDataOffset + dataDataSize;
         uint textRelocStart = relocStart;
         uint textRelocSize = cast(uint)(textRelocs.length * RelocationInfo.sizeof);
         uint dataRelocStart = textRelocStart + textRelocSize;
@@ -322,9 +333,9 @@ class MachOWriter {
         // 2. LC_SEGMENT_64
         SegmentCommand64 segCmd;
         segCmd.cmdSize = segCmdSize;
-        segCmd.vmSize = textSizePadded + dataConstSize;
+        segCmd.vmSize = textSizePadded + dataConstSizePadded + dataDataSize;
         segCmd.fileOff = sectionDataStart;
-        segCmd.fileSize = textSizePadded + dataConstSize;
+        segCmd.fileSize = textSizePadded + dataConstSizePadded + dataDataSize;
         segCmd.nSections = nSections;
         writeStruct(result, headerSize, segCmd);
 
@@ -353,7 +364,7 @@ class MachOWriter {
             Section64 dataSect;
             setName(dataSect.sectName, "__const");
             setName(dataSect.segName, "__DATA");
-            dataSect.addr = textSizePadded; // vm address follows text (8-byte aligned)
+            dataSect.addr = textSizePadded;
             dataSect.size = dataConstSize;
             dataSect.fileOffset = dataConstOffset;
             dataSect.align_ = 3; // 8-byte aligned
@@ -363,6 +374,20 @@ class MachOWriter {
                 dataSect.nRelocs = cast(uint)dataRelocs.length;
             }
             writeStruct(result, sectOffset, dataSect);
+            sectOffset += cast(uint)Section64.sizeof;
+        }
+
+        // 5. __DATA,__data section (writable, for mutable globals)
+        if (dataData.length > 0) {
+            Section64 ddSect;
+            setName(ddSect.sectName, "__data");
+            setName(ddSect.segName, "__DATA");
+            ddSect.addr = textSizePadded + dataConstSizePadded;
+            ddSect.size = dataDataSize;
+            ddSect.fileOffset = dataDataOffset;
+            ddSect.align_ = 3; // 8-byte aligned
+            ddSect.flags = S_REGULAR;
+            writeStruct(result, sectOffset, ddSect);
         }
 
         // 5. LC_SYMTAB
@@ -383,11 +408,13 @@ class MachOWriter {
         dysymtab.nUndefSym = cast(uint)undef.length;
         writeStruct(result, headerSize + segCmdSize + symtabCmdSize, dysymtab);
 
-        // 7. Section data
+        // Section data
         if (textSize > 0)
             result[textOffset .. textOffset + textSize] = textCode[];
         if (dataConstSize > 0)
             result[dataConstOffset .. dataConstOffset + dataConstSize] = dataConst[];
+        if (dataDataSize > 0)
+            result[dataDataOffset .. dataDataOffset + dataDataSize] = dataData[];
 
         // 8. Relocations
         foreach (i, ref rel; allRelocs) {

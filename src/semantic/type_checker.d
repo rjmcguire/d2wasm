@@ -3374,6 +3374,9 @@ class TypeChecker {
         // Narrow float literals to Float32 when target is float
         if (fromExpr !is null && narrowFloatLiteral(fromExpr, to))
             from = to;
+        // Narrow integer literals to smaller types (ubyte, short, etc.) when value fits
+        if (fromExpr !is null && narrowIntLiteral(fromExpr, to))
+            from = to;
         // Widen integer literals to Int64/UInt64 when target is long/ulong
         if (fromExpr !is null && widenIntLiteral(fromExpr, to))
             from = to;
@@ -3494,6 +3497,57 @@ class TypeChecker {
         return null;
     }
     
+    /**
+     * Narrow an integer literal to a smaller integer type when the value fits.
+     * D allows VRP: `ubyte x = 0;` works because 0 fits in ubyte.
+     */
+    bool narrowIntLiteral(Expression expr, Type targetType) {
+        auto targetBt = cast(BasicType)targetType;
+        if (!targetBt)
+            return false;
+
+        // Only narrow to smaller integer types
+        if (targetBt.kind != BasicType.Kind.UInt8 &&
+            targetBt.kind != BasicType.Kind.Int8 &&
+            targetBt.kind != BasicType.Kind.UInt16 &&
+            targetBt.kind != BasicType.Kind.Int16 &&
+            targetBt.kind != BasicType.Kind.UInt32 &&
+            targetBt.kind != BasicType.Kind.Char)
+            return false;
+
+        if (auto lit = cast(LiteralExpression)expr) {
+            if (lit.value.type == typeid(int) || lit.value.type == typeid(long)) {
+                long val = lit.value.type == typeid(int)
+                    ? cast(long) lit.value.get!int()
+                    : lit.value.get!long();
+                bool fits = false;
+                switch (targetBt.kind) {
+                    case BasicType.Kind.UInt8: fits = val >= 0 && val <= 255; break;
+                    case BasicType.Kind.Char: fits = val >= 0 && val <= 255; break;
+                    case BasicType.Kind.Int8: fits = val >= -128 && val <= 127; break;
+                    case BasicType.Kind.UInt16: fits = val >= 0 && val <= 65535; break;
+                    case BasicType.Kind.Int16: fits = val >= -32768 && val <= 32767; break;
+                    case BasicType.Kind.UInt32: fits = val >= 0 && val <= 4294967295; break;
+                    default: break;
+                }
+                if (fits) {
+                    lit.type = targetType;
+                    return true;
+                }
+            }
+        }
+        if (auto unary = cast(UnaryExpression)expr) {
+            if (unary.operator == UnaryExpression.Operator.Minus ||
+                unary.operator == UnaryExpression.Operator.Plus) {
+                if (narrowIntLiteral(unary.operand, targetType)) {
+                    unary.type = targetType;
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     /**
      * Narrow a double literal expression to Float32 when the target type is float.
      * In D, floating-point literals are implicitly narrowable because their value
