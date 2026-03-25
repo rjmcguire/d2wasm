@@ -431,14 +431,14 @@ void addCharQuad(float* verts, int* count, float sx, float sy,
         float cw, float ch, int charCode, int color) {
     int glyphIdx = charCode - 32;
     if (glyphIdx < 0) glyphIdx = 0;
-    if (glyphIdx > 94) glyphIdx = 0;
+    if (glyphIdx > 95) glyphIdx = 0;  // 0-94 = printable ASCII, 95 = solid block
     float gi = cast(float) glyphIdx;
     float x1 = sx + cw;
     float y1 = sy - ch;
     // Unpack color: 0xRRGGBB
-    float r = cast(float)((color >> 16) & 0xFF) / 255.0;
-    float g = cast(float)((color >> 8) & 0xFF) / 255.0;
-    float b = cast(float)(color & 0xFF) / 255.0;
+    float r = cast(float)(cast(float)((color >> 16) & 0xFF) / 255.0);
+    float g = cast(float)(cast(float)((color >> 8) & 0xFF) / 255.0);
+    float b = cast(float)(cast(float)(color & 0xFF) / 255.0);
 
     int off = *count * 9;
     off = emitVertex(verts, off, sx, sy, 0.0, 0.0, r, g, b, gi);
@@ -662,6 +662,9 @@ void initFontData(ubyte* font) {
     setGlyph(font, 93, 0x00,0x00,0x70,0x18,0x18,0x18,0x0E,0x18,0x18,0x18,0x70,0x00,0x00,0x00,0x00,0x00);
     // ~ (126 - glyph index 94)
     setGlyph(font, 94, 0x00,0x00,0x00,0x00,0x00,0x32,0x7F,0x4C,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00);
+
+    // Solid block (glyph index 95) — used for cursor
+    setGlyph(font, 95, 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF);
 }
 
 void setGlyph(ubyte* font, int idx, ubyte r0, ubyte r1, ubyte r2, ubyte r3,
@@ -679,7 +682,7 @@ void setGlyph(ubyte* font, int idx, ubyte r0, ubyte r1, ubyte r2, ubyte r3,
 int main() {
     // Text buffer
     TextBuffer buf;
-    initTextBuffer(buf);
+    initTextBuffer(&buf);
 
     // Seed with some content
     string hello = "Hello, editor!\nType here...\nLine 3\n";
@@ -689,10 +692,10 @@ int main() {
         hi = hi + 1;
     }
     buf.len = 34;
-    recomputeLines(buf);
+    recomputeLines(&buf);
 
-    // Font data (1520 bytes = 95 chars * 16 bytes)
-    ubyte[1520] fontData;
+    // Font data (1536 bytes = 96 glyphs * 16 bytes, last is solid block for cursor)
+    ubyte[1536] fontData;
     initFontData(fontData.ptr);
 
     // App initialization
@@ -764,9 +767,9 @@ int main() {
     EditorWindowDelegate del = EditorWindowDelegate.myAlloc().myInit();
     window.setDelegate(cast(long) del);
 
-    // Upload font data to Metal buffer
+    // Upload font data to Metal buffer (96 glyphs * 16 bytes)
     long fontBuf = device.newBufferWithBytes(
-        cast(ubyte*) fontData.ptr, cast(long) 1520, 0);
+        cast(ubyte*) fontData.ptr, cast(long) 1536, 0);
 
     // Show window
     window.makeKeyAndOrderFront(0);
@@ -808,27 +811,27 @@ int main() {
 
             if (code == 36) {
                 // Return
-                insertNewline(buf);
+                insertNewline(&buf);
             } else if (code == 51) {
                 // Backspace
-                deleteCharBeforeCursor(buf);
+                deleteCharBeforeCursor(&buf);
             } else if (code == 123) {
-                moveCursorLeft(buf);
+                moveCursorLeft(&buf);
             } else if (code == 124) {
-                moveCursorRight(buf);
+                moveCursorRight(&buf);
             } else if (code == 125) {
-                moveCursorDown(buf);
+                moveCursorDown(&buf);
             } else if (code == 126) {
-                moveCursorUp(buf);
+                moveCursorUp(&buf);
             } else if (code == 48) {
                 // Tab — insert spaces
-                insertCharAtCursor(buf, 32);
-                insertCharAtCursor(buf, 32);
-                insertCharAtCursor(buf, 32);
-                insertCharAtCursor(buf, 32);
+                insertCharAtCursor(&buf, 32);
+                insertCharAtCursor(&buf, 32);
+                insertCharAtCursor(&buf, 32);
+                insertCharAtCursor(&buf, 32);
             } else {
                 if (ch >= 32 && ch < 127) {
-                    insertCharAtCursor(buf, ch);
+                    insertCharAtCursor(&buf, ch);
                 }
             }
         }
@@ -880,13 +883,9 @@ int main() {
                     float sx = -1.0 + cast(float) col * charW;
                     float sy = 1.0 - cast(float) screenRow * charH;
 
-                    // Default text color: light gray
-                    float cr = 0.86;
-                    float cg = 0.86;
-                    float cb = 0.86;
-
+                    // Default text color: light gray (0xDBDBDB)
                     addCharQuad(vertexBatch.ptr, &vertCount, sx, sy,
-                        charW, charH, ch, cr, cg, cb);
+                        charW, charH, ch, 0xDBDBDB);
 
                     // Flush batch if full
                     if (vertCount >= 2994) {  // 499 chars * 6 verts
@@ -904,51 +903,14 @@ int main() {
                 line = line + 1;
             }
 
-            // Render cursor (solid block)
+            // Render cursor using solid block glyph (index 95 → charCode 127)
             int cursorScreenRow = buf.cursorLine - buf.scrollLine;
             if (cursorScreenRow >= 0 && cursorScreenRow < visRows) {
                 float cx = -1.0 + cast(float) buf.cursorCol * charW;
                 float cy = 1.0 - cast(float) cursorScreenRow * charH;
-                // Cursor is a solid block (glyph 127-32=95, but we only have 0-94)
-                // Use a filled rectangle by adding 6 vertices manually
-                int cbase = vertCount * 9;
-                float x0 = cx;
-                float y0 = cy;
-                float x1 = cx + charW;
-                float y1 = cy - charH;
-                // Triangle 1
-                vertexBatch[cbase+0] = x0; vertexBatch[cbase+1] = y0;
-                vertexBatch[cbase+2] = 0.0; vertexBatch[cbase+3] = 0.0;
-                vertexBatch[cbase+4] = 0.8; vertexBatch[cbase+5] = 0.8;
-                vertexBatch[cbase+6] = 0.2; vertexBatch[cbase+7] = 0.5;
-                vertexBatch[cbase+8] = 0.0;  // space glyph (mostly transparent)
-                vertexBatch[cbase+9] = x1; vertexBatch[cbase+10] = y0;
-                vertexBatch[cbase+11] = 1.0; vertexBatch[cbase+12] = 0.0;
-                vertexBatch[cbase+13] = 0.8; vertexBatch[cbase+14] = 0.8;
-                vertexBatch[cbase+15] = 0.2; vertexBatch[cbase+16] = 0.5;
-                vertexBatch[cbase+17] = 0.0;
-                vertexBatch[cbase+18] = x0; vertexBatch[cbase+19] = y1;
-                vertexBatch[cbase+20] = 0.0; vertexBatch[cbase+21] = 1.0;
-                vertexBatch[cbase+22] = 0.8; vertexBatch[cbase+23] = 0.8;
-                vertexBatch[cbase+24] = 0.2; vertexBatch[cbase+25] = 0.5;
-                vertexBatch[cbase+26] = 0.0;
-                // Triangle 2
-                vertexBatch[cbase+27] = x1; vertexBatch[cbase+28] = y0;
-                vertexBatch[cbase+29] = 1.0; vertexBatch[cbase+30] = 0.0;
-                vertexBatch[cbase+31] = 0.8; vertexBatch[cbase+32] = 0.8;
-                vertexBatch[cbase+33] = 0.2; vertexBatch[cbase+34] = 0.5;
-                vertexBatch[cbase+35] = 0.0;
-                vertexBatch[cbase+36] = x1; vertexBatch[cbase+37] = y1;
-                vertexBatch[cbase+38] = 1.0; vertexBatch[cbase+39] = 1.0;
-                vertexBatch[cbase+40] = 0.8; vertexBatch[cbase+41] = 0.8;
-                vertexBatch[cbase+42] = 0.2; vertexBatch[cbase+43] = 0.5;
-                vertexBatch[cbase+44] = 0.0;
-                vertexBatch[cbase+45] = x0; vertexBatch[cbase+46] = y1;
-                vertexBatch[cbase+47] = 0.0; vertexBatch[cbase+48] = 1.0;
-                vertexBatch[cbase+49] = 0.8; vertexBatch[cbase+50] = 0.8;
-                vertexBatch[cbase+51] = 0.2; vertexBatch[cbase+52] = 0.5;
-                vertexBatch[cbase+53] = 0.0;
-                vertCount = vertCount + 6;
+                // Use glyph 95 (solid block), charCode 127 maps to 127-32=95
+                addCharQuad(vertexBatch.ptr, &vertCount, cx, cy,
+                    charW, charH, 127, 0xCCCC33);
             }
 
             // Flush remaining vertices
