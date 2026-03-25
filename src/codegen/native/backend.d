@@ -1473,7 +1473,17 @@ class NativeCompiledFunction : CompiledFunction {
                 auto d = exprTempDepth(a);
                 if (d > inner) inner = d;
             }
-            return args + 8 + inner;
+            // Account for large return temp (hidden result pointer)
+            size_t largeReturnBytes = 0;
+            if (call.type && call.type.isLargeReturn()) {
+                if (auto sd = call.type.asStruct())
+                    largeReturnBytes = sd.structSize;
+                else if (auto arrType = cast(ArrayType)call.type)
+                    largeReturnBytes = arrType.isStaticArray ? 32 : sliceInfo.totalSize;
+                else
+                    largeReturnBytes = sliceInfo.totalSize;
+            }
+            return args + 8 + inner + largeReturnBytes;
         }
         if (auto unary = cast(UnaryExpression) expr) {
             return exprTempDepth(unary.operand);
@@ -3164,7 +3174,23 @@ class NativeCompiledFunction : CompiledFunction {
                     log(3, "native: call '", callName, "' calleeFunc=",
                         calleeFunc !is null ? calleeFunc.name : "null");
 
-                    int totalArgs = cast(int)call.arguments.length + arenaShift;
+                    // Check if callee returns a large type via hidden result pointer
+                    bool calleeHasLargeReturn = calleeFunc !is null &&
+                        calleeFunc.returnType !is null &&
+                        calleeFunc.returnType.isLargeReturn();
+                    int resultPtrShift = calleeHasLargeReturn ? 1 : 0;
+                    int hiddenShift = arenaShift + resultPtrShift;
+
+                    // Allocate temp space for large return result.
+                    // Allocated before arg temps so it survives their restore.
+                    size_t resultTemp = 0;
+                    if (calleeHasLargeReturn) {
+                        size_t resultSize = computeNativeLargeReturnSize(calleeFunc.returnType);
+                        assert(resultSize > 0, "Large return type has zero size");
+                        resultTemp = temps.alloc(resultSize);
+                    }
+
+                    int totalArgs = cast(int)call.arguments.length + hiddenShift;
                     uint stackArgBytes = 0;
 
                     // Check if any argument contains a nested call
@@ -3199,7 +3225,7 @@ class NativeCompiledFunction : CompiledFunction {
                             gen.emitStorePtr(slot);
                             argSlots ~= slot;
                         }
-                        stackArgBytes = emitCallArgs(argSlots, arenaShift, totalArgs);
+                        stackArgBytes = emitCallArgs(argSlots, hiddenShift, totalArgs);
                         temps.restore(mark);
                     } else {
                         // Direct path: compile args in reverse order into registers
@@ -3220,13 +3246,19 @@ class NativeCompiledFunction : CompiledFunction {
                             } else {
                                 compileExpression(call.arguments[cast(size_t)i]);
                             }
-                            emitMoveX0ToArgRegister(cast(int)i + arenaShift);
+                            emitMoveX0ToArgRegister(cast(int)i + hiddenShift);
                         }
                     }
 
-                    // Load arena into x0 if callee needs it
+                    // Load arena into register (shifted by resultPtrShift)
                     if (calleeNeedsArena) {
                         gen.emitLoadPtr(currentFunctionArenaOffset);
+                        emitMoveX0ToArgRegister(resultPtrShift);
+                    }
+
+                    // Load hidden result pointer into x0
+                    if (calleeHasLargeReturn) {
+                        gen.emitStackAddress(resultTemp);
                     }
 
                     // Emit the call (BL instruction)
@@ -3238,6 +3270,11 @@ class NativeCompiledFunction : CompiledFunction {
 
                     // Check for exception after call (preserves return value in x0)
                     emitNativeExceptionCheckWithValue();
+
+                    // For large returns, x0 = address of result on our stack
+                    if (calleeHasLargeReturn) {
+                        gen.emitStackAddress(resultTemp);
+                    }
                     // Result is in x0
                     return;
                 }
@@ -4909,6 +4946,21 @@ class NativeCompiledFunction : CompiledFunction {
         return stackBytes;
     }
 
+    /// Compute the byte size needed for a large return type (struct, slice, static array).
+    /// Returns 0 if the type is not a large return.
+    private size_t computeNativeLargeReturnSize(Type returnType) {
+        if (returnType is null) return 0;
+        if (auto sd = returnType.asStruct()) return sd.structSize;
+        if (auto arrType = cast(ArrayType)returnType) {
+            if (arrType.arraySize !is null) {
+                if (auto sizeLit = cast(LiteralExpression)arrType.arraySize)
+                    return cast(size_t)(sizeLit.value.get!long() * 4);
+            }
+            return sliceInfo.totalSize;
+        }
+        return 0;
+    }
+
     /// Move x0 into the ARM64 argument register for position `idx` (0-7).
     private void emitMoveX0ToArgRegister(int idx) {
         switch (idx) {
@@ -5927,8 +5979,24 @@ class NativeCompiledFunction : CompiledFunction {
             calleeNeedsArena = (*calleeDecl).needsArena;
         int arenaShift = calleeNeedsArena ? 1 : 0;
 
+        // Check if callee returns a large type via hidden result pointer
+        bool calleeHasLargeReturn = funcDecl !is null &&
+            funcDecl.returnType !is null &&
+            funcDecl.returnType.isLargeReturn();
+        int resultPtrShift = calleeHasLargeReturn ? 1 : 0;
+        int hiddenShift = arenaShift + resultPtrShift;
+
         // Compile and save args to temp slots
         auto mark = temps.save();
+
+        // Allocate temp space for large return result
+        size_t resultTemp = 0;
+        if (calleeHasLargeReturn) {
+            size_t resultSize = computeNativeLargeReturnSize(funcDecl.returnType);
+            assert(resultSize > 0, "Large return type has zero size");
+            resultTemp = temps.alloc(resultSize);
+        }
+
         size_t[] argTemps;
         foreach (arg; allArgs) {
             compileExpression(arg);
@@ -5937,25 +6005,31 @@ class NativeCompiledFunction : CompiledFunction {
             argTemps ~= t;
         }
 
-        // Load args into registers (shifted by arena)
+        // Load args into registers (shifted by hidden params)
         for (long i = cast(long)argTemps.length - 1; i >= 0; i--) {
             gen.emitLoadPtr(argTemps[cast(size_t)i]);
-            switch (cast(int)i + arenaShift) {
-                case 0: break;  // already in x0
-                case 1: gen.emitMoveX0ToX1(); break;
-                case 2: gen.emitMoveX0ToX2(); break;
-                case 3: gen.emitMoveX0ToX3(); break;
-                default: assert(0, "UFCS: too many arguments");
-            }
+            emitMoveX0ToArgRegister(cast(int)i + hiddenShift);
         }
 
-        // Load arena into x0 if callee needs it (user args already shifted to x1+)
+        // Load arena into register (shifted by resultPtrShift)
         if (calleeNeedsArena) {
             gen.emitLoadPtr(currentFunctionArenaOffset);
+            emitMoveX0ToArgRegister(resultPtrShift);
+        }
+
+        // Load hidden result pointer into x0
+        if (calleeHasLargeReturn) {
+            gen.emitStackAddress(resultTemp);
         }
 
         gen.emitCall(*labelPtr);
         emitNativeExceptionCheckWithValue();
+
+        // For large returns, x0 = address of result on our stack
+        if (calleeHasLargeReturn) {
+            gen.emitStackAddress(resultTemp);
+        }
+
         temps.restore(mark);
     }
 
