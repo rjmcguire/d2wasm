@@ -665,6 +665,29 @@ struct NativeCodeGen {
     alias emitStoreArg2ToLocal32 = emitStoreLocal32FromX2;
     alias emitStoreArg3ToLocal32 = emitStoreLocal32FromX3;
 
+    // ========== Stack argument passing (caller side, for args 8+) ==========
+
+    /// SUB SP, SP, #imm12 — allocate stack space for overflow args
+    void emitSubSPImm(uint imm) {
+        // SUB SP, SP, #imm12: 0xD10003FF | (imm12 << 10)
+        uint imm12 = imm;
+        emitRaw32(0xD10003FF | (imm12 << 10));
+    }
+
+    /// ADD SP, SP, #imm12 — deallocate stack space after call
+    void emitAddSPImm(uint imm) {
+        // ADD SP, SP, #imm12: 0x910003FF | (imm12 << 10)
+        uint imm12 = imm;
+        emitRaw32(0x910003FF | (imm12 << 10));
+    }
+
+    /// STR x0, [SP, #offset] — store x0 to stack (64-bit, offset must be 8-byte aligned)
+    void emitStorePtrToSP(uint offset) {
+        // STR x0, [SP, #imm12*8]: 0xF90003E0 | ((offset/8) << 10)
+        uint imm12 = offset / 8;
+        emitRaw32(0xF90003E0 | (imm12 << 10));
+    }
+
     /// Store a pointer-sized value from x0 to a stack slot.
     /// On ARM64, pointers are 64-bit. Offset MUST be 8-byte aligned.
     /// Use this (not emitStoreLocal/emitStoreLocal32) when storing addresses,

@@ -589,7 +589,43 @@ class NativeCompiledFunction : CompiledFunction {
             case 1: gen.emitMoveX1ToX0(); break;
             case 2: gen.emitMoveX2ToX0(); break;
             case 3: gen.emitMoveX3ToX0(); break;
-            default: assert(0, "moveRegToX0: register index > 3 not supported");
+            default: break;  // stack params handled separately
+        }
+    }
+
+    /// Move argument register to x9 (for struct/array copy from param).
+    /// For stack params (>= 8), loads from caller's stack frame into x9.
+    private void moveRegToX9(int paramReg) {
+        switch (paramReg) {
+            case 0: gen.emitMoveX0ToX9(); break;
+            case 1: gen.emitMoveX1ToX9(); break;
+            case 2: gen.emitMoveX2ToX9(); break;
+            case 3: gen.emitMoveX3ToX9(); break;
+            default: break;  // stack params: caller loads to x0 first, then x0→x9
+        }
+    }
+
+    /// Load a parameter that arrived in a register (0-7) or on the stack (8+) into x0.
+    /// For stack params, uses the caller's stack frame: [FP + totalLocalBytes + 16 + (paramReg-8)*8]
+    private void loadParamToX0(int paramReg) {
+        if (paramReg < 8) {
+            moveRegToX0(paramReg);
+        } else {
+            // Stack parameter: load from caller's stack frame
+            // After prologue: FP + totalLocalBytes + 16 is the old SP
+            // Stack arg i is at old_SP + (paramReg - 8) * 8
+            size_t stackArgOffset = totalLocalBytes + 16 + cast(size_t)(paramReg - 8) * 8;
+            gen.emitLoadPtr(stackArgOffset);
+        }
+    }
+
+    /// Load a parameter into x9 (for struct/array data copy).
+    private void loadParamToX9(int paramReg) {
+        if (paramReg < 4) {
+            moveRegToX9(paramReg);
+        } else {
+            loadParamToX0(paramReg);
+            gen.emitMoveX0ToX9();
         }
     }
 
@@ -820,28 +856,18 @@ class NativeCompiledFunction : CompiledFunction {
             regIdx++;
         }
 
-        // Spill user parameters from registers to stack
+        // Spill user parameters from registers (0-7) or caller stack (8+) to local frame
         assert(regIdx == layout.regOffset(), "regIdx mismatch with layout.regOffset()");
         foreach (i, param; func.parameters) {
             int paramReg = cast(int)i + regIdx;
-            if (paramReg >= 4) {
-                throw new Exception("Native backend: more than 4 parameters not yet supported");
-            }
-            // Store parameter register to its stack slot
             auto nli = param.name in localVars;
             assert(nli !is null, "Parameter '" ~ param.name ~ "' not in localVars");
             size_t offset = nli.offset;
 
             final switch (nli.kind) {
                 case VarKind.struct_:
-                    // Register contains pointer to struct - copy struct data to our stack
-                    switch (paramReg) {
-                        case 0: gen.emitMoveX0ToX9(); break;
-                        case 1: gen.emitMoveX1ToX9(); break;
-                        case 2: gen.emitMoveX2ToX9(); break;
-                        case 3: gen.emitMoveX3ToX9(); break;
-                        default: break;
-                    }
+                    // Register/stack contains pointer to struct - copy struct data to our stack
+                    loadParamToX9(paramReg);
                     size_t structSize = nli.structDecl.structSize;
                     for (uint fieldOff = 0; fieldOff < structSize; fieldOff += 4) {
                         gen.emitLoadFromX9Offset(fieldOff);
@@ -850,20 +876,12 @@ class NativeCompiledFunction : CompiledFunction {
                     break;
 
                 case VarKind.class_:
-                    // Class params use reference semantics — just store the pointer
-                    moveRegToX0(paramReg);
+                    loadParamToX0(paramReg);
                     gen.emitStorePtr(offset);
                     break;
 
                 case VarKind.staticArray:
-                    // Register contains pointer to caller's array - copy data to our stack
-                    switch (paramReg) {
-                        case 0: gen.emitMoveX0ToX9(); break;
-                        case 1: gen.emitMoveX1ToX9(); break;
-                        case 2: gen.emitMoveX2ToX9(); break;
-                        case 3: gen.emitMoveX3ToX9(); break;
-                        default: break;
-                    }
+                    loadParamToX9(paramReg);
                     uint arrBytes = nli.staticArraySize * nli.staticArrayElemSize;
                     for (uint off = 0; off < arrBytes; off += 4) {
                         gen.emitLoadFromX9Offset(off);
@@ -872,14 +890,7 @@ class NativeCompiledFunction : CompiledFunction {
                     break;
 
                 case VarKind.slice:
-                    // Register contains pointer to caller's slice struct - copy to our stack
-                    switch (paramReg) {
-                        case 0: gen.emitMoveX0ToX9(); break;
-                        case 1: gen.emitMoveX1ToX9(); break;
-                        case 2: gen.emitMoveX2ToX9(); break;
-                        case 3: gen.emitMoveX3ToX9(); break;
-                        default: break;
-                    }
+                    loadParamToX9(paramReg);
                     for (size_t off = 0; off < sliceInfo.totalSize; off += 4) {
                         gen.emitLoadFromX9Offset(off);
                         gen.emitStoreLocal32(offset + off);
@@ -887,22 +898,22 @@ class NativeCompiledFunction : CompiledFunction {
                     break;
 
                 case VarKind.scalar:
-                    if (nli.isRef) {
-                        // ref param: store 64-bit pointer (address from caller)
-                        moveRegToX0(paramReg);
-                        gen.emitStorePtr(offset);
-                    } else if (isF64ElementType(nli.elementType) || isI64ElementType(nli.elementType)) {
-                        // 64-bit param (float/double/long/ulong): store full 64-bit register
-                        moveRegToX0(paramReg);
+                    if (nli.isRef || isF64ElementType(nli.elementType) || isI64ElementType(nli.elementType)) {
+                        loadParamToX0(paramReg);
                         gen.emitStorePtr(offset);
                     } else {
-                        // Simple scalar - store the 32-bit register value
-                        switch (paramReg) {
-                            case 0: gen.emitStoreLocal32(offset); break;        // x0
-                            case 1: gen.emitStoreLocal32FromX1(offset); break;  // x1
-                            case 2: gen.emitStoreLocal32FromX2(offset); break;  // x2
-                            case 3: gen.emitStoreLocal32FromX3(offset); break;  // x3
-                            default: break;
+                        // 32-bit scalar — for register params use direct store, for stack params load first
+                        if (paramReg < 4) {
+                            switch (paramReg) {
+                                case 0: gen.emitStoreLocal32(offset); break;
+                                case 1: gen.emitStoreLocal32FromX1(offset); break;
+                                case 2: gen.emitStoreLocal32FromX2(offset); break;
+                                case 3: gen.emitStoreLocal32FromX3(offset); break;
+                                default: break;
+                            }
+                        } else {
+                            loadParamToX0(paramReg);
+                            gen.emitStoreLocal32(offset);
                         }
                     }
                     break;
@@ -1672,12 +1683,7 @@ class NativeCompiledFunction : CompiledFunction {
                                 // User args go into x(1+arenaShift), x(2+arenaShift), ...
                                 for (long i = cast(long)argTemps.length - 1; i >= 0; i--) {
                                     gen.emitLoadLocal32(argTemps[cast(size_t)i]);
-                                    switch (cast(int)i + 1 + arenaShift) {
-                                        case 1: gen.emitMoveX0ToX1(); break;
-                                        case 2: gen.emitMoveX0ToX2(); break;
-                                        case 3: gen.emitMoveX0ToX3(); break;
-                                        default: assert(0, "argument register > 3");
-                                    }
+                                    emitMoveX0ToArgRegister(cast(int)i + 1 + arenaShift);
                                 }
 
                                 // Load arena into x1 if callee needs it
@@ -1829,12 +1835,7 @@ class NativeCompiledFunction : CompiledFunction {
                             // Load args into registers (user args after result ptr + arena)
                             for (long i = cast(long)argTemps.length - 1; i >= 0; i--) {
                                 gen.emitLoadPtr(argTemps[cast(size_t)i]);  // 64-bit load
-                                switch (cast(int)i + 1 + arenaShift) {
-                                    case 1: gen.emitMoveX0ToX1(); break;
-                                    case 2: gen.emitMoveX0ToX2(); break;
-                                    case 3: gen.emitMoveX0ToX3(); break;
-                                    default: assert(0, "argument register > 3");
-                                }
+                                emitMoveX0ToArgRegister(cast(int)i + 1 + arenaShift);
                             }
 
                             // Load arena into x1 if callee needs it
@@ -2016,12 +2017,7 @@ class NativeCompiledFunction : CompiledFunction {
                             // User args go into x(1+arenaShift), x(2+arenaShift), ...
                             for (long i = cast(long)argTemps.length - 1; i >= 0; i--) {
                                 gen.emitLoadLocal32(argTemps[cast(size_t)i]);
-                                switch (cast(int)i + 1 + arenaShift) {
-                                    case 1: gen.emitMoveX0ToX1(); break;
-                                    case 2: gen.emitMoveX0ToX2(); break;
-                                    case 3: gen.emitMoveX0ToX3(); break;
-                                    default: assert(0, "argument register > 3");
-                                }
+                                emitMoveX0ToArgRegister(cast(int)i + 1 + arenaShift);
                             }
 
                             // Load arena into x1 if callee needs it
@@ -2939,19 +2935,6 @@ class NativeCompiledFunction : CompiledFunction {
                     }
                     int arenaShift = calleeNeedsArena ? 1 : 0;
 
-                    if (call.arguments.length + arenaShift > 4) {
-                        throw new Exception("Native backend: more than 4 arguments not yet supported");
-                    }
-
-                    // Check if any argument contains a function call that would clobber registers
-                    bool hasNestedCalls = false;
-                    foreach (arg; call.arguments) {
-                        if (containsCall(arg)) {
-                            hasNestedCalls = true;
-                            break;
-                        }
-                    }
-
                     // Resolve callee FunctionDecl for ref param checking
                     FunctionDecl calleeFunc = null;
                     if (auto cd = callName in functionDecls)
@@ -2959,77 +2942,33 @@ class NativeCompiledFunction : CompiledFunction {
                     log(3, "native: call '", callName, "' calleeFunc=",
                         calleeFunc !is null ? calleeFunc.name : "null");
 
-                    if (hasNestedCalls && call.arguments.length > 1) {
-                        // Save arguments to temp slots, then load into registers
-                        // This prevents register clobbering from nested calls
-                        auto mark = temps.save();
-                        size_t[] argSlots;
-                        foreach (i, arg; call.arguments) {
-                            // ref param: push address instead of value
-                            if (calleeFunc && i < calleeFunc.parameters.length &&
-                                calleeFunc.parameters[i].isRef) {
-                                if (auto argIdent = cast(IdentifierExpression)arg) {
-                                    if (auto argInfo = argIdent.name in localVars) {
-                                        gen.emitStackAddress(argInfo.offset);
-                                    } else {
-                                        throw new NativeCompileError("ref argument must be a variable", arg.location);
-                                    }
+                    // Compile all args to temp slots, then dispatch to registers/stack
+                    auto mark = temps.save();
+                    size_t[] argSlots;
+                    foreach (i, arg; call.arguments) {
+                        if (calleeFunc && i < calleeFunc.parameters.length &&
+                            calleeFunc.parameters[i].isRef) {
+                            if (auto argIdent = cast(IdentifierExpression)arg) {
+                                if (auto argInfo = argIdent.name in localVars) {
+                                    gen.emitStackAddress(argInfo.offset);
                                 } else {
                                     throw new NativeCompileError("ref argument must be a variable", arg.location);
                                 }
                             } else {
-                                compileExpression(arg);
+                                throw new NativeCompileError("ref argument must be a variable", arg.location);
                             }
-                            size_t slot = temps.alloc(8);
-                            gen.emitStorePtr(slot);
-                            argSlots ~= slot;
+                        } else {
+                            compileExpression(arg);
                         }
-                        // Load from temp slots into argument registers (reverse order!)
-                        // Arena shifts user args: x0 -> x(0+shift), etc.
-                        for (long i = cast(long)argSlots.length - 1; i >= 0; i--) {
-                            gen.emitLoadPtr(argSlots[cast(size_t)i]);
-                            switch (cast(int)i + arenaShift) {
-                                case 0: break;  // already in x0
-                                case 1: gen.emitMoveX0ToX1(); break;
-                                case 2: gen.emitMoveX0ToX2(); break;
-                                case 3: gen.emitMoveX0ToX3(); break;
-                                default: assert(0, "argument register > 3");
-                            }
-                        }
-                        temps.restore(mark);
-                    } else {
-                        // No nested calls - use the faster direct approach
-                        // Compile arguments in reverse order into their target registers
-                        for (long i = cast(long)call.arguments.length - 1; i >= 0; i--) {
-                            // ref param: push address instead of value
-                            if (calleeFunc && i < calleeFunc.parameters.length &&
-                                calleeFunc.parameters[cast(size_t)i].isRef) {
-                                log(2, "native: ref arg ", i, " for '", calleeFunc.name, "'");
-                                if (auto argIdent = cast(IdentifierExpression)call.arguments[cast(size_t)i]) {
-                                    if (auto argInfo = argIdent.name in localVars) {
-                                        log(2, "native:   emitting stack address at offset ", argInfo.offset);
-                                        gen.emitStackAddress(argInfo.offset);
-                                    } else {
-                                        throw new NativeCompileError("ref argument must be a variable",
-                                            call.arguments[cast(size_t)i].location);
-                                    }
-                                } else {
-                                    throw new NativeCompileError("ref argument must be a variable",
-                                        call.arguments[cast(size_t)i].location);
-                                }
-                            } else {
-                                compileExpression(call.arguments[cast(size_t)i]);
-                            }
-                            // Move x0 to target register (shifted by arena)
-                            switch (cast(int)i + arenaShift) {
-                                case 0: break;  // already in x0
-                                case 1: gen.emitMoveX0ToX1(); break;
-                                case 2: gen.emitMoveX0ToX2(); break;
-                                case 3: gen.emitMoveX0ToX3(); break;
-                                default: assert(0, "argument register > 3");
-                            }
-                        }
+                        size_t slot = temps.alloc(8);
+                        gen.emitStorePtr(slot);
+                        argSlots ~= slot;
                     }
+
+                    // Emit stack overflow args (8+ after arena shift)
+                    int totalArgs = cast(int)call.arguments.length + arenaShift;
+                    uint stackArgBytes = emitCallArgs(argSlots, arenaShift, totalArgs);
+                    temps.restore(mark);
 
                     // Load arena into x0 if callee needs it
                     if (calleeNeedsArena) {
@@ -3038,6 +2977,11 @@ class NativeCompiledFunction : CompiledFunction {
 
                     // Emit the call (BL instruction)
                     gen.emitCall(*labelPtr);
+
+                    // Clean up stack overflow args
+                    if (stackArgBytes > 0)
+                        gen.emitAddSPImm(stackArgBytes);
+
                     // Check for exception after call (preserves return value in x0)
                     emitNativeExceptionCheckWithValue();
                     // Result is in x0
@@ -3047,20 +2991,15 @@ class NativeCompiledFunction : CompiledFunction {
                 // Milestone 88/90: Check if this is a host function call
                 ulong hostSlot = hostFunctions.getFunctionSlotAddress(funcIdent.name);
                 if (hostSlot != 0) {
-                    if (call.arguments.length > 3) {
-                        throw new Exception("Native backend: host functions support max 3 arguments (x0 reserved for context)");
+                    if (call.arguments.length > 7) {
+                        throw new Exception("Native backend: host functions support max 7 arguments (x0 reserved for context)");
                     }
-                    
-                    // Compile arguments in reverse order into x0-x2
-                    // emitHostCall will shift them to x1-x3 and inject context in x0
+
+                    // Compile arguments in reverse order into x0-x6
+                    // emitHostCall will shift them to x1-x7 and inject context in x0
                     for (long i = cast(long)call.arguments.length - 1; i >= 0; i--) {
                         compileExpression(call.arguments[i]);
-                        switch (i) {
-                            case 0: break;  // already in x0
-                            case 1: gen.emitMoveX0ToX1(); break;
-                            case 2: gen.emitMoveX0ToX2(); break;
-                            default: break;
-                        }
+                        emitMoveX0ToArgRegister(cast(int) i);
                     }
                     
                     // Emit host call with context injection
@@ -3072,17 +3011,19 @@ class NativeCompiledFunction : CompiledFunction {
 
                 // Object-mode extern(C): emit BL with relocation (linker resolves)
                 if (objectMode && funcIdent.name in objectExternFunctions) {
-                    emitCCallArgs(call.arguments);
+                    uint stackBytes = emitCCallArgs(call.arguments);
                     emitObjectExternalCall(funcIdent.name);
+                    if (stackBytes > 0) gen.emitAddSPImm(stackBytes);
                     return;
                 }
 
                 // Check if this is an FFI call (extern(C) import resolved via dlsym)
                 if (auto ffiSlot = funcIdent.name in ffiSlots) {
-                    emitCCallArgs(call.arguments);
+                    uint stackBytes = emitCCallArgs(call.arguments);
 
                     // Call through the function pointer slot (no context injection)
                     gen.emitIndirectCall(*ffiSlot);
+                    if (stackBytes > 0) gen.emitAddSPImm(stackBytes);
                     // Result is in x0
                     return;
                 }
@@ -3621,13 +3562,7 @@ class NativeCompiledFunction : CompiledFunction {
             // Compile arguments into registers (shifted by arena)
             for (long i = cast(long)tmplInst.callArguments.length - 1; i >= 0; i--) {
                 compileExpression(tmplInst.callArguments[i]);
-                switch (cast(int)i + arenaShift) {
-                    case 0: break;
-                    case 1: gen.emitMoveX0ToX1(); break;
-                    case 2: gen.emitMoveX0ToX2(); break;
-                    case 3: gen.emitMoveX0ToX3(); break;
-                    default: assert(0, "argument register > 3");
-                }
+                emitMoveX0ToArgRegister(cast(int)i + arenaShift);
             }
 
             // Load arena into x0 if callee needs it
@@ -4355,24 +4290,14 @@ class NativeCompiledFunction : CompiledFunction {
             // Load from temp slots into registers (reverse order to not clobber)
             for (long i = cast(long)argSlots.length - 1; i >= 0; i--) {
                 gen.emitLoadPtr(argSlots[cast(size_t)i]);
-                switch (cast(int)i + 1 + arenaShift) {
-                    case 1: gen.emitMoveX0ToX1(); break;
-                    case 2: gen.emitMoveX0ToX2(); break;
-                    case 3: gen.emitMoveX0ToX3(); break;
-                    default: assert(0, "method argument register > 3");
-                }
+                emitMoveX0ToArgRegister(cast(int)i + 1 + arenaShift);
             }
             temps.restore(mark);
         } else {
             // No nested calls - direct register assignment (reverse order)
             for (long i = cast(long)args.length - 1; i >= 0; i--) {
                 compileExpression(args[i]);
-                switch (cast(int)i + 1 + arenaShift) {
-                    case 1: gen.emitMoveX0ToX1(); break;
-                    case 2: gen.emitMoveX0ToX2(); break;
-                    case 3: gen.emitMoveX0ToX3(); break;
-                    default: assert(0, "method argument register > 3");
-                }
+                emitMoveX0ToArgRegister(cast(int)i + 1 + arenaShift);
             }
         }
     }
@@ -4574,52 +4499,74 @@ class NativeCompiledFunction : CompiledFunction {
      * Builds the error string at compile time, stores in __DATA,__const,
      * emits ADRP+ADD to load its address, then calls write(2, msg, len) + _exit(1).
      */
-    /// Compile arguments into x0-x3 following the C calling convention.
-    /// Used for both JIT FFI calls and object-mode extern(C) calls.
-    private void emitCCallArgs(Expression[] arguments) {
-        if (arguments.length > 4)
-            throw new Exception("Native backend: C calls support max 4 arguments");
+    /// Compile arguments following ARM64 AAPCS64 C calling convention.
+    /// Args 0-7 in x0-x7, args 8+ on the stack.
+    /// Returns bytes of stack space allocated for overflow args (caller must clean up).
+    private uint emitCCallArgs(Expression[] arguments) {
+        // Always use temp-slot path for safety (handles nested calls, any arg count)
+        auto mark = temps.save();
+        size_t[] argSlots;
+        foreach (i, arg; arguments) {
+            compileExpression(arg);
+            size_t slot = temps.alloc(8);
+            gen.emitStorePtr(slot);
+            argSlots ~= slot;
+        }
+        uint stackBytes = emitCallArgs(argSlots, 0, cast(int)arguments.length);
+        temps.restore(mark);
+        return stackBytes;
+    }
 
-        bool hasNestedCalls = false;
-        foreach (arg; arguments) {
-            if (containsCall(arg)) {
-                hasNestedCalls = true;
-                break;
+    /// Move x0 into the ARM64 argument register for position `idx` (0-7).
+    private void emitMoveX0ToArgRegister(int idx) {
+        switch (idx) {
+            case 0: break;  // already in x0
+            case 1: gen.emitMoveX0ToX1(); break;
+            case 2: gen.emitMoveX0ToX2(); break;
+            case 3: gen.emitMoveX0ToX3(); break;
+            case 4: gen.emitMoveX0ToX4(); break;
+            case 5: gen.emitMoveX0ToX5(); break;
+            case 6: gen.emitMoveX0ToX6(); break;
+            case 7: gen.emitMoveX0ToX7(); break;
+            default: break;  // stack args handled by emitCallArgs
+        }
+    }
+
+    /// Emit argument loading for a function call following ARM64 AAPCS64.
+    /// Args 0-7 go in x0-x7, args 8+ go on the stack.
+    /// argSlots = temp slot offsets for each compiled argument.
+    /// arenaShift = 1 if callee needs arena in x0 (shifts user args by 1).
+    /// totalArgs = total args including arena shift.
+    /// Returns bytes of stack space allocated for overflow args (caller must clean up).
+    private uint emitCallArgs(size_t[] argSlots, int arenaShift, int totalArgs) {
+        // Calculate stack overflow
+        int stackArgs = totalArgs > 8 ? totalArgs - 8 : 0;
+        uint stackBytes = 0;
+        if (stackArgs > 0) {
+            stackBytes = cast(uint)((stackArgs * 8 + 15) & ~15);  // 16-byte aligned
+            gen.emitSubSPImm(stackBytes);
+        }
+
+        // Store stack args (positions 8+) first — they reference SP which we just adjusted
+        for (int i = 0; i < stackArgs; i++) {
+            int argIdx = 8 - arenaShift + i;  // index into argSlots
+            if (argIdx >= 0 && argIdx < cast(int)argSlots.length) {
+                gen.emitLoadPtr(argSlots[argIdx]);
+                gen.emitStorePtrToSP(cast(uint)(i * 8));
             }
         }
 
-        if (hasNestedCalls && arguments.length > 1) {
-            auto mark = temps.save();
-            size_t[] argSlots;
-            foreach (i, arg; arguments) {
-                compileExpression(arg);
-                size_t slot = temps.alloc(8);
-                gen.emitStorePtr(slot);
-                argSlots ~= slot;
-            }
-            for (long i = cast(long)argSlots.length - 1; i >= 0; i--) {
-                gen.emitLoadPtr(argSlots[cast(size_t)i]);
-                switch (cast(int)i) {
-                    case 0: break;
-                    case 1: gen.emitMoveX0ToX1(); break;
-                    case 2: gen.emitMoveX0ToX2(); break;
-                    case 3: gen.emitMoveX0ToX3(); break;
-                    default: assert(0, "C call argument register > 3");
-                }
-            }
-            temps.restore(mark);
-        } else {
-            for (long i = cast(long)arguments.length - 1; i >= 0; i--) {
-                compileExpression(arguments[i]);
-                switch (cast(int)i) {
-                    case 0: break;
-                    case 1: gen.emitMoveX0ToX1(); break;
-                    case 2: gen.emitMoveX0ToX2(); break;
-                    case 3: gen.emitMoveX0ToX3(); break;
-                    default: assert(0, "C call argument register > 3");
-                }
+        // Load register args (0-7) from temp slots in reverse order
+        int regArgs = totalArgs > 8 ? 8 : totalArgs;
+        for (int i = regArgs - 1; i >= arenaShift; i--) {
+            int argIdx = i - arenaShift;
+            if (argIdx >= 0 && argIdx < cast(int)argSlots.length) {
+                gen.emitLoadPtr(argSlots[argIdx]);
+                emitMoveX0ToArgRegister(i);
             }
         }
+
+        return stackBytes;
     }
 
     private void emitRuntimeError(string errorKind, string fileName, uint line) {
