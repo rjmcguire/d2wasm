@@ -2860,7 +2860,7 @@ class NativeCompiledFunction : CompiledFunction {
                     case VarKind.scalar:
                         if (isF64ElementType(info.elementType))
                             gen.emitLoadLocalF64(info.offset);
-                        else if (isI64ElementType(info.elementType))
+                        else if (isI64ElementType(info.elementType) || info.isRawPointer || info.isRef)
                             gen.emitLoadPtr(info.offset);
                         else
                             gen.emitLoadLocal32(info.offset);

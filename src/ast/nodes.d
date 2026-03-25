@@ -825,8 +825,14 @@ class ArrayType : Type {
         }
         return elementType.size() * 1;  // Fallback for non-literal sizes
     }
-    
-    
+
+    /// Static array alignment = element alignment (not total size).
+    /// Dynamic array alignment = pointer size (inherited from size()).
+    override size_t alignment() const {
+        if (arraySize) return elementType.alignment();
+        return size();  // dynamic array: pointer-sized
+    }
+
     override string toString() const {
         if (arraySize) {
             return format("%s[%s]", elementType.toString(), arraySize.toString());
