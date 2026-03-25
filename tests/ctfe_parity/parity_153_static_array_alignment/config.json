@@ -1,0 +1,7 @@
+{
+  "name": "static_array_alignment",
+  "description": "Static array alignment uses element alignment, not total size — struct field layout correctness",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 42
+}

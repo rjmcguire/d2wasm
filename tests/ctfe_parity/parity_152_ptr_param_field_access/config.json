@@ -1,0 +1,7 @@
+{
+  "name": "ptr_param_field_access",
+  "description": "Pointer parameter field read/write — 64-bit pointer must not be truncated to 32-bit",
+  "type": "ffi_exec",
+  "expected_result": 42,
+  "compiler_args": ["--target=arm64-macos"]
+}

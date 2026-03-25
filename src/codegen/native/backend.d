@@ -2464,6 +2464,26 @@ class NativeCompiledFunction : CompiledFunction {
         return false;
     }
     
+    /**
+     * Check if an expression might clobber x1 during compilation.
+     * The binary expression handler saves one operand in x1 while compiling
+     * the other, so any sub-expression that uses x1 as scratch must be detected.
+     * This recursively looks through wrappers (Cast, Unary) to find the real node.
+     */
+    private bool mightClobberX1(Expression expr) {
+        if (expr is null) return false;
+        if (containsFunctionCall(expr)) return true;
+        if (cast(BinaryExpression)expr !is null) return true;
+        if (cast(IndexExpression)expr !is null) return true;
+        if (cast(MemberExpression)expr !is null) return true;
+        // Look through transparent wrappers
+        if (auto castExpr = cast(CastExpression)expr)
+            return mightClobberX1(castExpr.expression);
+        if (auto unaryExpr = cast(UnaryExpression)expr)
+            return mightClobberX1(unaryExpr.operand);
+        return false;
+    }
+
     /// Check if a Type is f64 (double/float).
     private static bool isF64ElementType(Type t) {
         if (auto bt = cast(BasicType)t)
@@ -2636,10 +2656,7 @@ class NativeCompiledFunction : CompiledFunction {
 
             // i64 integer path: 64-bit arithmetic in x0/x1
             if (isI64Expression(binOp.left) || isI64Expression(binOp.right)) {
-                bool leftMightClobber64 = containsFunctionCall(binOp.left) ||
-                                          cast(BinaryExpression)binOp.left !is null ||
-                                          cast(IndexExpression)binOp.left !is null ||
-                                          cast(MemberExpression)binOp.left !is null;
+                bool leftMightClobber64 = mightClobberX1(binOp.left);
                 compileExpression(binOp.right);
                 if (leftMightClobber64) {
                     auto mark = temps.save();
@@ -2677,11 +2694,9 @@ class NativeCompiledFunction : CompiledFunction {
             }
 
             // Check if left operand might clobber x1 (function call, nested binary expr, index expr,
-            // or member expr whose object evaluation uses x1 for address calculation)
-            bool leftMightClobber = containsFunctionCall(binOp.left) ||
-                                    cast(BinaryExpression)binOp.left !is null ||
-                                    cast(IndexExpression)binOp.left !is null ||
-                                    cast(MemberExpression)binOp.left !is null;
+            // or member expr whose object evaluation uses x1 for address calculation).
+            // Must look through wrappers like CastExpression and UnaryExpression.
+            bool leftMightClobber = mightClobberX1(binOp.left);
 
             // Compile right operand first (into x0)
             compileExpression(binOp.right);

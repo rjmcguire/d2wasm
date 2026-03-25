@@ -1,0 +1,7 @@
+{
+  "name": "large_struct_slice_copy",
+  "description": "Slice copy after large struct — x9 clobber by emitStoreLocal32 large-offset path",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 42
+}
