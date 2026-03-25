@@ -30,6 +30,7 @@ import semantic.symbol_table;
 import semantic.type_checker;
 import codegen.emitter;
 import codegen.backend;
+import codegen.emitter_cache : EmitterCache, EmitterCacheStats;
 import incremental.dep_graph : DeclDependencyGraph;
 import incremental.graph_builder : GraphBuilder;
 import diagnostic.error_format : printError;
@@ -1165,10 +1166,10 @@ private ubyte[32] computeErrorHash(string msg) {
  * transitively dirty functions, then evict them from the emitter's code cache.
  * Shared by both disk-based and warm-state cache paths.
  */
-private void invalidateFromDepGraph(Emitter)(
+private void invalidateFromDepGraph(
     DeclDependencyGraph oldGraph,
     GraphBuilder graphBuilder,
-    Emitter emitter)
+    EmitterCache emitter)
 {
     import diagnostic.log : log;
 

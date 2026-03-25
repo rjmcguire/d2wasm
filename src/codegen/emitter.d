@@ -18,6 +18,7 @@ module codegen.emitter;
 
 import codegen.wasm.types;
 import codegen.wasm.func_context : FuncContext;
+import codegen.emitter_cache : EmitterCache, EmitterCacheStats;
 import codegen.wasm.sections;
 import codegen.target : WasmVtablePacking, sliceInfo;
 import codegen.param_layout;
@@ -97,7 +98,7 @@ enum EmitPhase {
 // Binary Emitter
 //==============================================================================
 
-class BinaryEmitter {
+class BinaryEmitter : EmitterCache {
     // Package-visible for FuncContext access
     package {
         FuncSig[] types;
@@ -314,14 +315,8 @@ class BinaryEmitter {
     /**
      * Get cache statistics.
      */
-    struct CacheStats {
-        size_t totalFunctions;
-        size_t cacheHits;
-        size_t cacheMisses;
-    }
-    
-    CacheStats getCacheStats() {
-        CacheStats stats;
+    EmitterCacheStats getCacheStats() {
+        EmitterCacheStats stats;
         // Exclude builtins (f.decl is null) — they're deterministic, not cached
         size_t builtinCount = 0;
         foreach (f; functions)

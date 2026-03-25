@@ -11,20 +11,14 @@ import codegen.native.backend : NativeCompiledFunction;
 import codegen.target : sliceInfo, SliceInfo;
 import codegen.mangle : computeMangledName;
 import codegen.function_collector;
+import codegen.emitter_cache : EmitterCache, EmitterCacheStats;
 import cache.entry : CacheEntry, SourceHash;
 import ast.nodes;
 import semantic.symbol_table;
 import semantic.modules_context : ModulesContext;
 import semantic.module_ : Module;
 
-/// Cache hit/miss statistics for native compilation
-struct NativeCacheStats {
-    size_t totalFunctions;
-    size_t cacheHits;
-    size_t cacheMisses;
-}
-
-class NativeModuleEmitter {
+class NativeModuleEmitter : EmitterCache {
     private SymbolTable symbolTable;
 
     // Cache state (mirrors BinaryEmitter's cache interface)
@@ -67,8 +61,8 @@ class NativeModuleEmitter {
     }
 
     /// Get cache statistics
-    NativeCacheStats getCacheStats() {
-        NativeCacheStats stats;
+    EmitterCacheStats getCacheStats() {
+        EmitterCacheStats stats;
         stats.totalFunctions = codeCache.length;
         stats.cacheHits = cacheHits.length;
         stats.cacheMisses = stats.totalFunctions - stats.cacheHits;
