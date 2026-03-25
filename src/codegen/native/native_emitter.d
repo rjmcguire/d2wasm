@@ -10,12 +10,29 @@ import codegen.native.macho_writer;
 import codegen.native.backend : NativeCompiledFunction;
 import codegen.target : sliceInfo, SliceInfo;
 import codegen.mangle : computeMangledName;
+import codegen.function_collector;
+import cache.entry : CacheEntry, SourceHash;
 import ast.nodes;
 import semantic.symbol_table;
 import semantic.modules_context : ModulesContext;
+import semantic.module_ : Module;
+
+/// Cache hit/miss statistics for native compilation
+struct NativeCacheStats {
+    size_t totalFunctions;
+    size_t cacheHits;
+    size_t cacheMisses;
+}
 
 class NativeModuleEmitter {
     private SymbolTable symbolTable;
+
+    // Cache state (mirrors BinaryEmitter's cache interface)
+    private string sourceText;
+    private ubyte[][string] codeCache;       // mangledName → cached native code bytes
+    private SourceHash[string] sourceHashes; // mangledName → source hash
+    private bool[string] cacheHits;          // track which functions used cache
+    private string[string] funcSourceText;   // mangledName → module source text (for hash computation)
 
     this(SymbolTable st) {
         this.symbolTable = st;
@@ -23,66 +40,127 @@ class NativeModuleEmitter {
         sliceInfo = SliceInfo(8);
     }
 
-    /// Compile all modules to a Mach-O .o file.
-    ubyte[] emit(ModulesContext modulesCtx) {
-        Declaration[] allDecls;
-        foreach (mod; modulesCtx.modulesInOrder())
-            allDecls ~= mod.ast;
-        return emit(allDecls);
+    /// Set source text for hash computation
+    void setSourceText(string source) {
+        this.sourceText = source;
     }
 
-    /// Compile declarations to a Mach-O .o file.
-    /// Returns the .o bytes ready to write to disk.
-    ubyte[] emit(Declaration[] decls) {
-        // Collect functions and extern(C) imports
+    /// Pre-populate the code cache with previously compiled function code.
+    void setCodeCache(CacheEntry[] entries) {
+        foreach (entry; entries) {
+            codeCache[entry.memberName] = entry.wasmBytes.dup;
+            sourceHashes[entry.memberName] = entry.sourceHash;
+        }
+    }
+
+    /// Get all emitted function code as cache entries.
+    CacheEntry[] getEmittedCode() {
+        CacheEntry[] results;
+        foreach (name, bytes; codeCache) {
+            CacheEntry entry;
+            entry.memberName = name;
+            entry.sourceHash = (name in sourceHashes) ? sourceHashes[name] : SourceHash.init;
+            entry.wasmBytes = bytes;  // field name is "wasmBytes" but works for any bytes
+            results ~= entry;
+        }
+        return results;
+    }
+
+    /// Get cache statistics
+    NativeCacheStats getCacheStats() {
+        NativeCacheStats stats;
+        stats.totalFunctions = codeCache.length;
+        stats.cacheHits = cacheHits.length;
+        stats.cacheMisses = stats.totalFunctions - stats.cacheHits;
+        return stats;
+    }
+
+    /// Evict dirty entries from cache
+    void evictFromCache(const(string[]) dirtyNames) {
+        foreach (name; dirtyNames) {
+            codeCache.remove(name);
+            sourceHashes.remove(name);
+        }
+    }
+
+    /// Compile all modules to a Mach-O .o file.
+    /// Processes per-module to preserve module context for source hashing.
+    ubyte[] emit(ModulesContext modulesCtx) {
+        auto perModule = collectFunctionsPerModule(modulesCtx);
+
+        // Merge all modules into flat lists for the backend,
+        // but do per-module cache checking with correct source text
         FunctionDecl[] funcs;
         FunctionDecl mainFunc;
         ImportedFunctionDecl[] imports;
+        ubyte[][string] cachedBytes;
 
-        foreach (decl; decls) {
-            if (auto imp = cast(ImportedFunctionDecl)decl) {
-                if (imp.moduleName == "ffi")
-                    imports ~= imp;
-                continue;
-            }
-            // Collect methods from struct/class declarations
-            if (auto aggDecl = cast(AggregateDecl)decl) {
-                if (auto classDecl = cast(ClassDecl)decl) {
-                    if (classDecl.isObjC) {
-                        // ObjC classes: only collect methods with D bodies
-                        foreach (member; classDecl.members) {
-                            auto method = cast(FunctionDecl)member;
-                            if (method is null) continue;
-                            if (method.body_ is null) continue;
-                            funcs ~= method;
+        foreach (ref mf; perModule) {
+            imports ~= mf.imports;
+
+            // Use this module's source text for per-function cache checks
+            string modSource = mf.mod.sourceText;
+
+            foreach (func; mf.functions) {
+                funcs ~= func;
+                if (func.name == "main")
+                    mainFunc = func;
+
+                // Track per-function source text for cache hash computation
+                string name = mangledNameOf(func);
+                funcSourceText[name] = modSource;
+                if (name in codeCache && modSource.length > 0) {
+                    auto loc = func.location;
+                    if (loc.endOffset > loc.startOffset && loc.endOffset <= modSource.length) {
+                        auto currentHash = CacheEntry.computeHash(
+                            modSource[loc.startOffset .. loc.endOffset]);
+                        if (name in sourceHashes && sourceHashes[name] == currentHash) {
+                            cachedBytes[name] = codeCache[name];
+                            cacheHits[name] = true;
                         }
-                        continue;
                     }
                 }
-                foreach (member; aggDecl.members) {
-                    auto method = cast(FunctionDecl)member;
-                    if (method is null) continue;
-                    if (method.body_ is null) continue;
-                    if (method.isTemplate) continue;
-                    funcs ~= method;
-                }
-                continue;
             }
-            auto funcDecl = cast(FunctionDecl)decl;
-            if (funcDecl is null) continue;
-            if (funcDecl.body_ is null) continue;     // forward declaration
-            if (funcDecl.isTemplate) continue;          // template (not instantiation)
-
-            funcs ~= funcDecl;
-            if (funcDecl.name == "main")
-                mainFunc = funcDecl;
         }
 
+        return emitFunctions(funcs, mainFunc, imports, cachedBytes);
+    }
+
+    /// Compile declarations to a Mach-O .o file (single-module path).
+    /// Returns the .o bytes ready to write to disk.
+    ubyte[] emit(Declaration[] decls) {
+        auto collected = collectFunctions(decls);
+
+        // Build per-function cache lookup using the emitter's sourceText
+        ubyte[][string] cachedBytes;
+        if (sourceText.length > 0 && codeCache.length > 0) {
+            foreach (func; collected.functions) {
+                string name = mangledNameOf(func);
+                if (name !in codeCache) continue;
+                auto loc = func.location;
+                if (loc.endOffset > loc.startOffset && loc.endOffset <= sourceText.length) {
+                    auto currentHash = CacheEntry.computeHash(
+                        sourceText[loc.startOffset .. loc.endOffset]);
+                    if (name in sourceHashes && sourceHashes[name] == currentHash) {
+                        cachedBytes[name] = codeCache[name];
+                        cacheHits[name] = true;
+                    }
+                }
+            }
+        }
+
+        return emitFunctions(collected.functions, collected.mainFunc, collected.imports, cachedBytes);
+    }
+
+    /// Core emission: compile functions to Mach-O .o bytes.
+    private ubyte[] emitFunctions(FunctionDecl[] funcs, FunctionDecl mainFunc,
+                                  ImportedFunctionDecl[] imports, ubyte[][string] cachedBytes) {
         if (mainFunc is null)
             throw new Exception("No main() function found");
 
-        // Compile all functions in object mode (relocatable buffer, no CTFE infrastructure)
-        auto compiled = new NativeCompiledFunction(funcs, symbolTable, true, imports);
+        // Compile functions in object mode, injecting cached bytes where available
+        auto compiled = new NativeCompiledFunction(
+            funcs, symbolTable, true, imports, cachedBytes);
 
         // Look up main's offset using its mangled name (symbol table sets mangledName
         // during type checking, e.g. "main" → "_D4test4mainFZi")
@@ -139,6 +217,29 @@ class NativeModuleEmitter {
             size_t off = compiled.getFunctionOffset(key);
             if (off != size_t.max)
                 writer.addLocalSymbol(key, 1, off);
+        }
+
+        // Capture per-function code into cache for next compilation
+        foreach (ref info; compiled.getPerFunctionCode()) {
+            auto funcBytes = NativeCompiledFunction.extractFunctionBytes(code, info);
+            if (funcBytes !is null) {
+                codeCache[info.mangledName] = funcBytes;
+                // Compute and store source hash using per-module source text
+                foreach (func; funcs) {
+                    if (mangledNameOf(func) == info.mangledName) {
+                        string src = (info.mangledName in funcSourceText)
+                            ? funcSourceText[info.mangledName]
+                            : sourceText;
+                        auto loc = func.location;
+                        if (src.length > 0 && loc.endOffset > loc.startOffset
+                            && loc.endOffset <= src.length) {
+                            sourceHashes[info.mangledName] = CacheEntry.computeHash(
+                                src[loc.startOffset .. loc.endOffset]);
+                        }
+                        break;
+                    }
+                }
+            }
         }
 
         compiled.dispose(); // free the malloc'd code buffer

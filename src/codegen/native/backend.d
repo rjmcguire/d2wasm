@@ -422,8 +422,10 @@ class NativeCompiledFunction : CompiledFunction {
 
     /// Object-mode constructor: compiles functions into a relocatable buffer for .o output.
     /// Skips CTFE-only infrastructure (exceptions, host functions, data section).
+    /// If cachedCode is provided, cached functions are injected instead of compiled.
     this(FunctionDecl[] funcs, SymbolTable st, bool objectModeFlag,
-         ImportedFunctionDecl[] imports = null) {
+         ImportedFunctionDecl[] imports = null,
+         ubyte[][string] cachedCode = null) {
         assert(objectModeFlag, "Use other constructors for JIT mode");
         this.objectMode = true;
         this.symbolTable = st;
@@ -450,6 +452,15 @@ class NativeCompiledFunction : CompiledFunction {
 
         log(1, "native: object mode compiling ", funcs.length, " functions");
         foreach (func; funcs) {
+            string name = getMangledName(func);
+            if (cachedCode !is null) {
+                if (auto cached = name in cachedCode) {
+                    // Cache hit: inject pre-compiled bytes instead of compiling
+                    injectCachedFunction(name, *cached);
+                    log(2, "native: cache hit for ", name);
+                    continue;
+                }
+            }
             compileFunction(func);
         }
         log(1, "native: object mode compilation done");
@@ -580,6 +591,20 @@ class NativeCompiledFunction : CompiledFunction {
             case 3: gen.emitMoveX3ToX0(); break;
             default: assert(0, "moveRegToX0: register index > 3 not supported");
         }
+    }
+
+    /// Inject pre-compiled (cached) function bytes into the code buffer.
+    /// Binds the function's label to the injection point and records boundaries.
+    void injectCachedFunction(string name, const ubyte[] cachedBytes) {
+        // Bind function label to current position
+        if (auto labelPtr = name in functionLabels)
+            gen.bindLabel(*labelPtr);
+
+        uint codeStart = gen.pos;
+        gen.emitRawBytes(cachedBytes);
+
+        // Record per-function code boundary
+        functionCodeInfos ~= FunctionCodeInfo(name, codeStart, gen.pos);
     }
 
     private void compileFunction(FunctionDecl func) {

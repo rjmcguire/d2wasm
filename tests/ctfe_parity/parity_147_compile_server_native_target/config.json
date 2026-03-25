@@ -1,7 +1,6 @@
 {
   "name": "compile_server_native_target",
-  "description": "Compile server full cycle with arm64-macos target output",
+  "description": "Persistent code cache with arm64-macos target output",
   "type": "shell",
-  "script": "run_test.sh",
-  "skip_backends": ["native"]
+  "script": "run_test.sh"
 }

@@ -623,52 +623,23 @@ int compileFile(CompilerOptions options) {
                 sliceInfo = SliceInfo(8); // ARM64: 8-byte pointers
 
                 // Collect functions and extern(C) imports from all modules
-                FunctionDecl[] funcs;
-                ImportedFunctionDecl[] imports;
+                import codegen.function_collector : collectFunctions;
+                Declaration[] allNativeDecls;
+                foreach (mod; modulesCtx.modulesInOrder())
+                    allNativeDecls ~= mod.ast;
+                auto collected = collectFunctions(allNativeDecls);
+
+                FunctionDecl[] funcs = collected.functions;
+                ImportedFunctionDecl[] imports = collected.imports;
+
+                // Find entry function
                 string entryName;
-
-                foreach (mod; modulesCtx.modulesInOrder()) {
-                foreach (decl; mod.ast) {
-                    if (auto imp = cast(ImportedFunctionDecl)decl) {
-                        if (imp.moduleName == "ffi")
-                            imports ~= imp;
-                        continue;
+                foreach (func; funcs) {
+                    if (func.name == options.runFunc) {
+                        entryName = func.mangledName ? func.mangledName
+                            : computeMangledName([], func);
                     }
-                    // Collect methods from struct/class declarations
-                    if (auto aggDecl = cast(AggregateDecl)decl) {
-                        if (auto classDecl = cast(ClassDecl)decl) {
-                            if (classDecl.isObjC) {
-                                // ObjC classes: only collect methods with D bodies
-                                foreach (member; classDecl.members) {
-                                    auto method = cast(FunctionDecl)member;
-                                    if (method is null) continue;
-                                    if (method.body_ is null) continue;
-                                    funcs ~= method;
-                                }
-                                continue;
-                            }
-                        }
-                        foreach (member; aggDecl.members) {
-                            auto method = cast(FunctionDecl)member;
-                            if (method is null) continue;
-                            if (method.body_ is null) continue;
-                            if (method.isTemplate) continue;
-                            funcs ~= method;
-                        }
-                        continue;
-                    }
-                    auto funcDecl = cast(FunctionDecl)decl;
-                    if (funcDecl is null) continue;
-                    if (funcDecl.body_ is null) continue;
-                    if (funcDecl.isTemplate) continue;
-
-                    funcs ~= funcDecl;
-                    if (funcDecl.name == options.runFunc) {
-                        entryName = funcDecl.mangledName ? funcDecl.mangledName
-                            : computeMangledName([], funcDecl);
-                    }
-                } // foreach decl
-                } // foreach mod
+                }
 
                 if (entryName.length == 0)
                     throw new Exception("No " ~ options.runFunc ~ "() function found");
@@ -691,15 +662,105 @@ int compileFile(CompilerOptions options) {
             log(1, "Generating ARM64 Mach-O object file...");
 
             import codegen.native.native_emitter : NativeModuleEmitter;
+            import cache.compiler_cache : CompilerCache;
+            import cache.entry : CacheEntry;
 
             auto nativeEmitter = new NativeModuleEmitter(inputModule.symbolTable);
+
+            // Load cache if enabled (same pattern as WASM path)
+            CompilerCache nativeCache;
+            bool nativeUsingWarmState = options.warmState !is null;
+
+            if (nativeUsingWarmState) {
+                // Server mode: use in-memory warm state
+                nativeEmitter.setSourceText(sourceCode);
+                auto ws = options.warmState;
+                if (ws.cachedEntries.length > 0) {
+                    nativeEmitter.setCodeCache(ws.cachedEntries);
+                    log(2, "Native warm state: ", ws.cachedEntries.length, " cached function(s)");
+                }
+                // Pre-evict dirty entries from incremental fileChanged
+                if (options.pendingEvictions.length > 0) {
+                    nativeEmitter.evictFromCache(options.pendingEvictions);
+                    log(2, "Native pre-evicted ", options.pendingEvictions.length,
+                        " function(s) from incremental change detection");
+                }
+                // Dep-graph invalidation using warm state's graph
+                if (graphBuilder !is null && ws.depGraph !is null)
+                    invalidateFromDepGraph(ws.depGraph, graphBuilder, nativeEmitter);
+            } else if (options.cacheDir.length > 0) {
+                // Disk mode: load from CompilerCache
+                string moduleName = baseName(stripExtension(options.inputFile));
+                nativeCache = new CompilerCache(options.cacheDir, moduleName);
+                nativeEmitter.setSourceText(sourceCode);
+                auto cachedEntries = nativeCache.getEntries();
+                if (cachedEntries.length > 0) {
+                    nativeEmitter.setCodeCache(cachedEntries);
+                    log(2, "Native loaded ", cachedEntries.length, " cached function(s)");
+                }
+                // Dep-graph invalidation from disk
+                if (graphBuilder !is null) {
+                    string graphPath = buildPath(options.cacheDir, moduleName ~ "_dep_graph.bin");
+                    auto oldGraph = DeclDependencyGraph.loadFromFile(graphPath);
+                    if (oldGraph !is null)
+                        invalidateFromDepGraph(oldGraph, graphBuilder, nativeEmitter);
+                    graphBuilder.graph.saveToFile(graphPath);
+                }
+            }
+
             ubyte[] objBytes = nativeEmitter.emit(modulesCtx);
+
+            // Cache storage
+            auto nativeStats = nativeEmitter.getCacheStats();
+
+            if (nativeUsingWarmState) {
+                // Server mode: update warm state
+                auto ws = options.warmState;
+                ws.cachedEntries = nativeEmitter.getEmittedCode();
+                if (graphBuilder !is null)
+                    ws.depGraph = graphBuilder.graph;
+                ws.sourceText = sourceCode;
+                ws.lastCacheHits = nativeStats.cacheHits;
+                ws.lastCacheMisses = nativeStats.cacheMisses;
+                // Seed tree-sitter parser for incremental reparse
+                if (ws.parser is null) {
+                    import parser.tree_sitter_c : TreeSitterParser;
+                    ws.parser = new TreeSitterParser();
+                    ws.parser.parseString(sourceCode);
+                }
+                log(2, "Native warm state updated: ", nativeStats.cacheHits, " hits, ",
+                    nativeStats.cacheMisses, " misses");
+            } else if (nativeCache !is null) {
+                // Disk mode: flush to staging
+                auto emittedCode = nativeEmitter.getEmittedCode();
+                nativeCache.storeEntries(emittedCode);
+                nativeCache.flush();
+                log(2, "Native cache: ", nativeStats.cacheHits, " hits, ",
+                    nativeStats.cacheMisses, " misses");
+
+                // JSON output mode
+                if (options.jsonOutput) {
+                    import std.json;
+                    string moduleName = baseName(stripExtension(options.inputFile));
+                    JSONValue json;
+                    json["module"] = moduleName;
+                    json["input"] = options.inputFile;
+                    json["output"] = options.outputFile;
+                    json["success"] = true;
+                    json["wasmSize"] = objBytes.length;  // field name kept for compat
+                    json["cacheHits"] = cast(int)nativeStats.cacheHits;
+                    json["cacheMisses"] = cast(int)nativeStats.cacheMisses;
+                    writeln(json.toPrettyString());
+                    return 0;
+                }
+            }
 
             if (options.compileOnly) {
                 // -c: write .o and stop
                 std.file.write(options.outputFile, objBytes);
                 log(1, "Generated ", objBytes.length, " bytes → ", options.outputFile);
-                writeln("Successfully compiled to ", options.outputFile);
+                if (!nativeUsingWarmState)
+                    writeln("Successfully compiled to ", options.outputFile);
             } else {
                 // Compile + link: write .o to temp, invoke cc to link
                 string objFile = options.outputFile ~ ".o";
@@ -735,7 +796,8 @@ int compileFile(CompilerOptions options) {
                 // Clean up temp .o
                 std.file.remove(objFile);
 
-                writeln("Successfully compiled to ", options.outputFile);
+                if (!nativeUsingWarmState)
+                    writeln("Successfully compiled to ", options.outputFile);
             }
 
             // Print CTFE stats at verbosity 2+
@@ -1103,10 +1165,10 @@ private ubyte[32] computeErrorHash(string msg) {
  * transitively dirty functions, then evict them from the emitter's code cache.
  * Shared by both disk-based and warm-state cache paths.
  */
-private void invalidateFromDepGraph(
+private void invalidateFromDepGraph(Emitter)(
     DeclDependencyGraph oldGraph,
     GraphBuilder graphBuilder,
-    BinaryEmitter emitter)
+    Emitter emitter)
 {
     import diagnostic.log : log;
 

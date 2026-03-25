@@ -1,0 +1,6 @@
+{
+  "name": "lsp_full_cycle",
+  "description": "LSP server initialize/shutdown handshake with diagnostics",
+  "type": "shell",
+  "script": "run_test.sh"
+}

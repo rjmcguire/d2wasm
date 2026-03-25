@@ -347,7 +347,15 @@ struct NativeCodeGen {
         *cast(uint*)(base + offset) = instr;
         offset += 4;
     }
-    
+
+    /// Emit a block of raw bytes (for injecting cached function code)
+    void emitRawBytes(const ubyte[] bytes) {
+        if (offset + bytes.length > capacity) return;
+        import core.stdc.string : memcpy;
+        memcpy(base + offset, bytes.ptr, bytes.length);
+        offset += cast(uint)bytes.length;
+    }
+
     // ========== Function Calls ==========
     
     /// Emit BL (branch with link) to a label

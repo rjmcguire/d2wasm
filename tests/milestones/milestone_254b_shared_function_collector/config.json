@@ -1,0 +1,6 @@
+{
+  "name": "shared_function_collector",
+  "description": "Shared function collector used by both WASM and native emitters",
+  "type": "native_exec",
+  "expected_exit": 7
+}
