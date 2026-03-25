@@ -293,6 +293,15 @@ class NativeCompiledFunction : CompiledFunction {
     static struct ObjectReloc { uint codeOffset; string symbol; RelocType type; uint sectionIndex = 0; }
     private ObjectReloc[] objectRelocations;
 
+    /// Per-function code boundary info (for caching)
+    static struct FunctionCodeInfo {
+        string mangledName;
+        uint codeStart;
+        uint codeEnd;
+    }
+    private FunctionCodeInfo[] functionCodeInfos;
+    private string currentCompilingFunction;  // set during compileFunction for relocation tagging
+
     private string[] objectExternalSymbols;
     private uint objectDataSymCount;
     private bool[string] objectExternFunctions;  // extern(C) function names for object mode
@@ -471,6 +480,15 @@ class NativeCompiledFunction : CompiledFunction {
     /// Get relocations (ADRP/ADD/BL fixups for the linker).
     const(ObjectReloc)[] getObjectRelocations() { return objectRelocations; }
 
+    /// Get per-function code boundaries (for caching).
+    const(FunctionCodeInfo)[] getPerFunctionCode() { return functionCodeInfos; }
+
+    /// Extract a function's code bytes from a finalized code buffer.
+    static ubyte[] extractFunctionBytes(const ubyte[] code, FunctionCodeInfo info) {
+        if (info.codeEnd > code.length) return null;
+        return code[info.codeStart .. info.codeEnd].dup;
+    }
+
     /// Get external symbol names (undefined symbols resolved by the linker).
     const(string)[] getObjectExternalSymbols() { return objectExternalSymbols; }
 
@@ -572,16 +590,20 @@ class NativeCompiledFunction : CompiledFunction {
         string name = getMangledName(func);
         log(2, "native: compileFunction ", name, " (isMethod=", func.isMethod, ", parent=", func.parent ? func.parent.name : "null", ")");
 
+        // Record per-function code start (for caching)
+        uint funcCodeStart = gen.pos;
+        currentCompilingFunction = name;
+
         // Bind function label (for multi-function mode)
         if (auto labelPtr = name in functionLabels) {
             gen.bindLabel(*labelPtr);
         }
-        
+
         // For single-function mode, track entry point
         if (functionLabels.length == 0) {
             entryPoint = gen.pos;
         }
-        
+
         // Reset local tracking for this function
         localVars.clear();
         nextLocalOffset = 0;
@@ -899,6 +921,10 @@ class NativeCompiledFunction : CompiledFunction {
         } else {
             gen.emitEpilogue();
         }
+
+        // Record per-function code boundary (for caching)
+        functionCodeInfos ~= FunctionCodeInfo(name, funcCodeStart, gen.pos);
+        currentCompilingFunction = null;
     }
 
     // ========== Exception Handling Helpers ==========

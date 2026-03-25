@@ -1,0 +1,6 @@
+{
+  "name": "per_function_boundaries",
+  "description": "Native backend tracks per-function code boundaries for caching",
+  "type": "native_exec",
+  "expected_exit": 7
+}

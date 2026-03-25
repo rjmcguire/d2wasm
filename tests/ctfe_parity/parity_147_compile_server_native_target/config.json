@@ -1,0 +1,7 @@
+{
+  "name": "compile_server_native_target",
+  "description": "Compile server full cycle with arm64-macos target output",
+  "type": "shell",
+  "script": "run_test.sh",
+  "skip_backends": ["native"]
+}

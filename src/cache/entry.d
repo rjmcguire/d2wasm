@@ -293,4 +293,32 @@ unittest {
         
         writeln("✓ Tree-sitter S-expression available");
     }
+
+    // Test 7: Cache handles non-WASM binary data (native ARM64 bytes)
+    {
+        // Simulate ARM64 machine code (arbitrary bytes, not valid WASM)
+        ubyte[] nativeBytes = [
+            0xFD, 0x7B, 0xBF, 0xA9,  // stp x29, x30, [sp, #-16]!  (prologue)
+            0xFD, 0x03, 0x00, 0x91,  // mov x29, sp
+            0x00, 0x00, 0x80, 0xD2,  // mov x0, #0
+            0xFD, 0x7B, 0xC1, 0xA8,  // ldp x29, x30, [sp], #16     (epilogue)
+            0xC0, 0x03, 0x5F, 0xD6,  // ret
+        ];
+
+        CacheEntry entry;
+        entry.memberName = "_D4test4mainFZi";
+        entry.sourceHash = CacheEntry.computeHash("int main() { return 0; }");
+        entry.wasmBytes = nativeBytes;  // field name is "wasmBytes" but it's just ubyte[]
+
+        // Serialize and deserialize
+        auto serialized = entry.serialize();
+        assert(serialized.length > 0, "Serialized native cache entry should not be empty");
+
+        auto deserialized = CacheEntry.deserialize(serialized);
+        assert(deserialized.memberName == "_D4test4mainFZi");
+        assert(deserialized.wasmBytes == nativeBytes, "Native bytes should survive round-trip");
+        assert(deserialized.sourceHash == entry.sourceHash);
+
+        writeln("✓ Cache handles native ARM64 binary data");
+    }
 }

@@ -1,0 +1,6 @@
+{
+  "name": "cache_native_bytes",
+  "description": "Cache infrastructure handles native ARM64 binary data (not just WASM)",
+  "type": "unittest",
+  "module": "cache.entry"
+}
