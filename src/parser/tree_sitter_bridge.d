@@ -3234,6 +3234,8 @@ class TreeSitterBridge {
                     }
                 }
                 throw new ParseError("Empty primary_expression", loc);
+            case "super":
+                return new IdentifierExpression(loc, "super");
             default:
                 throw new ParseError("Unknown expression node: " ~ nodeType, loc);
         }

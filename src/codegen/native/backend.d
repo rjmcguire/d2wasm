@@ -4431,6 +4431,12 @@ class NativeCompiledFunction : CompiledFunction {
             throw new Exception("Method call on non-identifier object not yet supported in native backend");
         }
 
+        // ObjC super call: super.method() inside an extern(Objective-C) class
+        if (objIdent.name == "super" && currentMethodClass !is null && currentMethodClass.isObjC) {
+            emitObjCMsgSendSuper(currentMethodClass, memberExpr.memberName, args);
+            return;
+        }
+
         // ObjC static call: type name as receiver (e.g., NSObject.alloc())
         if (objIdent.name !in localVars) {
             auto sym = symbolTable.lookupSymbol(objIdent.name);
@@ -6472,6 +6478,103 @@ class NativeCompiledFunction : CompiledFunction {
 
         // Step 7: Call objc_msgSend
         emitExternalOrHostCall("objc_msgSend");
+
+        temps.restore(mark);
+        // Result is in x0
+    }
+
+    /// Emit super.method() via objc_msgSendSuper for D-defined ObjC classes.
+    /// ARM64: objc_msgSendSuper(objc_super* super, SEL sel, ...args)
+    /// objc_super = { id receiver (self), Class super_class }
+    private void emitObjCMsgSendSuper(ClassDecl classDecl, string methodName, Expression[] args) {
+        // Find the method and selector
+        FunctionDecl method = null;
+        string selector = methodName;
+
+        // Search class members first
+        foreach (member; classDecl.members) {
+            if (auto fd = cast(FunctionDecl)member) {
+                if (fd.name == methodName) {
+                    method = fd;
+                    if (fd.objcSelector !is null && fd.objcSelector.length > 0)
+                        selector = fd.objcSelector;
+                    break;
+                }
+            }
+        }
+        // Search parent ObjC interface
+        if (classDecl.interfaces.length > 0) {
+            if (auto ut = cast(UserType) classDecl.interfaces[0]) {
+                if (auto ifaceDecl = cast(InterfaceDecl) ut.declaration) {
+                    foreach (m; ifaceDecl.methods) {
+                        if (m.name == methodName) {
+                            if (method is null) method = m;
+                            if (m.objcSelector !is null && m.objcSelector.length > 0)
+                                selector = m.objcSelector;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        auto mark = temps.save();
+        // Allocate objc_super struct on temp stack: { id receiver, Class super_class } = 16 bytes
+        size_t superStructTemp = temps.alloc(16);
+        size_t selectorTemp = temps.alloc(8);
+
+        // Step 1: Build objc_super struct
+        // receiver = self (this pointer)
+        gen.emitLoadPtr(currentThisOffset);
+        gen.emitStorePtr(superStructTemp);          // objc_super.receiver = self
+
+        // super_class = objc_getClass(superclassName)
+        string superName = "NSObject";
+        if (classDecl.interfaces.length > 0) {
+            if (auto ut = cast(UserType) classDecl.interfaces[0])
+                if (auto ifaceDecl = cast(InterfaceDecl) ut.declaration)
+                    if (ifaceDecl.isObjC)
+                        superName = ifaceDecl.name;
+        }
+        emitCStringLoad(superName);
+        emitExternalOrHostCall("objc_getClass");
+        gen.emitStorePtr(superStructTemp + 8);      // objc_super.super_class
+
+        // Step 2: sel_registerName(selector)
+        emitCStringLoad(selector);
+        emitExternalOrHostCall("sel_registerName");
+        gen.emitStorePtr(selectorTemp);
+
+        // Step 3: Compile user args → x2-x7 (same as objc_msgSend)
+        size_t[] intArgTemps;
+        foreach (i, arg; args) {
+            compileExpression(arg);
+            size_t t = temps.alloc(8);
+            gen.emitStorePtr(t);
+            intArgTemps ~= t;
+        }
+
+        // Step 4: Load integer args into x2-x7
+        foreach (i, t; intArgTemps) {
+            gen.emitLoadPtr(t);
+            switch (cast(int) i) {
+                case 0: gen.emitMoveX0ToX2(); break;
+                case 1: gen.emitMoveX0ToX3(); break;
+                case 2: gen.emitMoveX0ToX4(); break;
+                case 3: gen.emitMoveX0ToX5(); break;
+                default: break;
+            }
+        }
+
+        // Step 5: x1 = SEL
+        gen.emitLoadPtr(selectorTemp);
+        gen.emitMoveX0ToX1();
+
+        // Step 6: x0 = &objc_super (pointer to the struct on stack)
+        gen.emitStackAddress(superStructTemp);
+
+        // Step 7: Call objc_msgSendSuper
+        emitExternalOrHostCall("objc_msgSendSuper");
 
         temps.restore(mark);
         // Result is in x0

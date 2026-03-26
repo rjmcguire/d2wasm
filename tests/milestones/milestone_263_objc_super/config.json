@@ -1,0 +1,8 @@
+{
+    "name": "objc_super",
+    "description": "D-defined ObjC class calls super.init() via objc_msgSendSuper",
+    "type": "ffi_exec",
+    "expected_result": 42,
+    "compiler_args": ["--target=arm64-macos"],
+    "link_frameworks": ["Foundation"]
+}

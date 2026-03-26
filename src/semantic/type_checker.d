@@ -1277,6 +1277,16 @@ class TypeChecker {
 
         // Handle struct method calls (obj.method()) or UFCS (obj.func() -> func(obj))
         if (auto memberExpr = cast(MemberExpression)expr.function_) {
+            // ObjC super call: super.method() — skip normal checkExpression for "super"
+            if (auto superIdent = cast(IdentifierExpression)memberExpr.object) {
+                if (superIdent.name == "super" && currentClassDecl !is null && currentClassDecl.isObjC) {
+                    // Check arguments
+                    foreach (arg; expr.arguments)
+                        checkExpression(arg);
+                    // Return type from parent interface or own class method
+                    return checkMemberExpression(memberExpr);
+                }
+            }
             Type objectType = checkExpression(memberExpr.object);
             bool foundMethod = false;
 
@@ -2984,6 +2994,32 @@ class TypeChecker {
                 // Rewrite to plain identifier and resolve normally
                 auto rewritten = new IdentifierExpression(expr.location, expr.memberName);
                 return checkIdentifierExpression(rewritten);
+            }
+        }
+
+        // ObjC super call: super.method() inside an extern(Objective-C) class
+        if (auto ident = cast(IdentifierExpression)expr.object) {
+            if (ident.name == "super" && currentClassDecl !is null && currentClassDecl.isObjC) {
+                // Find method in parent ObjC interface
+                if (currentClassDecl.interfaces.length > 0) {
+                    if (auto ut = cast(UserType) currentClassDecl.interfaces[0]) {
+                        if (auto ifaceDecl = cast(InterfaceDecl) ut.declaration) {
+                            foreach (m; ifaceDecl.methods) {
+                                if (m.name == expr.memberName)
+                                    return m.returnType;
+                            }
+                        }
+                    }
+                }
+                // Check the class's own methods
+                foreach (member; currentClassDecl.members) {
+                    if (auto fd = cast(FunctionDecl)member)
+                        if (fd.name == expr.memberName)
+                            return fd.returnType;
+                }
+                throw new TypeError(
+                    "No method '" ~ expr.memberName ~ "' found on super class of " ~ currentClassDecl.name,
+                    expr.location);
             }
         }
 
