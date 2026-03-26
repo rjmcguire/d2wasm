@@ -1,0 +1,7 @@
+{
+    "name": "objc_imports",
+    "description": "Shared ObjC binding modules via import objc.foundation",
+    "type": "ffi_exec",
+    "expected_result": 42,
+    "compiler_args": ["--target=arm64-macos"]
+}

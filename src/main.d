@@ -346,6 +346,21 @@ int compileFile(CompilerOptions options) {
         modRegistry.searchPaths = options.importPaths.dup;
         // Also search relative to the input file's directory
         modRegistry.searchPaths ~= dirName(absolutePath(options.inputFile));
+        // Search runtime/ for ObjC binding modules (objc/foundation.d etc.)
+        {
+            string exeDir = dirName(thisExePath());
+            string[] rtPaths = [
+                buildPath(exeDir, "..", "runtime"),
+                buildPath(exeDir, "runtime"),
+                "runtime",
+            ];
+            foreach (p; rtPaths) {
+                if (exists(p) && isDir(p)) {
+                    modRegistry.searchPaths ~= p;
+                    break;
+                }
+            }
+        }
 
         // Register runtime/object.d if not already in registry
         if (modRegistry.lookupModule("object") is null) {
