@@ -1,0 +1,8 @@
+{
+    "name": "objc_f32_hfa",
+    "description": "ObjC method with Float32 HFA struct parameter — s-registers instead of d-registers",
+    "type": "ffi_exec",
+    "expected_result": 42,
+    "compiler_args": ["--target=arm64-macos"],
+    "link_frameworks": ["Foundation"]
+}

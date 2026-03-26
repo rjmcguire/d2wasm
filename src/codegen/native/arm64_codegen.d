@@ -922,6 +922,97 @@ struct NativeCodeGen {
         emitRaw32(0x9E670003);
     }
 
+    /// Bitwise transfer w0 to s0 (for f32 HFA struct field passing)
+    void emitMoveW0ToS0() {
+        // FMOV s0, w0 = 0x1E270000
+        emitRaw32(0x1E270000);
+    }
+
+    /// Bitwise transfer w0 to s1 (for f32 HFA struct field passing)
+    void emitMoveW0ToS1() {
+        // FMOV s1, w0 = 0x1E270001
+        emitRaw32(0x1E270001);
+    }
+
+    /// Bitwise transfer w0 to s2 (for f32 HFA struct field passing)
+    void emitMoveW0ToS2() {
+        // FMOV s2, w0 = 0x1E270002
+        emitRaw32(0x1E270002);
+    }
+
+    /// Bitwise transfer w0 to s3 (for f32 HFA struct field passing)
+    void emitMoveW0ToS3() {
+        // FMOV s3, w0 = 0x1E270003
+        emitRaw32(0x1E270003);
+    }
+
+    /// Store s0 to local at offset (32-bit f32)
+    void emitStoreLocalF32(size_t offset) {
+        // STR s0, [sp, #offset] — imm12 scaled by 4
+        if (offset / 4 < 4096) {
+            emitRaw32(0xBD0003E0 | (cast(uint)(offset / 4) << 10));
+        } else {
+            emitComputeSPOffset(offset);
+            emitRaw32(0xBD000120);  // STR s0, [x9]
+        }
+    }
+
+    /// Store s1 to local at offset (32-bit f32)
+    void emitStoreLocalF32FromS1(size_t offset) {
+        if (offset / 4 < 4096) {
+            emitRaw32(0xBD0003E1 | (cast(uint)(offset / 4) << 10));
+        } else {
+            emitComputeSPOffset(offset);
+            emitRaw32(0xBD000121);  // STR s1, [x9]
+        }
+    }
+
+    /// Store s2 to local at offset (32-bit f32)
+    void emitStoreLocalF32FromS2(size_t offset) {
+        if (offset / 4 < 4096) {
+            emitRaw32(0xBD0003E2 | (cast(uint)(offset / 4) << 10));
+        } else {
+            emitComputeSPOffset(offset);
+            emitRaw32(0xBD000122);  // STR s2, [x9]
+        }
+    }
+
+    /// Store s3 to local at offset (32-bit f32)
+    void emitStoreLocalF32FromS3(size_t offset) {
+        if (offset / 4 < 4096) {
+            emitRaw32(0xBD0003E3 | (cast(uint)(offset / 4) << 10));
+        } else {
+            emitComputeSPOffset(offset);
+            emitRaw32(0xBD000123);  // STR s3, [x9]
+        }
+    }
+
+    /// Load from local to s0 (32-bit f32)
+    void emitLoadLocalF32(size_t offset) {
+        // LDR s0, [sp, #offset] — imm12 scaled by 4
+        if (offset / 4 < 4096) {
+            emitRaw32(0xBD4003E0 | (cast(uint)(offset / 4) << 10));
+        } else {
+            emitComputeSPOffset(offset);
+            emitRaw32(0xBD400120);  // LDR s0, [x9]
+        }
+    }
+
+    /// Convert f64 (d0) to f32 (s0): FCVT s0, d0
+    void emitConvertF64ToF32() {
+        emitRaw32(0x1E624000);
+    }
+
+    /// Convert f32 (s0) to f64 (d0): FCVT d0, s0
+    void emitConvertF32ToF64() {
+        emitRaw32(0x1E22C000);
+    }
+
+    /// Convert f32 (s0) to int (w0): FCVTZS w0, s0
+    void emitConvertF32ToI32() {
+        emitRaw32(0x1E380000);
+    }
+
     /// Load 64-bit value from [x0 + offset] into x0 (for reading struct fields via pointer)
     void emitLoadPtrFromX0Offset(size_t offset) {
         // LDR x0, [x0, #imm12] where imm12 is offset/8 (scaled by 8 for 64-bit)

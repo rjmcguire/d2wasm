@@ -2503,10 +2503,19 @@ class NativeCompiledFunction : CompiledFunction {
         return false;
     }
 
-    /// Check if a Type is f64 (double/float).
+    /// Check if a Type is f64 (double) or f32 (float) — i.e. any float type.
+    /// Used for register classification (both use d-registers during computation).
     private static bool isF64ElementType(Type t) {
         if (auto bt = cast(BasicType)t)
             return bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32;
+        return false;
+    }
+
+    /// Check if a Type is specifically f32 (float), not f64 (double).
+    /// Used for 4-byte struct field stores/loads and narrowing conversions.
+    private static bool isF32ElementType(Type t) {
+        if (auto bt = cast(BasicType)t)
+            return bt.kind == BasicType.Kind.Float32;
         return false;
     }
 
@@ -3602,6 +3611,11 @@ class NativeCompiledFunction : CompiledFunction {
                                 gen.emitImm32(stencil_load_imm32, cast(int)field.offset);
                                 gen.emit(stencil_add_i64);
                             }
+                        } else if (isF32ElementType(field.type)) {
+                            // f32: load 4-byte float via pointer, widen to d0
+                            gen.emitLoadFromPointer(field.offset);  // LDR w0, [x0, #off]
+                            gen.emitMoveW0ToS0();
+                            gen.emitConvertF32ToF64();
                         } else if (isF64ElementType(field.type)) {
                             if (field.offset > 0) {
                                 gen.emitMoveX0ToX1();
@@ -3617,12 +3631,18 @@ class NativeCompiledFunction : CompiledFunction {
                         size_t totalOffset = varInfo.offset + field.offset;
                         if (field.type.isAggregate()) {
                             gen.emitStackAddress(totalOffset);
+                        } else if (isF32ElementType(field.type)) {
+                            // f32: load 4 bytes into s0, widen to d0 for computation
+                            gen.emitLoadLocalF32(totalOffset);
+                            gen.emitConvertF32ToF64();
                         } else if (isF64ElementType(field.type)) {
                             gen.emitLoadLocalF64(totalOffset);
                         } else if (isI64ElementType(field.type)) {
                             gen.emitLoadLocal(totalOffset);  // 64-bit integer
-                        } else {
+                        } else if (field.type.size() <= 4) {
                             gen.emitLoadLocal32(totalOffset);
+                        } else {
+                            assert(0, "Unsupported field type for load: " ~ field.name ~ " in " ~ aggregateDecl.name);
                         }
                     }
                     return;
@@ -4828,14 +4848,20 @@ class NativeCompiledFunction : CompiledFunction {
                 auto retType = method.returnType.resolve();
                 retStruct = retType.asStruct();
             }
-            int hfaCount = detectHFA(retStruct);
+            HFAInfo hfa = detectHFAInfo(retStruct);
 
-            if (hfaCount > 0) {
-                // HFA: result in d0, d1, d2, d3 (Float64)
+            if (hfa.count > 0 && hfa.isFloat32) {
+                // f32 HFA: result in s0, s1, s2, s3
+                gen.emitStoreLocalF32(resultOffset);
+                if (hfa.count >= 2) gen.emitStoreLocalF32FromS1(resultOffset + 4);
+                if (hfa.count >= 3) gen.emitStoreLocalF32FromS2(resultOffset + 8);
+                if (hfa.count >= 4) gen.emitStoreLocalF32FromS3(resultOffset + 12);
+            } else if (hfa.count > 0) {
+                // f64 HFA: result in d0, d1, d2, d3
                 gen.emitStoreLocalF64(resultOffset);
-                if (hfaCount >= 2) gen.emitStoreLocalF64FromD1(resultOffset + 8);
-                if (hfaCount >= 3) gen.emitStoreLocalF64FromD2(resultOffset + 16);
-                if (hfaCount >= 4) gen.emitStoreLocalF64FromD3(resultOffset + 24);
+                if (hfa.count >= 2) gen.emitStoreLocalF64FromD1(resultOffset + 8);
+                if (hfa.count >= 3) gen.emitStoreLocalF64FromD2(resultOffset + 16);
+                if (hfa.count >= 4) gen.emitStoreLocalF64FromD3(resultOffset + 24);
             } else {
                 // Non-HFA: result in x0 (≤8 bytes) or x0+x1 (≤16 bytes)
                 gen.emitStorePtr(resultOffset);
@@ -6094,12 +6120,18 @@ class NativeCompiledFunction : CompiledFunction {
                     // Direct instance on stack
                     compileExpression(assign.right);
                     size_t totalOffset = varInfo.offset + field.offset;
-                    if (isF64ElementType(field.type)) {
+                    if (isF32ElementType(field.type)) {
+                        // f32: narrow d0→s0 then store 4 bytes
+                        gen.emitConvertF64ToF32();
+                        gen.emitStoreLocalF32(totalOffset);
+                    } else if (isF64ElementType(field.type)) {
                         gen.emitStoreLocalF64(totalOffset);
                     } else if (isI64ElementType(field.type)) {
                         gen.emitStoreLocal(totalOffset);  // 64-bit integer
-                    } else {
+                    } else if (field.type.size() <= 4) {
                         gen.emitStoreLocal32(totalOffset);
+                    } else {
+                        assert(0, "Unsupported field type for store: " ~ field.name ~ " in " ~ aggregateDecl.name);
                     }
                 }
                 return;
@@ -6281,18 +6313,34 @@ class NativeCompiledFunction : CompiledFunction {
         emitObjCMsgSend(classDecl.name, selector, receiver, args, isStatic, method);
     }
 
-    /// Check if a struct is an HFA (Homogeneous Float Aggregate) of Float64.
-    /// ARM64 ABI: HFA with ≤4 same-type float fields passed in d0-d3.
-    /// Returns field count if HFA, 0 otherwise.
-    private int detectHFA(StructDecl sd) {
+    /// HFA (Homogeneous Float Aggregate) detection result.
+    private struct HFAInfo {
+        int count;       // Number of fields (0 = not HFA)
+        bool isFloat32;  // true for float (s-regs), false for double (d-regs)
+    }
+
+    /// Check if a struct is an HFA (Homogeneous Float Aggregate).
+    /// ARM64 ABI: HFA with ≤4 same-type float fields passed in s0-s3 (Float32) or d0-d3 (Float64).
+    private HFAInfo detectHFAInfo(StructDecl sd) {
         if (sd is null || sd.fields.length == 0 || sd.fields.length > 4)
-            return 0;
-        foreach (f; sd.fields) {
+            return HFAInfo(0, false);
+        auto firstBt = cast(BasicType) sd.fields[0].type;
+        if (firstBt is null)
+            return HFAInfo(0, false);
+        if (firstBt.kind != BasicType.Kind.Float64 && firstBt.kind != BasicType.Kind.Float32)
+            return HFAInfo(0, false);
+        // All fields must be the same float type
+        foreach (f; sd.fields[1 .. $]) {
             auto bt = cast(BasicType) f.type;
-            if (bt is null || bt.kind != BasicType.Kind.Float64)
-                return 0;
+            if (bt is null || bt.kind != firstBt.kind)
+                return HFAInfo(0, false);
         }
-        return cast(int) sd.fields.length;
+        return HFAInfo(cast(int) sd.fields.length, firstBt.kind == BasicType.Kind.Float32);
+    }
+
+    /// Backwards-compatible wrapper: returns field count if HFA (f32 or f64), 0 otherwise.
+    private int detectHFA(StructDecl sd) {
+        return detectHFAInfo(sd).count;
     }
 
     /// Core objc_msgSend emission with HFA struct support.
@@ -6326,37 +6374,45 @@ class NativeCompiledFunction : CompiledFunction {
         foreach (i, arg; args) {
             // Check if this parameter is an HFA struct
             StructDecl paramStruct = null;
-            int hfaCount = 0;
+            HFAInfo hfa;
             if (method !is null && i < method.parameters.length) {
                 // UserType must be resolved against symbol table for asStruct() to work
                 if (auto ut = cast(UserType) method.parameters[i].type)
                     ut.ensureResolved(symbolTable);
                 auto paramType = method.parameters[i].type.resolve();
                 paramStruct = paramType.asStruct();
-                hfaCount = detectHFA(paramStruct);
+                hfa = detectHFAInfo(paramStruct);
             }
 
-            if (hfaCount > 0 && floatArgIdx + hfaCount <= 4) {
+            if (hfa.count > 0 && floatArgIdx + hfa.count <= 4) {
                 // HFA struct: compile expression → x0 = struct address,
-                // then load each 8-byte double field into d-registers
+                // then load each field into float registers
                 compileExpression(arg);
                 size_t baseTemp = temps.alloc(8);
                 gen.emitStorePtr(baseTemp);
 
                 foreach (fi, field; paramStruct.fields) {
                     gen.emitLoadPtr(baseTemp);
-                    if (field.offset > 0) {
-                        gen.emitLoadPtrFromX0Offset(cast(uint) field.offset);
+                    if (hfa.isFloat32) {
+                        // f32: LDR w0, [x0, #offset] (4-byte load)
+                        gen.emitLoadFromPointer(field.offset);
+                        switch (floatArgIdx) {
+                            case 0: gen.emitMoveW0ToS0(); break;
+                            case 1: gen.emitMoveW0ToS1(); break;
+                            case 2: gen.emitMoveW0ToS2(); break;
+                            case 3: gen.emitMoveW0ToS3(); break;
+                            default: break;
+                        }
                     } else {
-                        // offset 0: LDR x0, [x0] — load first field
-                        gen.emitLoadPtrFromX0Offset(0);
-                    }
-                    switch (floatArgIdx) {
-                        case 0: gen.emitMoveX0ToD0(); break;
-                        case 1: gen.emitMoveX0ToD1(); break;
-                        case 2: gen.emitMoveX0ToD2(); break;
-                        case 3: gen.emitMoveX0ToD3(); break;
-                        default: break;
+                        // f64: LDR x0, [x0, #offset] (8-byte load)
+                        gen.emitLoadPtrFromX0Offset(cast(uint) field.offset);
+                        switch (floatArgIdx) {
+                            case 0: gen.emitMoveX0ToD0(); break;
+                            case 1: gen.emitMoveX0ToD1(); break;
+                            case 2: gen.emitMoveX0ToD2(); break;
+                            case 3: gen.emitMoveX0ToD3(); break;
+                            default: break;
+                        }
                     }
                     floatArgIdx++;
                 }
