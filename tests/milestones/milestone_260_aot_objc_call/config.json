@@ -1,0 +1,6 @@
+{
+    "name": "aot_objc_call",
+    "description": "ObjC interface method calls work in AOT-compiled binaries (objc_msgSend relocations)",
+    "type": "shell",
+    "script": "run_test.sh"
+}
