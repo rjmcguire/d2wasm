@@ -6,3 +6,4 @@ d2wasm
 tests/output_parity/**/test_bin
 tests/milestones/**/test_bin
 
+editor

@@ -1737,7 +1737,14 @@ class NativeCompiledFunction : CompiledFunction {
                 is8ByteScalar = bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32 ||
                                 bt.kind == BasicType.Kind.Int64 || bt.kind == BasicType.Kind.UInt64;
             }
-            if (isSlice || isObjCRef || isPtr || is8ByteScalar) {
+            // Align to 8 bytes for types that use 64-bit load/store instructions
+            // (ARM64 scaled immediates require aligned offsets)
+            bool needsAlign8 = isSlice || isObjCRef || isPtr || is8ByteScalar;
+            if (!needsAlign8 && structType) {
+                // Structs with 8-byte-aligned fields (doubles, pointers) need 8-byte alignment
+                needsAlign8 = structType.aggregateAlign_ >= 8;
+            }
+            if (needsAlign8) {
                 nextLocalOffset = (nextLocalOffset + 7) & ~7;
             }
             NativeLocalInfo nli;
