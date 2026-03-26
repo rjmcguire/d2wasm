@@ -3,9 +3,6 @@
 
 module objc.metal;
 
-import objc.foundation;
-import objc.appkit;
-
 pragma(lib, "/System/Library/Frameworks/Metal.framework/Metal");
 pragma(lib, "/System/Library/Frameworks/QuartzCore.framework/QuartzCore");
 
@@ -31,9 +28,9 @@ interface CAMetalDrawable {
 extern(Objective-C)
 interface MTLDevice {
     MTLCommandQueue newCommandQueue();
-    MTLLibrary newLibraryWithSource(NSString source, long options, long errPtr)
+    MTLLibrary newLibraryWithSource(long source, long options, long errPtr)
         @selector("newLibraryWithSource:options:error:");
-    NSString name();
+    long name();
     long newRenderPipelineStateWithDescriptor(long desc, long error)
         @selector("newRenderPipelineStateWithDescriptor:error:");
     long newBufferWithBytes(ubyte* bytes, long length, long options)
@@ -42,7 +39,7 @@ interface MTLDevice {
 
 extern(Objective-C)
 interface MTLLibrary {
-    long newFunctionWithName(NSString name);
+    long newFunctionWithName(long name) @selector("newFunctionWithName:");
 }
 
 extern(Objective-C)
@@ -52,8 +49,9 @@ interface MTLCommandQueue {
 
 extern(Objective-C)
 interface MTLCommandBuffer {
-    MTLRenderCommandEncoder renderCommandEncoderWithDescriptor(MTLRenderPassDescriptor desc);
-    void presentDrawable(CAMetalDrawable drawable);
+    MTLRenderCommandEncoder renderCommandEncoderWithDescriptor(long desc)
+        @selector("renderCommandEncoderWithDescriptor:");
+    void presentDrawable(long drawable) @selector("presentDrawable:");
     void commit();
     void waitUntilCompleted();
 }

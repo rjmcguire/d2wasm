@@ -603,6 +603,17 @@ class SymbolTable {
         }
         return globalScope.lookupLocal(name);
     }
+
+    /// Look up a symbol in imported module scopes only (no CTFE side effects).
+    /// Used by ensureResolved as a fallback when lookupGlobalSymbol fails.
+    Symbol lookupSymbolInImports(string name) {
+        if (moduleScope is null) return null;
+        foreach (imp; moduleScope.importedModules) {
+            if (auto sym = imp.lookupLocal(name))
+                return sym;
+        }
+        return null;
+    }
     
     /**
      * Get current scope

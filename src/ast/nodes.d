@@ -918,6 +918,12 @@ class UserType : Type {
             if (sym && sym.kind == SymbolKind.Type)
                 declaration = sym.declaration;
         }
+        // Fall back to imported modules (needed for cross-module ObjC interface references)
+        if (declaration is null) {
+            auto sym = symTab.lookupSymbolInImports(name);
+            if (sym && sym.kind == SymbolKind.Type)
+                declaration = sym.declaration;
+        }
         if (declaration is null) {
             import semantic.symbol_table : SemanticError;
             throw new SemanticError(

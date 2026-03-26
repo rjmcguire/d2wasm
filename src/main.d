@@ -453,25 +453,38 @@ int compileFile(CompilerOptions options) {
         auto importResolver = new ImportResolver(modRegistry, parseFn);
         importResolver.resolveImports(inputModule);
 
-        // Collect pragma(lib, ...) from AST — load libraries before CTFE
+        // Collect pragma(lib, ...) from all modules (user + imported) — load libraries before CTFE
         {
             import core.sys.posix.dlfcn : dlopen, RTLD_LAZY, RTLD_GLOBAL;
             string sourceDir = dirName(absolutePath(options.inputFile));
-            foreach (decl; ast) {
-                if (auto pragma_ = cast(PragmaDeclaration)decl) {
-                    if (pragma_.pragmaName == "lib") {
-                        foreach (arg; pragma_.arguments) {
-                            // Resolve relative paths against source file directory
-                            string libPath = arg;
-                            if (!isAbsolute(arg))
-                                libPath = buildPath(sourceDir, arg);
-                            auto handle = dlopen((libPath ~ "\0").ptr, RTLD_LAZY | RTLD_GLOBAL);
-                            if (handle is null) {
-                                log(1, "Warning: pragma(lib) could not load '", libPath, "'");
-                            } else {
-                                log(2, "Loaded pragma(lib): ", libPath);
+
+            // Scan all modules (input + imports) for pragma(lib)
+            Declaration[][] allAsts;
+            allAsts ~= ast;
+            foreach (mod; modRegistry.allModules())
+                if (mod.ast !is null && mod.ast !is ast)
+                    allAsts ~= mod.ast;
+
+            foreach (moduleAst; allAsts) {
+                foreach (decl; moduleAst) {
+                    if (auto pragma_ = cast(PragmaDeclaration)decl) {
+                        if (pragma_.pragmaName == "lib") {
+                            foreach (arg; pragma_.arguments) {
+                                // Resolve relative paths against source file directory
+                                string libPath = arg;
+                                if (!isAbsolute(arg))
+                                    libPath = buildPath(sourceDir, arg);
+                                // Skip duplicates
+                                import std.algorithm : canFind;
+                                if (options.pragmaLibs.canFind(libPath)) continue;
+                                auto handle = dlopen((libPath ~ "\0").ptr, RTLD_LAZY | RTLD_GLOBAL);
+                                if (handle is null) {
+                                    log(1, "Warning: pragma(lib) could not load '", libPath, "'");
+                                } else {
+                                    log(2, "Loaded pragma(lib): ", libPath);
+                                }
+                                options.pragmaLibs ~= libPath;
                             }
-                            options.pragmaLibs ~= libPath;
                         }
                     }
                 }
