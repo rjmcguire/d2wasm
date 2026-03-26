@@ -668,6 +668,25 @@ class TreeSitterBridge {
     }
 
     /**
+     * Auto-derive an ObjC selector from D method name and parameters.
+     * 0 params: "alloc" → "alloc"
+     * 1 param:  "setTitle" → "setTitle:"
+     * N params: "initWithContentRect" + 4 params → "initWithContentRect::::"
+     * For multi-param methods where each param maps to a selector part,
+     * use explicit @selector instead.
+     */
+    private static string deriveObjCSelector(string name, Parameter[] params) {
+        if (params.length == 0)
+            return name;
+        char[] sel;
+        sel ~= name;
+        sel ~= ':';
+        foreach (_; params[1 .. $])
+            sel ~= ':';
+        return cast(string) sel;
+    }
+
+    /**
      * Extract the string content from a string_literal node (handles quoted_string child)
      */
     private string extractStringLiteral(TSNode stringLitNode) {
@@ -1560,6 +1579,10 @@ class TreeSitterBridge {
         if (name.length == 0) return null;
         if (returnType is null) returnType = new BasicType(loc, BasicType.Kind.Void);
 
+        // Auto-derive selector if not explicitly specified
+        if (selector is null)
+            selector = deriveObjCSelector(name, parameters);
+
         auto decl = new FunctionDecl(loc, name, returnType, parameters, null);
         decl.isStatic = isStatic;
         decl.objcSelector = selector;
@@ -1633,6 +1656,10 @@ class TreeSitterBridge {
 
         if (name.length == 0) return null;
         if (returnType is null) returnType = new BasicType(loc, BasicType.Kind.Void);
+
+        // Auto-derive selector if not explicitly specified
+        if (selector is null)
+            selector = deriveObjCSelector(name, parameters);
 
         auto decl = new FunctionDecl(loc, name, returnType, parameters, funcBody);
         decl.isStatic = isStatic;

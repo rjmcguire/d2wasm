@@ -1,0 +1,8 @@
+{
+    "name": "auto_selector",
+    "description": "ObjC methods auto-derive selector from D name + parameter count",
+    "type": "ffi_exec",
+    "expected_result": 42,
+    "compiler_args": ["--target=arm64-macos"],
+    "link_frameworks": ["Foundation"]
+}
