@@ -647,7 +647,8 @@ int compileFile(CompilerOptions options) {
                     throw new Exception("No " ~ options.runFunc ~ "() function found");
 
                 auto compiled = new NativeCompiledFunction(funcs, entryName,
-                    inputModule.symbolTable, options.stackTrace, imports, false);
+                    inputModule.symbolTable, options.stackTrace, imports, false,
+                    null, collected.objcClasses);
                 int result = cast(int) compiled.call([]).intValue;
                 compiled.dispose();
 

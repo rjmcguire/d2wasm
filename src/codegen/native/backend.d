@@ -234,6 +234,7 @@ class NativeCompiledFunction : CompiledFunction {
     // ObjC interface/class tracking
     private InterfaceDecl[string] objcInterfaces;
     private ClassDecl[string] objcClasses;
+    private Label[string] objcTrampolineLabels;  // "ClassName_methodName" → trampoline label
 
     // Vtable infrastructure for class virtual dispatch
     private uint nextNativeTableBase = 0;       // sequential counter for vtable base indices
@@ -355,7 +356,8 @@ class NativeCompiledFunction : CompiledFunction {
     /// Multi-function constructor for CTFE with dependencies (or --run JIT)
     /// Set ctfeMode = false for --run JIT to enable mutable global access.
     this(FunctionDecl[] funcs, string entryFuncName, SymbolTable st, bool enableStackTrace = true,
-            ImportedFunctionDecl[] imports = null, bool ctfeMode = true) {
+            ImportedFunctionDecl[] imports = null, bool ctfeMode = true,
+            ubyte[][string] cachedCode = null, ClassDecl[] objcClassDecls = null) {
         import std.stdio : writeln;
         
         this.funcName = entryFuncName;
@@ -415,6 +417,12 @@ class NativeCompiledFunction : CompiledFunction {
         }
         log(1, "native: JIT compilation done");
 
+        // Emit ObjC method trampolines (must be before finalize — code buffer becomes read-only)
+        if (objcClassDecls !is null) {
+            foreach (classDecl; objcClassDecls)
+                emitObjCMethodTrampolines(classDecl);
+        }
+
         // Set entry point to the entry function
         if (auto entryLabel = entryFuncName in functionLabels) {
             entryPoint = (*entryLabel).offset;
@@ -429,6 +437,10 @@ class NativeCompiledFunction : CompiledFunction {
 
         // Patch vtable entries now that function addresses are resolved
         patchVtableEntries();
+
+        // Register extern(Objective-C) classes with the ObjC runtime (JIT only)
+        if (objcClassDecls !is null && objcClassDecls.length > 0)
+            registerObjCClassesJIT(objcClassDecls);
 
     }
 
@@ -6187,8 +6199,10 @@ class NativeCompiledFunction : CompiledFunction {
             }
         }
 
-        // If method has a D body, call it directly instead of through objc_msgSend
-        if (dBodyMethod !is null) {
+        // If method has a D body and no user params, call it directly (skip objc_msgSend).
+        // For methods with params, we must go through objc_msgSend so the trampoline
+        // handles the calling convention shift (_cmd removal).
+        if (dBodyMethod !is null && args.length == 0) {
             string mangledName = getMangledName(dBodyMethod);
             auto labelPtr = mangledName in functionLabels;
             log(2, "native: ObjC D-body method '", methodName, "' mangled='", mangledName, "' found=", labelPtr !is null);
@@ -6335,6 +6349,184 @@ class NativeCompiledFunction : CompiledFunction {
             throw new Exception("Cannot resolve runtime function: " ~ funcName);
         gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)ptr);
         gen.emitCallIndirectX9();
+    }
+
+    // ---- ObjC JIT class registration infrastructure ----
+
+    /// Emit ARM64 trampolines for ObjC class methods that shift _cmd out of the way.
+    /// ObjC dispatches (self, _cmd, arg0, arg1, ...) but D methods expect (this, arg0, arg1, ...).
+    /// For methods with N user params, we emit: MOV x1,x2 / MOV x2,x3 / ... / B <real_method>
+    /// For 0-param methods, we skip the trampoline and use the method address directly.
+    private void emitObjCMethodTrampolines(ClassDecl classDecl) {
+        foreach (member; classDecl.members) {
+            auto method = cast(FunctionDecl)member;
+            if (method is null || method.body_ is null) continue;
+
+            size_t nParams = method.parameters.length;
+            if (nParams == 0) continue;  // No trampoline needed — _cmd in x1 is harmlessly ignored
+
+            string mangledName = getMangledName(method);
+            auto labelPtr = mangledName in functionLabels;
+            if (labelPtr is null) continue;
+
+            // Create trampoline label
+            string key = classDecl.name ~ "_" ~ method.name;
+            auto trampolineLabel = gen.newLabel();
+            gen.bindLabel(trampolineLabel);
+
+            // Shift registers: x1←x2, x2←x3, ..., x(N)←x(N+1)
+            // Must go forward (x1←x2 before x2←x3) to avoid clobbering
+            foreach (i; 0 .. nParams) {
+                uint dst = cast(uint)(1 + i);   // x1, x2, x3, ...
+                uint src = cast(uint)(2 + i);   // x2, x3, x4, ...
+                if (src <= 7)  // ARM64 ABI: x0-x7 are argument registers
+                    gen.emitMoveXReg(src, dst);
+            }
+
+            // Branch to the real method (resolved during finalize)
+            gen.emitBranch(*labelPtr);
+
+            objcTrampolineLabels[key] = trampolineLabel;
+            log(2, "native: ObjC trampoline for ", classDecl.name, ".", method.name,
+                " (", nParams, " params)");
+        }
+    }
+
+    /// Register extern(Objective-C) classes with the ObjC runtime via dlsym'd runtime functions.
+    /// Called after gen.finalize() when code addresses are resolved.
+    private void registerObjCClassesJIT(ClassDecl[] classDecls) {
+        import core.sys.posix.dlfcn : dlsym;
+        version (OSX) {
+            import core.sys.darwin.dlfcn : RTLD_DEFAULT;
+        } else {
+            import core.sys.posix.dlfcn : RTLD_DEFAULT;
+        }
+
+        // Resolve ObjC runtime functions
+        alias ObjcGetClassFn = extern(C) void* function(const(char)* name);
+        alias ObjcAllocClassPairFn = extern(C) void* function(void* superclass, const(char)* name, size_t extraBytes);
+        alias ClassAddMethodFn = extern(C) bool function(void* cls, void* sel, void* imp, const(char)* types);
+        alias ObjcRegisterClassPairFn = extern(C) void function(void* cls);
+        alias SelRegisterNameFn = extern(C) void* function(const(char)* name);
+
+        auto objc_getClass_fn = cast(ObjcGetClassFn) dlsym(RTLD_DEFAULT, "objc_getClass");
+        auto objc_allocateClassPair_fn = cast(ObjcAllocClassPairFn) dlsym(RTLD_DEFAULT, "objc_allocateClassPair");
+        auto class_addMethod_fn = cast(ClassAddMethodFn) dlsym(RTLD_DEFAULT, "class_addMethod");
+        auto objc_registerClassPair_fn = cast(ObjcRegisterClassPairFn) dlsym(RTLD_DEFAULT, "objc_registerClassPair");
+        auto sel_registerName_fn = cast(SelRegisterNameFn) dlsym(RTLD_DEFAULT, "sel_registerName");
+
+        if (objc_getClass_fn is null || objc_allocateClassPair_fn is null ||
+            class_addMethod_fn is null || objc_registerClassPair_fn is null ||
+            sel_registerName_fn is null) {
+            log(1, "native: ObjC runtime functions not available — skipping class registration");
+            return;
+        }
+
+        foreach (classDecl; classDecls) {
+            // Find superclass (default to NSObject)
+            // ObjC classes move their base to interfaces[0] during type checking
+            string superName = "NSObject";
+            if (classDecl.baseClassDecl !is null)
+                superName = classDecl.baseClassDecl.name;
+            else if (classDecl.interfaces.length > 0) {
+                if (auto ut = cast(UserType) classDecl.interfaces[0]) {
+                    if (auto ifaceDecl = cast(InterfaceDecl) ut.declaration)
+                        if (ifaceDecl.isObjC)
+                            superName = ifaceDecl.name;
+                }
+            }
+
+            void* superclass = objc_getClass_fn((superName ~ '\0').ptr);
+            if (superclass is null) {
+                log(1, "native: ObjC superclass '", superName, "' not found — skipping ", classDecl.name);
+                continue;
+            }
+
+            void* newClass = objc_allocateClassPair_fn(superclass, (classDecl.name ~ '\0').ptr, 0);
+            if (newClass is null) {
+                log(1, "native: objc_allocateClassPair failed for '", classDecl.name, "'");
+                continue;
+            }
+
+            // Add methods
+            int methodCount = 0;
+            foreach (member; classDecl.members) {
+                auto method = cast(FunctionDecl)member;
+                if (method is null || method.body_ is null) continue;
+
+                string selector = method.objcSelector;
+                if (selector is null || selector.length == 0)
+                    selector = method.name;
+
+                void* sel = sel_registerName_fn((selector ~ '\0').ptr);
+
+                // Get the IMP address: trampoline for methods with params, direct for 0-param
+                void* imp;
+                string key = classDecl.name ~ "_" ~ method.name;
+                if (auto trampLabel = key in objcTrampolineLabels) {
+                    imp = cast(void*)(gen.base + trampLabel.offset);
+                } else {
+                    // 0-param method: use compiled function address directly
+                    string mangledName = getMangledName(method);
+                    auto labelPtr = mangledName in functionLabels;
+                    if (labelPtr is null) continue;
+                    imp = cast(void*)(gen.base + labelPtr.offset);
+                }
+
+                // Build type encoding
+                string typeEnc = buildObjCTypeEncodingNative(method);
+
+                bool ok = class_addMethod_fn(newClass, sel, imp, (typeEnc ~ '\0').ptr);
+                if (ok) methodCount++;
+                log(2, "native: class_addMethod ", classDecl.name, " @selector(", selector,
+                    ") enc=", typeEnc, " ok=", ok);
+            }
+
+            objc_registerClassPair_fn(newClass);
+            log(1, "native: registered ObjC class '", classDecl.name, "' with ", methodCount, " methods");
+        }
+    }
+
+    /// Build ObjC type encoding string for a method (mirrors emitter.d:buildObjCTypeEncoding)
+    private static string buildObjCTypeEncodingNative(FunctionDecl method) {
+        char[] enc;
+        enc ~= typeToObjCEncodingNative(method.returnType);
+        enc ~= '@';  // self
+        enc ~= ':';  // _cmd
+        foreach (p; method.parameters)
+            enc ~= typeToObjCEncodingNative(p.type);
+        return cast(string) enc;
+    }
+
+    /// Map a D type to its ObjC type encoding character
+    private static char typeToObjCEncodingNative(Type t) {
+        if (t is null) return 'v';
+        t = t.resolve();
+        if (auto bt = cast(BasicType) t) {
+            final switch (bt.kind) with (BasicType.Kind) {
+                case Bool: return 'B';
+                case Char: return 'c';
+                case Int8: return 'c';
+                case UInt8: return 'C';
+                case Int16: return 's';
+                case UInt16: return 'S';
+                case Int32: return 'i';
+                case UInt32: return 'I';
+                case Int64: return 'q';
+                case UInt64: return 'Q';
+                case Float32: return 'f';
+                case Float64: return 'd';
+                case Void: return 'v';
+            }
+        }
+        if (auto ut = cast(UserType) t) {
+            if (auto ifaceDecl = cast(InterfaceDecl) ut.declaration)
+                if (ifaceDecl.isObjC) return '@';
+            if (auto classDecl = cast(ClassDecl) ut.declaration)
+                if (classDecl.isObjC) return '@';
+        }
+        if (cast(PointerType) t) return '^';
+        return '@';  // default: object pointer
     }
 
     // ---- Vtable infrastructure for class virtual dispatch ----

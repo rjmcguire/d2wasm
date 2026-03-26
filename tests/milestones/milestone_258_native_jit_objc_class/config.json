@@ -1,0 +1,8 @@
+{
+    "name": "native_jit_objc_class",
+    "description": "D-defined extern(Objective-C) class registered with ObjC runtime in native JIT mode",
+    "type": "ffi_exec",
+    "expected_result": 42,
+    "link_frameworks": ["Foundation"],
+    "capability": "Native JIT ObjC class registration via objc_allocateClassPair + class_addMethod + trampoline"
+}

@@ -16,6 +16,7 @@ struct CollectedFunctions {
     FunctionDecl[] functions;
     ImportedFunctionDecl[] imports;
     FunctionDecl mainFunc;  // null if no main()
+    ClassDecl[] objcClasses;  // extern(Objective-C) classes with D-body methods
 }
 
 /// Per-module collected functions (preserves module context)
@@ -43,13 +44,17 @@ CollectedFunctions collectFunctions(Declaration[] decls) {
         if (auto aggDecl = cast(AggregateDecl)decl) {
             if (auto classDecl = cast(ClassDecl)decl) {
                 if (classDecl.isObjC) {
-                    // ObjC classes: only collect methods with D bodies
+                    // ObjC classes: collect methods with D bodies + track the class
+                    bool hasBodyMethods = false;
                     foreach (member; classDecl.members) {
                         auto method = cast(FunctionDecl)member;
                         if (method is null) continue;
                         if (method.body_ is null) continue;
                         result.functions ~= method;
+                        hasBodyMethods = true;
                     }
+                    if (hasBodyMethods)
+                        result.objcClasses ~= classDecl;
                     continue;
                 }
             }

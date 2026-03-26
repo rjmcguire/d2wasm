@@ -380,6 +380,12 @@ struct NativeCodeGen {
     }
     
     /// Move x0 to x1 (for binary op: first arg to second position)
+    /// General MOV xD, xS (ORR xD, xzr, xS). src and dst are register numbers 0-30.
+    void emitMoveXReg(uint src, uint dst) {
+        assert(src <= 30 && dst <= 30, "Invalid register number for MOV");
+        emitRaw32(0xAA0003E0 | (src << 16) | dst);
+    }
+
     void emitMoveX0ToX1() {
         // MOV x1, x0: really ORR x1, xzr, x0 = 0xAA0003E1
         emitRaw32(0xAA0003E1);
