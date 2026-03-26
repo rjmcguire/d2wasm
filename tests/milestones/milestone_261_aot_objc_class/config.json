@@ -1,0 +1,6 @@
+{
+    "name": "aot_objc_class",
+    "description": "D-defined extern(Objective-C) class registered at startup in AOT binary",
+    "type": "shell",
+    "script": "run_test.sh"
+}

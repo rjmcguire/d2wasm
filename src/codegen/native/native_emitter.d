@@ -87,6 +87,7 @@ class NativeModuleEmitter : EmitterCache {
         FunctionDecl[] funcs;
         FunctionDecl mainFunc;
         ImportedFunctionDecl[] imports;
+        ClassDecl[] objcClasses;
         ubyte[][string] cachedBytes;
 
         foreach (ref mf; perModule) {
@@ -117,7 +118,13 @@ class NativeModuleEmitter : EmitterCache {
             }
         }
 
-        return emitFunctions(funcs, mainFunc, imports, cachedBytes);
+        // Collect ObjC classes from all modules
+        foreach (mod; modulesCtx.modulesInOrder()) {
+            auto modCollected = collectFunctions(mod.ast);
+            objcClasses ~= modCollected.objcClasses;
+        }
+
+        return emitFunctions(funcs, mainFunc, imports, cachedBytes, objcClasses);
     }
 
     /// Compile declarations to a Mach-O .o file (single-module path).
@@ -143,18 +150,20 @@ class NativeModuleEmitter : EmitterCache {
             }
         }
 
-        return emitFunctions(collected.functions, collected.mainFunc, collected.imports, cachedBytes);
+        return emitFunctions(collected.functions, collected.mainFunc, collected.imports,
+                             cachedBytes, collected.objcClasses);
     }
 
     /// Core emission: compile functions to Mach-O .o bytes.
     private ubyte[] emitFunctions(FunctionDecl[] funcs, FunctionDecl mainFunc,
-                                  ImportedFunctionDecl[] imports, ubyte[][string] cachedBytes) {
+                                  ImportedFunctionDecl[] imports, ubyte[][string] cachedBytes,
+                                  ClassDecl[] objcClasses = null) {
         if (mainFunc is null)
             throw new Exception("No main() function found");
 
         // Compile functions in object mode, injecting cached bytes where available
         auto compiled = new NativeCompiledFunction(
-            funcs, symbolTable, true, imports, cachedBytes);
+            funcs, symbolTable, true, imports, cachedBytes, objcClasses);
 
         // Look up main's offset using its mangled name (symbol table sets mangledName
         // during type checking, e.g. "main" → "_D4test4mainFZi")
@@ -168,7 +177,12 @@ class NativeModuleEmitter : EmitterCache {
         if (code is null)
             throw new Exception("Failed to finalize native code");
 
-        ubyte[] wrapper = emitMainWrapper(code.length, mainOffset, mainFunc.needsArena);
+        // Check for ObjC class init function
+        size_t objcInitOffset = compiled.getFunctionOffset("__objc_class_init");
+        bool hasObjCInit = objcInitOffset != size_t.max;
+
+        ubyte[] wrapper = emitMainWrapper(code.length, mainOffset, mainFunc.needsArena,
+                                          hasObjCInit ? objcInitOffset : size_t.max);
 
         // Combine: user functions + _main wrapper
         ubyte[] fullCode = code ~ wrapper;
@@ -226,6 +240,13 @@ class NativeModuleEmitter : EmitterCache {
                 writer.addLocalSymbol(key, 1, off);
         }
 
+        // Add ObjC trampoline and init symbols (needed for ADRP/ADD relocations)
+        foreach (name; compiled.getObjCSymbolNames()) {
+            size_t off = compiled.getFunctionOffset(name);
+            if (off != size_t.max)
+                writer.addLocalSymbol(name, 1, off);
+        }
+
         // Capture per-function code into cache for next compilation
         foreach (ref info; compiled.getPerFunctionCode()) {
             auto funcBytes = NativeCompiledFunction.extractFunctionBytes(code, info);
@@ -272,8 +293,10 @@ private:
     ///   BL  <user_main>
     ///   LDP x29, x30, [SP], #16
     ///   RET
-    static ubyte[] emitMainWrapper(size_t codeSize, size_t mainFuncOffset, bool mainNeedsArena) {
-        uint instrCount = mainNeedsArena ? 6 : 5;
+    static ubyte[] emitMainWrapper(size_t codeSize, size_t mainFuncOffset, bool mainNeedsArena,
+                                    size_t objcInitOffset = size_t.max) {
+        bool hasObjCInit = objcInitOffset != size_t.max;
+        uint instrCount = 5 + (mainNeedsArena ? 1 : 0) + (hasObjCInit ? 1 : 0);
         ubyte[] buf = new ubyte[instrCount * 4];
         uint* instrs = cast(uint*)buf.ptr;
 
@@ -284,6 +307,14 @@ private:
 
         // MOV x29, SP  (ADD x29, SP, #0)
         instrs[idx++] = 0x910003FD;
+
+        // BL __objc_class_init (register ObjC classes before main)
+        if (hasObjCInit) {
+            size_t blOff = codeSize + idx * 4;
+            long rel = cast(long)objcInitOffset - cast(long)blOff;
+            int imm = cast(int)(rel / 4);
+            instrs[idx++] = 0x94000000 | (imm & 0x03FFFFFF);
+        }
 
         // MOV x0, #0  (arena = null) — only if main expects arena parameter
         if (mainNeedsArena)

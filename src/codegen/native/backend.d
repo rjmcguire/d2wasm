@@ -449,7 +449,8 @@ class NativeCompiledFunction : CompiledFunction {
     /// If cachedCode is provided, cached functions are injected instead of compiled.
     this(FunctionDecl[] funcs, SymbolTable st, bool objectModeFlag,
          ImportedFunctionDecl[] imports = null,
-         ubyte[][string] cachedCode = null) {
+         ubyte[][string] cachedCode = null,
+         ClassDecl[] objcClassDecls = null) {
         assert(objectModeFlag, "Use other constructors for JIT mode");
         this.objectMode = true;
         this.symbolTable = st;
@@ -491,6 +492,13 @@ class NativeCompiledFunction : CompiledFunction {
             compileFunction(func);
         }
         log(1, "native: object mode compilation done");
+
+        // Emit ObjC method trampolines and class init constructor (AOT)
+        if (objcClassDecls !is null && objcClassDecls.length > 0) {
+            foreach (classDecl; objcClassDecls)
+                emitObjCMethodTrampolines(classDecl);
+            emitObjCClassInitAOT(objcClassDecls);
+        }
     }
 
     /// Get relocatable code bytes (for object mode).
@@ -533,6 +541,19 @@ class NativeCompiledFunction : CompiledFunction {
 
     /// Get external symbol names (undefined symbols resolved by the linker).
     const(string)[] getObjectExternalSymbols() { return objectExternalSymbols; }
+
+    /// Get ObjC-related symbol names (trampolines + init function) for MachO symbol table.
+    string[] getObjCSymbolNames() {
+        string[] names;
+        foreach (key, label; objcTrampolineLabels) {
+            string sym = "__objc_tramp_" ~ key;
+            if (sym in functionLabels)
+                names ~= sym;
+        }
+        if ("__objc_class_init" in functionLabels)
+            names ~= "__objc_class_init";
+        return names;
+    }
 
     /// Append data to the object data section, return its offset. 8-byte aligned.
     private uint appendObjectData(const(ubyte)[] data) {
@@ -6648,6 +6669,103 @@ class NativeCompiledFunction : CompiledFunction {
         }
         if (cast(PointerType) t) return '^';
         return '@';  // default: object pointer
+    }
+
+    // ---- ObjC AOT class registration ----
+
+    /// Emit a constructor function that registers ObjC classes at program startup.
+    /// Called from the main wrapper before main(). Uses callee-saved registers
+    /// (x19-x22) to hold values across external calls.
+    private void emitObjCClassInitAOT(ClassDecl[] classDecls) {
+        assert(objectMode, "emitObjCClassInitAOT is for object mode only");
+
+        auto initLabel = gen.newLabel();
+        gen.bindLabel(initLabel);
+        functionLabels["__objc_class_init"] = initLabel;
+
+        // Prologue: save x29, x30, x19-x22 (48 bytes)
+        gen.emitRaw32(0xA9BD7BFD);  // STP x29, x30, [SP, #-48]!
+        gen.emitRaw32(0xA90153F3);  // STP x19, x20, [SP, #16]
+        gen.emitRaw32(0xA9025BF5);  // STP x21, x22, [SP, #32]
+        gen.emitRaw32(0x910003FD);  // MOV x29, SP
+
+        foreach (classDecl; classDecls) {
+            // Find superclass name
+            string superName = "NSObject";
+            if (classDecl.interfaces.length > 0) {
+                if (auto ut = cast(UserType) classDecl.interfaces[0])
+                    if (auto ifaceDecl = cast(InterfaceDecl) ut.declaration)
+                        if (ifaceDecl.isObjC)
+                            superName = ifaceDecl.name;
+            }
+
+            // x0 = objc_getClass(superName) → x19 = superclass
+            emitCStringLoad(superName);
+            emitObjectExternalCall("objc_getClass");
+            gen.emitMoveXReg(0, 19);  // x19 = superclass
+
+            // objc_allocateClassPair(x19, className, 0) → x20 = new class
+            emitCStringLoad(classDecl.name);
+            gen.emitMoveXReg(0, 1);   // x1 = className
+            gen.emitMoveXReg(19, 0);  // x0 = superclass
+            gen.emitRaw32(0xD2800002); // MOVZ x2, #0 (extraBytes)
+            emitObjectExternalCall("objc_allocateClassPair");
+            gen.emitMoveXReg(0, 20);  // x20 = new class
+
+            // Add each D-body method
+            foreach (member; classDecl.members) {
+                auto method = cast(FunctionDecl)member;
+                if (method is null || method.body_ is null) continue;
+
+                string selector = method.objcSelector;
+                if (selector is null || selector.length == 0)
+                    selector = method.name;
+
+                // sel_registerName(selector) → x21 = SEL
+                emitCStringLoad(selector);
+                emitObjectExternalCall("sel_registerName");
+                gen.emitMoveXReg(0, 21);  // x21 = SEL
+
+                // Get IMP: trampoline label for methods with params, direct label for 0-param
+                string key = classDecl.name ~ "_" ~ method.name;
+                string impSymbol;
+                if (auto trampLabel = key in objcTrampolineLabels) {
+                    // Use trampoline symbol
+                    impSymbol = "__objc_tramp_" ~ classDecl.name ~ "_" ~ method.name;
+                    // Register the trampoline as a local symbol
+                    functionLabels[impSymbol] = *trampLabel;
+                } else {
+                    // Direct method
+                    impSymbol = getMangledName(method);
+                }
+
+                // Build type encoding
+                string typeEnc = buildObjCTypeEncodingNative(method);
+
+                // class_addMethod(x20, x21, IMP, typeEnc)
+                gen.emitMoveXReg(20, 0);  // x0 = class
+                gen.emitMoveXReg(21, 1);  // x1 = SEL
+                emitLoadDataAddress(impSymbol); // x0 = IMP address
+                gen.emitMoveXReg(0, 2);   // x2 = IMP
+                emitCStringLoad(typeEnc);
+                gen.emitMoveXReg(0, 3);   // x3 = types
+                gen.emitMoveXReg(20, 0);  // x0 = class (reload)
+                gen.emitMoveXReg(21, 1);  // x1 = SEL (reload)
+                emitObjectExternalCall("class_addMethod");
+            }
+
+            // objc_registerClassPair(x20)
+            gen.emitMoveXReg(20, 0);  // x0 = class
+            emitObjectExternalCall("objc_registerClassPair");
+        }
+
+        // Epilogue: restore registers and return
+        gen.emitRaw32(0xA9425BF5);  // LDP x21, x22, [SP, #32]
+        gen.emitRaw32(0xA94153F3);  // LDP x19, x20, [SP, #16]
+        gen.emitRaw32(0xA8C37BFD);  // LDP x29, x30, [SP], #48
+        gen.emitRaw32(0xD65F03C0);  // RET
+
+        log(1, "native: emitted __objc_class_init for ", classDecls.length, " ObjC class(es)");
     }
 
     // ---- Vtable infrastructure for class virtual dispatch ----
