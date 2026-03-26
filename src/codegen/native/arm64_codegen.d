@@ -712,6 +712,16 @@ struct NativeCodeGen {
         }
     }
 
+    /// Store x1 to local at offset (64-bit, for struct returns in x0+x1)
+    void emitStoreLocalFromX1(size_t offset) {
+        if (offset / 8 < 4096) {
+            emitRaw32(0xF90003E1 | (cast(uint)(offset / 8) << 10));
+        } else {
+            emitComputeSPOffset(offset);
+            emitRaw32(0xF9000121);  // STR x1, [x9]
+        }
+    }
+
     /// Load from local to x0 (64-bit)
     void emitLoadLocal(size_t offset) {
         if (offset / 8 < 4096) {
@@ -827,6 +837,36 @@ struct NativeCodeGen {
         } else {
             emitComputeSPOffset(offset);
             emitRaw32(0xFD000120);  // STR d0, [x9]
+        }
+    }
+
+    /// Store d1 to local at offset (64-bit f64)
+    void emitStoreLocalF64FromD1(size_t offset) {
+        if (offset / 8 < 4096) {
+            emitRaw32(0xFD0003E1 | (cast(uint)(offset / 8) << 10));
+        } else {
+            emitComputeSPOffset(offset);
+            emitRaw32(0xFD000121);  // STR d1, [x9]
+        }
+    }
+
+    /// Store d2 to local at offset (64-bit f64)
+    void emitStoreLocalF64FromD2(size_t offset) {
+        if (offset / 8 < 4096) {
+            emitRaw32(0xFD0003E2 | (cast(uint)(offset / 8) << 10));
+        } else {
+            emitComputeSPOffset(offset);
+            emitRaw32(0xFD000122);  // STR d2, [x9]
+        }
+    }
+
+    /// Store d3 to local at offset (64-bit f64)
+    void emitStoreLocalF64FromD3(size_t offset) {
+        if (offset / 8 < 4096) {
+            emitRaw32(0xFD0003E3 | (cast(uint)(offset / 8) << 10));
+        } else {
+            emitComputeSPOffset(offset);
+            emitRaw32(0xFD000123);  // STR d3, [x9]
         }
     }
 

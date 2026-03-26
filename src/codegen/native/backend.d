@@ -4780,6 +4780,68 @@ class NativeCompiledFunction : CompiledFunction {
 
             gen.emitCall(*labelPtr);
             emitNativeExceptionCheck();
+        } else if (info.isObjCRef) {
+            // ObjC interface/class method returning a struct
+            // On ARM64, objc_msgSend returns HFA structs in d0-d3 (Float64) or s0-s3 (Float32).
+            // Non-HFA small structs return in x0-x1.
+
+            // Find the method in the ObjC interface
+            InterfaceDecl ifaceDecl = info.interfaceDecl;
+            FunctionDecl method = null;
+            string selector = memberFunc.memberName;
+
+            if (ifaceDecl !is null) {
+                method = findObjCMethod(ifaceDecl.methods, memberFunc.memberName);
+            }
+            // Also check class decl
+            if (method is null && info.classDecl !is null && info.classDecl.isObjC) {
+                foreach (member; info.classDecl.members) {
+                    if (auto fd = cast(FunctionDecl)member) {
+                        if (fd.name == memberFunc.memberName) {
+                            method = fd;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (method !is null && method.objcSelector !is null && method.objcSelector.length > 0)
+                selector = method.objcSelector;
+
+            // Dispatch via objc_msgSend
+            emitObjCMsgSend(
+                ifaceDecl !is null ? ifaceDecl.name : info.classDecl.name,
+                selector,
+                memberFunc.object,  // receiver expression
+                args,
+                false,  // not static
+                method,
+            );
+
+            // Extract result from registers into the result buffer.
+            // Determine the return struct type for HFA detection.
+            // UserType must be resolved against symbol table for asStruct() to work.
+            StructDecl retStruct = null;
+            if (method !is null && method.returnType !is null) {
+                if (auto ut = cast(UserType) method.returnType)
+                    ut.ensureResolved(symbolTable);
+                auto retType = method.returnType.resolve();
+                retStruct = retType.asStruct();
+            }
+            int hfaCount = detectHFA(retStruct);
+
+            if (hfaCount > 0) {
+                // HFA: result in d0, d1, d2, d3 (Float64)
+                gen.emitStoreLocalF64(resultOffset);
+                if (hfaCount >= 2) gen.emitStoreLocalF64FromD1(resultOffset + 8);
+                if (hfaCount >= 3) gen.emitStoreLocalF64FromD2(resultOffset + 16);
+                if (hfaCount >= 4) gen.emitStoreLocalF64FromD3(resultOffset + 24);
+            } else {
+                // Non-HFA: result in x0 (≤8 bytes) or x0+x1 (≤16 bytes)
+                gen.emitStorePtr(resultOffset);
+                if (retStruct !is null && retStruct.structSize > 8)
+                    gen.emitStoreLocalFromX1(resultOffset + 8);
+            }
         } else {
             throw new Exception("Struct-returning method call on non-struct/class variable: " ~ objIdent.name);
         }
@@ -6266,6 +6328,9 @@ class NativeCompiledFunction : CompiledFunction {
             StructDecl paramStruct = null;
             int hfaCount = 0;
             if (method !is null && i < method.parameters.length) {
+                // UserType must be resolved against symbol table for asStruct() to work
+                if (auto ut = cast(UserType) method.parameters[i].type)
+                    ut.ensureResolved(symbolTable);
                 auto paramType = method.parameters[i].type.resolve();
                 paramStruct = paramType.asStruct();
                 hfaCount = detectHFA(paramStruct);
