@@ -1,0 +1,7 @@
+{
+  "name": "objc_hfa_struct_arg",
+  "description": "ObjC method with HFA struct parameter — UserType must be resolved for detectHFA",
+  "type": "ffi_exec",
+  "expected_result": 42,
+  "compiler_args": ["--target=arm64-macos"]
+}

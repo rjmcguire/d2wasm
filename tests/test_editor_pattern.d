@@ -1,8 +1,3 @@
-// Bug: structs with double fields placed after int variables had misaligned
-// stack offsets.  ARM64 STR/LDR for d-registers use scaled immediates
-// (offset/8), so a non-8-byte-aligned offset silently stores to the wrong
-// location (offset truncated to next lower multiple of 8).
-
 struct CGSize { double width; double height; }
 
 struct BigBuffer {
@@ -10,13 +5,19 @@ struct BigBuffer {
     int len;
 }
 
+int dummy(int x) { return x; }
+
 int main() {
     BigBuffer buf;
     buf.len = 0;
 
-    // Two ints before the struct force a non-8-byte-aligned nextLocalOffset
     int winW = 1024;
     int winH = 768;
+
+    // Function calls between winW declaration and drawSize use
+    int r1 = dummy(1);
+    int r2 = dummy(2);
+    int r3 = dummy(3);
 
     CGSize drawSize;
     drawSize.width = cast(double) winW;
