@@ -204,6 +204,12 @@ immutable stencil_f64_to_i32 = Stencil(
     []
 );
 
+immutable stencil_i32_to_f64 = Stencil(
+    "i32_to_f64",
+    cast(immutable ubyte[])[0x00, 0x00, 0x62, 0x1e],  // SCVTF d0, w0
+    []
+);
+
 // ----- f64 Register Moves -----
 
 immutable stencil_move_d1_to_d0 = Stencil(
@@ -973,6 +979,7 @@ shared static this() {
     stencilTable["gt_f64"] = &stencil_gt_f64;
     stencilTable["ge_f64"] = &stencil_ge_f64;
     stencilTable["f64_to_i32"] = &stencil_f64_to_i32;
+    stencilTable["i32_to_f64"] = &stencil_i32_to_f64;
     stencilTable["move_d1_to_d0"] = &stencil_move_d1_to_d0;
     stencilTable["load_f64"] = &stencil_load_f64;
     stencilTable["store_f64"] = &stencil_store_f64;

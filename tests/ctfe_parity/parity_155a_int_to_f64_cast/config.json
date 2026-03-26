@@ -1,0 +1,7 @@
+{
+  "name": "int_to_f64_cast",
+  "description": "cast(double) int — int-to-f64 conversion (SCVTF on ARM64, f64.convert_i32_s on WASM)",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 42
+}

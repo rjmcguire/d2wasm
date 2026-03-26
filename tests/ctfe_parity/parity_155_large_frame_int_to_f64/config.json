@@ -1,0 +1,7 @@
+{
+  "name": "large_frame_int_to_f64",
+  "description": "cast(double) int with large stack frame — int-to-f64 conversion at high offsets",
+  "type": "ffi_exec",
+  "expected_result": 42,
+  "compiler_args": ["--target=arm64-macos"]
+}

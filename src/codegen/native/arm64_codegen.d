@@ -187,8 +187,15 @@ struct NativeCodeGen {
     /// Load 32-bit value from [x9 + offset] into x0
     void emitLoadFromX9Offset(size_t offset) {
         // LDR w0, [x9, #offset]
-        uint imm12 = cast(uint)(offset / 4);  // Scaled offset for 32-bit load
-        emitRaw32(0xB9400120 | (imm12 << 10));  // LDR w0, [x9, #imm]
+        if (offset / 4 < 4096) {
+            uint imm12 = cast(uint)(offset / 4);
+            emitRaw32(0xB9400120 | (imm12 << 10));
+        } else {
+            // Large offset: x9 holds base, compute x9+offset into x0, load from it
+            emitLoadImm64(offset);      // x0 = offset (clobbers x0 only)
+            emitRaw32(0x8B000120);      // ADD x0, x9, x0
+            emitRaw32(0xB9400000);      // LDR w0, [x0, #0]
+        }
     }
     
     /// Move x0 to x9
@@ -830,8 +837,13 @@ struct NativeCodeGen {
     /// Load from local to d1 (64-bit f64, for binary right operand)
     void emitLoadLocalF64ToD1(size_t offset) {
         // LDR d1, [sp, #offset] — imm12 scaled by 8
-        uint imm12 = cast(uint)(offset / 8);
-        emitRaw32(0xFD4003E1 | (imm12 << 10));
+        if (offset / 8 < 4096) {
+            uint imm12 = cast(uint)(offset / 8);
+            emitRaw32(0xFD4003E1 | (imm12 << 10));
+        } else {
+            emitComputeSPOffset(offset);
+            emitRaw32(0xFD400121);  // LDR d1, [x9]
+        }
     }
 
     /// Move d0 to d1 (save left operand before evaluating right)
@@ -865,10 +877,17 @@ struct NativeCodeGen {
     }
 
     /// Load 64-bit value from [x0 + offset] into x0 (for reading struct fields via pointer)
-    void emitLoadPtrFromX0Offset(uint offset) {
+    void emitLoadPtrFromX0Offset(size_t offset) {
         // LDR x0, [x0, #imm12] where imm12 is offset/8 (scaled by 8 for 64-bit)
-        uint imm12 = offset / 8;
-        emitRaw32(0xF9400000 | (imm12 << 10));
+        if (offset / 8 < 4096) {
+            uint imm12 = cast(uint)(offset / 8);
+            emitRaw32(0xF9400000 | (imm12 << 10));
+        } else {
+            emitMoveX0ToX9();           // x9 = base
+            emitLoadImm64(offset);      // x0 = offset
+            emitRaw32(0x8B090000);      // ADD x0, x0, x9  (x0 = base + offset)
+            emitRaw32(0xF9400000);      // LDR x0, [x0, #0]
+        }
     }
 
     /// Increment 32-bit local in place: [fp + offset]++
@@ -904,20 +923,43 @@ struct NativeCodeGen {
     /// Load unsigned byte from pointer in x0 with offset: LDRB w0, [x0, #offset]
     void emitLoadByteFromPointer(size_t offset) {
         // LDRB w0, [x0, #offset] — unsigned byte load, zero-extended to 32 bits
-        emitRaw32(0x39400000 | (cast(uint)offset << 10));
+        if (offset < 4096) {
+            emitRaw32(0x39400000 | (cast(uint)offset << 10));
+        } else {
+            emitMoveX0ToX9();           // x9 = base
+            emitLoadImm64(offset);      // x0 = offset
+            emitRaw32(0x8B090000);      // ADD x0, x0, x9  (x0 = base + offset)
+            emitRaw32(0x39400000);      // LDRB w0, [x0, #0]
+        }
     }
 
     /// Store 32-bit value from x1 to pointer in x0 with offset: STR w1, [x0, #offset]
     void emitStoreToPointer(size_t offset) {
         // STR w1, [x0, #offset] where offset is scaled by 4
-        uint imm12 = cast(uint)(offset / 4);
-        emitRaw32(0xB9000001 | (imm12 << 10));
+        if (offset / 4 < 4096) {
+            uint imm12 = cast(uint)(offset / 4);
+            emitRaw32(0xB9000001 | (imm12 << 10));
+        } else {
+            emitRaw32(0xAA0003E8);  // MOV x8, x0  (save base)
+            emitLoadImm64(offset);  // x0 = offset
+            emitRaw32(0x8B000100);  // ADD x0, x8, x0  (x0 = base + offset)
+            emitRaw32(0xB9000001);  // STR w1, [x0, #0]
+            emitRaw32(0xAA0803E0);  // MOV x0, x8  (restore base)
+        }
     }
 
     /// Store byte from w1 to pointer in x0 with offset: STRB w1, [x0, #offset]
     void emitStoreByteToPointer(size_t offset) {
         // STRB w1, [x0, #offset] — store low byte of w1
-        emitRaw32(0x39000001 | (cast(uint)offset << 10));
+        if (offset < 4096) {
+            emitRaw32(0x39000001 | (cast(uint)offset << 10));
+        } else {
+            emitRaw32(0xAA0003E8);  // MOV x8, x0  (save base)
+            emitLoadImm64(offset);  // x0 = offset
+            emitRaw32(0x8B000100);  // ADD x0, x8, x0  (x0 = base + offset)
+            emitRaw32(0x39000001);  // STRB w1, [x0, #0]
+            emitRaw32(0xAA0803E0);  // MOV x0, x8  (restore base)
+        }
     }
 
     /// Store 32-bit value from x9 to pointer in x0 with offset: STR w9, [x0, #offset]

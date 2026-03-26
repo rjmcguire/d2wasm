@@ -3898,10 +3898,12 @@ class NativeCompiledFunction : CompiledFunction {
             }
             throw new Exception("Array indexing only supported for local variables");
         } else if (auto castExpr = cast(CastExpression)expr) {
-            // Check for f64 → int conversion
             if (auto targetBt = cast(BasicType)castExpr.targetType) {
-                bool targetIsInt = targetBt.kind != BasicType.Kind.Float64 &&
-                                   targetBt.kind != BasicType.Kind.Float32;
+                bool targetIsF64 = targetBt.kind == BasicType.Kind.Float64;
+                bool targetIsF32 = targetBt.kind == BasicType.Kind.Float32;
+                bool targetIsInt = !targetIsF64 && !targetIsF32;
+
+                // f64 → int conversion
                 if (targetIsInt && isF64Expression(castExpr.expression)) {
                     assert(targetBt.kind == BasicType.Kind.Int32 ||
                            targetBt.kind == BasicType.Kind.UInt32 ||
@@ -3910,6 +3912,13 @@ class NativeCompiledFunction : CompiledFunction {
                            "f64→int cast: unexpected target type");
                     compileExpression(castExpr.expression);
                     gen.emit(stencil_f64_to_i32);  // FCVTZS w0, d0
+                    return;
+                }
+
+                // int → f64 conversion
+                if (targetIsF64 && !isF64Expression(castExpr.expression)) {
+                    compileExpression(castExpr.expression);
+                    gen.emit(stencil_i32_to_f64);  // SCVTF d0, w0
                     return;
                 }
             }

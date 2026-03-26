@@ -1,0 +1,7 @@
+{
+  "name": "large_frame_f64",
+  "description": "f64 operations after large struct — ARM64 imm12 overflow in float load/store instructions",
+  "type": "ffi_exec",
+  "expected_result": 42,
+  "compiler_args": ["--target=arm64-macos"]
+}
