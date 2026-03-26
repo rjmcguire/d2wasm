@@ -58,6 +58,12 @@ char* toStringz(string s) {
     return (s ~ "\0").ptr;
 }
 
+// ObjC type aliases — semantic names for opaque ObjC pointers.
+// Physically identical to long (8 bytes on ARM64, i64 on WASM).
+alias id = long;       // Any ObjC object pointer
+alias Class = long;    // ObjC class pointer
+alias SEL = long;      // ObjC selector
+
 // Checked shift operators — trap on out-of-range shift amounts
 T opShiftLeft(T)(T value, int amount) {
     if (amount < 0 || amount >= 32)

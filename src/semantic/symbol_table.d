@@ -539,10 +539,19 @@ class SymbolTable {
     }
 
     /**
-     * Look up a type alias in the scope chain.
+     * Look up a type alias in the scope chain, then imported modules.
      */
     Type lookupAlias(string aliasName) {
-        return currentScope.lookupAlias(aliasName);
+        auto result = currentScope.lookupAlias(aliasName);
+        if (result) return result;
+        // Search imported module scopes (for aliases from runtime/object.d etc.)
+        if (moduleScope !is null) {
+            foreach (imp; moduleScope.importedModules) {
+                if (auto ptr = aliasName in imp.aliases)
+                    return *ptr;
+            }
+        }
+        return null;
     }
 
     /**

@@ -1,0 +1,7 @@
+{
+    "name": "objc_typed_refs",
+    "description": "ObjC type aliases id/Class/SEL from runtime/object.d",
+    "type": "ffi_exec",
+    "expected_result": 42,
+    "compiler_args": ["--target=arm64-macos"]
+}

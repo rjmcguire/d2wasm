@@ -14,9 +14,9 @@ interface NSApplication {
     static NSApplication sharedApplication();
     void setActivationPolicy(long policy);
     void activateIgnoringOtherApps(int flag);
-    long nextEventMatchingMask(long mask, long untilDate, long inMode, int dequeue)
+    id nextEventMatchingMask(long mask, id untilDate, id inMode, int dequeue)
         @selector("nextEventMatchingMask:untilDate:inMode:dequeue:");
-    void sendEvent(long event) @selector("sendEvent:");
+    void sendEvent(id event) @selector("sendEvent:");
     void updateWindows();
 }
 
@@ -25,10 +25,10 @@ interface NSWindow {
     static NSWindow alloc();
     NSWindow initWithContentRect(NSRect rect, long styleMask, long backing, int defer_)
         @selector("initWithContentRect:styleMask:backing:defer:");
-    void setTitle(long title) @selector("setTitle:");
-    void makeKeyAndOrderFront(long sender);
-    long contentView();
-    void setDelegate(long del);
+    void setTitle(id title) @selector("setTitle:");
+    void makeKeyAndOrderFront(id sender);
+    id contentView();
+    void setDelegate(id del);
 }
 
 extern(Objective-C)
@@ -36,9 +36,9 @@ interface NSView {
     static NSView alloc();
     NSView initWithFrame(NSRect frame_);
     void setWantsLayer(int flag);
-    void setLayer(long layer);
+    void setLayer(id layer);
     void setAutoresizingMask(long mask);
-    void addSubview(long view);
+    void addSubview(id view);
     NSRect bounds();
 }
 
