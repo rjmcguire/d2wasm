@@ -78,6 +78,32 @@ mixin template StatementEmitter() {
                 throw new EmitError("continue statement outside of loop", stmt.location);
             auto ctx = loopStack[$ - 1];
             emitBr(out_, blockDepth - ctx.continueBlockDepth);
+        } else if (auto funcStmt = cast(FunctionDeclarationStatement)stmt) {
+            // Nested function — emit as delegate variable initialization
+            if (funcStmt.syntheticLambda !is null) {
+                auto info = resolveVar(funcStmt.uniqueLocalId, funcStmt.funcDecl.name);
+                if (info is null)
+                    throw new EmitError("Nested function variable not found: " ~ funcStmt.funcDecl.name, stmt.location);
+
+                // Emit the lambda literal — pushes {tableIndex, envPtr}
+                emitFunctionLiteral(out_, funcStmt.syntheticLambda);
+
+                // Store envPtr to temp, then tableIndex to temp
+                emitLocalSet(out_, tempLocalA);
+                emitLocalSet(out_, tempLocalB);
+
+                // Store tableIndex at slot + 0
+                emitVarAddress(out_, info);
+                emitLocalGet(out_, tempLocalB);
+                emitI32Store(out_);
+
+                // Store envPtr at slot + 4
+                emitVarAddress(out_, info);
+                emitI32Const(out_, 4);
+                out_ ~= Op.i32_add;
+                emitLocalGet(out_, tempLocalA);
+                emitI32Store(out_);
+            }
         } else if (cast(StructDeclarationStatement)stmt) {
             // Inner struct declaration — no runtime code; methods already collected by emitter
         } else if (auto tryStmt = cast(TryStatement)stmt) {
@@ -594,7 +620,8 @@ mixin template StatementEmitter() {
         if (cast(ExpressionStatement)stmt || cast(VariableDeclarationStatement)stmt
             || cast(WhileStatement)stmt || cast(ForStatement)stmt
             || cast(BreakStatement)stmt || cast(ContinueStatement)stmt
-            || cast(MixinStatement)stmt || cast(StructDeclarationStatement)stmt) {
+            || cast(MixinStatement)stmt || cast(StructDeclarationStatement)stmt
+            || cast(FunctionDeclarationStatement)stmt) {
             return false;
         }
         assert(0, "alwaysReturns: unhandled statement type: " ~ typeid(stmt).name);

@@ -220,6 +220,12 @@ class MixinExpander {
                 }
             }
             return stmt;
+        } else if (auto funcStmt = cast(FunctionDeclarationStatement)stmt) {
+            // Recurse into nested function body for mixin expansion
+            if (funcStmt.funcDecl.body_) {
+                funcStmt.funcDecl.body_ = expandMixinsInStatement(funcStmt.funcDecl.body_);
+            }
+            return stmt;
         }
         // Other statements (return, expression, var decl, break, continue) don't contain mixins
         return stmt;

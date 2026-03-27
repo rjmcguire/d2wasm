@@ -2625,6 +2625,11 @@ class TreeSitterBridge {
                     return new StructDeclarationStatement(loc, sd);
                 // Template struct in statement position — not yet supported
                 throw new ParseError("Template struct declarations inside functions are not yet supported", loc);
+            case "function_declaration":
+                auto funcResult = parseFunctionDeclaration(node);
+                if (auto fd = cast(FunctionDecl)funcResult)
+                    return new FunctionDeclarationStatement(loc, fd);
+                throw new ParseError("Template/imported function declarations inside functions not supported", loc);
             case "auto_declaration":
                 return parseAutoDeclarationStatement(node, loc);
             case "comment":

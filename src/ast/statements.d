@@ -212,6 +212,25 @@ class StructDeclarationStatement : Statement {
 }
 
 /**
+ * Function declaration as a statement (nested function inside a function body).
+ * Lowered to a delegate variable by the type checker using the lambda pipeline.
+ */
+class FunctionDeclarationStatement : Statement {
+    FunctionDecl funcDecl;
+    FunctionLiteralExpression syntheticLambda;  // set by type checker
+    uint uniqueLocalId = uint.max;
+
+    this(SourceLocation loc, FunctionDecl funcDecl) {
+        super(loc);
+        this.funcDecl = funcDecl;
+    }
+
+    override string toString() const {
+        return format("FunctionDeclarationStatement(%s)", funcDecl.name);
+    }
+}
+
+/**
  * Break statement: break;
  * Exits the innermost enclosing loop.
  */

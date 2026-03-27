@@ -214,6 +214,10 @@ class DependencyAnalyzer {
         } else if (auto structStmt = cast(StructDeclarationStatement)stmt) {
             // Scan inner struct method bodies for calls (including nested types)
             scanAggregateMembersForCalls(structStmt.structDecl, calls);
+        } else if (auto funcStmt = cast(FunctionDeclarationStatement)stmt) {
+            // Scan nested function body for calls
+            if (funcStmt.funcDecl.body_)
+                calls ~= findCallsInStatement(funcStmt.funcDecl.body_);
         } else if (auto tryStmt = cast(TryStatement)stmt) {
             calls ~= findCallsInStatement(tryStmt.tryBody);
             foreach (c; tryStmt.catches)

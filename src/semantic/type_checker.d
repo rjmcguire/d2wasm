@@ -809,6 +809,8 @@ class TypeChecker {
             collector.collectStructSymbol(structStmt.structDecl);
             // Type check struct members (methods, etc.)
             checkStructDeclaration(structStmt.structDecl);
+        } else if (auto funcStmt = cast(FunctionDeclarationStatement)stmt) {
+            checkNestedFunctionDeclaration(funcStmt);
         } else if (auto tryStmt = cast(TryStatement)stmt) {
             checkStatement(tryStmt.tryBody);
             foreach (ref c; tryStmt.catches) {
@@ -2428,6 +2430,41 @@ class TypeChecker {
         auto ft = new FunctionType(expr.location, funcDecl.returnType, paramTypes, isDg);
         expr.type = ft;
         return ft;
+    }
+
+    /**
+     * Lower a nested function declaration to a delegate variable using the lambda pipeline.
+     * `int bar(int y) { return x + y; }` becomes `auto bar = delegate(int y) { return x + y; };`
+     */
+    void checkNestedFunctionDeclaration(FunctionDeclarationStatement funcStmt) {
+        import std.format : format;
+
+        auto fd = funcStmt.funcDecl;
+
+        // Create a synthetic FunctionLiteralExpression from the nested function
+        auto funcLit = new FunctionLiteralExpression(
+            fd.location,
+            false,          // isDelegateKeyword
+            fd.returnType,
+            fd.parameters,
+            fd.body_,
+            null,           // arrowBody
+            null            // singleParamName
+        );
+
+        // Run through the full lambda pipeline (capture detection, lifting, env struct)
+        auto ft = checkFunctionLiteralExpression(funcLit);
+        funcStmt.syntheticLambda = funcLit;
+
+        // Allocate a local ID for the delegate variable
+        funcStmt.uniqueLocalId = symbolTable.nextLocalId++;
+        symbolTable.trackScopeVar(funcStmt.uniqueLocalId);
+
+        // Register the function name as a delegate variable in scope
+        auto symbol = new Symbol(fd.name, SymbolKind.Variable, ft,
+                                 null, fd.location, false);
+        symbol.uniqueLocalId = funcStmt.uniqueLocalId;
+        symbolTable.addSymbol(symbol);
     }
 
     /// Walk a statement tree and mark VariableDeclarationStatement nodes as captured

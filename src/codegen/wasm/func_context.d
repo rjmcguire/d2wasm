@@ -860,6 +860,31 @@ class FuncContext {
             }
             if (tryStmt.finallyBody)
                 collectLocals(tryStmt.finallyBody);
+        } else if (auto funcStmt = cast(FunctionDeclarationStatement)stmt) {
+            // Nested function declaration — allocate delegate slot on shadow stack
+            if (funcStmt.syntheticLambda !is null) {
+                frameSize = (frameSize + 3) & ~3;  // Align to 4 bytes
+
+                VarInfo vi;
+                vi.kind = VarKind.delegate_;
+                vi.addrMode = AddrMode.shadowStack;
+                vi.frameOffset = frameSize;
+                vi.delegateLiftedFunc = funcStmt.syntheticLambda.liftedFunction;
+
+                if (funcStmt.uniqueLocalId != uint.max)
+                    varsByLocalId[funcStmt.uniqueLocalId] = vi;
+                varsByName[funcStmt.funcDecl.name] = vi;
+
+                frameSize += 8;  // {tableIndex: i32, envPtr: i32}
+
+                // Allocate env struct for capturing nested functions
+                auto funcLit = funcStmt.syntheticLambda;
+                if (!funcLit.isNonCapturing && funcLit.envSize > 0) {
+                    frameSize = (frameSize + 3) & ~3;
+                    funcLit.envFrameOffset = frameSize;
+                    frameSize += funcLit.envSize;
+                }
+            }
         } else if (cast(ReturnStatement)stmt || cast(ExpressionStatement)stmt
                    || cast(BreakStatement)stmt || cast(ContinueStatement)stmt
                    || cast(StructDeclarationStatement)stmt) {

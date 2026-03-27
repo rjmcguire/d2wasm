@@ -2005,6 +2005,10 @@ class BinaryEmitter : EmitterCache {
                     scanForSliceTypes(funcDecl);
                 }
             }
+        } else if (auto funcStmt = cast(FunctionDeclarationStatement)stmt) {
+            // Scan nested function body for slice types
+            if (funcStmt.syntheticLambda !is null && funcStmt.syntheticLambda.liftedFunction !is null)
+                scanForSliceTypes(funcStmt.syntheticLambda.liftedFunction);
         } else if (cast(BreakStatement)stmt || cast(ContinueStatement)stmt) {
             // No expressions to scan
         } else if (auto mixinStmt = cast(MixinStatement)stmt) {
@@ -2052,6 +2056,10 @@ class BinaryEmitter : EmitterCache {
             }
         } else if (auto structStmt = cast(StructDeclarationStatement)stmt) {
             collectStructMethods(structStmt.structDecl);
+        } else if (auto funcStmt = cast(FunctionDeclarationStatement)stmt) {
+            // Recurse into nested function body for inner structs
+            if (funcStmt.funcDecl.body_ !is null)
+                collectInnerStructs(funcStmt.funcDecl.body_);
         } else if (auto ifStmt = cast(IfStatement)stmt) {
             collectInnerStructs(ifStmt.thenStatement);
             if (ifStmt.elseStatement) collectInnerStructs(ifStmt.elseStatement);
@@ -2162,7 +2170,8 @@ class BinaryEmitter : EmitterCache {
             return false;
         }
         if (cast(BreakStatement)stmt || cast(ContinueStatement)stmt
-            || cast(MixinStatement)stmt || cast(StructDeclarationStatement)stmt) {
+            || cast(MixinStatement)stmt || cast(StructDeclarationStatement)stmt
+            || cast(FunctionDeclarationStatement)stmt) {
             return false;
         }
         if (auto tryStmt = cast(TryStatement)stmt) {
@@ -3010,6 +3019,9 @@ class BinaryEmitter : EmitterCache {
             scanExprForLambdas(retStmt.value, result);
         } else if (auto exprStmt = cast(ExpressionStatement)stmt) {
             scanExprForLambdas(exprStmt.expression, result);
+        } else if (auto funcStmt = cast(FunctionDeclarationStatement)stmt) {
+            if (funcStmt.syntheticLambda !is null)
+                result ~= funcStmt.syntheticLambda;
         } else if (auto tryStmt = cast(TryStatement)stmt) {
             scanForLambdas(tryStmt.tryBody, result);
             foreach (c; tryStmt.catches)

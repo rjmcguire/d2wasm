@@ -155,11 +155,13 @@ class NativeCompiledFunction : CompiledFunction {
         bool isObjCRef;           // true for ObjC opaque pointers (8-byte, no vtable)
         bool isRawPointer;        // true for raw pointer types (char*, int*, etc.) — 8 bytes on ARM64
         bool isRef;               // true for `ref` parameters (stores pointer, deref on read/write)
+        FunctionDecl delegateLiftedFunc;  // Non-null when kind == delegate_ (the lifted lambda)
 
         bool isStruct() const { return kind == VarKind.struct_; }
         bool isClass() const { return kind == VarKind.class_; }
         bool isSlice() const { return kind == VarKind.slice; }
         bool isStaticArray() const { return kind == VarKind.staticArray; }
+        bool isDelegate() const { return kind == VarKind.delegate_; }
 
         /// Get element size for any array-like kind
         uint elemSize() const {
@@ -212,6 +214,14 @@ class NativeCompiledFunction : CompiledFunction {
     private size_t nextLocalOffset;
     private size_t totalLocalBytes;
     private TempAllocator temps;
+
+    // Capture tracking for lifted lambdas
+    private struct NativeCaptureInfo {
+        string name;
+        size_t envOffset;  // byte offset in env struct (native: 8 bytes per capture)
+    }
+    private NativeCaptureInfo[] currentCaptures;
+    private size_t currentEnvParamOffset = size_t.max;  // stack offset of __env param
 
     // Large return tracking (hidden result pointer pattern)
     private bool currentFunctionHasHiddenResult;
@@ -269,6 +279,7 @@ class NativeCompiledFunction : CompiledFunction {
     // For multi-function support: map function names to their labels
     private Label[string] functionLabels;
     private FunctionDecl[string] functionDecls;  // for looking up parameter counts
+    private FunctionLiteralExpression[string] liftedLambdaExprs;  // mangled name → FuncLitExpr (for captures)
     
     // Data section for external data (import() file contents, etc.) - Milestone 85/86
     private NativeDataSection dataSection;
@@ -344,9 +355,34 @@ class NativeCompiledFunction : CompiledFunction {
         this.paramCount = func.parameters.length;
         this.entryNeedsArena = func.needsArena;
 
-        // Compile the function
-        compileFunction(func);
-        
+        // Discover lifted lambdas — a single function can contain delegates
+        FunctionDecl[] allFuncs = [func];
+        auto liftedLambdas = discoverLiftedLambdas(allFuncs);
+
+        // Register all functions (main + lambdas) with labels
+        string mainName = getMangledName(func);
+        functionDecls[mainName] = func;
+        functionLabels[mainName] = gen.newLabel();
+        foreach (lifted; liftedLambdas) {
+            string lname = getMangledName(lifted);
+            if (lname !in functionLabels) {
+                functionDecls[lname] = lifted;
+                functionLabels[lname] = gen.newLabel();
+                allFuncs ~= lifted;
+            }
+        }
+        collectLambdaExprs(allFuncs, liftedLambdaExprs);
+
+        // Compile all functions (main + lifted lambdas)
+        foreach (f; allFuncs) {
+            compileFunction(f);
+        }
+
+        // Set entry point
+        if (auto entryLabel = mainName in functionLabels) {
+            entryPoint = (*entryLabel).offset;
+        }
+
         // Finalize (resolve branches, make executable)
         if (!gen.finalize()) {
             throw new Exception("Failed to finalize native code");
@@ -397,7 +433,20 @@ class NativeCompiledFunction : CompiledFunction {
             string name = getMangledName(func);
             functionLabels[name] = gen.newLabel();
         }
-        
+
+        // Discover lifted lambda functions and add them to compilation
+        auto liftedLambdas = discoverLiftedLambdas(funcs);
+        foreach (lifted; liftedLambdas) {
+            string name = getMangledName(lifted);
+            if (name !in functionLabels) {
+                functionDecls[name] = lifted;
+                functionLabels[name] = gen.newLabel();
+                funcs ~= lifted;
+            }
+        }
+        // Collect lambda expressions for capture info (second pass)
+        collectLambdaExprs(funcs, liftedLambdaExprs);
+
         // Find entry function and store its param count
         if (auto entryFunc = entryFuncName in functionDecls) {
             this.paramCount = (*entryFunc).parameters.length;
@@ -691,6 +740,166 @@ class NativeCompiledFunction : CompiledFunction {
 
     /// Get the mangled name for a function.
     /// Uses FunctionDecl.mangledName if set (by WASM emitter), otherwise computes it.
+    /**
+     * Collect FunctionLiteralExpression → mangled name mappings for capture info.
+     */
+    private void collectLambdaExprs(FunctionDecl[] funcs, ref FunctionLiteralExpression[string] result) {
+        import ast.expressions : FunctionLiteralExpression;
+        foreach (func; funcs) {
+            if (func.body_ !is null)
+                collectLambdaExprsInStmt(func.body_, result);
+        }
+    }
+
+    private void collectLambdaExprsInStmt(Statement stmt, ref FunctionLiteralExpression[string] result) {
+        import ast.expressions : FunctionLiteralExpression;
+        if (stmt is null) return;
+        if (auto compound = cast(CompoundStatement)stmt) {
+            foreach (s; compound.statements)
+                collectLambdaExprsInStmt(s, result);
+        } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
+            if (auto funcLit = cast(FunctionLiteralExpression)varDecl.initializer) {
+                if (funcLit.liftedFunction !is null) {
+                    string name = getMangledName(funcLit.liftedFunction);
+                    result[name] = funcLit;
+                }
+            }
+        } else if (auto funcStmt = cast(FunctionDeclarationStatement)stmt) {
+            if (funcStmt.syntheticLambda !is null && funcStmt.syntheticLambda.liftedFunction !is null) {
+                string name = getMangledName(funcStmt.syntheticLambda.liftedFunction);
+                result[name] = funcStmt.syntheticLambda;
+            }
+        } else if (auto ifStmt = cast(IfStatement)stmt) {
+            collectLambdaExprsInStmt(ifStmt.thenStatement, result);
+            collectLambdaExprsInStmt(ifStmt.elseStatement, result);
+        } else if (auto whileStmt = cast(WhileStatement)stmt) {
+            collectLambdaExprsInStmt(whileStmt.body_, result);
+        } else if (auto forStmt = cast(ForStatement)stmt) {
+            collectLambdaExprsInStmt(forStmt.init, result);
+            collectLambdaExprsInStmt(forStmt.body_, result);
+        } else if (auto tryStmt = cast(TryStatement)stmt) {
+            collectLambdaExprsInStmt(tryStmt.tryBody, result);
+            foreach (c; tryStmt.catches)
+                collectLambdaExprsInStmt(c.body_, result);
+            if (tryStmt.finallyBody !is null)
+                collectLambdaExprsInStmt(tryStmt.finallyBody, result);
+        }
+    }
+
+    /**
+     * Scan all function bodies for FunctionLiteralExpression nodes
+     * and collect their lifted FunctionDecls for compilation.
+     */
+    private static FunctionDecl[] discoverLiftedLambdas(FunctionDecl[] funcs) {
+        import ast.expressions : FunctionLiteralExpression;
+        FunctionDecl[] result;
+        bool[string] seen;
+        foreach (func; funcs) {
+            if (func.body_ !is null)
+                scanStmtForLambdas(func.body_, result, seen);
+        }
+        return result;
+    }
+
+    private static void scanStmtForLambdas(Statement stmt, ref FunctionDecl[] result, ref bool[string] seen) {
+        import ast.expressions : FunctionLiteralExpression;
+        if (stmt is null) return;
+        if (auto compound = cast(CompoundStatement)stmt) {
+            foreach (s; compound.statements)
+                scanStmtForLambdas(s, result, seen);
+        } else if (auto ifStmt = cast(IfStatement)stmt) {
+            scanStmtForLambdas(ifStmt.thenStatement, result, seen);
+            scanStmtForLambdas(ifStmt.elseStatement, result, seen);
+        } else if (auto whileStmt = cast(WhileStatement)stmt) {
+            scanStmtForLambdas(whileStmt.body_, result, seen);
+        } else if (auto forStmt = cast(ForStatement)stmt) {
+            scanStmtForLambdas(forStmt.init, result, seen);
+            scanStmtForLambdas(forStmt.body_, result, seen);
+        } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
+            scanExprForLambdas(varDecl.initializer, result, seen);
+        } else if (auto retStmt = cast(ReturnStatement)stmt) {
+            scanExprForLambdas(retStmt.value, result, seen);
+        } else if (auto exprStmt = cast(ExpressionStatement)stmt) {
+            scanExprForLambdas(exprStmt.expression, result, seen);
+        } else if (auto funcStmt = cast(FunctionDeclarationStatement)stmt) {
+            if (funcStmt.syntheticLambda !is null && funcStmt.syntheticLambda.liftedFunction !is null) {
+                auto lifted = funcStmt.syntheticLambda.liftedFunction;
+                auto name = getMangledName(lifted);
+                if (name !in seen) {
+                    seen[name] = true;
+                    result ~= lifted;
+                    // Recurse into the lifted function's body
+                    if (lifted.body_ !is null)
+                        scanStmtForLambdas(lifted.body_, result, seen);
+                }
+            }
+        } else if (auto tryStmt = cast(TryStatement)stmt) {
+            scanStmtForLambdas(tryStmt.tryBody, result, seen);
+            foreach (c; tryStmt.catches)
+                scanStmtForLambdas(c.body_, result, seen);
+            if (tryStmt.finallyBody !is null)
+                scanStmtForLambdas(tryStmt.finallyBody, result, seen);
+        }
+    }
+
+    private static void scanExprForLambdas(Expression expr, ref FunctionDecl[] result, ref bool[string] seen) {
+        import ast.expressions;
+        if (expr is null) return;
+        if (auto funcLit = cast(FunctionLiteralExpression)expr) {
+            if (funcLit.liftedFunction !is null) {
+                auto name = getMangledName(funcLit.liftedFunction);
+                if (name !in seen) {
+                    seen[name] = true;
+                    result ~= funcLit.liftedFunction;
+                    if (funcLit.liftedFunction.body_ !is null)
+                        scanStmtForLambdas(funcLit.liftedFunction.body_, result, seen);
+                }
+            }
+        } else if (auto call = cast(CallExpression)expr) {
+            scanExprForLambdas(call.function_, result, seen);
+            foreach (a; call.arguments)
+                scanExprForLambdas(a, result, seen);
+        } else if (auto bin = cast(BinaryExpression)expr) {
+            scanExprForLambdas(bin.left, result, seen);
+            scanExprForLambdas(bin.right, result, seen);
+        } else if (auto un = cast(UnaryExpression)expr) {
+            scanExprForLambdas(un.operand, result, seen);
+        } else if (auto castExpr = cast(CastExpression)expr) {
+            scanExprForLambdas(castExpr.expression, result, seen);
+        } else if (auto idx = cast(IndexExpression)expr) {
+            scanExprForLambdas(idx.array, result, seen);
+            scanExprForLambdas(idx.index, result, seen);
+        } else if (auto mem = cast(MemberExpression)expr) {
+            scanExprForLambdas(mem.object, result, seen);
+        } else if (auto slice = cast(SliceExpression)expr) {
+            scanExprForLambdas(slice.array, result, seen);
+            scanExprForLambdas(slice.start, result, seen);
+            scanExprForLambdas(slice.end, result, seen);
+        } else if (auto assign = cast(AssignmentExpression)expr) {
+            scanExprForLambdas(assign.left, result, seen);
+            scanExprForLambdas(assign.right, result, seen);
+        } else if (auto arrLit = cast(ArrayLiteralExpression)expr) {
+            foreach (elem; arrLit.elements)
+                scanExprForLambdas(elem, result, seen);
+        } else if (auto newExpr = cast(NewExpression)expr) {
+            foreach (a; newExpr.arguments)
+                scanExprForLambdas(a, result, seen);
+        } else if (auto throwExpr = cast(ThrowExpression)expr) {
+            scanExprForLambdas(throwExpr.operand, result, seen);
+        } else if (auto tmplInst = cast(TemplateInstantiationExpression)expr) {
+            foreach (a; tmplInst.callArguments)
+                scanExprForLambdas(a, result, seen);
+        } else if (cast(LiteralExpression)expr
+               || cast(IdentifierExpression)expr
+               || cast(ImportExpression)expr
+               || cast(IsExpression)expr
+               || cast(TraitsExpression)expr) {
+            // Leaf expressions — no sub-expressions containing lambdas
+        } else {
+            assert(0, "scanExprForLambdas: unhandled expression type: " ~ typeid(expr).name);
+        }
+    }
+
     private static string getMangledName(FunctionDecl func) {
         if (func.mangledName)
             return func.mangledName;
@@ -960,7 +1169,26 @@ class NativeCompiledFunction : CompiledFunction {
             localVars[param.name] = nli;
             nextLocalOffset += paramSize;
         }
-        
+
+        // Initialize capture info for lifted lambdas
+        currentCaptures = null;
+        currentEnvParamOffset = size_t.max;
+        if (auto lambdaExpr = name in liftedLambdaExprs) {
+            if (!(*lambdaExpr).isNonCapturing && (*lambdaExpr).capturedNames.length > 0) {
+                // __env is the first user parameter
+                auto envInfo = "__env" in localVars;
+                if (envInfo !is null) {
+                    currentEnvParamOffset = envInfo.offset;
+                    foreach (i, capName; (*lambdaExpr).capturedNames) {
+                        NativeCaptureInfo ci;
+                        ci.name = capName;
+                        ci.envOffset = i * 8;  // 8 bytes per capture on ARM64
+                        currentCaptures ~= ci;
+                    }
+                }
+            }
+        }
+
         // Count bytes needed for locals in the body
         size_t bodyLocalBytes = countLocalBytesInStatement(func.body_);
 
@@ -1090,7 +1318,22 @@ class NativeCompiledFunction : CompiledFunction {
                     }
                     break;
                 case VarKind.delegate_:
-                    assert(0, "delegate parameters not yet supported in native backend");
+                    // Delegate parameter: passed as pointer to 16-byte {funcPtr, envPtr} struct
+                    // Copy the 16 bytes from the pointer to our stack slot
+                    loadParamToX0(paramReg);
+                    auto dgSpillMark = temps.save();
+                    size_t dgSpillTemp = temps.alloc(8);
+                    gen.emitStorePtr(dgSpillTemp);
+                    // Copy funcPtr (8 bytes)
+                    gen.emitLoadPtr(dgSpillTemp);
+                    gen.emitLoadFromPointer64(0);
+                    gen.emitStorePtr(offset);
+                    // Copy envPtr (8 bytes)
+                    gen.emitLoadPtr(dgSpillTemp);
+                    gen.emitLoadFromPointer64(8);
+                    gen.emitStorePtr(offset + 8);
+                    temps.restore(dgSpillMark);
+                    break;
             }
         }
         
@@ -1642,7 +1885,8 @@ class NativeCompiledFunction : CompiledFunction {
             if (tryStmt.finallyBody !is null)
                 bytes += countLocalBytesInStatement(tryStmt.finallyBody);
         } else if (cast(BreakStatement)stmt || cast(ContinueStatement)stmt
-                   || cast(MixinStatement)stmt || cast(StructDeclarationStatement)stmt) {
+                   || cast(MixinStatement)stmt || cast(StructDeclarationStatement)stmt
+                   || cast(FunctionDeclarationStatement)stmt) {
             // No local allocations
         } else {
             assert(0, "countLocalBytesInStatement: unhandled statement type: " ~ typeid(stmt).name);
@@ -1754,6 +1998,9 @@ class NativeCompiledFunction : CompiledFunction {
             } else if (cast(PointerType)varDecl.type !is null) {
                 // Raw pointer: 8 bytes on ARM64
                 varSize = 8;
+            } else if (cast(FunctionType)varDecl.type !is null) {
+                // Delegate/function pointer: {funcPtr: i64, envPtr: i64} = 16 bytes
+                varSize = 16;
             } else if (auto bt = cast(BasicType)varDecl.type) {
                 // Float and long scalars need 8 bytes
                 if (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32 ||
@@ -1772,7 +2019,8 @@ class NativeCompiledFunction : CompiledFunction {
             }
             // Align to 8 bytes for types that use 64-bit load/store instructions
             // (ARM64 scaled immediates require aligned offsets)
-            bool needsAlign8 = isSlice || isObjCRef || isPtr || is8ByteScalar;
+            bool isDelegateType = cast(FunctionType)varDecl.type !is null;
+            bool needsAlign8 = isSlice || isObjCRef || isPtr || is8ByteScalar || isDelegateType;
             if (!needsAlign8 && structType) {
                 // Structs with 8-byte-aligned fields (doubles, pointers) need 8-byte alignment
                 needsAlign8 = structType.aggregateAlign_ >= 8;
@@ -1809,6 +2057,11 @@ class NativeCompiledFunction : CompiledFunction {
                 } else {
                     nli.staticArrayElemSize = 4;
                 }
+            } else if (isDelegateType) {
+                nli.kind = VarKind.delegate_;
+                // Store the lifted function reference for delegate calls
+                if (auto funcLit = cast(FunctionLiteralExpression)varDecl.initializer)
+                    nli.delegateLiftedFunc = funcLit.liftedFunction;
             }
             // else: kind stays VarKind.scalar (default)
             // Store type info for scalar float/long variables
@@ -2307,6 +2560,9 @@ class NativeCompiledFunction : CompiledFunction {
                     } else {
                         throw new Exception("Static array can only be initialized from array literal or function call");
                     }
+                } else if (nli.isDelegate) {
+                    // Delegate variable: store {funcPtr, envPtr} (16 bytes)
+                    emitDelegateInit(nli, varDecl.initializer);
                 } else {
                     size_t varOffset = nli.offset;
                     nextLocalOffset += varSize;  // advance past variable before compiling initializer
@@ -2432,6 +2688,20 @@ class NativeCompiledFunction : CompiledFunction {
             compileTryStatement(tryStmt);
         } else if (cast(StructDeclarationStatement)stmt) {
             // Inner struct declaration — no runtime code
+        } else if (auto funcStmt = cast(FunctionDeclarationStatement)stmt) {
+            // Nested function — emit as delegate variable
+            if (funcStmt.syntheticLambda !is null) {
+                // Allocate 16-byte delegate slot (8-byte aligned)
+                nextLocalOffset = (nextLocalOffset + 7) & ~7;
+                NativeLocalInfo nli;
+                nli.kind = VarKind.delegate_;
+                nli.offset = nextLocalOffset;
+                nli.delegateLiftedFunc = funcStmt.syntheticLambda.liftedFunction;
+                localVars[funcStmt.funcDecl.name] = nli;
+
+                emitDelegateInit(nli, funcStmt.syntheticLambda);
+                nextLocalOffset += 16;
+            }
         } else if (auto mixinStmt = cast(MixinStatement)stmt) {
             if (mixinStmt.isExpanded) {
                 foreach (s; mixinStmt.expandedStatements) {
@@ -2892,6 +3162,24 @@ class NativeCompiledFunction : CompiledFunction {
             }
         } else if (auto ident = cast(IdentifierExpression)expr) {
             log(3, "native:   ident '", ident.name, "'");
+            // Check captures first (lifted lambda env access)
+            if (currentCaptures.length > 0) {
+                foreach (ref cap; currentCaptures) {
+                    if (cap.name == ident.name) {
+                        // By-reference capture: env stores pointer to captured var's stack slot
+                        // Load __env param (pointer to env struct)
+                        gen.emitLoadPtr(currentEnvParamOffset);
+                        // Load pointer to captured variable from env + offset
+                        if (cap.envOffset > 0)
+                            gen.emitLoadFromPointer64(cap.envOffset);
+                        else
+                            gen.emitLoadFromPointer64(0);
+                        // Now x0 = pointer to captured variable. Load the value.
+                        gen.emitLoadFromPointer(0);  // x0 = *captured_var (32-bit)
+                        return;
+                    }
+                }
+            }
             // Load variable from stack
             if (auto info = ident.name in localVars) {
                 log(3, "native:     -> local (kind=", info.kind, ", offset=", info.offset,
@@ -3253,6 +3541,14 @@ class NativeCompiledFunction : CompiledFunction {
                 if (funcIdent.name.length > 12 && funcIdent.name[0..12] == "__intrinsic_") {
                     compileIntrinsicCall(funcIdent.name, call.arguments);
                     return;
+                }
+
+                // Check if this is a delegate call (local delegate variable)
+                if (auto dgInfo = funcIdent.name in localVars) {
+                    if (dgInfo.kind == VarKind.delegate_) {
+                        emitDelegateCall(dgInfo, call.arguments);
+                        return;
+                    }
                 }
 
                 // Resolve to mangled name for function label lookup
@@ -4374,6 +4670,106 @@ class NativeCompiledFunction : CompiledFunction {
      * Passes 'this' pointer (address of obj) as first argument in x0,
      * then user arguments in x1, x2, etc.
      */
+    /**
+     * Initialize a delegate slot: store {funcPtr, envPtr} at the given NativeLocalInfo offset.
+     * Works for both VariableDeclarationStatement (with FunctionLiteralExpression initializer)
+     * and FunctionDeclarationStatement (with syntheticLambda).
+     */
+    private void emitDelegateInit(ref NativeLocalInfo nli, Expression initExpr) {
+        import ast.expressions : FunctionLiteralExpression;
+        auto funcLit = cast(FunctionLiteralExpression)initExpr;
+        if (funcLit is null || funcLit.liftedFunction is null)
+            return;  // Uninitialized delegate
+
+        auto lifted = funcLit.liftedFunction;
+        string liftedName = getMangledName(lifted);
+
+        // Store funcPtr at offset+0 (8 bytes)
+        auto liftedLabel = liftedName in functionLabels;
+        if (liftedLabel !is null) {
+            gen.emitLoadLabelAddress(*liftedLabel);  // x0 = address of lifted function
+        } else {
+            gen.emitLoadImm64(0);  // fallback: null funcPtr
+        }
+        gen.emitStorePtr(nli.offset);
+
+        // Store envPtr at offset+8
+        if (!funcLit.isNonCapturing && funcLit.capturedNames.length > 0) {
+            // Allocate env struct on stack (8 bytes per capture for native 64-bit pointers)
+            nextLocalOffset = (nextLocalOffset + 7) & ~7;
+            size_t envOffset = nextLocalOffset;
+            size_t nativeEnvSize = funcLit.capturedNames.length * 8;
+            nextLocalOffset += nativeEnvSize;
+
+            // Store pointers to captured variables in the env struct
+            foreach (i, capName; funcLit.capturedNames) {
+                size_t capSlotOffset = envOffset + i * 8;
+                // Get address of captured variable
+                // All params and locals are in localVars on native backend
+                auto capInfo = capName in localVars;
+                if (capInfo !is null) {
+                    gen.emitStackAddress(capInfo.offset);
+                } else {
+                    gen.emitLoadImm64(0);  // not found — null pointer
+                }
+                gen.emitStorePtr(capSlotOffset);
+            }
+
+            // envPtr = address of env struct on stack
+            gen.emitStackAddress(envOffset);
+            gen.emitStorePtr(nli.offset + 8);
+        } else {
+            // Non-capturing: envPtr = 0
+            gen.emitLoadImm64(0);
+            gen.emitStorePtr(nli.offset + 8);
+        }
+    }
+
+    /**
+     * Emit a delegate call: load funcPtr and envPtr from delegate slot,
+     * pass envPtr as first argument (x0), user args in x1+, BLR funcPtr.
+     */
+    private void emitDelegateCall(NativeLocalInfo* dgInfo, Expression[] args) {
+        // Save funcPtr to temp slot (can't hold in register across arg compilation)
+        auto mark = temps.save();
+        size_t funcPtrTemp = temps.alloc(8);
+
+        gen.emitLoadPtr(dgInfo.offset);  // x0 = funcPtr
+        gen.emitStorePtr(funcPtrTemp);    // save to temp
+
+        // Compile user arguments and save to temp slots
+        size_t[] argTemps;
+        foreach (arg; args) {
+            size_t argTemp = temps.alloc(8);
+            compileExpression(arg);
+            gen.emitStorePtr(argTemp);
+            argTemps ~= argTemp;
+        }
+
+        // Load args into registers:
+        // x0 = envPtr (from delegate+8)
+        // x1, x2, ... = user arguments
+        // Load in reverse to avoid clobbering
+
+        // Load user args into x1+
+        for (long i = cast(long)argTemps.length - 1; i >= 0; i--) {
+            gen.emitLoadPtr(argTemps[cast(size_t)i]);
+            emitMoveX0ToArgRegister(cast(int)i + 1);  // x1, x2, ...
+        }
+
+        // Load envPtr into x0
+        gen.emitLoadPtr(dgInfo.offset + 8);  // x0 = envPtr
+
+        // Load funcPtr into x8 and call
+        gen.emitLoadPtr(funcPtrTemp);  // x0 = funcPtr
+        gen.emitMoveX0ToX8();          // x8 = funcPtr
+        // Restore x0 = envPtr
+        gen.emitLoadPtr(dgInfo.offset + 8);
+        gen.emitCallIndirect();        // BLR x8
+
+        temps.restore(mark);
+    }
+
     private void emitMethodCall(MemberExpression memberExpr, Expression[] args) {
         log(2, "native: emitMethodCall .", memberExpr.memberName);
         // Handle nested MemberExpression objects (e.g., obj.field.method() from alias-this)

@@ -164,6 +164,8 @@ private bool hasDirectAllocation(Statement stmt) {
         }
     } else if (auto structStmt = cast(StructDeclarationStatement)stmt) {
         // Inner struct methods don't affect the enclosing function's needsArena
+    } else if (cast(FunctionDeclarationStatement)stmt) {
+        // Nested function doesn't affect the enclosing function's needsArena
     } else if (auto tryStmt = cast(TryStatement)stmt) {
         if (hasDirectAllocation(tryStmt.tryBody)) return true;
         foreach (c; tryStmt.catches)

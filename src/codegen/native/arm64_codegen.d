@@ -34,6 +34,7 @@ enum BranchKind {
     ifNonZero,       // CBNZ
     call,            // BL
     conditional,     // B.cond (condition in bits 0-3)
+    adr,             // ADR x0, target (PC-relative address load)
 }
 
 /// ARM64 Native Code Generator
@@ -373,6 +374,15 @@ struct NativeCodeGen {
         unresolved ~= UnresolvedBranch(callOffset, target.id, BranchKind.call);
     }
     
+    /// Emit ADR x0, label — loads the PC-relative address of a label into x0.
+    /// Resolved during finalize. Range: ±1MB.
+    void emitLoadLabelAddress(Label target) {
+        uint adrOffset = pos;
+        // ADR x0: 0x10000000 (placeholder, patched during finalize)
+        emitRaw32(0x10000000);
+        unresolved ~= UnresolvedBranch(adrOffset, target.id, BranchKind.adr);
+    }
+
     /// Emit BLR (branch with link to register) - call function pointer in x8
     void emitCallIndirect() {
         // BLR x8: 0xD63F0100
@@ -1057,6 +1067,20 @@ struct NativeCodeGen {
         }
     }
 
+    /// Load 64-bit value from pointer in x0 with offset: LDR x0, [x0, #offset]
+    void emitLoadFromPointer64(size_t offset) {
+        assert(offset % 8 == 0, "emitLoadFromPointer64: offset not 8-byte aligned");
+        if (offset / 8 < 4096) {
+            uint imm12 = cast(uint)(offset / 8);
+            emitRaw32(0xF9400000 | (imm12 << 10));  // LDR x0, [x0, #offset]
+        } else {
+            emitMoveX0ToX9();           // x9 = base
+            emitLoadImm64(offset);      // x0 = offset
+            emitRaw32(0x8B090000);      // ADD x0, x0, x9  (x0 = base + offset)
+            emitRaw32(0xF9400000);      // LDR x0, [x0, #0]
+        }
+    }
+
     /// Load unsigned byte from pointer in x0 with offset: LDRB w0, [x0, #offset]
     void emitLoadByteFromPointer(size_t offset) {
         // LDRB w0, [x0, #offset] — unsigned byte load, zero-extended to 32 bits
@@ -1186,6 +1210,14 @@ struct NativeCodeGen {
                     int imm19_cond = relOffset / 4;
                     *instr = (*instr & 0xF) | 0x54000000 | ((imm19_cond & 0x7FFFF) << 5);
                     break;
+
+                case BranchKind.adr:
+                    // ADR x0, #imm: immlo (bits 29-30), immhi (bits 5-23), Rd=0
+                    // imm21 = relOffset (byte offset, NOT divided by 4)
+                    uint immlo = cast(uint)(relOffset & 0x3);
+                    uint immhi = cast(uint)((relOffset >> 2) & 0x7FFFF);
+                    *instr = 0x10000000 | (immlo << 29) | (immhi << 5) | 0;  // Rd=x0
+                    break;
             }
         }
         
@@ -1231,6 +1263,11 @@ struct NativeCodeGen {
                 case BranchKind.conditional:
                     int imm19_cond = relOffset / 4;
                     *instr = (*instr & 0xF) | 0x54000000 | ((imm19_cond & 0x7FFFF) << 5);
+                    break;
+                case BranchKind.adr:
+                    uint immlo = cast(uint)(relOffset & 0x3);
+                    uint immhi = cast(uint)((relOffset >> 2) & 0x7FFFF);
+                    *instr = 0x10000000 | (immlo << 29) | (immhi << 5) | 0;
                     break;
             }
         }
