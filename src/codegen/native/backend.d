@@ -2086,8 +2086,14 @@ class NativeCompiledFunction : CompiledFunction {
                     gen.emitLoadImm64(0);
                     gen.emitStorePtr(nli.offset);
                 } else if (nli.kind == VarKind.scalar) {
-                    gen.emitImm32(stencil_load_imm32, 0);
-                    gen.emitStoreLocal32(nli.offset);
+                    if (isF64ElementType(nli.elementType)) {
+                        // Float/double scalars use 8-byte slots — zero all 8 bytes
+                        gen.emitLoadImm64(0);
+                        gen.emitStorePtr(nli.offset);
+                    } else {
+                        gen.emitImm32(stencil_load_imm32, 0);
+                        gen.emitStoreLocal32(nli.offset);
+                    }
                 }
             }
 
@@ -4322,8 +4328,8 @@ class NativeCompiledFunction : CompiledFunction {
                     return;
                 }
 
-                // int → f64 conversion
-                if (targetIsF64 && !isF64Expression(castExpr.expression)) {
+                // int → f64/f32 conversion (native backend uses f64 for both)
+                if ((targetIsF64 || targetIsF32) && !isF64Expression(castExpr.expression)) {
                     compileExpression(castExpr.expression);
                     gen.emit(stencil_i32_to_f64);  // SCVTF d0, w0
                     return;
