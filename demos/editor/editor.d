@@ -187,10 +187,10 @@ long g_keyMods = 0;
 // ── Text Buffer ─────────────────────────────────────────────────────
 
 struct TextBuffer {
-    ubyte[65536] data;
+    ubyte[4096] data;
     int len;
-    int[2000] lineStart;
-    int[2000] lineLen;
+    int[200] lineStart;
+    int[200] lineLen;
     int lineCount;
     int cursorLine;
     int cursorCol;
@@ -215,7 +215,7 @@ void recomputeLines(TextBuffer* buf) {
     int i = 0;
     while (i < buf.len) {
         if (buf.data[i] == 10) {
-            if (buf.lineCount < 2000) {
+            if (buf.lineCount < 200) {
                 buf.lineStart[buf.lineCount] = lineStart;
                 buf.lineLen[buf.lineCount] = i - lineStart;
                 buf.lineCount = buf.lineCount + 1;
@@ -225,7 +225,7 @@ void recomputeLines(TextBuffer* buf) {
         i = i + 1;
     }
     // Last line (no trailing newline)
-    if (buf.lineCount < 2000) {
+    if (buf.lineCount < 200) {
         buf.lineStart[buf.lineCount] = lineStart;
         buf.lineLen[buf.lineCount] = buf.len - lineStart;
         buf.lineCount = buf.lineCount + 1;
@@ -238,7 +238,7 @@ int cursorByteOffset(TextBuffer* buf) {
 }
 
 void insertCharAtCursor(TextBuffer* buf, int ch) {
-    if (buf.len >= 65535) return;
+    if (buf.len >= 4095) return;
     int pos = cursorByteOffset(buf);
     // Shift tail right by 1
     int j = buf.len;

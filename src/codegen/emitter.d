@@ -202,6 +202,7 @@ class BinaryEmitter : EmitterCache {
         // Memory tracking
         bool needsMemory = false;
         uint memoryPages = 2;  // Page 0: data+stack, Page 1+: arena (growable)
+        uint maxFrameSize = 0; // Largest shadow stack frame across all functions
         
         // Globals (heap_ptr, etc.)
         struct GlobalInfo {
@@ -428,11 +429,19 @@ class BinaryEmitter : EmitterCache {
             addArrayBuiltins();
             addArenaBuiltins();
             finalizeHeapPtr();
-            finalizeArenaBase();
         }
 
-        // Always add shadow stack for struct locals
+        // Compute max frame size across all functions (needed for memory sizing).
+        // This only does local collection, not code emission.
+        computeMaxFrameSize();
+
+        // Size shadow stack and memory pages based on max frame size
         addShadowStackGlobal();
+
+        // Arena starts at the top of the stack area (must be after addShadowStackGlobal)
+        if (needsArraySupport) {
+            finalizeArenaBase();
+        }
 
         // Exception handling globals (always allocated — needed for scope guards too)
         addExceptionGlobals();
@@ -2503,17 +2512,21 @@ class BinaryEmitter : EmitterCache {
 
     /**
      * Finalize the arena base address.
-     * Arena lives on page 1+ (65536+), separate from shadow stack (page 0).
+     * Arena lives above the stack area, separate from shadow stack.
      * This allows the arena to grow via memory.grow without conflicting with the stack.
+     * Must be called AFTER addShadowStackGlobal() which sets memoryPages.
      */
     private void finalizeArenaBase() {
         import codegen.wasm.types : ARENA_METADATA_SIZE;
 
         if (!hasArenaBuiltins) return;
 
-        // Arena starts at page 1 boundary — completely separate from page 0
-        // (data section, heap, shadow stack all live in page 0)
-        uint arenaStart = 65536;
+        // Arena starts at the top of the data+stack area.
+        // In full modules, this equals the SP init value set by addShadowStackGlobal.
+        // In CTFE mini-modules (no shadow stack), use page 1 boundary.
+        uint arenaStart = (spGlobal < globals.length && globals[spGlobal].name == "__sp")
+            ? cast(uint)globals[spGlobal].initValue
+            : 65536;
         uint arenaEnd = memoryPages * 65536;  // initial memory ceiling
 
         globals[arenaBaseGlobal].initValue = arenaStart;
@@ -2555,16 +2568,28 @@ class BinaryEmitter : EmitterCache {
     }
     
     /**
-     * Add shadow stack pointer global.
-     * The shadow stack lives in page 0, growing downward from 65536.
-     * Arena lives on page 1+ and grows upward via memory.grow — no collision possible.
+     * Add shadow stack pointer global, sized based on maxFrameSize.
+     * Must be called AFTER computeMaxFrameSize().
+     *
+     * Memory layout:
+     *   Pages 0..stackPages-1: data section (growing up) + shadow stack (growing down)
+     *   Pages stackPages..:    arena (growable via memory.grow)
      */
     private void addShadowStackGlobal() {
+        uint dataSize = nextDataOffset;
+        uint stackNeed = maxFrameSize * 2;  // 2x for call nesting headroom
+        uint totalNeed = dataSize + stackNeed;
+        uint stackPages = (totalNeed + 65535) / 65536;
+        if (stackPages < 1) stackPages = 1;
+        uint stackTop = stackPages * 65536;
+
+        memoryPages = stackPages + 1;  // +1 for initial arena page
+
         spGlobal = cast(uint)globals.length;
         GlobalInfo sp;
         sp.type = ValType.i32;
         sp.mutable = true;
-        sp.initValue = 65536;  // Top of page 0 (stack grows down, arena grows up from page 1)
+        sp.initValue = stackTop;
         sp.name = "__sp";
         globals ~= sp;
     }
@@ -3255,15 +3280,29 @@ class BinaryEmitter : EmitterCache {
     
     private void emitCodeSection() {
         if (functions.length == 0) return;
-        
+
         // Emit all function bodies
         ubyte[][] bodies;
         foreach (f; functions) {
             bodies ~= emitFunctionBody(f);
         }
-        
+
         if (auto content = buildCodeSection(bodies))
             emitSection(Section.code, content);
+    }
+
+    /// Compute the maximum shadow stack frame size across all functions.
+    /// Only does local variable collection (no code emission), so it's safe
+    /// to call before globals and function indices are finalized.
+    private void computeMaxFrameSize() {
+        foreach (ref f; functions) {
+            if (f.decl is null || f.decl.body_ is null) continue;
+            auto ctx = new FuncContext(f, this);
+            ctx.scanAddressTakenVars(f.decl.body_);
+            ctx.collectLocals(f.decl.body_);
+            if (ctx.frameSize > maxFrameSize)
+                maxFrameSize = ctx.frameSize;
+        }
     }
     
     private ubyte[] emitFunctionBody(FuncInfo f) {
@@ -3296,7 +3335,7 @@ class BinaryEmitter : EmitterCache {
         
         // Finalize locals (adds savedSpLocal if struct locals exist)
         ctx.finalizeLocals();
-        
+
         // Emit local declarations
         ctx.emitLocalDecls(body_);
         
