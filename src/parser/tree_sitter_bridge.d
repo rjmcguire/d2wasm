@@ -1333,6 +1333,14 @@ class TreeSitterBridge {
                 auto name = extractAliasThisFromDecl(child);
                 if (name)
                     aliasThisNames ~= name;
+            } else if (childType == "struct_declaration") {
+                auto result = parseStructDeclaration(child);
+                if (auto sd = cast(StructDecl)result)
+                    members ~= sd;
+                else
+                    members ~= result;  // TemplateDecl wrapping a struct
+            } else if (childType == "class_declaration") {
+                members ~= parseClassDeclaration(child);
             }
             // Skip braces, semicolons, etc.
         }

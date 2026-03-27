@@ -937,6 +937,10 @@ class BinaryEmitter : EmitterCache {
                 if (funcDecl.isMethod) {
                     collectMethod(structDecl, funcDecl);
                 }
+            } else if (auto nestedStruct = cast(StructDecl)member) {
+                collectStructMethods(nestedStruct);
+            } else if (auto nestedClass = cast(ClassDecl)member) {
+                collectClassMethods(nestedClass);
             }
         }
     }
@@ -1069,12 +1073,16 @@ class BinaryEmitter : EmitterCache {
                         }
                     }
                 }
+            } else if (auto nestedStruct = cast(StructDecl)member) {
+                collectStructMethods(nestedStruct);
+            } else if (auto nestedClass = cast(ClassDecl)member) {
+                collectClassMethods(nestedClass);
             }
         }
-        
+
         // Track this class for post-stabilization table building
         classesWithVtables ~= classDecl;
-        
+
         // Generate TypeInfo in data section
         generateTypeInfo(classDecl);
     }

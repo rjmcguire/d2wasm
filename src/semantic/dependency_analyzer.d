@@ -152,6 +152,20 @@ class DependencyAnalyzer {
     /**
      * Find all CallExpressions in a statement (recursive).
      */
+    private void scanAggregateMembersForCalls(AggregateDecl aggDecl, ref CallExpression[] calls) {
+        foreach (member; aggDecl.members) {
+            if (auto funcDecl = cast(FunctionDecl)member) {
+                if (funcDecl.body_) {
+                    calls ~= findCallsInStatement(funcDecl.body_);
+                }
+            } else if (auto nestedStruct = cast(StructDecl)member) {
+                scanAggregateMembersForCalls(nestedStruct, calls);
+            } else if (auto nestedClass = cast(ClassDecl)member) {
+                scanAggregateMembersForCalls(nestedClass, calls);
+            }
+        }
+    }
+
     private CallExpression[] findCallsInStatement(Statement stmt) {
         CallExpression[] calls;
 
@@ -198,14 +212,8 @@ class DependencyAnalyzer {
                 }
             }
         } else if (auto structStmt = cast(StructDeclarationStatement)stmt) {
-            // Scan inner struct method bodies for calls
-            foreach (member; structStmt.structDecl.members) {
-                if (auto funcDecl = cast(FunctionDecl)member) {
-                    if (funcDecl.body_) {
-                        calls ~= findCallsInStatement(funcDecl.body_);
-                    }
-                }
-            }
+            // Scan inner struct method bodies for calls (including nested types)
+            scanAggregateMembersForCalls(structStmt.structDecl, calls);
         } else if (auto tryStmt = cast(TryStatement)stmt) {
             calls ~= findCallsInStatement(tryStmt.tryBody);
             foreach (c; tryStmt.catches)

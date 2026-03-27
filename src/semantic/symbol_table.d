@@ -1009,6 +1009,9 @@ class SymbolCollector {
             }
         }
 
+        // Collect nested type declarations before computing layout
+        collectNestedTypes(decl);
+
         // Compute class layout (with vtable pointer as first field)
         // Default to 4-byte pointers (wasm32)
         computeClassLayout(decl, 4);
@@ -1045,6 +1048,10 @@ class SymbolCollector {
     }
     
     package void collectStructSymbol(StructDecl decl) {
+        // Collect nested type declarations before computing layout,
+        // so fields using inner types can resolve during layout computation.
+        collectNestedTypes(decl);
+
         // Compute struct layout
         computeStructLayout(decl);
         
@@ -1062,7 +1069,24 @@ class SymbolCollector {
         );
         addOrReplaceSymbol(symbol);
     }
-    
+
+    /**
+     * Collect nested struct/class declarations inside an aggregate body.
+     * Sets enclosingAggregate and recursively registers the inner type symbols
+     * so that fields using inner types resolve during layout computation.
+     */
+    private void collectNestedTypes(AggregateDecl parent) {
+        foreach (member; parent.members) {
+            if (auto nestedStruct = cast(StructDecl)member) {
+                nestedStruct.enclosingAggregate = parent;
+                collectStructSymbol(nestedStruct);
+            } else if (auto nestedClass = cast(ClassDecl)member) {
+                nestedClass.enclosingAggregate = parent;
+                collectClassSymbol(nestedClass);
+            }
+        }
+    }
+
     /**
      * Compute struct layout: field offsets, alignment, and total size
      */

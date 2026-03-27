@@ -425,6 +425,7 @@ abstract class AggregateDecl : Declaration {
     bool layoutComputed;
     FunctionDecl destructor;
     string[] aliasThis;  // alias-this member names (multi-alias)
+    AggregateDecl enclosingAggregate;  // non-null when declared inside another struct/class
 
     this(SourceLocation loc, string name, bool isPublic) {
         super(loc, name, isPublic);
