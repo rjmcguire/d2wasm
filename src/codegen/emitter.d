@@ -3288,8 +3288,9 @@ class BinaryEmitter : EmitterCache {
         // Create context for this function
         auto ctx = new FuncContext(f, this);
         
-        // Collect locals from function body
+        // Scan for address-taken locals, then collect locals from function body
         if (f.decl.body_) {
+            ctx.scanAddressTakenVars(f.decl.body_);
             ctx.collectLocals(f.decl.body_);
         }
         

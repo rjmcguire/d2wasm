@@ -240,6 +240,10 @@ class FuncContext {
     uint tempLocalF64;         // Temp local for f64 values (e.g., f64-returning call exception check)
     uint tempLocalF32;         // Temp local for f32 values (e.g., f32-returning call exception check)
     
+    // Address-taken locals: local IDs whose address is taken via &var
+    // These must be promoted to shadow stack for addressability.
+    bool[uint] addressTakenLocalIds;
+
     // Block depth for br instructions
     uint blockDepth = 0;
 
@@ -551,6 +555,107 @@ class FuncContext {
     }
 
     /**
+     * Pre-scan function body to find local variables whose address is taken (&var).
+     * Must be called before collectLocals so that such variables are promoted
+     * to the shadow stack instead of WASM locals.
+     */
+    void scanAddressTakenVars(Statement stmt) {
+        if (stmt is null) return;
+
+        if (auto compound = cast(CompoundStatement)stmt) {
+            foreach (s; compound.statements)
+                scanAddressTakenVars(s);
+        } else if (auto exprStmt = cast(ExpressionStatement)stmt) {
+            scanExprForAddressOf(exprStmt.expression);
+        } else if (auto varDecl = cast(VariableDeclarationStatement)stmt) {
+            if (varDecl.initializer !is null)
+                scanExprForAddressOf(varDecl.initializer);
+        } else if (auto returnStmt = cast(ReturnStatement)stmt) {
+            if (returnStmt.value !is null)
+                scanExprForAddressOf(returnStmt.value);
+        } else if (auto ifStmt = cast(IfStatement)stmt) {
+            if (ifStmt.condition !is null)
+                scanExprForAddressOf(ifStmt.condition);
+            scanAddressTakenVars(ifStmt.thenStatement);
+            if (ifStmt.elseStatement !is null)
+                scanAddressTakenVars(ifStmt.elseStatement);
+        } else if (auto whileStmt = cast(WhileStatement)stmt) {
+            if (whileStmt.condition !is null)
+                scanExprForAddressOf(whileStmt.condition);
+            scanAddressTakenVars(whileStmt.body_);
+        } else if (auto forStmt = cast(ForStatement)stmt) {
+            if (forStmt.init !is null) scanAddressTakenVars(forStmt.init);
+            if (forStmt.condition !is null)
+                scanExprForAddressOf(forStmt.condition);
+            if (forStmt.update !is null)
+                scanExprForAddressOf(forStmt.update);
+            scanAddressTakenVars(forStmt.body_);
+        } else if (auto mixinStmt = cast(MixinStatement)stmt) {
+            if (mixinStmt.isExpanded) {
+                foreach (s; mixinStmt.expandedStatements)
+                    scanAddressTakenVars(s);
+            }
+        } else if (auto tryStmt = cast(TryStatement)stmt) {
+            scanAddressTakenVars(tryStmt.tryBody);
+            foreach (c; tryStmt.catches)
+                if (c.body_) scanAddressTakenVars(c.body_);
+            if (tryStmt.finallyBody !is null)
+                scanAddressTakenVars(tryStmt.finallyBody);
+        }
+    }
+
+    /// Recursively scan an expression tree for &ident patterns.
+    private void scanExprForAddressOf(Expression expr) {
+        if (expr is null) return;
+
+        if (auto unary = cast(UnaryExpression)expr) {
+            if (unary.operator == UnaryExpression.Operator.AddressOf) {
+                if (auto ident = cast(IdentifierExpression)unary.operand) {
+                    if (ident.resolvedLocalId != uint.max)
+                        addressTakenLocalIds[ident.resolvedLocalId] = true;
+                }
+            }
+            scanExprForAddressOf(unary.operand);
+            return;
+        }
+        if (auto binary = cast(BinaryExpression)expr) {
+            scanExprForAddressOf(binary.left);
+            scanExprForAddressOf(binary.right);
+            return;
+        }
+        if (auto call = cast(CallExpression)expr) {
+            scanExprForAddressOf(call.function_);
+            foreach (arg; call.arguments)
+                scanExprForAddressOf(arg);
+            return;
+        }
+        if (auto assign = cast(AssignmentExpression)expr) {
+            scanExprForAddressOf(assign.left);
+            scanExprForAddressOf(assign.right);
+            return;
+        }
+        if (auto castExpr = cast(CastExpression)expr) {
+            scanExprForAddressOf(castExpr.expression);
+            return;
+        }
+        if (auto member = cast(MemberExpression)expr) {
+            scanExprForAddressOf(member.object);
+            return;
+        }
+        if (auto index = cast(IndexExpression)expr) {
+            scanExprForAddressOf(index.array);
+            scanExprForAddressOf(index.index);
+            return;
+        }
+        if (auto slice = cast(SliceExpression)expr) {
+            scanExprForAddressOf(slice.array);
+            scanExprForAddressOf(slice.start);
+            scanExprForAddressOf(slice.end);
+            return;
+        }
+    }
+
+    /**
      * Collect local variable declarations from statements
      */
     void collectLocals(Statement stmt) {
@@ -797,9 +902,10 @@ class FuncContext {
                 }
             }
 
-            // Regular local - add to WASM locals (or shadow stack if captured)
-            if (varDecl.isCaptured) {
-                // Captured scalar: promote to shadow stack for addressability
+            // Regular local - add to WASM locals (or shadow stack if captured/address-taken)
+            if (varDecl.isCaptured ||
+                (varDecl.uniqueLocalId != uint.max && varDecl.uniqueLocalId in addressTakenLocalIds)) {
+                // Captured or address-taken scalar: promote to shadow stack for addressability
                 frameSize = (frameSize + 3) & ~3;
                 VarInfo vi;
                 vi.kind = VarKind.scalar;
