@@ -712,13 +712,16 @@ class CTFERuntime {
         if (!initialized) {
             throw new CTFERuntimeError("Runtime not initialized");
         }
-        
+
         IM3Function func;
         auto result = m3_FindFunction(&func, runtime, funcName.toStringz());
         if (result !is null) {
             throw new CTFERuntimeError("Function not found: " ~ funcName ~ " - " ~ fromStringz(result).idup);
         }
-        
+
+        // Clear callback error state before execution
+        clearCallbackError();
+
         // Call function
         if (args.length == 0) {
             result = m3_CallV(func);
@@ -731,11 +734,14 @@ class CTFERuntime {
         } else {
             throw new CTFERuntimeError("Too many arguments (max 3 for now)");
         }
-        
+
         if (result !is null) {
             string baseError = "CTFE execution failed: " ~ fromStringz(result).idup;
             throw new CTFERuntimeError(formatErrorWithStack(baseError));
         }
+
+        // Check for ObjC callback errors that occurred during execution
+        checkCallbackError();
         
         // Get return value from stack
         // wasm3 leaves the result at runtime.stack
@@ -762,11 +768,13 @@ class CTFERuntime {
             throw new CTFERuntimeError("Function not found: " ~ funcName ~ " - " ~ fromStringz(result).idup);
         }
 
+        clearCallbackError();
         result = m3_CallV(func);
         if (result !is null) {
             string baseError = "CTFE execution failed: " ~ fromStringz(result).idup;
             throw new CTFERuntimeError(formatErrorWithStack(baseError));
         }
+        checkCallbackError();
 
         // Get f64 return value
         double returnValue;
@@ -785,19 +793,21 @@ class CTFERuntime {
         if (!initialized) {
             throw new CTFERuntimeError("Runtime not initialized");
         }
-        
+
         IM3Function func;
         auto result = m3_FindFunction(&func, runtime, funcName.toStringz());
         if (result !is null) {
             throw new CTFERuntimeError("Function not found: " ~ funcName);
         }
-        
+
+        clearCallbackError();
         result = m3_CallV(func);
         if (result !is null) {
             string baseError = "CTFE execution failed: " ~ fromStringz(result).idup;
             throw new CTFERuntimeError(formatErrorWithStack(baseError));
         }
-        
+        checkCallbackError();
+
         return CTFEValue.void_();
     }
     
@@ -922,6 +932,26 @@ class CTFERuntime {
             return result;
         } catch (Exception) {
             return null;
+        }
+    }
+
+    /**
+     * Check if an ObjC callback error occurred during WASM execution.
+     * The C trampoline sets a global error string when m3_Call fails inside a callback.
+     */
+    private void clearCallbackError() {
+        import runtime.ffi_bindings : ffi_clear_callback_error;
+        ffi_clear_callback_error();
+    }
+
+    private void checkCallbackError() {
+        import runtime.ffi_bindings : ffi_get_callback_error;
+        import semantic.ctfe : CTFEError;
+        import ast.nodes : SourceLocation;
+        auto err = ffi_get_callback_error();
+        if (err !is null) {
+            string msg = fromStringz(err).idup;
+            throw new CTFEError(msg, SourceLocation.init);
         }
     }
 

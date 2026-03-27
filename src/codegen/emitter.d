@@ -1724,6 +1724,20 @@ class BinaryEmitter : EmitterCache {
         return '@';
     }
 
+    /// Ensure __objc_msgSendSuper is registered as an FFI import.
+    /// Signature: (i64 super_ptr, i64 sel, ...) → i64 — same as objc_msgSend
+    /// but the first arg is a pointer to objc_super struct (WASM memory offset as i64).
+    package void ensureObjCMsgSendSuperImport() {
+        ensureObjCHelpers();
+        if ("__objc_msgSendSuper" in importIndex) return;
+        // First arg is i32 (WASM memory offset to objc_super struct → ARG_PTR converts to native pointer)
+        // Second arg is i64 (selector)
+        addObjCHelperImport("__objc_msgSendSuper", [ValType.i32, ValType.i64], [ValType.i64],
+                            [ArgKind.ARG_PTR, ArgKind.ARG_I64], ArgKind.ARG_I64);
+        // Set nativeName so the FFI trampoline resolves to objc_msgSendSuper
+        ffiMetas[$ - 1].nativeName = "objc_msgSendSuper";
+    }
+
     /// Ensure objc_getClass and sel_registerName are registered as FFI imports
     private void ensureObjCHelpers() {
         if (objcHelpersAdded) return;

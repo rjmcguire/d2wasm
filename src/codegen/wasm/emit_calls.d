@@ -1020,6 +1020,12 @@ mixin template CallEmitter() {
             throw new EmitError("Method call on non-identifier object not yet supported", memberExpr.location);
         }
 
+        // ObjC super call: super.method() inside an extern(Objective-C) class method
+        if (objIdent.name == "super" && isObjCMethod && func.classParent !is null && func.classParent.isObjC) {
+            emitObjCMsgSendSuper(out_, func.classParent, memberExpr.memberName, args);
+            return;
+        }
+
         // Unified lookup
         auto objInfo = resolveVar(objIdent.resolvedLocalId, objIdent.name);
         if (objInfo) {
@@ -1202,6 +1208,106 @@ mixin template CallEmitter() {
         if (methodHasLargeReturn) {
             emitGlobalGet(out_, emitter.spGlobal);
         }
+    }
+
+    /**
+     * Emit super.method() via objc_msgSendSuper for D-defined ObjC classes (WASM path).
+     * Builds objc_super {self, superclass} on shadow stack, calls through
+     * a dedicated import bound to objc_msgSendSuper.
+     */
+    void emitObjCMsgSendSuper(ref Appender!(ubyte[]) out_, ClassDecl classDecl,
+                               string methodName, Expression[] args) {
+        // Find superclass name
+        string superName = "NSObject";
+        if (classDecl.interfaces.length > 0) {
+            if (auto ut = cast(UserType) classDecl.interfaces[0])
+                if (auto ifaceDecl = cast(InterfaceDecl) ut.declaration)
+                    if (ifaceDecl.isObjC)
+                        superName = ifaceDecl.name;
+        }
+
+        // Find method and selector
+        FunctionDecl method = null;
+        string selector = methodName;
+        // Check parent interface
+        if (classDecl.interfaces.length > 0) {
+            if (auto ut = cast(UserType) classDecl.interfaces[0]) {
+                if (auto ifaceDecl = cast(InterfaceDecl) ut.declaration) {
+                    foreach (m; ifaceDecl.methods) {
+                        if (m.name == methodName) {
+                            method = m;
+                            if (m.objcSelector !is null && m.objcSelector.length > 0)
+                                selector = m.objcSelector;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        // Check own class methods
+        if (method is null) {
+            foreach (member; classDecl.members) {
+                if (auto fd = cast(FunctionDecl)member) {
+                    if (fd.name == methodName) {
+                        method = fd;
+                        if (fd.objcSelector !is null && fd.objcSelector.length > 0)
+                            selector = fd.objcSelector;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Ensure __objc_msgSendSuper import exists
+        emitter.ensureObjCMsgSendSuperImport();
+
+        // Allocate 16 bytes on shadow stack for objc_super struct
+        // SP -= 16
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 16);
+        out_ ~= Op.i32_sub;
+        emitGlobalSet(out_, emitter.spGlobal);
+
+        // Store self (i64) at [SP+0]
+        emitGlobalGet(out_, emitter.spGlobal);  // i32 address
+        emitLocalGet(out_, 0);                  // self is local 0 (i64) in ObjC methods
+        out_ ~= Op.i64_store;
+        out_ ~= cast(ubyte) 0x03;  // align=8
+        out_ ~= cast(ubyte) 0x00;  // offset=0
+
+        // Store superclass (i64) at [SP+8]
+        // Call objc_getClass(superName) → i64
+        emitGlobalGet(out_, emitter.spGlobal);  // i32 address for store
+        uint superNameAddr = emitter.registerCString(superName);
+        emitI32Const(out_, superNameAddr);
+        uint getClassIdx = emitter.getFuncIndex("objc_getClass", SourceLocation.init);
+        emitWasmCall(out_, getClassIdx);        // → i64 superclass pointer
+        out_ ~= Op.i64_store;
+        out_ ~= cast(ubyte) 0x03;  // align=8
+        out_ ~= cast(ubyte) 0x08;  // offset=8
+
+        // Arg 1: pointer to objc_super struct (as i32 WASM memory offset — ARG_PTR converts to native)
+        emitGlobalGet(out_, emitter.spGlobal);
+
+        // Arg 2: selector (i64)
+        uint selAddr = emitter.registerCString(selector);
+        emitI32Const(out_, selAddr);
+        uint selRegIdx = emitter.getFuncIndex("sel_registerName", SourceLocation.init);
+        emitWasmCall(out_, selRegIdx);
+
+        // Arg 3+: user arguments
+        foreach (arg; args)
+            emitExpression(out_, arg);
+
+        // Call __objc_msgSendSuper
+        uint superSendIdx = emitter.getFuncIndex("__objc_msgSendSuper", SourceLocation.init);
+        emitWasmCall(out_, superSendIdx);
+
+        // Restore shadow stack: SP += 16
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, 16);
+        out_ ~= Op.i32_add;
+        emitGlobalSet(out_, emitter.spGlobal);
     }
 
     /**

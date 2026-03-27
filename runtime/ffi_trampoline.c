@@ -16,6 +16,18 @@
 #include "wasm3.h"
 #include "m3_env.h"
 
+/* Global error buffer for ObjC callback failures.
+ * Checked by D code after WASM execution to report errors with full context. */
+static char g_callback_error[512] = {0};
+
+const char* ffi_get_callback_error(void) {
+    return g_callback_error[0] ? g_callback_error : NULL;
+}
+
+void ffi_clear_callback_error(void) {
+    g_callback_error[0] = '\0';
+}
+
 /* ArgKind enum — must match emitter.d's ArgKind */
 typedef enum {
     ARG_I32    = 0,
@@ -389,7 +401,10 @@ static void objc_callback_handler(ffi_cif *cif, void *ret, void **args, void *us
 
     M3Result result = m3_Call(desc->wasm_func, total_args, stack_ptrs);
     if (result) {
-        fprintf(stderr, "ObjC callback: m3_Call failed: %s\n", result);
+        const char *fname = m3_GetFunctionName(desc->wasm_func);
+        fprintf(stderr, "ObjC callback '%s' failed: %s\n", fname ? fname : "?", result);
+        snprintf(g_callback_error, sizeof(g_callback_error),
+                 "ObjC callback '%s' failed: %s", fname ? fname : "?", result);
         if (ret) memset(ret, 0, 8);
         return;
     }

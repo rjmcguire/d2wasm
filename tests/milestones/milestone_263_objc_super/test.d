@@ -11,25 +11,24 @@ interface NSObject {
     NSObject init_() @selector("init");
 }
 
+int g_superCalled = 0;
+
 extern(Objective-C)
 class MyObj : NSObject {
     static MyObj myAlloc() @selector("alloc");
-
     MyObj myInit() @selector("init") {
-        // Chain to superclass init via objc_msgSendSuper
         super.init_();
+        g_superCalled = 1;
         return cast(MyObj) cast(long) this;
     }
 
     int getValue() @selector("getValue") {
-        return 42;
+        return 41 + g_superCalled;
     }
 }
 
 int main() {
     MyObj obj = MyObj.myAlloc().myInit();
     if (cast(long) obj == 0) return 1;
-
-    int val = obj.getValue();
-    return val;  // 42
+    return obj.getValue();  // 42 if super.init_() ran
 }

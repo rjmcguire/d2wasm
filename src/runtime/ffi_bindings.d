@@ -51,4 +51,11 @@ extern(C) @nogc nothrow {
     int objc_register_classes_from_section(
         const(ubyte)* section_data, size_t section_len,
         void* runtime, void* module_);
+
+    /// Check if an ObjC callback error occurred during WASM execution.
+    /// Returns error message, or null if no error.
+    const(char)* ffi_get_callback_error();
+
+    /// Clear the callback error state (call before each WASM execution).
+    void ffi_clear_callback_error();
 }
