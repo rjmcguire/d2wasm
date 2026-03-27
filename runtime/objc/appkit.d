@@ -3,6 +3,8 @@
 
 module objc.appkit;
 
+import objc.foundation;
+
 pragma(lib, "/System/Library/Frameworks/Cocoa.framework/Cocoa");
 
 struct NSPoint { double x; double y; }
@@ -14,9 +16,9 @@ interface NSApplication {
     static NSApplication sharedApplication();
     void setActivationPolicy(long policy);
     void activateIgnoringOtherApps(int flag);
-    id nextEventMatchingMask(long mask, id untilDate, id inMode, int dequeue)
+    NSEvent nextEventMatchingMask(long mask, NSDate untilDate, NSString inMode, int dequeue)
         @selector("nextEventMatchingMask:untilDate:inMode:dequeue:");
-    void sendEvent(id event) @selector("sendEvent:");
+    void sendEvent(NSEvent event);
     void updateWindows();
 }
 
@@ -25,7 +27,7 @@ interface NSWindow {
     static NSWindow alloc();
     NSWindow initWithContentRect(NSRect rect, long styleMask, long backing, int defer_)
         @selector("initWithContentRect:styleMask:backing:defer:");
-    void setTitle(id title) @selector("setTitle:");
+    void setTitle(NSString title);
     void makeKeyAndOrderFront(id sender);
     id contentView();
     void setDelegate(id del);

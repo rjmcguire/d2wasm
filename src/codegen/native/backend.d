@@ -2314,6 +2314,8 @@ class NativeCompiledFunction : CompiledFunction {
                     if (nli.isRawPointer || nli.isObjCRef)
                         gen.emitStorePtr(varOffset);
                     else if (isF64ElementType(varDecl.type))
+                        // Both f32 and f64 scalars use 8-byte d-register ops
+                        // (standalone vars have 8-byte slots; f64 is lossless for f32)
                         gen.emitStoreLocalF64(varOffset);
                     else if (isI64ElementType(varDecl.type))
                         gen.emitStorePtr(varOffset);
@@ -3141,7 +3143,7 @@ class NativeCompiledFunction : CompiledFunction {
             // Handle slice append specially (~=)
             if (assign.operator == AssignmentExpression.Operator.ConcatAssign) {
                 if (info.isSlice) {
-                    compileSliceAppend(info.offset, assign.right, info.elemSize, isF64ElementType(info.elementType));
+                    compileSliceAppend(info.offset, assign.right, info.elemSize, isF64ElementType(info.elementType), isF32ElementType(info.elementType));
                     return;
                 } else {
                     throw new Exception("~= only supported on slice types");
@@ -3684,6 +3686,10 @@ class NativeCompiledFunction : CompiledFunction {
                     gen.emit(stencil_add_i64);  // 64-bit ptr arithmetic
                 }
                 // x0 now has address of nested aggregate
+            } else if (isF32ElementType(field.type)) {
+                gen.emitLoadFromPointer(fieldOffset);  // LDR w0, [x0, #off] (4-byte)
+                gen.emitMoveW0ToS0();
+                gen.emitConvertF32ToF64();
             } else if (isF64ElementType(field.type)) {
                 if (fieldOffset > 0) {
                     gen.emitMoveX0ToX1();
@@ -3744,9 +3750,10 @@ class NativeCompiledFunction : CompiledFunction {
                         case VarKind.staticArray:
                             // Static array: elements stored inline at offset
                             uint saElemSz = info.staticArrayElemSize;
-                            bool saIsFloat = isF64ElementType(info.elementType);
+                            bool saIsF32 = isF32ElementType(info.elementType);
+                            bool saIsF64 = !saIsF32 && isF64ElementType(info.elementType);
                             // For constant index, load directly (scalars only)
-                            if (saElemSz <= 4 && !saIsFloat) {
+                            if (saElemSz <= 4 && !saIsF32 && !saIsF64) {
                                 if (auto indexLit = cast(LiteralExpression)indexExpr.index) {
                                     if (indexLit.value.type == typeid(long)) {
                                         uint idx = cast(uint)indexLit.value.get!long();
@@ -3764,17 +3771,20 @@ class NativeCompiledFunction : CompiledFunction {
                             gen.emitStackAddress(info.offset);  // x0 = base address
                             gen.emit(stencil_add_i64);  // x0 = element address (64-bit ptr)
                             // Load value from computed address
-                            if (saIsFloat)
-                                gen.emit(stencil_load_f64);  // LDR d0, [x0]
+                            if (saIsF32) {
+                                gen.emitLoadFromPointer(0);   // LDR w0, [x0] (4-byte)
+                                gen.emitMoveW0ToS0();
+                                gen.emitConvertF32ToF64();    // widen to d0 for computation
+                            } else if (saIsF64)
+                                gen.emit(stencil_load_f64);   // LDR d0, [x0] (8-byte)
                             else if (saElemSz <= 4)
                                 gen.emitLoadFromPointer(0);
                             return;
 
                         case VarKind.slice:
                             // Dynamic array (slice): { ptr: i64, length: i32, capacity: i32 }
-                            bool slIsFloat = isF64ElementType(info.elementType);
-                            assert(!slIsFloat || info.elemSize == 8,
-                                   "f64 slice must have elemSize 8");
+                            bool slIsF32 = isF32ElementType(info.elementType);
+                            bool slIsF64 = !slIsF32 && isF64ElementType(info.elementType);
                             assert(info.offset % 8 == 0,
                                    "slice offset not 8-byte aligned");
                             compileExpression(indexExpr.index);
@@ -3799,8 +3809,12 @@ class NativeCompiledFunction : CompiledFunction {
                             gen.emit(stencil_add_i64);  // 64-bit ptr arithmetic
 
                             // Load value from computed address
-                            if (slIsFloat) {
-                                gen.emit(stencil_load_f64);  // LDR d0, [x0]
+                            if (slIsF32) {
+                                gen.emitLoadFromPointer(0);   // LDR w0, [x0] (4-byte)
+                                gen.emitMoveW0ToS0();
+                                gen.emitConvertF32ToF64();    // widen to d0
+                            } else if (slIsF64) {
+                                gen.emit(stencil_load_f64);   // LDR d0, [x0] (8-byte)
                             } else if (info.elemSize <= 4) {
                                 if (info.elemSize == 1)
                                     gen.emitLoadByteFromPointer(0);
@@ -3892,8 +3906,11 @@ class NativeCompiledFunction : CompiledFunction {
                                 gen.emitLoadPtr(ptrTemp);  // x0 = ptr
                                 gen.emit(stencil_add_i64);  // x0 = ptr + byte_offset
                                 // Load value for scalar elements
-                                bool isFloat = isF64ElementType(arrType.elementType);
-                                if (isFloat)
+                                if (isF32ElementType(arrType.elementType)) {
+                                    gen.emitLoadFromPointer(0);  // LDR w0, [x0] (4-byte)
+                                    gen.emitMoveW0ToS0();
+                                    gen.emitConvertF32ToF64();
+                                } else if (isF64ElementType(arrType.elementType))
                                     gen.emit(stencil_load_f64);
                                 else if (elemSize <= 4) {
                                     if (elemSize == 1)
@@ -3939,8 +3956,11 @@ class NativeCompiledFunction : CompiledFunction {
                                     gen.emitLoadPtr(ptrTemp);  // x0 = ptr
                                     gen.emit(stencil_add_i64);  // x0 = ptr + byte_offset
                                     // Load value for scalar elements
-                                    bool isFloat = isF64ElementType(arrType.elementType);
-                                    if (isFloat)
+                                    if (isF32ElementType(arrType.elementType)) {
+                                        gen.emitLoadFromPointer(0);
+                                        gen.emitMoveW0ToS0();
+                                        gen.emitConvertF32ToF64();
+                                    } else if (isF64ElementType(arrType.elementType))
                                         gen.emit(stencil_load_f64);
                                     else if (elemSize <= 4) {
                                         if (elemSize == 1)
@@ -5573,10 +5593,13 @@ class NativeCompiledFunction : CompiledFunction {
      * 4. Store element at ptr[length]
      * 5. Increment length
      */
-    private void compileSliceAppend(size_t sliceOffset, Expression element, uint elemSize, bool isFloat = false) {
+    private void compileSliceAppend(size_t sliceOffset, Expression element, uint elemSize, bool isFloat = false, bool isF32 = false) {
+        // f32 elements are 4-byte scalars — treat like i32 for memory ops (same bit width).
+        // Only f64 needs special d-register handling.
+        if (isF32) isFloat = false;  // f32 uses 4-byte i32 path, not 8-byte f64 path
         bool isAggregate = (elemSize > 4 && !isFloat);
         // Allocate temp slots — unified layout for both f64 and i32 paths.
-        // isFloat only controls which store/load instructions are used.
+        // isFloat only controls which store/load instructions are used (f64 d-register ops).
         auto mark = temps.save();
         size_t tempElement = temps.alloc(8);  // scalar value or source address for aggregates
         size_t tempNewCap  = temps.alloc(8);
@@ -5864,7 +5887,7 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitStoreLocal32(tempSlice + sliceInfo.capacityOffset);
 
         // Run the standard append on the temp copy
-        compileSliceAppend(tempSlice, element, elemSize, isF64ElementType(arrType.elementType));
+        compileSliceAppend(tempSlice, element, elemSize, isF64ElementType(arrType.elementType), isF32ElementType(arrType.elementType));
 
         // Copy modified slice back to this_ptr + fieldOffset
         emitSaveFieldAddr();
@@ -5919,7 +5942,7 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitStoreLocal32(tempSlice + sliceInfo.capacityOffset);
 
         // Run append on temp
-        compileSliceAppend(tempSlice, element, elemSize, isF64ElementType(arrType.elementType));
+        compileSliceAppend(tempSlice, element, elemSize, isF64ElementType(arrType.elementType), isF32ElementType(arrType.elementType));
 
         // Copy back: use stack-address approach (safe even if sliceAddr is not 8-byte aligned)
         auto mark = temps.save();
@@ -6320,19 +6343,51 @@ class NativeCompiledFunction : CompiledFunction {
             }
         }
 
-        // If method has a D body and no user params, call it directly (skip objc_msgSend).
-        // For methods with params, we must go through objc_msgSend so the trampoline
-        // handles the calling convention shift (_cmd removal).
-        if (dBodyMethod !is null && args.length == 0) {
+        // If method has a D body, call it directly (skip objc_msgSend overhead).
+        // D calling convention: x0 = this, x1 = arg0, x2 = arg1, ...
+        if (dBodyMethod !is null) {
             string mangledName = getMangledName(dBodyMethod);
             auto labelPtr = mangledName in functionLabels;
             log(2, "native: ObjC D-body method '", methodName, "' mangled='", mangledName, "' found=", labelPtr !is null);
             if (labelPtr !is null) {
-                // Direct call: x0 = this (receiver)
-                if (receiver !is null)
-                    compileExpression(receiver);
+                auto mark = temps.save();
+
+                // Save args to temps (they may contain calls that clobber registers)
+                size_t[] argTemps;
+                foreach (arg; args) {
+                    compileExpression(arg);
+                    size_t t = temps.alloc(8);
+                    gen.emitStorePtr(t);
+                    argTemps ~= t;
+                }
+
+                // Save receiver to temp if there are args (compileExpression may clobber x0)
+                size_t receiverTemp = 0;
+                if (receiver !is null) {
+                    if (args.length > 0) {
+                        compileExpression(receiver);
+                        receiverTemp = temps.alloc(8);
+                        gen.emitStorePtr(receiverTemp);
+                    }
+                }
+
+                // Load args into x1, x2, ... (D method convention)
+                foreach (i, t; argTemps) {
+                    gen.emitLoadPtr(t);
+                    gen.emitMoveXReg(0, cast(uint)(1 + i));
+                }
+
+                // x0 = this (receiver)
+                if (receiver !is null) {
+                    if (args.length > 0)
+                        gen.emitLoadPtr(receiverTemp);
+                    else
+                        compileExpression(receiver);
+                }
+
                 gen.emitCall(*labelPtr);
                 emitNativeExceptionCheckWithValue();
+                temps.restore(mark);
                 return;
             }
         }
