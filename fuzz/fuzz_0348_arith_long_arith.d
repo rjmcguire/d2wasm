@@ -1,4 +1,3 @@
-// STATUS: bug — compile error
 // EXPECTED: 10000000000
 int main() {
     long a = 5000000000;

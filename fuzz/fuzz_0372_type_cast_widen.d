@@ -1,4 +1,3 @@
-// STATUS: maybeLater — literal narrowing not implemented
 // EXPECTED: 127
 int main() {
     byte a = 127;

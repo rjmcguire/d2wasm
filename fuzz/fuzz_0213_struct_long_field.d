@@ -1,4 +1,3 @@
-// STATUS: bug — compile error
 // EXPECTED: 5000000000
 struct BigVal {
     long value;

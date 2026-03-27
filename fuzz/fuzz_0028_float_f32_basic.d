@@ -1,4 +1,3 @@
-// STATUS: bug — compile error
 // EXPECTED: 5
 // EXPECTED: 6
 int main() {

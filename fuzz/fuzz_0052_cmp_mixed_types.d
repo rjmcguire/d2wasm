@@ -1,4 +1,3 @@
-// STATUS: maybeLater — literal narrowing not implemented
 // EXPECTED: 1
 // EXPECTED: 1
 // EXPECTED: 1
