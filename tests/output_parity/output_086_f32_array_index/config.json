@@ -1,0 +1,7 @@
+{
+  "name": "f32_array_index",
+  "description": "Output parity: float (f32) static array indexing — read, write, adjacent element corruption check",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 42
+}

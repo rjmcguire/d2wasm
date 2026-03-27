@@ -1,0 +1,7 @@
+{
+  "name": "f32_variable_init",
+  "description": "Output parity: float (f32) variable initialization, default init, reassignment",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 42
+}

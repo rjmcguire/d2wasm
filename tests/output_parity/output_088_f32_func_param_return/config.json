@@ -1,0 +1,7 @@
+{
+  "name": "f32_func_param_return",
+  "description": "Output parity: float (f32) function parameters and return values — pure, mixed, chained calls",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 42
+}

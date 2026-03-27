@@ -1,0 +1,7 @@
+{
+  "name": "f32_slice_append",
+  "description": "Output parity: float (f32) slice append — ~= operator must use f32 store/load, not f64",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 42
+}

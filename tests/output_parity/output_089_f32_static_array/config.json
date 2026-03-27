@@ -1,0 +1,7 @@
+{
+  "name": "f32_static_array",
+  "description": "Output parity: float (f32) static array — init, pointer-based fill/sum, neighbor corruption check",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 42
+}

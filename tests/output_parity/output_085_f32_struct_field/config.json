@@ -1,0 +1,7 @@
+{
+  "name": "f32_struct_field",
+  "description": "Output parity: float (f32) struct fields — pure float struct, mixed int/float struct, field modification",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 42
+}

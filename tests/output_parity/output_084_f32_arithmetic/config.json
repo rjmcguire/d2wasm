@@ -1,0 +1,7 @@
+{
+  "name": "f32_arithmetic",
+  "description": "Output parity: float (f32) arithmetic — add, sub, mul, div, negate, compare",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 42
+}
