@@ -923,6 +923,14 @@ class TypeChecker {
         Type leftType = checkExpression(expr.left);
         Type rightType = checkExpression(expr.right);
 
+        // Narrow integer literals in binary expressions (e.g. long_var + 1).
+        // Float literals are NOT narrowed here — D uses arithmetic promotion
+        // (f32 widens to f64) in binary expressions, preserving f64 precision.
+        if (narrowIntLiteral(expr.right, leftType))
+            rightType = leftType;
+        else if (narrowIntLiteral(expr.left, rightType))
+            leftType = rightType;
+
         // Arithmetic operators
         if (expr.operator >= BinaryExpression.Operator.Add &&
             expr.operator <= BinaryExpression.Operator.Modulo) {
@@ -941,7 +949,7 @@ class TypeChecker {
 
             return promoteArithmeticTypes(leftType, rightType, expr.location);
         }
-        
+
         // Comparison operators
         if (expr.operator >= BinaryExpression.Operator.Equal &&
             expr.operator <= BinaryExpression.Operator.GreaterEqual) {

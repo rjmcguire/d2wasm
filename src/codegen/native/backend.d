@@ -2126,7 +2126,14 @@ class NativeCompiledFunction : CompiledFunction {
                                 auto field = sd.fields[i];
                                 size_t fieldOffset = nextLocalOffset + field.offset;
                                 compileExpression(tmplInst.callArguments[i]);
-                                gen.emitStoreLocal32(fieldOffset);
+                                if (isF32ElementType(field.type)) {
+                                    gen.emitConvertF64ToF32();
+                                    gen.emitStoreLocalF32(fieldOffset);
+                                } else if (isF64ElementType(field.type)) {
+                                    gen.emitStoreLocalF64(fieldOffset);
+                                } else {
+                                    gen.emitStoreLocal32(fieldOffset);
+                                }
                             }
                         }
                     } else if (auto call = cast(CallExpression)effectiveInit) {
@@ -2162,7 +2169,14 @@ class NativeCompiledFunction : CompiledFunction {
                                             }
                                             
                                             compileExpression(call.arguments[i]);
-                                            gen.emitStoreLocal32(fieldOffset);
+                                            if (isF32ElementType(field.type)) {
+                                                gen.emitConvertF64ToF32();
+                                                gen.emitStoreLocalF32(fieldOffset);
+                                            } else if (isF64ElementType(field.type)) {
+                                                gen.emitStoreLocalF64(fieldOffset);
+                                            } else {
+                                                gen.emitStoreLocal32(fieldOffset);
+                                            }
                                         }
                                 }
                             } else if (symbol && symbol.kind == SymbolKind.Function) {
@@ -2507,10 +2521,18 @@ class NativeCompiledFunction : CompiledFunction {
                 } else if (nli.isStaticArray) {
                     // Static array initialization from array literal
                     if (auto arrLit = cast(ArrayLiteralExpression)varDecl.initializer) {
-                        // Store each element directly on stack
+                        // Store each element directly on stack — use type-appropriate store
                         foreach (i, elem; arrLit.elements) {
                             compileExpression(elem);
-                            gen.emitStoreLocal32(nextLocalOffset + i * 4);
+                            size_t elemOff = nextLocalOffset + i * nli.elemSize;
+                            if (isF32ElementType(nli.elementType)) {
+                                gen.emitConvertF64ToF32();
+                                gen.emitStoreLocalF32(elemOff);
+                            } else if (isF64ElementType(nli.elementType)) {
+                                gen.emitStoreLocalF64(elemOff);
+                            } else {
+                                gen.emitStoreLocal32(elemOff);
+                            }
                         }
                     } else if (auto call = cast(CallExpression)varDecl.initializer) {
                         // Function call returning static array — hidden result pointer
@@ -3450,6 +3472,8 @@ class NativeCompiledFunction : CompiledFunction {
                 compileExpression(assign.right);
                 if (info.isRawPointer || info.isObjCRef)
                     gen.emitStorePtr(info.offset);
+                else if (isF64ElementType(info.elementType))
+                    gen.emitStoreLocalF64(info.offset);
                 else
                     gen.emitStoreLocal32(info.offset);
             } else {
@@ -3616,6 +3640,10 @@ class NativeCompiledFunction : CompiledFunction {
                                 }
                             } else {
                                 compileExpression(arg);
+                                // Float results are in d0 — transfer bits to x0
+                                // so emitStorePtr saves the correct IEEE 754 value.
+                                if (isF64Expression(arg))
+                                    gen.emitRaw32(0x9E660000);  // FMOV x0, d0
                             }
                             size_t slot = temps.alloc(8);
                             gen.emitStorePtr(slot);
@@ -3641,6 +3669,9 @@ class NativeCompiledFunction : CompiledFunction {
                                 }
                             } else {
                                 compileExpression(call.arguments[cast(size_t)i]);
+                                // Float results are in d0 — transfer bits to x0
+                                if (isF64Expression(call.arguments[cast(size_t)i]))
+                                    gen.emitRaw32(0x9E660000);  // FMOV x0, d0
                             }
                             emitMoveX0ToArgRegister(cast(int)i + hiddenShift);
                         }
@@ -4579,18 +4610,28 @@ class NativeCompiledFunction : CompiledFunction {
                     temps.restore(mark);
                     return;
                 }
+                // Float elements need d-register store, not x-register
+                bool saIsF32 = isF32ElementType(info.elementType);
+                bool saIsFloat = isF64ElementType(info.elementType);  // true for both f32 and f64
+
                 // Scalar: constant index optimization
                 if (auto indexLit = cast(LiteralExpression)indexExpr.index) {
                     if (indexLit.value.type == typeid(long)) {
                         uint idx = cast(uint)indexLit.value.get!long();
-                        compileExpression(value);  // x0 = value
-                        gen.emitStoreLocal32(info.offset + idx * es);
+                        size_t targetOff = info.offset + idx * es;
+                        compileExpression(value);  // d0 = value (float), x0 = value (int)
+                        if (saIsF32) {
+                            gen.emitConvertF64ToF32();
+                            gen.emitStoreLocalF32(targetOff);
+                        } else if (saIsFloat) {
+                            gen.emitStoreLocalF64(targetOff);
+                        } else {
+                            gen.emitStoreLocal32(targetOff);
+                        }
                         return;
                     }
                 }
-                // Scalar: dynamic index
-                compileExpression(value);  // x0 = value
-                gen.emitMoveX0ToX9();      // x9 = value
+                // Scalar: dynamic index — compute target address then store
                 compileExpression(indexExpr.index);  // x0 = index
                 gen.emitMoveX0ToX1();
                 gen.emitImm32(stencil_load_imm32, es);
@@ -4598,7 +4639,26 @@ class NativeCompiledFunction : CompiledFunction {
                 gen.emitMoveX0ToX1();
                 gen.emitStackAddress(info.offset);
                 gen.emit(stencil_add_i64);  // x0 = target address (64-bit ptr)
-                gen.emitStoreToPointerFromX9(0);
+                // Save target address, compile value, then store through saved address
+                auto mark2 = temps.save();
+                size_t addrTemp = temps.alloc(8);
+                gen.emitStorePtr(addrTemp);
+                compileExpression(value);  // d0 = value (float), x0 = value (int)
+                if (saIsF32) {
+                    gen.emitConvertF64ToF32();
+                    gen.emitLoadPtr(addrTemp);
+                    // STR s0, [x0]: store f32 through pointer
+                    gen.emitRaw32(0xBD000000);  // STR s0, [x0, #0]
+                } else if (saIsFloat) {
+                    gen.emitLoadPtr(addrTemp);
+                    // STR d0, [x0]: store f64 through pointer
+                    gen.emitRaw32(0xFD000000);  // STR d0, [x0, #0]
+                } else {
+                    gen.emitMoveX0ToX9();
+                    gen.emitLoadPtr(addrTemp);
+                    gen.emitStoreToPointerFromX9(0);
+                }
+                temps.restore(mark2);
                 return;
 
             case VarKind.slice:
@@ -5701,11 +5761,20 @@ class NativeCompiledFunction : CompiledFunction {
             auto field = structDecl.fields[i];
             size_t fieldOffset = structOffset + field.offset;
 
-            // Compile the argument value (into x0)
+            // Compile the argument value (into x0 for int, d0 for float)
             compileExpression(args[i]);
 
-            // Store to the field's stack location
-            gen.emitStoreLocal32(fieldOffset);
+            // Store to the field's stack location — use type-appropriate store.
+            // compileExpression always produces f64 in d0 for float types
+            // (native backend promotes all floats to f64 for computation).
+            if (isF32ElementType(field.type)) {
+                gen.emitConvertF64ToF32();  // FCVT s0, d0
+                gen.emitStoreLocalF32(fieldOffset);
+            } else if (isF64ElementType(field.type)) {
+                gen.emitStoreLocalF64(fieldOffset);
+            } else {
+                gen.emitStoreLocal32(fieldOffset);
+            }
         }
 
         // Leave pointer to struct in x0: x0 = SP + structOffset
@@ -5990,9 +6059,8 @@ class NativeCompiledFunction : CompiledFunction {
      * 5. Increment length
      */
     private void compileSliceAppend(size_t sliceOffset, Expression element, uint elemSize, bool isFloat = false, bool isF32 = false) {
-        // f32 elements are 4-byte scalars — treat like i32 for memory ops (same bit width).
-        // Only f64 needs special d-register handling.
-        if (isF32) isFloat = false;  // f32 uses 4-byte i32 path, not 8-byte f64 path
+        // Both f32 and f64 values live in d-registers — isFloat controls d-register load/store.
+        // isF32 further narrows f64→f32 for 4-byte array element stores.
         bool isAggregate = (elemSize > 4 && !isFloat);
         // Allocate temp slots — unified layout for both f64 and i32 paths.
         // isFloat only controls which store/load instructions are used (f64 d-register ops).
@@ -6130,7 +6198,13 @@ class NativeCompiledFunction : CompiledFunction {
         } else {
             // Load element from source (scalar)
             if (isFloat) {
-                gen.emit(stencil_load_f64);         // d0 = f64 at [x0]
+                if (isF32) {
+                    gen.emitLoadFromPointer(0);     // w0 = 4 bytes at [x0]
+                    gen.emitMoveW0ToS0();           // s0 = w0 (bit reinterpret)
+                    gen.emitConvertF32ToF64();      // d0 = f64(s0)
+                } else {
+                    gen.emit(stencil_load_f64);     // d0 = f64 at [x0]
+                }
                 gen.emitStoreLocalF64(tempLoopVal); // save to temp (f64)
             } else if (elemSize == 1) {
                 gen.emitLoadByteFromPointer(0);     // x0 = byte at [x0]
@@ -6152,7 +6226,12 @@ class NativeCompiledFunction : CompiledFunction {
             // Store element to dest
             if (isFloat) {
                 gen.emitLoadLocalF64(tempLoopVal);  // d0 = saved f64
-                gen.emit(stencil_store_f64);        // STR d0, [x0]
+                if (isF32) {
+                    gen.emitConvertF64ToF32();       // FCVT s0, d0
+                    gen.emitRaw32(0xBD000000);       // STR s0, [x0, #0]
+                } else {
+                    gen.emit(stencil_store_f64);     // STR d0, [x0]
+                }
             } else {
                 gen.emitMoveX0ToX1();               // x1 = dest addr
                 gen.emitLoadLocal32(tempLoopVal);   // x0 = value
@@ -6211,7 +6290,12 @@ class NativeCompiledFunction : CompiledFunction {
             }
         } else if (isFloat) {
             gen.emitLoadLocalF64(tempElement);  // d0 = element (f64)
-            gen.emit(stencil_store_f64);        // STR d0, [x0]
+            if (isF32) {
+                gen.emitConvertF64ToF32();       // FCVT s0, d0
+                gen.emitRaw32(0xBD000000);       // STR s0, [x0, #0]
+            } else {
+                gen.emit(stencil_store_f64);     // STR d0, [x0]
+            }
         } else {
             gen.emitMoveX0ToX1();               // x1 = dest addr
             gen.emitLoadLocal32(tempElement);   // x0 = element value

@@ -1468,17 +1468,18 @@ mixin template StatementEmitter() {
         // Array literal initializer: [1, 2, 3, 4]
         if (auto arrayLit = cast(ArrayLiteralExpression)stmt.initializer) {
             uint elemCount = cast(uint)arrayLit.elements.length;
-            
+            bool isFloat = isF64ElementType(info.elementType) || isF32ElementType(info.elementType);
+
             // Store each element at FP + frameOffset + i * elemSize
             for (uint i = 0; i < elemCount && i < info.elementCount; i++) {
                 // Address: FP + frameOffset + i * elemSize
                 emitFPOffset(out_, info.frameOffset + i * info.elementSize);
-                
+
                 // Value
                 emitExpression(out_, arrayLit.elements[i]);
-                
-                // Store
-                emitI32Store(out_);
+
+                // Store — use type-appropriate op (f32_store for float, f64_store for double)
+                emitStoreForSize(out_, info.elementSize, isFloat);
             }
             return;
         }

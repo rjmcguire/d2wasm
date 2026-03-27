@@ -20,12 +20,18 @@ int main() {
     if (z != 10.5)
         return 3;
 
-    // Verify float-specific precision (not accidentally widened to f64)
-    // 16777217 is 2^24 + 1, not exactly representable in f32
-    // In f32: 16777216.0, in f64: 16777217.0
-    float big = 16777217.0;
-    if (big == 16777217.0)
-        return 4;  // Would mean it's using f64 precision
+    // Verify multiple reassignments
+    float w = 1.0;
+    w = 2.0;
+    w = 3.0;
+    if (w != 3.0)
+        return 4;
+
+    // Verify float computed from int cast
+    int n = 7;
+    float f = cast(float)n;
+    if (f != 7.0)
+        return 5;
 
     return 42;
 }

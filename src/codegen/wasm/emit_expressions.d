@@ -642,10 +642,12 @@ mixin template ExpressionEmitter() {
                          VarInfo* sliceInfo, Expression value) {
         int sliceAddr = sliceInfo.frameOffset;
         bool isFloat = isF64ElementType(sliceInfo.elementType) || isF32ElementType(sliceInfo.elementType);
+        bool isF32 = isF32ElementType(sliceInfo.elementType);
         uint elementSize = sliceInfo.elementSize;
         bool isAggregate = (elementSize > 4 && !isFloat);
         // SP scratch layout: value takes valSize bytes, then 3 i32 temporaries
-        int valSize = isAggregate ? cast(int)elementSize : (isFloat ? 8 : 4);
+        // f32 uses 4 bytes, f64 uses 8 bytes
+        int valSize = isAggregate ? cast(int)elementSize : (isFloat ? (isF32 ? 4 : 8) : 4);
         int capOff = valSize + 4;   // newCapacity offset from SP
         int bufOff = valSize + 8;   // newBuffer offset from SP
         int ctrOff = valSize + 12;  // loop counter offset from SP
@@ -676,9 +678,7 @@ mixin template ExpressionEmitter() {
             out_ ~= Op.i32_sub;
             emitExpression(out_, value);
             if (isFloat) {
-                out_ ~= Op.f64_store;
-                out_ ~= cast(ubyte)0x03;  // alignment log2(8)
-                leb128u(out_, 0);
+                emitStoreForSize(out_, cast(uint)valSize, true);
             } else {
                 emitI32Store(out_);
             }
@@ -913,9 +913,7 @@ mixin template ExpressionEmitter() {
             emitI32Const(out_, valSize);
             out_ ~= Op.i32_sub;
             if (isFloat) {
-                out_ ~= Op.f64_load;
-                out_ ~= cast(ubyte)0x03;
-                leb128u(out_, 0);
+                emitLoadForSize(out_, cast(uint)valSize, true);
             } else {
                 emitI32Load(out_);
             }
@@ -2008,12 +2006,31 @@ mixin template ExpressionEmitter() {
 
         // Emit operands
         emitExpression(out_, expr.left);
+        bool leftF32 = isF32Expression(expr.left);
+        bool leftF64 = isF64Expression(expr.left);
+        bool rightF32 = isF32Expression(expr.right);
+        bool rightF64 = isF64Expression(expr.right);
+
+        // Mixed f32/f64: promote f32 side to f64 before emitting the right operand
+        // D uses arithmetic promotion (f32 widens to f64) in binary expressions.
+        if (leftF32 && rightF64) {
+            out_ ~= Op.f64_promote_f32;  // promote left f32 → f64
+            leftF32 = false;
+            leftF64 = true;
+        }
+
         emitExpression(out_, expr.right);
+
+        if (leftF64 && rightF32) {
+            out_ ~= Op.f64_promote_f32;  // promote right f32 → f64
+            rightF32 = false;
+            rightF64 = true;
+        }
 
         // Emit operator — dispatch f64/f32 ops when operands are float
         Op op;
-        bool isF64 = isF64Expression(expr.left);
-        bool isF32 = isF32Expression(expr.left);
+        bool isF64 = leftF64;
+        bool isF32 = leftF32 && rightF32;
         if (isF64) {
             switch (expr.operator) {
                 case BinaryExpression.Operator.Add: op = Op.f64_add; break;
