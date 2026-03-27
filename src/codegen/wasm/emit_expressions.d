@@ -2409,10 +2409,12 @@ mixin template ExpressionEmitter() {
         // Check for pointer dereference assignment (*ptr = value)
         if (auto derefExpr = cast(UnaryExpression)expr.left) {
             if (derefExpr.operator == UnaryExpression.Operator.Dereference) {
-                // *ptr = value → [ptr_addr, value, i32.store]
+                // *ptr = value → [ptr_addr, value, tee temp, i32.store, get temp]
                 emitExpression(out_, derefExpr.operand);  // ptr address
                 emitExpression(out_, expr.right);          // value
-                emitI32Store(out_);
+                emitLocalTee(out_, tempLocalB);            // save value
+                emitI32Store(out_);                        // store [addr, val]
+                emitLocalGet(out_, tempLocalB);            // leave value on stack
                 return;
             }
         }
