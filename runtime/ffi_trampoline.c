@@ -16,6 +16,21 @@
 #include "wasm3.h"
 #include "m3_env.h"
 
+/* Bump allocator for copying native pointers (e.g. C strings) into WASM memory.
+ * Initialized by ffi_set_ptr_return_base() from the D runtime after module load.
+ * Grows upward from the base; resets each frame or when explicitly reset. */
+static uint32_t g_ptr_return_base = 0;
+static uint32_t g_ptr_return_bump = 0;
+
+void ffi_set_ptr_return_base(uint32_t base) {
+    g_ptr_return_base = base;
+    g_ptr_return_bump = base;
+}
+
+void ffi_reset_ptr_return_bump(void) {
+    g_ptr_return_bump = g_ptr_return_base;
+}
+
 /* Global error buffer for ObjC callback failures.
  * Checked by D code after WASM execution to report errors with full context. */
 static char g_callback_error[512] = {0};
@@ -308,7 +323,26 @@ const void *ffi_generic_trampoline(IM3Runtime runtime, IM3ImportContext _ctx,
 
     /* Write return value to _sp[0] */
     if (has_return) {
-        *((uint64_t *)_sp) = ret_val;
+        if (desc->ret_kind == ARG_PTR && ret_val != 0) {
+            /* Native pointer return (e.g. char* from UTF8String).
+             * Copy the C string into WASM linear memory so the WASM code
+             * can dereference it.  Uses a simple bump allocator at the
+             * top of the data/heap area (grows toward the shadow stack). */
+            const char *native_str = (const char *)(uintptr_t)ret_val;
+            uint32_t len = (uint32_t)strnlen(native_str, 4095) + 1;  /* include NUL, cap at 4KB */
+
+            uint32_t mem_size = 0;
+            uint8_t *mem = (uint8_t *)m3_GetMemory(runtime, &mem_size, 0);
+            if (mem && g_ptr_return_bump + len <= mem_size) {
+                memcpy(mem + g_ptr_return_bump, native_str, len);
+                *((uint64_t *)_sp) = (uint64_t)g_ptr_return_bump;
+                g_ptr_return_bump += (len + 3) & ~3u;  /* align to 4 */
+            } else {
+                *((uint64_t *)_sp) = 0;  /* NULL on overflow */
+            }
+        } else {
+            *((uint64_t *)_sp) = ret_val;
+        }
     }
 
     return NULL;  /* m3ApiSuccess */

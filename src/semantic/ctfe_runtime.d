@@ -346,6 +346,11 @@ class CTFERuntime {
         // Register extern(Objective-C) classes (if objc_classes section is present)
         registerObjCClasses(wasmBytes);
 
+        // Initialize the FFI string return buffer.
+        // Uses memory right after __heap_ptr for copying native C strings
+        // (like UTF8String results) into WASM linear memory.
+        initPtrReturnBuffer();
+
         initialized = true;
     }
     
@@ -518,6 +523,29 @@ class CTFERuntime {
 
         if (result > 0) {
             stderr.writeln("ObjC: registered ", result, " class(es)");
+        }
+    }
+
+    /**
+     * Initialize the FFI pointer-return bump allocator.
+     * Sets the base to __heap_ptr value (the first free byte after the data section).
+     * Native→WASM string copies (e.g. UTF8String) are placed here.
+     */
+    private void initPtrReturnBuffer() {
+        import runtime.ffi_bindings : ffi_set_ptr_return_base;
+        import std.string : toStringz;
+
+        if (mod is null) return;
+        auto global = m3_FindGlobal(mod, "__heap_ptr".toStringz());
+        if (global is null) return;
+
+        M3TaggedValue val;
+        auto err = m3_GetGlobal(global, &val);
+        if (err !is null) return;
+
+        uint heapPtr = val.value.i32;
+        if (heapPtr > 0) {
+            ffi_set_ptr_return_base(heapPtr);
         }
     }
 
@@ -719,8 +747,10 @@ class CTFERuntime {
             throw new CTFERuntimeError("Function not found: " ~ funcName ~ " - " ~ fromStringz(result).idup);
         }
 
-        // Clear callback error state before execution
+        // Clear callback error state and reset FFI string buffer before execution
         clearCallbackError();
+        import runtime.ffi_bindings : ffi_reset_ptr_return_bump;
+        ffi_reset_ptr_return_bump();
 
         // Call function
         if (args.length == 0) {

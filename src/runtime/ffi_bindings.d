@@ -58,4 +58,10 @@ extern(C) @nogc nothrow {
 
     /// Clear the callback error state (call before each WASM execution).
     void ffi_clear_callback_error();
+
+    /// Set the base WASM offset for the native→WASM string copy bump allocator.
+    void ffi_set_ptr_return_base(uint base);
+
+    /// Reset the bump pointer to the base (call between frames or runs).
+    void ffi_reset_ptr_return_bump();
 }
