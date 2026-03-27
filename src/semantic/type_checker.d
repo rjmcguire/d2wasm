@@ -378,6 +378,19 @@ class TypeChecker {
             }
         }
 
+        // Register nested type declarations in this class's scope
+        foreach (member; decl.members) {
+            if (auto nestedStruct = cast(StructDecl)member) {
+                nestedStruct.enclosingAggregate = decl;
+                auto collector = new SymbolCollector(symbolTable);
+                collector.collectStructSymbol(nestedStruct);
+            } else if (auto nestedClass = cast(ClassDecl)member) {
+                nestedClass.enclosingAggregate = decl;
+                auto collector = new SymbolCollector(symbolTable);
+                collector.collectClassSymbol(nestedClass);
+            }
+        }
+
         // Type check members
         foreach (member; decl.members) {
             checkDeclaration(member);
@@ -605,7 +618,21 @@ class TypeChecker {
     void checkStructDeclaration(StructDecl decl) {
         symbolTable.enterScope("struct:" ~ decl.name);
         scope(exit) symbolTable.exitScope();
-        
+
+        // Register nested type declarations in this struct's scope
+        // so they're only visible inside the struct (D scoping rules).
+        foreach (member; decl.members) {
+            if (auto nestedStruct = cast(StructDecl)member) {
+                nestedStruct.enclosingAggregate = decl;
+                auto collector = new SymbolCollector(symbolTable);
+                collector.collectStructSymbol(nestedStruct);
+            } else if (auto nestedClass = cast(ClassDecl)member) {
+                nestedClass.enclosingAggregate = decl;
+                auto collector = new SymbolCollector(symbolTable);
+                collector.collectClassSymbol(nestedClass);
+            }
+        }
+
         foreach (member; decl.members) {
             checkDeclaration(member);
         }

@@ -977,7 +977,7 @@ class SymbolCollector {
         addOrReplaceSymbol(symbol);
     }
     
-    private void collectClassSymbol(ClassDecl decl) {
+    package void collectClassSymbol(ClassDecl decl) {
         // ObjC classes don't have D layout — skip layout computation
         if (decl.isObjC) {
             auto userType = new UserType(decl.location, decl.name);
@@ -1008,9 +1008,6 @@ class SymbolCollector {
                 }
             }
         }
-
-        // Collect nested type declarations before computing layout
-        collectNestedTypes(decl);
 
         // Compute class layout (with vtable pointer as first field)
         // Default to 4-byte pointers (wasm32)
@@ -1048,16 +1045,13 @@ class SymbolCollector {
     }
     
     package void collectStructSymbol(StructDecl decl) {
-        // Collect nested type declarations before computing layout,
-        // so fields using inner types can resolve during layout computation.
-        collectNestedTypes(decl);
-
-        // Compute struct layout
+        // Compute struct layout (inner types resolved via sibling-member lookup
+        // in computeFieldLayout — no separate collection phase needed)
         computeStructLayout(decl);
-        
+
         auto userType = new UserType(decl.location, decl.name);
         userType.declaration = decl;  // Link type to declaration for size lookup
-        
+
         auto symbol = new Symbol(
             decl.name,
             SymbolKind.Type,
@@ -1068,23 +1062,6 @@ class SymbolCollector {
             symbolTable.modulePath
         );
         addOrReplaceSymbol(symbol);
-    }
-
-    /**
-     * Collect nested struct/class declarations inside an aggregate body.
-     * Sets enclosingAggregate and recursively registers the inner type symbols
-     * so that fields using inner types resolve during layout computation.
-     */
-    private void collectNestedTypes(AggregateDecl parent) {
-        foreach (member; parent.members) {
-            if (auto nestedStruct = cast(StructDecl)member) {
-                nestedStruct.enclosingAggregate = parent;
-                collectStructSymbol(nestedStruct);
-            } else if (auto nestedClass = cast(ClassDecl)member) {
-                nestedClass.enclosingAggregate = parent;
-                collectClassSymbol(nestedClass);
-            }
-        }
     }
 
     /**
@@ -1104,6 +1081,22 @@ class SymbolCollector {
             if (auto varDecl = cast(VariableDecl)member) {
                 // For UserType fields, resolve and ensure nested layout is computed
                 if (auto userType = cast(UserType)varDecl.type) {
+                    if (!userType.declaration) {
+                        // First check sibling members (inner types in same aggregate)
+                        foreach (sibling; decl.members) {
+                            if (auto sd = cast(StructDecl)sibling) {
+                                if (sd.name == userType.name) {
+                                    userType.declaration = sd;
+                                    break;
+                                }
+                            } else if (auto cd = cast(ClassDecl)sibling) {
+                                if (cd.name == userType.name) {
+                                    userType.declaration = cd;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     if (!userType.declaration) {
                         auto sym = symbolTable.lookupSymbol(userType.name);
                         if (sym && sym.kind == SymbolKind.Type) {
