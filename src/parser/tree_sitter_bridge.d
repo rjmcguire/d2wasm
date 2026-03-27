@@ -2345,21 +2345,43 @@ class TreeSitterBridge {
             {
                 string typeText = TreeSitterParser.getNodeText(node, sourceText);
                 if (typeText.length > 1 && typeText[$ - 1] == '*') {
-                    // Parse the base type — look for a "type" child (skip type_ctor,
-                    // anonymous parens, and the * itself)
+                    // Single pass: collect base type node, detect brackets, and
+                    // capture array size expression if present.
+                    // Handles int*, int[4]*, int[]* (pointer to static/dynamic array).
+                    Expression sizeExpr = null;
+                    TSNode baseTypeNode;
+                    bool foundBracket = false;
+                    bool hasBrackets = false;
+
                     for (uint i = 0; i < childCount; i++) {
                         TSNode child = TreeSitterParser.getChild(node, i);
                         string childType = TreeSitterParser.getNodeType(child);
-                        if (childType == "type") {
-                            Type baseType = parseType(child);
-                            return new PointerType(loc, baseType);
+
+                        if (childType == "[") {
+                            foundBracket = true;
+                            hasBrackets = true;
+                        } else if (childType == "]" || childType == "*") {
+                            // skip anonymous delimiters
+                        } else if (foundBracket && sizeExpr is null) {
+                            // Size expression between [ and ] (e.g. the 4 in int[4]*)
+                            sizeExpr = parseExpression(child);
+                        } else if (!foundBracket) {
+                            // Base type: prefer a "type" child, otherwise first non-special child
+                            if (childType == "type") {
+                                baseTypeNode = child;
+                            } else if (!TreeSitterParser.isValid(baseTypeNode)
+                                    && childType != "type_ctor"
+                                    && childType != "(" && childType != ")") {
+                                baseTypeNode = child;
+                            }
                         }
-                        // Also accept bare type keywords (e.g. "int*" where "int" is direct child)
-                        if (childType != "type_ctor" && childType != "*"
-                            && childType != "(" && childType != ")") {
-                            Type baseType = parseType(child);
-                            return new PointerType(loc, baseType);
-                        }
+                    }
+
+                    if (TreeSitterParser.isValid(baseTypeNode)) {
+                        Type baseType = parseType(baseTypeNode);
+                        if (hasBrackets)
+                            baseType = new ArrayType(loc, baseType, sizeExpr);
+                        return new PointerType(loc, baseType);
                     }
                 }
             }

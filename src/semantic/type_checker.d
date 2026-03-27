@@ -3400,7 +3400,8 @@ class TypeChecker {
         if (expr.operator == AssignmentExpression.Operator.ConcatAssign) {
             if (auto arrayType = cast(ArrayType)leftType) {
                 // Right side should be compatible with element type
-                auto compat = checkTypeCompatibility(rightType, arrayType.elementType);
+                // Pass expr.right so float literals can be narrowed (e.g. arr ~= 1.5 for float[])
+                auto compat = checkTypeCompatibility(rightType, arrayType.elementType, expr.right);
                 if (!compat.isCompatible) {
                     throw new TypeError(
                         format("Cannot append type '%s' to array of '%s'",
@@ -3480,6 +3481,32 @@ class TypeChecker {
         // Widen integer literals to Int64/UInt64 when target is long/ulong
         if (fromExpr !is null && widenIntLiteral(fromExpr, to))
             from = to;
+        // Narrow array literal elements: [1.0, 2.0] → float[N] or float[]
+        // Each double literal element is narrowed to float individually.
+        if (fromExpr !is null) {
+            if (auto arrLit = cast(ArrayLiteralExpression)fromExpr) {
+                if (auto toArr = cast(ArrayType)to.resolve()) {
+                    bool allNarrowed = true;
+                    foreach (elem; arrLit.elements) {
+                        if (!narrowFloatLiteral(elem, toArr.elementType)
+                            && !narrowIntLiteral(elem, toArr.elementType)
+                            && !widenIntLiteral(elem, toArr.elementType)) {
+                            // Check if already compatible without narrowing
+                            auto bt = cast(BasicType)(elem.type ? elem.type.resolve() : null);
+                            auto targetBt = cast(BasicType)toArr.elementType.resolve();
+                            if (bt && targetBt && bt.kind == targetBt.kind)
+                                continue;  // Already the right type
+                            allNarrowed = false;
+                            break;
+                        }
+                    }
+                    if (allNarrowed) {
+                        arrLit.elementType = toArr.elementType;
+                        from = new ArrayType(from.location, toArr.elementType);
+                    }
+                }
+            }
+        }
         from = resolveAliasType(from.resolve());
         to = resolveAliasType(to.resolve());
         // Exact type match
