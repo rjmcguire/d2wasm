@@ -6443,6 +6443,28 @@ class NativeCompiledFunction : CompiledFunction {
                     }
                     floatArgIdx++;
                 }
+            } else if (paramStruct !is null && paramStruct.structSize > 0) {
+                // Non-HFA struct: pass by value in GPRs per ARM64 ABI
+                // ≤8 bytes → one x-register, ≤16 bytes → two x-registers
+                compileExpression(arg);  // x0 = struct address
+                size_t baseTemp = temps.alloc(8);
+                gen.emitStorePtr(baseTemp);
+
+                // Load first 8 bytes
+                gen.emitLoadPtr(baseTemp);
+                gen.emitLoadPtrFromX0Offset(0);  // x0 = *(base+0)
+                size_t t1 = temps.alloc(8);
+                gen.emitStorePtr(t1);
+                intArgTemps ~= t1;
+
+                if (paramStruct.structSize > 8) {
+                    // Load second 8 bytes
+                    gen.emitLoadPtr(baseTemp);
+                    gen.emitLoadPtrFromX0Offset(8);  // x0 = *(base+8)
+                    size_t t2 = temps.alloc(8);
+                    gen.emitStorePtr(t2);
+                    intArgTemps ~= t2;
+                }
             } else {
                 // Integer/pointer arg: compile and save to temp
                 compileExpression(arg);

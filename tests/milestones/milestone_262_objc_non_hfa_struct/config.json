@@ -1,0 +1,6 @@
+{
+    "name": "objc_non_hfa_struct",
+    "description": "Non-HFA struct passed by value in GPRs to ObjC method (NSRange)",
+    "type": "shell",
+    "script": "run_test.sh"
+}
