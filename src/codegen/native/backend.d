@@ -154,6 +154,7 @@ class NativeCompiledFunction : CompiledFunction {
         bool isReference;         // true for 'this' pointers (stores address, not inline data)
         bool isObjCRef;           // true for ObjC opaque pointers (8-byte, no vtable)
         bool isRawPointer;        // true for raw pointer types (char*, int*, etc.) — 8 bytes on ARM64
+        uint ptrElemSize;         // Element byte size when isRawPointer (for ptr[i] indexing)
         bool isRef;               // true for `ref` parameters (stores pointer, deref on read/write)
         FunctionDecl delegateLiftedFunc;  // Non-null when kind == delegate_ (the lifted lambda)
 
@@ -167,6 +168,7 @@ class NativeCompiledFunction : CompiledFunction {
         uint elemSize() const {
             if (kind == VarKind.staticArray) return staticArrayElemSize;
             if (kind == VarKind.slice) return sliceElemSize;
+            if (isRawPointer && ptrElemSize > 0) return ptrElemSize;
             return 4;
         }
     }
@@ -1154,13 +1156,17 @@ class NativeCompiledFunction : CompiledFunction {
                     nli.sliceElemSize = nativeElementSize(arrayType.elementType);
                     paramSize = sliceInfo.totalSize;
                 }
-            } else if (cast(PointerType)param.type) {
+            } else if (auto ptrType = cast(PointerType)param.type) {
                 // Pointer parameter: 8-byte value on ARM64
                 nli.kind = VarKind.scalar;
                 nli.isRawPointer = true;
                 nli.offset = (nextLocalOffset + 7) & ~7;
                 nextLocalOffset = nli.offset;
                 paramSize = 8;
+                // Set element size and type for pointer indexing (ptr[i])
+                nli.elementType = ptrType.pointeeType;
+                import codegen.type_marshal : TypeReader;
+                nli.ptrElemSize = TypeReader.forNative().elementSizeOf(ptrType.pointeeType);
             } else if (param.type !is null && !cast(BasicType)param.type) {
                 throw new NativeCompileError(
                     "Unsupported parameter type for '" ~ param.name ~ "': " ~ param.type.toString(),
@@ -2069,8 +2075,15 @@ class NativeCompiledFunction : CompiledFunction {
                 nli.elementType = varDecl.type;
             if (isObjCRef)
                 nli.isObjCRef = true;
-            if (isPtr)
+            if (isPtr) {
                 nli.isRawPointer = true;
+                // Set element size for pointer indexing (ptr[i])
+                if (auto ptrType = cast(PointerType)varDecl.type) {
+                    nli.elementType = ptrType.pointeeType;
+                    import codegen.type_marshal : TypeReader;
+                    nli.ptrElemSize = TypeReader.forNative().elementSizeOf(ptrType.pointeeType);
+                }
+            }
             localVars[varDecl.name] = nli;
 
             // Zero-initialize variables without explicit initializer
@@ -4714,19 +4727,49 @@ class NativeCompiledFunction : CompiledFunction {
                 assert(0, "Cannot index-assign delegate variable: " ~ ident.name);
             case VarKind.scalar:
                 // Pointer index assignment: ptr[i] = value
-                // The scalar holds a pointer (e.g. ubyte* font), treat like slice
-                compileExpression(value);  // x0 = value
-                gen.emitMoveX0ToX9();      // x9 = value to store
-                compileExpression(indexExpr.index);  // x0 = index
-                if (es > 1) {
+                // The scalar holds a pointer (e.g. float*, ubyte*), treat like slice
+                bool ptrIsFloat = isF64ElementType(info.elementType);
+                bool ptrIsF32 = isF32ElementType(info.elementType);
+                {
+                    auto mark3 = temps.save();
+                    size_t valTemp3 = temps.alloc(8);
+                    size_t addrTemp3 = temps.alloc(8);
+                    // Compile value and save
+                    compileExpression(value);
+                    if (ptrIsFloat)
+                        gen.emitRaw32(0x9E660000);  // FMOV x0, d0 (preserve float bits)
+                    gen.emitStorePtr(valTemp3);
+                    // Compute target address: ptr + index * elemSize
+                    compileExpression(indexExpr.index);  // x0 = index
+                    if (es > 1) {
+                        gen.emitMoveX0ToX1();
+                        gen.emitImm32(stencil_load_imm32, es);
+                        gen.emit(stencil_mul_i32);  // x0 = index * elemSize
+                    }
                     gen.emitMoveX0ToX1();
-                    gen.emitImm32(stencil_load_imm32, es);
-                    gen.emit(stencil_mul_i32);  // x0 = index * elemSize
+                    gen.emitLoadPtr(info.offset);  // x0 = pointer value (64-bit)
+                    gen.emit(stencil_add_i64);     // x0 = target address
+                    gen.emitStorePtr(addrTemp3);
+                    // Store value through address
+                    if (ptrIsF32) {
+                        gen.emitLoadPtr(valTemp3);
+                        gen.emitMoveX0ToD0();          // FMOV d0, x0 (restore bits)
+                        gen.emitConvertF64ToF32();     // FCVT s0, d0
+                        gen.emitLoadPtr(addrTemp3);    // x0 = target address
+                        gen.emitRaw32(0xBD000000);     // STR s0, [x0, #0]
+                    } else if (ptrIsFloat) {
+                        gen.emitLoadPtr(valTemp3);
+                        gen.emitMoveX0ToD0();          // FMOV d0, x0
+                        gen.emitLoadPtr(addrTemp3);    // x0 = target address
+                        gen.emitRaw32(0xFD000000);     // STR d0, [x0, #0]
+                    } else {
+                        gen.emitLoadPtr(valTemp3);
+                        gen.emitMoveX0ToX9();
+                        gen.emitLoadPtr(addrTemp3);
+                        gen.emitStoreToPointerFromX9(0);
+                    }
+                    temps.restore(mark3);
                 }
-                gen.emitMoveX0ToX1();
-                gen.emitLoadPtr(info.offset);  // x0 = pointer value (64-bit)
-                gen.emit(stencil_add_i64);     // x0 = target address
-                gen.emitStoreToPointerFromX9(0);
                 return;
         }
     }
