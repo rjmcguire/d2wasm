@@ -6815,17 +6815,37 @@ class NativeCompiledFunction : CompiledFunction {
                 }
             }
         }
-        // Also check parent ObjC interface/class
-        if (classDecl.baseClassDecl && classDecl.baseClassDecl.isObjC) {
-            foreach (member; classDecl.baseClassDecl.members) {
-                if (auto funcDecl = cast(FunctionDecl)member) {
-                    if (funcDecl.name == methodName) {
-                        if (method is null) method = funcDecl;
-                        if (funcDecl.objcSelector !is null && funcDecl.objcSelector.length > 0)
-                            selector = funcDecl.objcSelector;
-                        break;
+        // Also check parent ObjC interface/class for selector and method info
+        if (method is null || selector == methodName) {
+            // Check baseClassDecl (D base class with ObjC linkage)
+            if (classDecl.baseClassDecl && classDecl.baseClassDecl.isObjC) {
+                foreach (member; classDecl.baseClassDecl.members) {
+                    if (auto funcDecl = cast(FunctionDecl)member) {
+                        if (funcDecl.name == methodName) {
+                            if (method is null) method = funcDecl;
+                            if (funcDecl.objcSelector !is null && funcDecl.objcSelector.length > 0)
+                                selector = funcDecl.objcSelector;
+                            break;
+                        }
                     }
                 }
+            }
+            // Check parent ObjC interfaces (e.g., EditorView : NSView)
+            foreach (iface; classDecl.interfaces) {
+                if (auto ut = cast(UserType) iface) {
+                    if (auto ifaceDecl = cast(InterfaceDecl) ut.declaration) {
+                        if (!ifaceDecl.isObjC) continue;
+                        foreach (ifaceMethod; ifaceDecl.methods) {
+                            if (ifaceMethod.name == methodName) {
+                                if (method is null) method = ifaceMethod;
+                                if (ifaceMethod.objcSelector !is null && ifaceMethod.objcSelector.length > 0)
+                                    selector = ifaceMethod.objcSelector;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (selector != methodName) break;  // found it
             }
         }
 
@@ -7244,6 +7264,7 @@ class NativeCompiledFunction : CompiledFunction {
                 }
             }
 
+            log(1, "native: registering ObjC class '", classDecl.name, "' with superclass '", superName, "'");
             void* superclass = objc_getClass_fn((superName ~ '\0').ptr);
             if (superclass is null) {
                 log(1, "native: ObjC superclass '", superName, "' not found — skipping ", classDecl.name);
