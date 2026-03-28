@@ -4500,12 +4500,23 @@ class NativeCompiledFunction : CompiledFunction {
                             gen.emitMoveX0ToX1();
                             gen.emitLoadPtr(baseTemp);
                             gen.emit(stencil_add_i64);
-                            // Store value through pointer
-                            gen.emitMoveX0ToX1();
-                            gen.emitLoadPtr(valTemp);
-                            gen.emitMoveX0ToX9();
-                            gen.emitMoveX1ToX0();
-                            gen.emitStoreToPointerFromX9(0);
+                            // Store value through pointer (size-aware)
+                            if (elemSize == 1) {
+                                // Byte store: value already computed, x0 = target addr
+                                // Need: x0 = addr, w1 = value
+                                gen.emitMoveX0ToX1();       // x1 = target addr (save)
+                                gen.emitLoadPtr(valTemp);    // x0 = value
+                                gen.emitMoveX0ToX9();        // x9 = value (save)
+                                gen.emitMoveX1ToX0();        // x0 = target addr
+                                gen.emitMoveX9ToX1();        // x1 = value
+                                gen.emitStoreByteToPointer(0); // STRB w1, [x0]
+                            } else {
+                                gen.emitMoveX0ToX1();
+                                gen.emitLoadPtr(valTemp);
+                                gen.emitMoveX0ToX9();
+                                gen.emitMoveX1ToX0();
+                                gen.emitStoreToPointerFromX9(0);
+                            }
                             temps.restore(mark);
                             return;
                         }
