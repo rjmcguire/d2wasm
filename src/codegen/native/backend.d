@@ -332,17 +332,17 @@ class NativeCompiledFunction : CompiledFunction {
         this.funcName = func.name;
         this.symbolTable = st;
         this.enableStackTrace = enableStackTrace;
-        this.gen = NativeCodeGen.alloc(64 * 1024);  // 64KB code buffer
+        this.gen = NativeCodeGen.alloc();
         this.dataSection = NativeDataSection.alloc(64 * 1024);  // 64KB data section
         this.hostFunctions = createCTFEHostFunctions();  // Milestone 88
-        
+
         if (!gen.base) {
-            throw new Exception("Failed to allocate executable memory");
+            throw new Exception("Failed to allocate code buffer");
         }
         if (!dataSection.base) {
             throw new Exception("Failed to allocate data section");
         }
-        
+
         // Reserve space for inline call stack (must be before adding other data)
         if (enableStackTrace) {
             dataSection.reserveInlineStack();
@@ -385,7 +385,7 @@ class NativeCompiledFunction : CompiledFunction {
 
         // Finalize (resolve branches, make executable)
         if (!gen.finalize()) {
-            throw new Exception("Failed to finalize native code");
+            throw new Exception("Failed to finalize native code: unresolved branch label");
         }
     }
     
@@ -399,7 +399,7 @@ class NativeCompiledFunction : CompiledFunction {
         this.funcName = entryFuncName;
         this.symbolTable = st;
         this.enableStackTrace = enableStackTrace;
-        this.gen = NativeCodeGen.alloc(64 * 1024);  // 64KB code buffer
+        this.gen = NativeCodeGen.alloc();
         this.dataSection = NativeDataSection.alloc(64 * 1024);  // 64KB data section
         this.hostFunctions = createCTFEHostFunctions();  // Milestone 88
         
@@ -481,7 +481,7 @@ class NativeCompiledFunction : CompiledFunction {
         
         // Finalize (resolve branches, make executable)
         if (!gen.finalize()) {
-            throw new Exception("Failed to finalize native code");
+            throw new Exception("Failed to finalize native code: unresolved branch label");
         }
 
         // Patch vtable entries now that function addresses are resolved
@@ -504,7 +504,7 @@ class NativeCompiledFunction : CompiledFunction {
         this.objectMode = true;
         this.symbolTable = st;
         this.enableStackTrace = false;
-        this.gen = NativeCodeGen.allocRelocatable(2 * 1024 * 1024);  // 2MB for large programs
+        this.gen = NativeCodeGen.allocRelocatable();
 
         if (!gen.base) {
             throw new Exception("Failed to allocate relocatable code buffer");

@@ -39,7 +39,7 @@ enum BranchKind {
 
 /// ARM64 Native Code Generator
 struct NativeCodeGen {
-    ubyte* base;
+    ubyte* base;       // malloc'd during generation, mmap'd after finalize (JIT)
     size_t capacity;
     size_t offset;
 
@@ -48,26 +48,37 @@ struct NativeCodeGen {
     UnresolvedBranch[] unresolved;
     int nextLabelId;
 
-    bool relocatable; // true = malloc-based buffer for object file output
+    bool relocatable; // true = stays malloc-based (object file output)
+    bool finalized;   // true after finalize() — base is now mmap'd (JIT)
 
-    /// Allocate a JIT code buffer (mmap with MAP_JIT)
-    static NativeCodeGen alloc(size_t size) {
-        void* mem = mmap(null, size,
-            PROT_READ | PROT_WRITE,
-            MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT,
-            -1, 0);
-
-        if (mem == MAP_FAILED) return NativeCodeGen.init;
-        return NativeCodeGen(cast(ubyte*)mem, size, 0);
+    /// Allocate a growable code buffer for JIT compilation.
+    /// Starts with malloc; finalize() copies to mmap(MAP_JIT).
+    static NativeCodeGen alloc(size_t initialSize = 64 * 1024) {
+        auto mem = cast(ubyte*)malloc(initialSize);
+        if (mem is null) return NativeCodeGen.init;
+        return NativeCodeGen(mem, initialSize, 0);
     }
 
-    /// Allocate a relocatable code buffer (malloc, for object file output)
-    static NativeCodeGen allocRelocatable(size_t size) {
-        auto mem = cast(ubyte*)malloc(size);
+    /// Allocate a growable code buffer for object file output.
+    static NativeCodeGen allocRelocatable(size_t initialSize = 64 * 1024) {
+        auto mem = cast(ubyte*)malloc(initialSize);
         if (mem is null) return NativeCodeGen.init;
-        auto gen = NativeCodeGen(mem, size, 0);
+        auto gen = NativeCodeGen(mem, initialSize, 0);
         gen.relocatable = true;
         return gen;
+    }
+
+    /// Ensure the buffer can hold `needed` more bytes, growing via realloc if necessary.
+    private bool ensureCapacity(size_t needed) {
+        if (offset + needed <= capacity) return true;
+        import core.stdc.stdlib : realloc;
+        size_t newCap = capacity;
+        while (newCap < offset + needed) newCap *= 2;
+        auto newBuf = cast(ubyte*)realloc(base, newCap);
+        if (newBuf is null) return false;
+        base = newBuf;
+        capacity = newCap;
+        return true;
     }
     
     /// Current position in buffer
@@ -77,7 +88,7 @@ struct NativeCodeGen {
     
     /// Emit raw bytes
     void* emitBytes(const(ubyte)[] bytes) {
-        if (offset + bytes.length > capacity) return null;
+        if (!ensureCapacity(bytes.length)) return null;
         void* addr = base + offset;
         memcpy(addr, bytes.ptr, bytes.length);
         offset += bytes.length;
@@ -351,15 +362,14 @@ struct NativeCodeGen {
     
     /// Emit raw 32-bit instruction
     void emitRaw32(uint instr) {
-        if (offset + 4 > capacity) return;
+        if (!ensureCapacity(4)) return;
         *cast(uint*)(base + offset) = instr;
         offset += 4;
     }
 
     /// Emit a block of raw bytes (for injecting cached function code)
     void emitRawBytes(const ubyte[] bytes) {
-        if (offset + bytes.length > capacity) return;
-        import core.stdc.string : memcpy;
+        if (!ensureCapacity(bytes.length)) return;
         memcpy(base + offset, bytes.ptr, bytes.length);
         offset += cast(uint)bytes.length;
     }
@@ -1159,69 +1169,31 @@ struct NativeCodeGen {
     
     /// Resolve all branch targets and make code executable
     bool finalize() {
-        // Patch all unresolved branches
-        foreach (ref br; unresolved) {
-            // Find the target label
-            Label* target;
-            foreach (ref l; labels) {
-                if (l.id == br.labelId) {
-                    target = &l;
-                    break;
-                }
-            }
-            
-            if (!target || !target.bound) {
-                return false;  // Unbound label!
-            }
-            
-            // Calculate relative offset (in bytes)
-            int relOffset = cast(int)(target.offset) - cast(int)(br.offset);
-            
-            // Patch the instruction
-            uint* instr = cast(uint*)(base + br.offset);
-            
-            final switch (br.kind) {
-                case BranchKind.unconditional:
-                    // B: imm26 = offset/4
-                    int imm26 = relOffset / 4;
-                    *instr = 0x14000000 | (imm26 & 0x03FFFFFF);
-                    break;
-                    
-                case BranchKind.ifZero:
-                    // CBZ: imm19 in bits 5-23, preserve register in bits 0-4
-                    int imm19 = relOffset / 4;
-                    *instr = (*instr & 0x1F) | 0x34000000 | ((imm19 & 0x7FFFF) << 5);
-                    break;
-                    
-                case BranchKind.ifNonZero:
-                    // CBNZ: imm19 in bits 5-23, preserve register in bits 0-4
-                    int imm19_2 = relOffset / 4;
-                    *instr = (*instr & 0x1F) | 0x35000000 | ((imm19_2 & 0x7FFFF) << 5);
-                    break;
-                    
-                case BranchKind.call:
-                    // BL: imm26 = offset/4
-                    int imm26_call = relOffset / 4;
-                    *instr = 0x94000000 | (imm26_call & 0x03FFFFFF);
-                    break;
-                    
-                case BranchKind.conditional:
-                    // B.cond: imm19 in bits 5-23, preserve condition in bits 0-3
-                    int imm19_cond = relOffset / 4;
-                    *instr = (*instr & 0xF) | 0x54000000 | ((imm19_cond & 0x7FFFF) << 5);
-                    break;
+        // Patch all unresolved branches (in the malloc'd buffer)
+        if (!patchBranches()) return false;
 
-                case BranchKind.adr:
-                    // ADR x0, #imm: immlo (bits 29-30), immhi (bits 5-23), Rd=0
-                    // imm21 = relOffset (byte offset, NOT divided by 4)
-                    uint immlo = cast(uint)(relOffset & 0x3);
-                    uint immhi = cast(uint)((relOffset >> 2) & 0x7FFFF);
-                    *instr = 0x10000000 | (immlo << 29) | (immhi << 5) | 0;  // Rd=x0
-                    break;
-            }
-        }
-        
-        // Make executable
+        // Allocate executable memory sized to actual usage, copy code, make executable
+        size_t codeLen = offset;
+        // Round up to page size for mmap
+        enum PAGE_SIZE = 16384; // 16KB on Apple Silicon
+        size_t mapSize = (codeLen + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        if (mapSize == 0) mapSize = PAGE_SIZE;
+
+        void* execMem = mmap(null, mapSize,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT,
+            -1, 0);
+
+        if (execMem == MAP_FAILED) return false;
+
+        memcpy(execMem, base, codeLen);
+
+        // Free the generation buffer, switch to the mmap'd one
+        free(base);
+        base = cast(ubyte*)execMem;
+        capacity = mapSize;
+        finalized = true;
+
         mprotect(base, capacity, PROT_READ | PROT_EXEC);
         return true;
     }
@@ -1229,6 +1201,12 @@ struct NativeCodeGen {
     /// Resolve branches and return code bytes (for object file output).
     /// Does NOT make code executable — caller writes bytes to .o file.
     ubyte[] finalizeRelocatable() {
+        if (!patchBranches()) return null;
+        return base[0 .. offset].dup;
+    }
+
+    /// Patch all unresolved branches in the current buffer.
+    private bool patchBranches() {
         foreach (ref br; unresolved) {
             Label* target;
             foreach (ref l; labels) {
@@ -1238,7 +1216,7 @@ struct NativeCodeGen {
                 }
             }
 
-            if (!target || !target.bound) return null;
+            if (!target || !target.bound) return false;
 
             int relOffset = cast(int)(target.offset) - cast(int)(br.offset);
             uint* instr = cast(uint*)(base + br.offset);
@@ -1271,9 +1249,7 @@ struct NativeCodeGen {
                     break;
             }
         }
-
-        // Return a copy of the code bytes
-        return base[0 .. offset].dup;
+        return true;
     }
 
     /// Get function pointer
@@ -1284,10 +1260,10 @@ struct NativeCodeGen {
     /// Free the buffer
     void freeBuffer() {
         if (base) {
-            if (relocatable)
-                free(base);
+            if (finalized)
+                munmap(base, capacity);  // JIT: mmap'd after finalize
             else
-                munmap(base, capacity);
+                free(base);             // Generation or relocatable: malloc'd
             base = null;
         }
     }
