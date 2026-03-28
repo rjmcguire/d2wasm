@@ -231,10 +231,56 @@ class TypeChecker {
             }
         }
         
+        // Emit warnings for unused local variables and parameters
+        checkUnusedLocals(decl);
+
         // Mark as type-checked to avoid redundant passes
         decl.isTypeChecked = true;
     }
     
+    /**
+     * Emit warnings for unused local variables and parameters.
+     * Called at the end of checkFunctionDeclaration, after the body
+     * has been fully type-checked and all references recorded.
+     */
+    private void checkUnusedLocals(FunctionDecl decl) {
+        import diagnostic.warnings : emitWarning, WarningSeverity;
+
+        // Walk the function scope's symbols looking for unreferenced locals
+        auto funcScope = symbolTable.getCurrentScope();
+        if (funcScope is null) return;
+
+        foreach (name, sym; funcScope.symbols) {
+            if (sym is null) continue;
+
+            // Skip special names
+            if (name == "this" || name.length == 0) continue;
+            // Skip names starting with _ (conventional "unused" marker in D)
+            if (name[0] == '_') continue;
+
+            bool isUnused = sym.declaration is null
+                || sym.declaration.references is null
+                || sym.declaration.references.length == 0;
+
+            if (!isUnused) continue;
+
+            if (sym.kind == SymbolKind.Variable) {
+                emitWarning(
+                    format("Variable '%s' is declared but never used", name),
+                    sym.location);
+            } else if (sym.kind == SymbolKind.Parameter) {
+                // Only warn for parameters if the function has a body
+                // (forward declarations intentionally have unused params)
+                if (decl.body_ !is null) {
+                    emitWarning(
+                        format("Parameter '%s' is not used", name),
+                        sym.location,
+                        WarningSeverity.Hint);
+                }
+            }
+        }
+    }
+
     /**
      * Check if a function body is effectively empty (no statements).
      * This can happen due to parse errors dropping statements.

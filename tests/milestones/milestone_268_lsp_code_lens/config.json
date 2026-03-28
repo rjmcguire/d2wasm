@@ -1,0 +1,6 @@
+{
+  "name": "lsp_code_lens",
+  "description": "LSP code lens shows reference counts on declarations",
+  "type": "shell",
+  "script": "run_test.sh"
+}

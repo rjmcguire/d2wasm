@@ -1,0 +1,6 @@
+{
+  "name": "lsp_call_hierarchy",
+  "description": "LSP call hierarchy shows callers and callees of functions",
+  "type": "shell",
+  "script": "run_test.sh"
+}

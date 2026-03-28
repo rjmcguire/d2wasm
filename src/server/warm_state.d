@@ -32,8 +32,9 @@ class WarmState {
         size_t lastCacheHits;
         size_t lastCacheMisses;
 
-        // Last compilation error (for LSP diagnostics)
-        Exception lastError;
+        // Last compilation errors (for LSP diagnostics)
+        Exception lastError;       // Primary error (backward compat)
+        Exception[] lastErrors;    // All accumulated errors
     }
 
     /// Warm data keyed by absolute input file path

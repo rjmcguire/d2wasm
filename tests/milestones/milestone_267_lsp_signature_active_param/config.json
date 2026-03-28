@@ -1,0 +1,6 @@
+{
+  "name": "lsp_signature_active_param",
+  "description": "LSP signature help tracks activeParameter via comma counting",
+  "type": "shell",
+  "script": "run_test.sh"
+}

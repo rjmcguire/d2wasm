@@ -1,0 +1,6 @@
+{
+  "name": "lsp_incremental_sync",
+  "description": "LSP incremental text sync (mode 2) applies edits correctly",
+  "type": "shell",
+  "script": "run_test.sh"
+}

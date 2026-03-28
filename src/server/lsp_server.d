@@ -18,6 +18,7 @@ import std.file;
 import std.array;
 
 import ast.nodes;
+import ast.statements;
 import server.lsp_types;
 import server.warm_state;
 import server.position_index;
@@ -161,6 +162,34 @@ class LSPServer {
                 return handleReferences(msg);
             case "textDocument/completion":
                 return handleCompletion(msg);
+            case "textDocument/codeLens":
+                return handleCodeLens(msg);
+            case "textDocument/semanticTokens/full":
+                return handleSemanticTokensFull(msg);
+            case "textDocument/prepareCallHierarchy":
+                return handlePrepareCallHierarchy(msg);
+            case "callHierarchy/incomingCalls":
+                return handleCallHierarchyIncoming(msg);
+            case "callHierarchy/outgoingCalls":
+                return handleCallHierarchyOutgoing(msg);
+            case "textDocument/prepareTypeHierarchy":
+                return handlePrepareTypeHierarchy(msg);
+            case "typeHierarchy/supertypes":
+                return handleTypeHierarchySupertypes(msg);
+            case "typeHierarchy/subtypes":
+                return handleTypeHierarchySubtypes(msg);
+            case "textDocument/prepareRename":
+                return handlePrepareRename(msg);
+            case "textDocument/rename":
+                return handleRename(msg);
+            case "textDocument/codeAction":
+                return handleCodeAction(msg);
+            case "workspace/didChangeWatchedFiles":
+                handleDidChangeWatchedFiles(msg);
+                return JSONValue(null);
+            case "workspace/didChangeWorkspaceFolders":
+                handleDidChangeWorkspaceFolders(msg);
+                return JSONValue(null);
             default:
                 if (isRequest)
                     return jsonRPCError(msg, -32601, "Method not found: " ~ method);
@@ -171,10 +200,61 @@ class LSPServer {
     // ── LSP Handlers ──
 
     private JSONValue handleInitialize(JSONValue msg) {
+        // Extract workspace root from client params for import path resolution
+        auto initParams = msg["params"];
+        if ("rootUri" in initParams && initParams["rootUri"].type != JSONType.null_) {
+            string rootUri = initParams["rootUri"].str;
+            string rootPath = uriToPath(rootUri);
+            if (rootPath.length > 0 && exists(rootPath)) {
+                // Add workspace root as an import search path
+                bool alreadyHave = false;
+                foreach (ip; importPaths) {
+                    if (ip == rootPath) { alreadyHave = true; break; }
+                }
+                if (!alreadyHave)
+                    importPaths ~= rootPath;
+                // Also check for common source subdirectories
+                foreach (subdir; ["src", "source"]) {
+                    string sub = buildPath(rootPath, subdir);
+                    if (exists(sub) && isDir(sub)) {
+                        bool have = false;
+                        foreach (ip; importPaths) {
+                            if (ip == sub) { have = true; break; }
+                        }
+                        if (!have) importPaths ~= sub;
+                    }
+                }
+                lspLog("Workspace root: ", rootPath);
+            }
+        }
+        if ("workspaceFolders" in initParams
+            && initParams["workspaceFolders"].type == JSONType.array)
+        {
+            foreach (folder; initParams["workspaceFolders"].array) {
+                if ("uri" in folder) {
+                    string folderPath = uriToPath(folder["uri"].str);
+                    if (folderPath.length > 0 && exists(folderPath)) {
+                        bool alreadyHave = false;
+                        foreach (ip; importPaths) {
+                            if (ip == folderPath) { alreadyHave = true; break; }
+                        }
+                        if (!alreadyHave)
+                            importPaths ~= folderPath;
+                    }
+                }
+            }
+        }
+
         JSONValue caps;
 
-        // Text document sync: full content on open/change
-        caps["textDocumentSync"] = 1;  // Full sync
+        // Text document sync: incremental (mode 2)
+        JSONValue syncOptions;
+        syncOptions["openClose"] = true;
+        syncOptions["change"] = 2;  // Incremental
+        JSONValue saveOptions;
+        saveOptions["includeText"] = true;
+        syncOptions["save"] = saveOptions;
+        caps["textDocumentSync"] = syncOptions;
 
         // Features we support
         caps["definitionProvider"] = true;
@@ -183,12 +263,56 @@ class LSPServer {
         caps["referencesProvider"] = true;
 
         JSONValue sigHelp;
-        sigHelp["triggerCharacters"] = JSONValue(["("]);
+        sigHelp["triggerCharacters"] = JSONValue(["(", ","]);
         caps["signatureHelpProvider"] = sigHelp;
 
         JSONValue completion;
         completion["triggerCharacters"] = JSONValue(["."]);
         caps["completionProvider"] = completion;
+
+        // Code lens: reference counts on declarations
+        JSONValue codeLens;
+        codeLens["resolveProvider"] = false;
+        caps["codeLensProvider"] = codeLens;
+
+        // Semantic tokens: full document
+        JSONValue semTokens;
+        JSONValue semLegend;
+        semLegend["tokenTypes"] = JSONValue(
+            cast(JSONValue[])null);
+        foreach (name; semanticTokenTypeNames)
+            semLegend["tokenTypes"].array ~= JSONValue(name);
+        semLegend["tokenModifiers"] = JSONValue(
+            cast(JSONValue[])null);
+        foreach (name; semanticTokenModifierNames)
+            semLegend["tokenModifiers"].array ~= JSONValue(name);
+        semTokens["legend"] = semLegend;
+        semTokens["full"] = true;
+        caps["semanticTokensProvider"] = semTokens;
+
+        // Call hierarchy
+        caps["callHierarchyProvider"] = true;
+
+        // Type hierarchy
+        caps["typeHierarchyProvider"] = true;
+
+        // Rename with prepare support
+        JSONValue rename;
+        rename["prepareProvider"] = true;
+        caps["renameProvider"] = rename;
+
+        // Code actions (quickfixes)
+        JSONValue codeAction;
+        codeAction["codeActionKinds"] = JSONValue([JSONValue("quickfix")]);
+        caps["codeActionProvider"] = codeAction;
+
+        // Workspace capabilities
+        JSONValue workspace;
+        JSONValue workspaceFoldersCap;
+        workspaceFoldersCap["supported"] = true;
+        workspaceFoldersCap["changeNotifications"] = true;
+        workspace["workspaceFolders"] = workspaceFoldersCap;
+        caps["workspace"] = workspace;
 
         JSONValue result;
         result["capabilities"] = caps;
@@ -215,10 +339,51 @@ class LSPServer {
         auto params = msg["params"];
         string uri = params["textDocument"]["uri"].str;
 
-        // Full sync: take the last content change
         auto changes = params["contentChanges"].array;
-        if (changes.length > 0)
-            openDocuments[uri] = changes[$ - 1]["text"].str;
+        if (changes.length == 0) return;
+
+        string path = uriToPath(uri);
+        auto absPath = absolutePath(path);
+
+        foreach (change; changes) {
+            if ("range" in change) {
+                // Incremental sync: apply the edit
+                auto range = Range.fromJSON(change["range"]);
+                string newText = change["text"].str;
+
+                string currentText = (uri in openDocuments) ? openDocuments[uri] : "";
+                uint startOff = positionToByteOffset(range.start, currentText);
+                uint endOff = positionToByteOffset(range.end, currentText);
+
+                // Splice the text
+                openDocuments[uri] = currentText[0 .. startOff] ~ newText
+                    ~ currentText[endOff .. $];
+
+                // Build TSInputEdit and notify warm state for incremental reparse
+                import parser.tree_sitter_c : TSInputEdit, TSPoint;
+                TSInputEdit edit;
+                edit.start_byte = startOff;
+                edit.old_end_byte = endOff;
+                edit.new_end_byte = startOff + cast(uint)newText.length;
+                edit.start_point = TSPoint(range.start.line, range.start.character);
+                edit.old_end_point = TSPoint(range.end.line, range.end.character);
+                // Compute new end point from new text
+                uint newEndLine = range.start.line;
+                uint newEndCol = range.start.character;
+                foreach (c; newText) {
+                    if (c == '\n') { newEndLine++; newEndCol = 0; }
+                    else newEndCol++;
+                }
+                edit.new_end_point = TSPoint(newEndLine, newEndCol);
+
+                warmState.applyFileChange(absPath, openDocuments[uri], &edit);
+            } else {
+                // Full sync fallback: take the entire text
+                openDocuments[uri] = change["text"].str;
+            }
+        }
+
+        // Don't recompile on every keystroke — wait for save
     }
 
     private void handleDidSave(JSONValue msg) {
@@ -341,25 +506,91 @@ class LSPServer {
         string path = uriToPath(uri);
         auto absPath = absolutePath(path);
 
-        auto pi = absPath in positionIndexes;
-        if (pi is null)
+        auto ppi = absPath in positionIndexes;
+        if (ppi is null)
             return jsonRPCResult(msg, JSONValue(null));
 
         string sourceText = (uri in openDocuments) ? openDocuments[uri] : "";
         uint byteOffset = positionToByteOffset(pos, sourceText);
 
-        // Find the call expression at cursor
-        import ast.expressions : CallExpression, IdentifierExpression;
+        // Scan backward from cursor to find the opening '(' and count commas
+        // at the correct nesting level. This is more robust than AST lookup
+        // because the source may be incomplete mid-typing.
+        int activeParam = 0;
+        uint openParenOffset = uint.max;
+        int depth = 0;
+        bool inString = false;
+        bool inChar = false;
 
-        auto node = pi.findExprAt(byteOffset);
-        auto call = cast(CallExpression)node;
-        if (call is null)
+        if (byteOffset > 0 && byteOffset <= sourceText.length) {
+            for (size_t i = byteOffset; i > 0; i--) {
+                char c = sourceText[i - 1];
+
+                // Simple string/char literal skip (scan backward)
+                if (c == '"' && !inChar) {
+                    inString = !inString;
+                    continue;
+                }
+                if (c == '\'' && !inString) {
+                    inChar = !inChar;
+                    continue;
+                }
+                if (inString || inChar)
+                    continue;
+
+                if (c == ')' || c == ']') {
+                    depth++;
+                } else if (c == '(' || c == '[') {
+                    if (depth > 0) {
+                        depth--;
+                    } else if (c == '(') {
+                        openParenOffset = cast(uint)(i - 1);
+                        break;
+                    }
+                } else if (c == ',' && depth == 0) {
+                    activeParam++;
+                }
+            }
+        }
+
+        if (openParenOffset == uint.max)
             return jsonRPCResult(msg, JSONValue(null));
 
-        // Resolve to FunctionDecl
+        // Find the function identifier just before the '('
+        import ast.expressions : CallExpression, IdentifierExpression, MemberExpression;
+
         FunctionDecl funcDecl;
-        if (auto ident = cast(IdentifierExpression)call.function_) {
-            funcDecl = cast(FunctionDecl)ident.declaration;
+
+        // Try to find an expression at or just before the opening paren
+        if (openParenOffset > 0) {
+            auto expr = ppi.findExprAt(openParenOffset - 1);
+
+            if (auto ident = cast(IdentifierExpression)expr) {
+                funcDecl = cast(FunctionDecl)ident.declaration;
+            } else if (auto member = cast(MemberExpression)expr) {
+                // Method call: resolve member name on the object's type
+                if (member.object !is null) {
+                    auto typedObj = cast(Expression)member.object;
+                    if (typedObj !is null && typedObj.type !is null) {
+                        if (auto userType = cast(UserType)typedObj.type) {
+                            if (userType.declaration !is null) {
+                                if (auto child = member.memberName in userType.declaration.childIndex) {
+                                    funcDecl = cast(FunctionDecl)*child;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback: try finding a CallExpression containing the cursor
+        if (funcDecl is null) {
+            auto node = ppi.findExprAt(byteOffset);
+            if (auto call = cast(CallExpression)node) {
+                if (auto ident = cast(IdentifierExpression)call.function_)
+                    funcDecl = cast(FunctionDecl)ident.declaration;
+            }
         }
 
         if (funcDecl is null)
@@ -382,6 +613,10 @@ class LSPServer {
         }
         sig ~= ")";
 
+        // Clamp activeParameter to valid range
+        if (paramInfos.length > 0 && activeParam >= paramInfos.length)
+            activeParam = cast(int)(paramInfos.length - 1);
+
         JSONValue sigInfo;
         sigInfo["label"] = sig;
         sigInfo["parameters"] = JSONValue(paramInfos);
@@ -389,7 +624,7 @@ class LSPServer {
         JSONValue result;
         result["signatures"] = JSONValue([sigInfo]);
         result["activeSignature"] = 0;
-        result["activeParameter"] = 0;
+        result["activeParameter"] = activeParam;
         return jsonRPCResult(msg, result);
     }
 
@@ -408,17 +643,7 @@ class LSPServer {
         if (sourceText.length == 0 && exists(path))
             sourceText = readText(path);
 
-        // Use warm state's module registry to find the module
-        Module mod;
-        if (warmState.moduleRegistry !is null) {
-            foreach (m; warmState.moduleRegistry.allModules()) {
-                if (m.sourceFilePath == absPath) {
-                    mod = m;
-                    break;
-                }
-            }
-        }
-
+        auto mod = findModule(absPath);
         if (mod is null || mod.topIndex is null)
             return jsonRPCResult(msg, emptyJSONArray());
 
@@ -544,18 +769,7 @@ class LSPServer {
             }
         } else {
             // Identifier completion: collect symbols from module scope
-            import semantic.module_ : Module;
-
-            // Find the module for this file
-            Module mod;
-            if (warmState.moduleRegistry !is null) {
-                foreach (m; warmState.moduleRegistry.allModules()) {
-                    if (m.sourceFilePath == absPath) {
-                        mod = m;
-                        break;
-                    }
-                }
-            }
+            auto mod = findModule(absPath);
 
             if (mod !is null && mod.symbolTable !is null) {
                 // Get prefix (characters before cursor on current line)
@@ -608,19 +822,43 @@ class LSPServer {
         JSONValue item;
         item["label"] = name;
 
-        // Determine kind
-        if (cast(FunctionDecl)decl)
+        // Determine kind and detail
+        if (auto funcDecl = cast(FunctionDecl)decl) {
             item["kind"] = cast(int)CompletionItemKind.Function;
-        else if (cast(StructDecl)decl)
+            // Build signature detail: "returnType(paramTypes)"
+            string detail = funcDecl.returnType !is null ? funcDecl.returnType.toString() : "void";
+            detail ~= "(";
+            foreach (i, param; funcDecl.parameters) {
+                if (i > 0) detail ~= ", ";
+                detail ~= param.type !is null ? param.type.toString() : "?";
+            }
+            detail ~= ")";
+            item["detail"] = detail;
+        } else if (auto structDecl = cast(StructDecl)decl) {
             item["kind"] = cast(int)CompletionItemKind.Struct;
-        else if (cast(ClassDecl)decl)
+            auto fieldCount = structDecl.fields.length;
+            item["detail"] = "struct (" ~ to!string(fieldCount) ~ " fields)";
+        } else if (auto classDecl = cast(ClassDecl)decl) {
             item["kind"] = cast(int)CompletionItemKind.Class;
-        else if (cast(VariableDecl)decl)
+            string detail = "class";
+            if (classDecl.baseClassDecl !is null)
+                detail ~= " : " ~ classDecl.baseClassDecl.name;
+            item["detail"] = detail;
+        } else if (auto varDecl = cast(VariableDecl)decl) {
             item["kind"] = cast(int)CompletionItemKind.Field;
-        else if (cast(ManifestConstantDecl)decl)
+            if (varDecl.type !is null)
+                item["detail"] = varDecl.type.toString();
+        } else if (auto manifest = cast(ManifestConstantDecl)decl) {
             item["kind"] = cast(int)CompletionItemKind.Constant;
-        else
+            string detail = "enum";
+            if (manifest.inferredType !is null)
+                detail = manifest.inferredType.toString();
+            else if (manifest.declaredType !is null)
+                detail = manifest.declaredType.toString();
+            item["detail"] = detail;
+        } else {
             item["kind"] = cast(int)CompletionItemKind.Variable;
+        }
 
         return item;
     }
@@ -666,6 +904,917 @@ class LSPServer {
             || (c >= '0' && c <= '9') || c == '_';
     }
 
+    // ── Code Lens ──
+
+    private JSONValue handleCodeLens(JSONValue msg) {
+        auto params = msg["params"];
+        string uri = params["textDocument"]["uri"].str;
+        string path = uriToPath(uri);
+        auto absPath = absolutePath(path);
+
+        import semantic.module_ : Module;
+
+        string sourceText = (uri in openDocuments) ? openDocuments[uri] : "";
+        if (sourceText.length == 0 && exists(path))
+            sourceText = readText(path);
+
+        Module mod = findModule(absPath);
+        if (mod is null || mod.topIndex is null)
+            return jsonRPCResult(msg, emptyJSONArray());
+
+        JSONValue[] lenses;
+        foreach (name, decl; mod.topIndex) {
+            if (decl is null || decl.name.length == 0) continue;
+            auto refCount = decl.references !is null ? decl.references.length : 0;
+            auto range = sourceLocationToRange(
+                decl.location.startOffset, decl.location.endOffset, sourceText);
+
+            CodeLens lens;
+            lens.range = range;
+            lens.commandTitle = to!string(refCount) ~ " reference" ~ (refCount != 1 ? "s" : "");
+            lens.commandName = "d2wasm.showReferences";
+            lenses ~= lens.toJSON();
+
+            // Also add lenses for children (methods, fields)
+            foreach (childName, child; decl.childIndex) {
+                if (child is null || child.name.length == 0) continue;
+                auto childRefs = child.references !is null ? child.references.length : 0;
+                auto childRange = sourceLocationToRange(
+                    child.location.startOffset, child.location.endOffset, sourceText);
+
+                CodeLens childLens;
+                childLens.range = childRange;
+                childLens.commandTitle = to!string(childRefs) ~ " reference" ~ (childRefs != 1 ? "s" : "");
+                childLens.commandName = "d2wasm.showReferences";
+                lenses ~= childLens.toJSON();
+            }
+        }
+
+        return jsonRPCResult(msg, JSONValue(lenses));
+    }
+
+    // ── Semantic Tokens ──
+
+    private JSONValue handleSemanticTokensFull(JSONValue msg) {
+        auto params = msg["params"];
+        string uri = params["textDocument"]["uri"].str;
+        string path = uriToPath(uri);
+        auto absPath = absolutePath(path);
+
+        auto ppi = absPath in positionIndexes;
+        if (ppi is null)
+            return jsonRPCResult(msg, JSONValue(null));
+
+        string sourceText = (uri in openDocuments) ? openDocuments[uri] : "";
+        if (sourceText.length == 0 && exists(path))
+            sourceText = readText(path);
+
+        import ast.expressions : IdentifierExpression, MemberExpression,
+            LiteralExpression, CallExpression;
+
+        // Build delta-encoded token data
+        uint[] data;
+        uint prevLine = 0;
+        uint prevChar = 0;
+
+        foreach (ref entry; ppi.allEntries()) {
+            SemanticTokenType tokenType;
+            uint modifiers = 0;
+            bool matched = false;
+
+            if (auto ident = cast(IdentifierExpression)entry.node) {
+                matched = true;
+                if (ident.declaration !is null) {
+                    if (cast(FunctionDecl)ident.declaration) {
+                        tokenType = SemanticTokenType.function_;
+                    } else if (cast(StructDecl)ident.declaration) {
+                        tokenType = SemanticTokenType.struct_;
+                    } else if (cast(ClassDecl)ident.declaration) {
+                        tokenType = SemanticTokenType.class_;
+                    } else if (cast(EnumDecl)ident.declaration) {
+                        tokenType = SemanticTokenType.enum_;
+                    } else if (cast(ManifestConstantDecl)ident.declaration) {
+                        tokenType = SemanticTokenType.variable;
+                        modifiers = 1 << SemanticTokenModifier.readonly_;
+                    } else if (cast(TemplateDecl)ident.declaration) {
+                        tokenType = SemanticTokenType.function_;
+                    } else {
+                        tokenType = SemanticTokenType.variable;
+                    }
+                } else {
+                    tokenType = SemanticTokenType.variable;
+                }
+            } else if (auto member = cast(MemberExpression)entry.node) {
+                // Classify member access — property or method
+                matched = true;
+                tokenType = SemanticTokenType.property;
+
+                // Check if it's a method by looking at the object type
+                if (member.object !is null) {
+                    auto typedObj = cast(Expression)member.object;
+                    if (typedObj !is null && typedObj.type !is null) {
+                        if (auto ut = cast(UserType)typedObj.type) {
+                            if (ut.declaration !is null) {
+                                if (auto child = member.memberName in ut.declaration.childIndex) {
+                                    if (cast(FunctionDecl)*child)
+                                        tokenType = SemanticTokenType.method;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!matched) continue;
+
+            // Compute line/character from byte offset
+            uint startLine = 0, startChar = 0;
+            uint line = 0, col = 0;
+            foreach (i, c; sourceText) {
+                if (i == entry.startByte) {
+                    startLine = line;
+                    startChar = col;
+                    break;
+                }
+                if (c == '\n') { line++; col = 0; }
+                else col++;
+            }
+
+            uint length = entry.endByte - entry.startByte;
+            if (length == 0) continue;
+
+            // Delta encoding
+            uint deltaLine = startLine - prevLine;
+            uint deltaChar = (deltaLine == 0) ? startChar - prevChar : startChar;
+
+            data ~= deltaLine;
+            data ~= deltaChar;
+            data ~= length;
+            data ~= cast(uint)tokenType;
+            data ~= modifiers;
+
+            prevLine = startLine;
+            prevChar = startChar;
+        }
+
+        JSONValue result;
+        JSONValue[] dataJSON;
+        foreach (d; data)
+            dataJSON ~= JSONValue(d);
+        result["data"] = JSONValue(dataJSON);
+        return jsonRPCResult(msg, result);
+    }
+
+    // ── Call Hierarchy ──
+
+    private JSONValue handlePrepareCallHierarchy(JSONValue msg) {
+        auto params = msg["params"];
+        string uri = params["textDocument"]["uri"].str;
+        auto pos = Position.fromJSON(params["position"]);
+
+        string path = uriToPath(uri);
+        auto absPath = absolutePath(path);
+
+        auto ppi = absPath in positionIndexes;
+        if (ppi is null)
+            return jsonRPCResult(msg, emptyJSONArray());
+
+        string sourceText = (uri in openDocuments) ? openDocuments[uri] : "";
+        uint byteOffset = positionToByteOffset(pos, sourceText);
+
+        // Find function declaration at cursor
+        FunctionDecl funcDecl;
+
+        // Try expression (identifier referencing a function)
+        import ast.expressions : IdentifierExpression;
+        auto expr = ppi.findExprAt(byteOffset);
+        if (auto ident = cast(IdentifierExpression)expr)
+            funcDecl = cast(FunctionDecl)ident.declaration;
+
+        // Try declaration directly
+        if (funcDecl is null) {
+            auto decl = ppi.findDeclAt(byteOffset);
+            funcDecl = cast(FunctionDecl)decl;
+        }
+
+        if (funcDecl is null)
+            return jsonRPCResult(msg, emptyJSONArray());
+
+        auto range = sourceLocationToRange(
+            funcDecl.location.startOffset, funcDecl.location.endOffset, sourceText);
+
+        CallHierarchyItem item;
+        item.name = funcDecl.name;
+        item.kind = cast(int)LSPSymbolKind.Function;
+        item.uri = uri;
+        item.range = range;
+        item.selectionRange = range;
+
+        return jsonRPCResult(msg, JSONValue([item.toJSON()]));
+    }
+
+    private JSONValue handleCallHierarchyIncoming(JSONValue msg) {
+        auto params = msg["params"];
+        auto itemJSON = params["item"];
+        string uri = itemJSON["uri"].str;
+        string targetName = itemJSON["name"].str;
+        auto targetRange = Range.fromJSON(itemJSON["range"]);
+
+        string path = uriToPath(uri);
+        auto absPath = absolutePath(path);
+
+        // Find the target function declaration
+        string sourceText = (uri in openDocuments) ? openDocuments[uri] : "";
+        if (sourceText.length == 0 && exists(path))
+            sourceText = readText(path);
+
+        uint byteOffset = positionToByteOffset(targetRange.start, sourceText);
+
+        auto ppi = absPath in positionIndexes;
+        if (ppi is null)
+            return jsonRPCResult(msg, emptyJSONArray());
+
+        FunctionDecl targetFunc;
+        auto decl = ppi.findDeclAt(byteOffset);
+        targetFunc = cast(FunctionDecl)decl;
+
+        // Also try via expression
+        if (targetFunc is null) {
+            import ast.expressions : IdentifierExpression;
+            auto expr = ppi.findExprAt(byteOffset);
+            if (auto ident = cast(IdentifierExpression)expr)
+                targetFunc = cast(FunctionDecl)ident.declaration;
+        }
+
+        if (targetFunc is null || targetFunc.references is null)
+            return jsonRPCResult(msg, emptyJSONArray());
+
+        // Walk references to find call sites and their enclosing functions
+        import ast.expressions : CallExpression;
+
+        JSONValue[] incomingCalls;
+        FunctionDecl[string] seenCallers;  // dedup by name
+
+        foreach (ref_; targetFunc.references) {
+            // Find the enclosing function for this reference
+            auto enclosingFunc = findEnclosingFunction(ref_.location, absPath);
+            if (enclosingFunc is null) continue;
+            if (enclosingFunc.name in seenCallers) continue;
+            seenCallers[enclosingFunc.name] = enclosingFunc;
+
+            string callerSource = sourceText;  // same file for now
+            auto callerRange = sourceLocationToRange(
+                enclosingFunc.location.startOffset,
+                enclosingFunc.location.endOffset, callerSource);
+
+            CallHierarchyItem callerItem;
+            callerItem.name = enclosingFunc.name;
+            callerItem.kind = cast(int)LSPSymbolKind.Function;
+            callerItem.uri = uri;
+            callerItem.range = callerRange;
+            callerItem.selectionRange = callerRange;
+
+            // Build the call site range
+            auto fromRange = sourceLocationToRange(
+                ref_.location.startOffset, ref_.location.endOffset, callerSource);
+
+            JSONValue incoming;
+            incoming["from"] = callerItem.toJSON();
+            incoming["fromRanges"] = JSONValue([fromRange.toJSON()]);
+            incomingCalls ~= incoming;
+        }
+
+        return jsonRPCResult(msg, JSONValue(incomingCalls));
+    }
+
+    private JSONValue handleCallHierarchyOutgoing(JSONValue msg) {
+        auto params = msg["params"];
+        auto itemJSON = params["item"];
+        string uri = itemJSON["uri"].str;
+        auto targetRange = Range.fromJSON(itemJSON["range"]);
+
+        string path = uriToPath(uri);
+        auto absPath = absolutePath(path);
+
+        string sourceText = (uri in openDocuments) ? openDocuments[uri] : "";
+        if (sourceText.length == 0 && exists(path))
+            sourceText = readText(path);
+
+        uint byteOffset = positionToByteOffset(targetRange.start, sourceText);
+
+        auto ppi = absPath in positionIndexes;
+        if (ppi is null)
+            return jsonRPCResult(msg, emptyJSONArray());
+
+        FunctionDecl targetFunc;
+        auto decl = ppi.findDeclAt(byteOffset);
+        targetFunc = cast(FunctionDecl)decl;
+
+        if (targetFunc is null)
+            return jsonRPCResult(msg, emptyJSONArray());
+
+        // Walk the function body to find all call expressions
+        import ast.expressions : CallExpression, IdentifierExpression,
+            BinaryExpression, UnaryExpression, AssignmentExpression,
+            CastExpression, IndexExpression, MemberExpression;
+
+        JSONValue[] outgoingCalls;
+        FunctionDecl[string] seenCallees;
+
+        // findCallsInExpr defined first (D has no nested function forward refs)
+        void findCallsInExpr(Expression expr) {
+            if (expr is null) return;
+
+            if (auto call = cast(CallExpression)expr) {
+                FunctionDecl callee;
+                if (auto ident = cast(IdentifierExpression)call.function_)
+                    callee = cast(FunctionDecl)ident.declaration;
+                if (callee !is null && callee.name !in seenCallees) {
+                    seenCallees[callee.name] = callee;
+
+                    auto calleeRange = sourceLocationToRange(
+                        callee.location.startOffset,
+                        callee.location.endOffset, sourceText);
+
+                    CallHierarchyItem calleeItem;
+                    calleeItem.name = callee.name;
+                    calleeItem.kind = cast(int)LSPSymbolKind.Function;
+                    calleeItem.uri = callee.location.filename.length > 0
+                        ? pathToURI(callee.location.filename) : uri;
+                    calleeItem.range = calleeRange;
+                    calleeItem.selectionRange = calleeRange;
+
+                    auto callRange = sourceLocationToRange(
+                        call.location.startOffset,
+                        call.location.endOffset, sourceText);
+
+                    JSONValue outgoing;
+                    outgoing["to"] = calleeItem.toJSON();
+                    outgoing["fromRanges"] = JSONValue([callRange.toJSON()]);
+                    outgoingCalls ~= outgoing;
+                }
+                foreach (arg; call.arguments) findCallsInExpr(arg);
+                findCallsInExpr(call.function_);
+            } else if (auto bin = cast(BinaryExpression)expr) {
+                findCallsInExpr(bin.left);
+                findCallsInExpr(bin.right);
+            } else if (auto unary = cast(UnaryExpression)expr) {
+                findCallsInExpr(unary.operand);
+            } else if (auto assign = cast(AssignmentExpression)expr) {
+                findCallsInExpr(assign.left);
+                findCallsInExpr(assign.right);
+            } else if (auto castExpr = cast(CastExpression)expr) {
+                findCallsInExpr(castExpr.expression);
+            } else if (auto indexExpr = cast(IndexExpression)expr) {
+                findCallsInExpr(indexExpr.array);
+                findCallsInExpr(indexExpr.index);
+            } else if (auto memberExpr = cast(MemberExpression)expr) {
+                findCallsInExpr(memberExpr.object);
+            }
+        }
+
+        void walkForCalls(Statement stmt) {
+            if (stmt is null) return;
+
+            if (auto compound = cast(CompoundStatement)stmt) {
+                foreach (s; compound.statements) walkForCalls(s);
+            } else if (auto exprStmt = cast(ExpressionStatement)stmt) {
+                findCallsInExpr(exprStmt.expression);
+            } else if (auto retStmt = cast(ReturnStatement)stmt) {
+                if (retStmt.value) findCallsInExpr(retStmt.value);
+            } else if (auto ifStmt = cast(IfStatement)stmt) {
+                findCallsInExpr(ifStmt.condition);
+                walkForCalls(ifStmt.thenStatement);
+                if (ifStmt.elseStatement) walkForCalls(ifStmt.elseStatement);
+            } else if (auto whileStmt = cast(WhileStatement)stmt) {
+                findCallsInExpr(whileStmt.condition);
+                walkForCalls(whileStmt.body_);
+            } else if (auto forStmt = cast(ForStatement)stmt) {
+                if (forStmt.init) walkForCalls(forStmt.init);
+                if (forStmt.condition) findCallsInExpr(forStmt.condition);
+                if (forStmt.update) findCallsInExpr(forStmt.update);
+                walkForCalls(forStmt.body_);
+            } else if (auto varDeclStmt = cast(VariableDeclarationStatement)stmt) {
+                if (varDeclStmt.initializer) findCallsInExpr(varDeclStmt.initializer);
+            }
+        }
+
+        if (targetFunc.body_)
+            walkForCalls(targetFunc.body_);
+
+        return jsonRPCResult(msg, JSONValue(outgoingCalls));
+    }
+
+    // ── Type Hierarchy ──
+
+    private JSONValue handlePrepareTypeHierarchy(JSONValue msg) {
+        auto params = msg["params"];
+        string uri = params["textDocument"]["uri"].str;
+        auto pos = Position.fromJSON(params["position"]);
+
+        string path = uriToPath(uri);
+        auto absPath = absolutePath(path);
+
+        auto ppi = absPath in positionIndexes;
+        if (ppi is null)
+            return jsonRPCResult(msg, emptyJSONArray());
+
+        string sourceText = (uri in openDocuments) ? openDocuments[uri] : "";
+        uint byteOffset = positionToByteOffset(pos, sourceText);
+
+        // Find class/interface/struct at cursor
+        Declaration target;
+        auto decl = ppi.findDeclAt(byteOffset);
+        if (cast(ClassDecl)decl || cast(StructDecl)decl)
+            target = decl;
+
+        // Also try via expression (identifier referencing a type)
+        if (target is null) {
+            import ast.expressions : IdentifierExpression;
+            auto expr = ppi.findExprAt(byteOffset);
+            if (auto ident = cast(IdentifierExpression)expr) {
+                if (cast(ClassDecl)ident.declaration || cast(StructDecl)ident.declaration)
+                    target = ident.declaration;
+            }
+        }
+
+        if (target is null)
+            return jsonRPCResult(msg, emptyJSONArray());
+
+        auto range = sourceLocationToRange(
+            target.location.startOffset, target.location.endOffset, sourceText);
+
+        int kind = cast(ClassDecl)target ? cast(int)LSPSymbolKind.Class : cast(int)LSPSymbolKind.Struct;
+
+        TypeHierarchyItem item;
+        item.name = target.name;
+        item.kind = kind;
+        item.uri = uri;
+        item.range = range;
+        item.selectionRange = range;
+
+        return jsonRPCResult(msg, JSONValue([item.toJSON()]));
+    }
+
+    private JSONValue handleTypeHierarchySupertypes(JSONValue msg) {
+        auto params = msg["params"];
+        auto itemJSON = params["item"];
+        string uri = itemJSON["uri"].str;
+        string targetName = itemJSON["name"].str;
+
+        string path = uriToPath(uri);
+        auto absPath = absolutePath(path);
+
+        string sourceText = (uri in openDocuments) ? openDocuments[uri] : "";
+        if (sourceText.length == 0 && exists(path))
+            sourceText = readText(path);
+
+        // Find the class declaration by name
+        import semantic.module_ : Module;
+        ClassDecl classDecl = findClassByName(targetName);
+
+        if (classDecl is null)
+            return jsonRPCResult(msg, emptyJSONArray());
+
+        JSONValue[] supertypes;
+
+        // Add base class
+        if (classDecl.baseClassDecl !is null) {
+            auto base = classDecl.baseClassDecl;
+            string baseSrc = "";
+            string baseUri = uri;
+            if (base.location.filename.length > 0) {
+                baseUri = pathToURI(base.location.filename);
+                if (exists(base.location.filename))
+                    baseSrc = readText(base.location.filename);
+            }
+
+            auto baseRange = sourceLocationToRange(
+                base.location.startOffset, base.location.endOffset,
+                baseSrc.length > 0 ? baseSrc : sourceText);
+
+            TypeHierarchyItem superItem;
+            superItem.name = base.name;
+            superItem.kind = cast(int)LSPSymbolKind.Class;
+            superItem.uri = baseUri;
+            superItem.range = baseRange;
+            superItem.selectionRange = baseRange;
+            supertypes ~= superItem.toJSON();
+        }
+
+        return jsonRPCResult(msg, JSONValue(supertypes));
+    }
+
+    private JSONValue handleTypeHierarchySubtypes(JSONValue msg) {
+        auto params = msg["params"];
+        auto itemJSON = params["item"];
+        string targetName = itemJSON["name"].str;
+
+        // Scan all modules for classes that extend the target
+        import semantic.module_ : Module;
+
+        JSONValue[] subtypes;
+
+        if (warmState.moduleRegistry !is null) {
+            foreach (mod; warmState.moduleRegistry.allModules()) {
+                foreach (name, decl; mod.topIndex) {
+                    if (auto classDecl = cast(ClassDecl)decl) {
+                        if (classDecl.baseClassDecl !is null
+                            && classDecl.baseClassDecl.name == targetName)
+                        {
+                            string subSrc = "";
+                            string subUri;
+                            if (classDecl.location.filename.length > 0) {
+                                subUri = pathToURI(classDecl.location.filename);
+                                if (exists(classDecl.location.filename))
+                                    subSrc = readText(classDecl.location.filename);
+                            }
+
+                            auto subRange = sourceLocationToRange(
+                                classDecl.location.startOffset,
+                                classDecl.location.endOffset,
+                                subSrc);
+
+                            TypeHierarchyItem subItem;
+                            subItem.name = classDecl.name;
+                            subItem.kind = cast(int)LSPSymbolKind.Class;
+                            subItem.uri = subUri;
+                            subItem.range = subRange;
+                            subItem.selectionRange = subRange;
+                            subtypes ~= subItem.toJSON();
+                        }
+                    }
+                }
+            }
+        }
+
+        return jsonRPCResult(msg, JSONValue(subtypes));
+    }
+
+    // ── Rename ──
+
+    private JSONValue handlePrepareRename(JSONValue msg) {
+        auto params = msg["params"];
+        string uri = params["textDocument"]["uri"].str;
+        auto pos = Position.fromJSON(params["position"]);
+
+        string path = uriToPath(uri);
+        auto absPath = absolutePath(path);
+
+        auto ppi = absPath in positionIndexes;
+        if (ppi is null)
+            return jsonRPCResult(msg, JSONValue(null));
+
+        string sourceText = (uri in openDocuments) ? openDocuments[uri] : "";
+        uint byteOffset = positionToByteOffset(pos, sourceText);
+
+        // Find the declaration to rename
+        import ast.expressions : IdentifierExpression;
+
+        Declaration target;
+        string targetName;
+
+        auto expr = ppi.findExprAt(byteOffset);
+        if (auto ident = cast(IdentifierExpression)expr) {
+            target = ident.declaration;
+            targetName = ident.name;
+        }
+
+        if (target is null) {
+            auto decl = ppi.findDeclAt(byteOffset);
+            if (decl !is null) {
+                target = decl;
+                targetName = decl.name;
+            }
+        }
+
+        if (target is null || targetName.length == 0)
+            return jsonRPCResult(msg, JSONValue(null));
+
+        // Return the range of the identifier under cursor
+        auto range = sourceLocationToRange(
+            expr !is null ? expr.location.startOffset : target.location.startOffset,
+            expr !is null ? expr.location.endOffset : target.location.endOffset,
+            sourceText);
+
+        JSONValue result;
+        result["range"] = range.toJSON();
+        result["placeholder"] = targetName;
+        return jsonRPCResult(msg, result);
+    }
+
+    private JSONValue handleRename(JSONValue msg) {
+        auto params = msg["params"];
+        string uri = params["textDocument"]["uri"].str;
+        auto pos = Position.fromJSON(params["position"]);
+        string newName = params["newName"].str;
+
+        string path = uriToPath(uri);
+        auto absPath = absolutePath(path);
+
+        auto ppi = absPath in positionIndexes;
+        if (ppi is null)
+            return jsonRPCResult(msg, JSONValue(null));
+
+        string sourceText = (uri in openDocuments) ? openDocuments[uri] : "";
+        uint byteOffset = positionToByteOffset(pos, sourceText);
+
+        // Find the declaration to rename
+        import ast.expressions : IdentifierExpression;
+
+        Declaration target;
+        auto expr = ppi.findExprAt(byteOffset);
+        if (auto ident = cast(IdentifierExpression)expr)
+            target = ident.declaration;
+
+        if (target is null) {
+            auto decl = ppi.findDeclAt(byteOffset);
+            if (decl !is null) target = decl;
+        }
+
+        if (target is null)
+            return jsonRPCResult(msg, JSONValue(null));
+
+        // Collect all edit locations
+        // Group edits by file URI
+        TextEdit[][string] editsByUri;
+
+        // Edit at the declaration site itself
+        if (target.location.filename.length > 0) {
+            string declUri = pathToURI(target.location.filename);
+            string declSrc = "";
+            if (exists(target.location.filename))
+                declSrc = readText(target.location.filename);
+
+            auto declRange = sourceLocationToRange(
+                target.location.startOffset, target.location.endOffset, declSrc);
+
+            TextEdit edit;
+            edit.range = declRange;
+            edit.newText = newName;
+            editsByUri[declUri] ~= edit;
+        }
+
+        // Edit at all reference sites
+        if (target.references !is null) {
+            foreach (ref_; target.references) {
+                auto loc = ref_.location;
+                if (loc.filename.length == 0) continue;
+
+                string refUri = pathToURI(loc.filename);
+                string refSrc = "";
+                if (exists(loc.filename))
+                    refSrc = readText(loc.filename);
+
+                auto refRange = sourceLocationToRange(
+                    loc.startOffset, loc.endOffset, refSrc);
+
+                TextEdit edit;
+                edit.range = refRange;
+                edit.newText = newName;
+                editsByUri[refUri] ~= edit;
+            }
+        }
+
+        // Build WorkspaceEdit
+        JSONValue changes;
+        foreach (fileUri, edits; editsByUri) {
+            JSONValue[] editJSONs;
+            foreach (ref e; edits)
+                editJSONs ~= e.toJSON();
+            changes[fileUri] = JSONValue(editJSONs);
+        }
+
+        JSONValue result;
+        result["changes"] = changes;
+        return jsonRPCResult(msg, result);
+    }
+
+    // ── Workspace ──
+
+    private void handleDidChangeWatchedFiles(JSONValue msg) {
+        auto params = msg["params"];
+        if ("changes" in params) {
+            foreach (change; params["changes"].array) {
+                string fileUri = change["uri"].str;
+                string filePath = uriToPath(fileUri);
+                auto absFilePath = absolutePath(filePath);
+
+                // If this file is open in the editor, skip (editor handles it)
+                if (fileUri in openDocuments) continue;
+
+                // Mark file as dirty in warm state so next compile picks up changes
+                if (exists(filePath) && filePath.length > 2
+                    && filePath[$ - 2 .. $] == ".d")
+                {
+                    auto ws = warmState.getOrCreate(absFilePath);
+                    // Clear cached data to force recompile
+                    ws.cachedEntries = null;
+                    lspLog("File changed on disk: ", filePath);
+                }
+            }
+        }
+    }
+
+    private void handleDidChangeWorkspaceFolders(JSONValue msg) {
+        auto params = msg["params"];
+        if ("event" in params) {
+            auto event = params["event"];
+            // Add new workspace folders as import paths
+            if ("added" in event) {
+                foreach (folder; event["added"].array) {
+                    string folderPath = uriToPath(folder["uri"].str);
+                    if (folderPath.length > 0 && exists(folderPath)) {
+                        bool alreadyHave = false;
+                        foreach (ip; importPaths) {
+                            if (ip == folderPath) { alreadyHave = true; break; }
+                        }
+                        if (!alreadyHave) {
+                            importPaths ~= folderPath;
+                            lspLog("Added workspace folder: ", folderPath);
+                        }
+                    }
+                }
+            }
+            // Remove workspace folders from import paths
+            if ("removed" in event) {
+                foreach (folder; event["removed"].array) {
+                    string folderPath = uriToPath(folder["uri"].str);
+                    string[] filtered;
+                    foreach (ip; importPaths) {
+                        if (ip != folderPath) filtered ~= ip;
+                    }
+                    importPaths = filtered;
+                    lspLog("Removed workspace folder: ", folderPath);
+                }
+            }
+        }
+    }
+
+    // ── Code Actions ──
+
+    private JSONValue handleCodeAction(JSONValue msg) {
+        auto params = msg["params"];
+        string uri = params["textDocument"]["uri"].str;
+        auto requestRange = Range.fromJSON(params["range"]);
+
+        string path = uriToPath(uri);
+        auto absPath = absolutePath(path);
+
+        string sourceText = (uri in openDocuments) ? openDocuments[uri] : "";
+        if (sourceText.length == 0 && exists(path))
+            sourceText = readText(path);
+
+        JSONValue[] actions;
+
+        // Check diagnostics in the requested range for quickfix opportunities
+        if ("context" in params && "diagnostics" in params["context"]) {
+            foreach (diag; params["context"]["diagnostics"].array) {
+                string diagMsg = diag["message"].str;
+
+                // "Did you mean?" for undefined identifiers
+                if (diagMsg.indexOf("Undefined identifier '") >= 0) {
+                    // Extract the identifier name from the error message
+                    auto quotePos = diagMsg.indexOf("'");
+                    if (quotePos >= 0) {
+                        auto start = cast(size_t)(quotePos + 1);
+                        auto endRel = diagMsg[start .. $].indexOf("'");
+                        if (endRel < 0) continue;
+                        auto end = start + cast(size_t)endRel;
+                        string badName = diagMsg[start .. end];
+                        auto suggestions = findSimilarNames(badName, absPath);
+
+                        foreach (suggestion; suggestions) {
+                            auto diagRange = Range.fromJSON(diag["range"]);
+
+                            JSONValue edit;
+                            edit["range"] = diagRange.toJSON();
+                            edit["newText"] = suggestion;
+
+                            JSONValue changes;
+                            changes[uri] = JSONValue([edit]);
+
+                            JSONValue workspaceEdit;
+                            workspaceEdit["changes"] = changes;
+
+                            JSONValue action;
+                            action["title"] = "Replace with '" ~ suggestion ~ "'";
+                            action["kind"] = "quickfix";
+                            action["diagnostics"] = JSONValue([diag]);
+                            action["edit"] = workspaceEdit;
+                            actions ~= action;
+                        }
+                    }
+                }
+            }
+        }
+
+        return jsonRPCResult(msg, JSONValue(actions));
+    }
+
+    /// Find names similar to `name` in the module's scope (Levenshtein distance <= 2)
+    private string[] findSimilarNames(string name, string absPath) {
+        import semantic.module_ : Module;
+
+        string[] suggestions;
+        auto mod = findModule(absPath);
+        if (mod is null) return suggestions;
+
+        // Collect candidate names from module scope and topIndex
+        void checkCandidate(string candidate) {
+            if (candidate == name) return;
+            if (candidate.length == 0) return;
+            auto dist = levenshtein(name, candidate);
+            if (dist <= 2 && dist > 0)
+                suggestions ~= candidate;
+        }
+
+        if (mod.symbolTable !is null && mod.symbolTable.moduleScope !is null) {
+            foreach (sym_name, _; mod.symbolTable.moduleScope.symbols)
+                checkCandidate(sym_name);
+        }
+        foreach (decl_name, _; mod.topIndex)
+            checkCandidate(decl_name);
+
+        // Sort by distance (shortest first), cap at 3
+        if (suggestions.length > 3)
+            suggestions = suggestions[0 .. 3];
+
+        return suggestions;
+    }
+
+    /// Levenshtein edit distance between two strings
+    private static uint levenshtein(string a, string b) {
+        if (a.length == 0) return cast(uint)b.length;
+        if (b.length == 0) return cast(uint)a.length;
+
+        auto prev = new uint[b.length + 1];
+        auto curr = new uint[b.length + 1];
+
+        foreach (j; 0 .. b.length + 1)
+            prev[j] = cast(uint)j;
+
+        foreach (i; 0 .. a.length) {
+            curr[0] = cast(uint)(i + 1);
+            foreach (j; 0 .. b.length) {
+                uint cost = (a[i] == b[j]) ? 0 : 1;
+                uint del = prev[j + 1] + 1;
+                uint ins = curr[j] + 1;
+                uint sub = prev[j] + cost;
+                curr[j + 1] = del < ins ? (del < sub ? del : sub) : (ins < sub ? ins : sub);
+            }
+            auto tmp = prev;
+            prev = curr;
+            curr = tmp;
+        }
+
+        return prev[b.length];
+    }
+
+    // ── Helper: find module by path ──
+
+    private auto findModule(string absPath) {
+        import semantic.module_ : Module;
+        if (warmState.moduleRegistry !is null) {
+            foreach (m; warmState.moduleRegistry.allModules()) {
+                if (m.sourceFilePath == absPath)
+                    return m;
+            }
+        }
+        return null;
+    }
+
+    /// Find enclosing function for a reference location
+    private FunctionDecl findEnclosingFunction(SourceLocation loc, string absPath) {
+        import semantic.module_ : Module;
+        auto mod = findModule(absPath);
+        if (mod is null) return null;
+
+        // Walk top-level declarations to find the function containing this offset
+        foreach (name, decl; mod.topIndex) {
+            if (auto funcDecl = cast(FunctionDecl)decl) {
+                if (funcDecl.location.startOffset <= loc.startOffset
+                    && funcDecl.location.endOffset >= loc.endOffset)
+                    return funcDecl;
+            }
+        }
+        return null;
+    }
+
+    /// Find a ClassDecl by name across all modules
+    private ClassDecl findClassByName(string name) {
+        import semantic.module_ : Module;
+        if (warmState.moduleRegistry is null) return null;
+
+        foreach (mod; warmState.moduleRegistry.allModules()) {
+            if (auto decl = name in mod.topIndex) {
+                if (auto classDecl = cast(ClassDecl)*decl)
+                    return classDecl;
+            }
+        }
+        return null;
+    }
+
     // ── Compilation + Diagnostics ──
 
     private void compileAndPublishDiagnostics(string uri, string sourceText) {
@@ -689,18 +1838,40 @@ class LSPServer {
         options.warmStateObj = warmState;
         options.cacheDir = dirName(absPath);
 
+        // Set up warning accumulator
+        import diagnostic.warnings : Warning, WarningSeverity, warningsSink;
+        Warning[] warnings;
+        warningsSink = &warnings;
+        scope(exit) warningsSink = null;
+
         // Compile
         Diagnostic[] diagnostics;
-        ws.lastError = null;  // clear previous error
+        ws.lastError = null;
+        ws.lastErrors = null;
         int result = compileFile(options);
 
-        // Extract diagnostics from compilation errors (stored via warm state pointer)
-        if (result != 0 && ws.lastError !is null) {
-            auto loc = extractLocation(ws.lastError);
+        // Extract diagnostics from compilation errors
+        if (result != 0) {
+            // Use accumulated errors if available, otherwise fall back to single error
+            Exception[] errors = ws.lastErrors.length > 0 ? ws.lastErrors :
+                (ws.lastError !is null ? [ws.lastError] : null);
+
+            foreach (err; errors) {
+                auto loc = extractLocation(err);
+                diagnostics ~= Diagnostic(
+                    sourceLocationToRange(loc.startOffset, loc.endOffset, sourceText),
+                    DiagnosticSeverity.Error,
+                    err.msg
+                );
+            }
+        }
+
+        // Add warnings (even on successful compilation)
+        foreach (ref w; warnings) {
             diagnostics ~= Diagnostic(
-                sourceLocationToRange(loc.startOffset, loc.endOffset, sourceText),
-                DiagnosticSeverity.Error,
-                ws.lastError.msg
+                sourceLocationToRange(w.location.startOffset, w.location.endOffset, sourceText),
+                cast(DiagnosticSeverity)w.severity,
+                w.message
             );
         }
 

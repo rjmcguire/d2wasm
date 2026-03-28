@@ -1,0 +1,6 @@
+{
+  "name": "lsp_code_actions",
+  "description": "LSP code actions provide 'did you mean?' quickfixes for typos",
+  "type": "shell",
+  "script": "run_test.sh"
+}

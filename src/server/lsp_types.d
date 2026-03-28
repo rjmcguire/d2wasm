@@ -141,6 +141,128 @@ enum CompletionItemKind : int {
     TypeParameter = 25
 }
 
+/// LSP CodeLens
+struct CodeLens {
+    Range range;
+    string commandTitle;
+    string commandName;
+
+    JSONValue toJSON() const {
+        JSONValue j;
+        j["range"] = range.toJSON();
+        JSONValue cmd;
+        cmd["title"] = commandTitle;
+        cmd["command"] = commandName;
+        j["command"] = cmd;
+        return j;
+    }
+}
+
+/// LSP TextEdit
+struct TextEdit {
+    Range range;
+    string newText;
+
+    JSONValue toJSON() const {
+        JSONValue j;
+        j["range"] = range.toJSON();
+        j["newText"] = newText;
+        return j;
+    }
+}
+
+/// LSP MarkupContent
+struct MarkupContent {
+    string kind;   // "plaintext" or "markdown"
+    string value;
+
+    JSONValue toJSON() const {
+        JSONValue j;
+        j["kind"] = kind;
+        j["value"] = value;
+        return j;
+    }
+}
+
+/// LSP CallHierarchyItem
+struct CallHierarchyItem {
+    string name;
+    int kind;  // LSPSymbolKind
+    string uri;
+    Range range;
+    Range selectionRange;
+
+    JSONValue toJSON() const {
+        JSONValue j;
+        j["name"] = name;
+        j["kind"] = kind;
+        j["uri"] = uri;
+        j["range"] = range.toJSON();
+        j["selectionRange"] = selectionRange.toJSON();
+        return j;
+    }
+}
+
+/// LSP TypeHierarchyItem
+struct TypeHierarchyItem {
+    string name;
+    int kind;  // LSPSymbolKind
+    string uri;
+    Range range;
+    Range selectionRange;
+
+    JSONValue toJSON() const {
+        JSONValue j;
+        j["name"] = name;
+        j["kind"] = kind;
+        j["uri"] = uri;
+        j["range"] = range.toJSON();
+        j["selectionRange"] = selectionRange.toJSON();
+        return j;
+    }
+}
+
+/// LSP SemanticTokenTypes — indices into the legend
+enum SemanticTokenType : uint {
+    namespace = 0,
+    type = 1,
+    class_ = 2,
+    enum_ = 3,
+    interface_ = 4,
+    struct_ = 5,
+    typeParameter = 6,
+    parameter = 7,
+    variable = 8,
+    property = 9,
+    function_ = 10,
+    method = 11,
+    keyword = 12,
+    number = 13,
+    string_ = 14,
+    comment = 15
+}
+
+/// String names for the legend (must match enum order)
+immutable string[] semanticTokenTypeNames = [
+    "namespace", "type", "class", "enum", "interface", "struct",
+    "typeParameter", "parameter", "variable", "property",
+    "function", "method", "keyword", "number", "string", "comment"
+];
+
+/// LSP SemanticTokenModifiers — bit flags
+enum SemanticTokenModifier : uint {
+    declaration = 0,
+    definition = 1,
+    readonly_ = 2,
+    static_ = 3,
+    deprecated_ = 4,
+    abstract_ = 5
+}
+
+immutable string[] semanticTokenModifierNames = [
+    "declaration", "definition", "readonly", "static", "deprecated", "abstract"
+];
+
 /// Convert file path to URI
 string pathToURI(string path) {
     import std.path : absolutePath;

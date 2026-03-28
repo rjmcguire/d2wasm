@@ -123,6 +123,9 @@ class PositionIndex {
     /// Number of indexed nodes
     size_t length() const { return entries.length; }
 
+    /// Access all entries (sorted by byte offset) for iteration
+    const(IndexEntry)[] allEntries() const { return entries; }
+
     private void collectNode(ASTNode node) {
         if (node is null) return;
         auto loc = node.location;

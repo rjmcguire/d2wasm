@@ -1,0 +1,6 @@
+{
+  "name": "lsp_type_hierarchy",
+  "description": "LSP type hierarchy resolves supertypes and subtypes",
+  "type": "shell",
+  "script": "run_test.sh"
+}

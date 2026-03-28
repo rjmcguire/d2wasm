@@ -1,0 +1,6 @@
+{
+  "name": "lsp_rename",
+  "description": "LSP rename returns workspace edits for declaration and references",
+  "type": "shell",
+  "script": "run_test.sh"
+}

@@ -1,0 +1,6 @@
+{
+  "name": "lsp_semantic_tokens",
+  "description": "LSP semantic tokens classifies identifiers by declaration type",
+  "type": "shell",
+  "script": "run_test.sh"
+}

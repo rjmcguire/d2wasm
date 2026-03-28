@@ -1,0 +1,6 @@
+{
+  "name": "lsp_workspace",
+  "description": "LSP workspace support reads rootUri and advertises workspace capabilities",
+  "type": "shell",
+  "script": "run_test.sh"
+}
