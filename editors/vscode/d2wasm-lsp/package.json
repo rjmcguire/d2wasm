@@ -1,0 +1,62 @@
+{
+  "name": "d2wasm-lsp",
+  "displayName": "D2WASM — D Language Support",
+  "description": "D language support powered by the d2wasm compiler's built-in LSP server",
+  "version": "0.1.0",
+  "publisher": "d2wasm",
+  "engines": {
+    "vscode": "^1.67.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:d"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "d",
+        "aliases": ["D", "dlang"],
+        "extensions": [".d", ".di"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "d",
+        "scopeName": "source.d",
+        "path": "./syntaxes/d.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "D2WASM",
+      "properties": {
+        "d2wasm.compilerPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the d2wasm compiler binary. If empty, looks for 'd2wasm' in PATH or the workspace root."
+        },
+        "d2wasm.extraArgs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Extra arguments to pass to the LSP server (e.g. ['--stack-trace'])"
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "d2wasm.restartServer",
+        "title": "D2WASM: Restart Language Server"
+      }
+    ]
+  },
+  "dependencies": {
+    "vscode-languageclient": "^8.1.0"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.67.0"
+  }
+}

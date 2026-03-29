@@ -1,0 +1,130 @@
+{
+  "scopeName": "source.d",
+  "name": "D",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#constants" },
+    { "include": "#functions" },
+    { "include": "#numbers" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.d",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.d",
+          "begin": "/\\*",
+          "end": "\\*/"
+        },
+        {
+          "name": "comment.block.nested.d",
+          "begin": "/\\+",
+          "end": "\\+/"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.d",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.d",
+              "match": "\\\\."
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.backtick.d",
+          "begin": "`",
+          "end": "`"
+        },
+        {
+          "name": "string.quoted.single.d",
+          "match": "'(\\\\.|[^'])'"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.d",
+          "match": "\\b(if|else|while|for|foreach|foreach_reverse|do|switch|case|default|break|continue|return|goto|try|catch|finally|throw|scope|with)\\b"
+        },
+        {
+          "name": "keyword.other.d",
+          "match": "\\b(import|module|alias|mixin|static|enum|struct|class|interface|union|template|override|abstract|final|const|immutable|shared|inout|lazy|ref|out|in|pure|nothrow|extern|export|package|private|protected|public|deprecated|version|debug|unittest|assert|cast|typeof|typeid|is|new|delete|this|super|null|true|false|__traits|pragma)\\b"
+        },
+        {
+          "name": "storage.type.d",
+          "match": "\\b(auto|void|bool|byte|ubyte|short|ushort|int|uint|long|ulong|float|double|real|char|wchar|dchar|string|wstring|dstring|size_t|ptrdiff_t)\\b"
+        },
+        {
+          "name": "storage.modifier.d",
+          "match": "@(safe|trusted|system|nogc|property|disable)"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "entity.name.type.d",
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.d",
+          "match": "\\b(true|false|null|__FILE__|__LINE__|__MODULE__|__FUNCTION__|__PRETTY_FUNCTION__|__ctfe)\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "name": "entity.name.function.d",
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*(?=\\()"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.d",
+          "match": "\\b0[xX][0-9a-fA-F_]+\\b"
+        },
+        {
+          "name": "constant.numeric.binary.d",
+          "match": "\\b0[bB][01_]+\\b"
+        },
+        {
+          "name": "constant.numeric.float.d",
+          "match": "\\b[0-9][0-9_]*\\.[0-9_]+([eE][+-]?[0-9_]+)?[fFL]?\\b"
+        },
+        {
+          "name": "constant.numeric.integer.d",
+          "match": "\\b[0-9][0-9_]*[uUlL]*\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.d",
+          "match": "(=>|\\.\\.\\.|\\.\\.)"
+        }
+      ]
+    }
+  }
+}
