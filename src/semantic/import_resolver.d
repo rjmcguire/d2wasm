@@ -15,6 +15,7 @@ import std.file : readText, exists;
 import std.path : baseName, stripExtension, absolutePath;
 
 import ast.nodes;
+import ast.statements;
 import semantic.module_ : Module, ModulePhase;
 import semantic.module_registry : ModuleRegistry;
 import ast.nodes : SourceLocation;
@@ -61,11 +62,8 @@ class ImportResolver {
 
         // Already resolved?
         if (mod.importDecls.length == 0 && mod.phase >= ModulePhase.parsed) {
-            // Scan AST for ImportDecls
-            foreach (decl; mod.ast) {
-                if (auto imp = cast(ImportDecl)decl)
-                    mod.importDecls ~= imp;
-            }
+            // Scan AST for ImportDecls — both top-level and inside function bodies
+            scanDeclsForImports(mod.ast, mod.importDecls);
         }
 
         resolving[fqn] = true;
@@ -126,17 +124,68 @@ class ImportResolver {
                 mod.imports ~= depMod;
             importDecl.resolvedModule = depMod;
 
-            // Scan for ImportDecls in the new module
-            foreach (decl; depMod.ast) {
-                if (auto imp = cast(ImportDecl)decl)
-                    depMod.importDecls ~= imp;
-            }
+            // Scan for ImportDecls in the new module — top-level and scoped
+            scanDeclsForImports(depMod.ast, depMod.importDecls);
 
             // Recurse
             resolveImports(depMod);
         }
     }
 
+}
+
+/**
+ * Scan a list of declarations for ImportDecls — top-level and inside function/method bodies.
+ */
+void scanDeclsForImports(Declaration[] decls, ref ImportDecl[] result) {
+    foreach (decl; decls) {
+        if (auto imp = cast(ImportDecl)decl)
+            result ~= imp;
+        else if (auto funcDecl = cast(FunctionDecl)decl)
+            collectScopedImports(funcDecl.body_, result);
+        else if (auto sd = cast(StructDecl)decl) {
+            foreach (member; sd.members)
+                if (auto method = cast(FunctionDecl)member)
+                    collectScopedImports(method.body_, result);
+        } else if (auto cd = cast(ClassDecl)decl) {
+            foreach (member; cd.members)
+                if (auto method = cast(FunctionDecl)member)
+                    collectScopedImports(method.body_, result);
+        }
+    }
+}
+
+/**
+ * Walk a statement tree to find ImportDeclarationStatements and collect their ImportDecls.
+ * This discovers scoped imports inside function bodies for module resolution.
+ */
+private void collectScopedImports(Statement stmt, ref ImportDecl[] result) {
+    if (stmt is null) return;
+
+    if (auto compound = cast(CompoundStatement)stmt) {
+        foreach (s; compound.statements)
+            collectScopedImports(s, result);
+    } else if (auto importStmt = cast(ImportDeclarationStatement)stmt) {
+        foreach (imp; importStmt.importDecls)
+            result ~= imp;
+    } else if (auto ifStmt = cast(IfStatement)stmt) {
+        collectScopedImports(ifStmt.thenStatement, result);
+        collectScopedImports(ifStmt.elseStatement, result);
+    } else if (auto whileStmt = cast(WhileStatement)stmt) {
+        collectScopedImports(whileStmt.body_, result);
+    } else if (auto forStmt = cast(ForStatement)stmt) {
+        collectScopedImports(forStmt.init, result);
+        collectScopedImports(forStmt.body_, result);
+    } else if (auto tryStmt = cast(TryStatement)stmt) {
+        collectScopedImports(tryStmt.tryBody, result);
+        foreach (ref c; tryStmt.catches)
+            collectScopedImports(c.body_, result);
+        collectScopedImports(tryStmt.finallyBody, result);
+    } else if (auto funcStmt = cast(FunctionDeclarationStatement)stmt) {
+        collectScopedImports(funcStmt.funcDecl.body_, result);
+    }
+    // Other statement types (return, expression, var decl, break, continue, etc.)
+    // cannot contain import statements.
 }
 
 private bool hasModule(Module[] arr, Module target) {

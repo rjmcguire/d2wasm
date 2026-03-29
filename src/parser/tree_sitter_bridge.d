@@ -2654,6 +2654,16 @@ class TreeSitterBridge {
                 throw new ParseError("Template/imported function declarations inside functions not supported", loc);
             case "auto_declaration":
                 return parseAutoDeclarationStatement(node, loc);
+            case "import_declaration":
+                auto importDecls = parseImportDeclaration(node);
+                ImportDecl[] imports;
+                foreach (decl; importDecls) {
+                    if (auto imp = cast(ImportDecl)decl)
+                        imports ~= imp;
+                }
+                if (imports.length == 0)
+                    return null;  // Magic module imports — skip
+                return new ImportDeclarationStatement(loc, imports);
             case "comment":
                 // Skip comments - return null (handled by caller)
                 return null;

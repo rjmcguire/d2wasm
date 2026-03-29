@@ -884,6 +884,9 @@ class TypeChecker {
             checkStructDeclaration(structStmt.structDecl);
         } else if (auto funcStmt = cast(FunctionDeclarationStatement)stmt) {
             checkNestedFunctionDeclaration(funcStmt);
+        } else if (auto importStmt = cast(ImportDeclarationStatement)stmt) {
+            // Scoped import — wire into current scope
+            wireScopedImport(importStmt);
         } else if (auto tryStmt = cast(TryStatement)stmt) {
             checkStatement(tryStmt.tryBody);
             foreach (ref c; tryStmt.catches) {
@@ -904,6 +907,35 @@ class TypeChecker {
             }
             if (tryStmt.finallyBody !is null)
                 checkStatement(tryStmt.finallyBody);
+        }
+    }
+
+    /**
+     * Wire a scoped import into the current scope.
+     * The ImportDecl.resolvedModule is already set by ImportResolver.
+     */
+    private void wireScopedImport(ImportDeclarationStatement importStmt) {
+        import semantic.module_ : Module;
+
+        foreach (impDecl; importStmt.importDecls) {
+            auto dep = cast(Module)impDecl.resolvedModule;
+            if (dep is null)
+                continue;
+            if (dep.symbolTable is null || dep.symbolTable.moduleScope is null)
+                continue;
+
+            auto depScope = dep.symbolTable.moduleScope;
+
+            if (impDecl.moduleAlias.length > 0) {
+                symbolTable.addScopedModuleAlias(impDecl.moduleAlias, depScope);
+            } else if (impDecl.selectiveImports.length > 0) {
+                foreach (ref sel; impDecl.selectiveImports) {
+                    symbolTable.addScopedSelectiveImport(
+                        sel.localName, depScope, sel.remoteName);
+                }
+            } else {
+                symbolTable.addScopedImport(depScope);
+            }
         }
     }
 

@@ -1892,7 +1892,8 @@ class NativeCompiledFunction : CompiledFunction {
                 bytes += countLocalBytesInStatement(tryStmt.finallyBody);
         } else if (cast(BreakStatement)stmt || cast(ContinueStatement)stmt
                    || cast(MixinStatement)stmt || cast(StructDeclarationStatement)stmt
-                   || cast(FunctionDeclarationStatement)stmt) {
+                   || cast(FunctionDeclarationStatement)stmt
+                   || cast(ImportDeclarationStatement)stmt) {
             // No local allocations
         } else {
             assert(0, "countLocalBytesInStatement: unhandled statement type: " ~ typeid(stmt).name);
@@ -2727,8 +2728,9 @@ class NativeCompiledFunction : CompiledFunction {
             gen.emitBranch(nativeLoopStack[$ - 1].continueLabel);
         } else if (auto tryStmt = cast(TryStatement)stmt) {
             compileTryStatement(tryStmt);
-        } else if (cast(StructDeclarationStatement)stmt) {
-            // Inner struct declaration — no runtime code
+        } else if (cast(StructDeclarationStatement)stmt
+                   || cast(ImportDeclarationStatement)stmt) {
+            // No runtime code
         } else if (auto funcStmt = cast(FunctionDeclarationStatement)stmt) {
             // Nested function — emit as delegate variable
             if (funcStmt.syntheticLambda !is null) {

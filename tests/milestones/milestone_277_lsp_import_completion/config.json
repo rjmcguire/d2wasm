@@ -1,0 +1,6 @@
+{
+  "name": "lsp_import_completion",
+  "description": "LSP completion for import paths and selective imports",
+  "type": "shell",
+  "script": "run_test.sh"
+}

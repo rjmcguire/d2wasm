@@ -2032,6 +2032,8 @@ class BinaryEmitter : EmitterCache {
                 scanStatementForSliceTypes(c.body_);
             if (tryStmt.finallyBody !is null)
                 scanStatementForSliceTypes(tryStmt.finallyBody);
+        } else if (cast(ImportDeclarationStatement)stmt) {
+            // No expressions to scan
         } else {
             assert(0, "scanStatementForSliceTypes: unhandled statement type: " ~ typeid(stmt).name);
         }
@@ -2180,7 +2182,8 @@ class BinaryEmitter : EmitterCache {
         }
         if (cast(BreakStatement)stmt || cast(ContinueStatement)stmt
             || cast(MixinStatement)stmt || cast(StructDeclarationStatement)stmt
-            || cast(FunctionDeclarationStatement)stmt) {
+            || cast(FunctionDeclarationStatement)stmt
+            || cast(ImportDeclarationStatement)stmt) {
             return false;
         }
         if (auto tryStmt = cast(TryStatement)stmt) {

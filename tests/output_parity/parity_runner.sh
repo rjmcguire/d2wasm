@@ -77,6 +77,9 @@ run_test_with_backend() {
         return 0
     fi
 
+    # Extra compiler args from config (e.g., --import-path)
+    local extra_args=$(jq -r '.compiler_args // [] | join(" ")' "$config_file")
+
     # Build framework flags for ffi_exec tests
     local fw_args=""
     if [ "$test_type" = "ffi_exec" ]; then
@@ -103,7 +106,7 @@ run_test_with_backend() {
         fi
 
         local run_output
-        run_output=$("$COMPILER" --run --target arm64-macos $fw_args "$test_file" 2>&1)
+        run_output=$("$COMPILER" --run --target arm64-macos $fw_args $extra_args "$test_file" 2>&1)
         local actual=$?
 
         local expected_result=$(jq -r '.expected_result // "null"' "$config_file")
@@ -140,9 +143,9 @@ run_test_with_backend() {
         # For exec tests, compiler auto-links to produce an executable
         local compile_output
         if [ "$test_type" = "compile_only" ]; then
-            compile_output=$("$COMPILER" --target arm64-macos -c $fw_args "$test_file" -o "$obj_file" 2>&1)
+            compile_output=$("$COMPILER" --target arm64-macos -c $fw_args $extra_args "$test_file" -o "$obj_file" 2>&1)
         else
-            compile_output=$("$COMPILER" --target arm64-macos $fw_args "$test_file" -o "$bin_file" 2>&1)
+            compile_output=$("$COMPILER" --target arm64-macos $fw_args $extra_args "$test_file" -o "$bin_file" 2>&1)
         fi
         local compile_status=$?
 
@@ -186,7 +189,7 @@ run_test_with_backend() {
         fi
 
         local run_output
-        run_output=$("$COMPILER" --run $fw_args "$test_file" 2>&1)
+        run_output=$("$COMPILER" --run $fw_args $extra_args "$test_file" 2>&1)
         local actual=$?
 
         local expected_result=$(jq -r '.expected_result // "null"' "$config_file")
@@ -212,7 +215,7 @@ run_test_with_backend() {
     fi
 
     local compile_output
-    compile_output=$("$COMPILER" "$test_file" -o "$wasm_file" 2>&1)
+    compile_output=$("$COMPILER" $extra_args "$test_file" -o "$wasm_file" 2>&1)
     local compile_status=$?
 
     if [ $compile_status -ne 0 ]; then

@@ -1,0 +1,8 @@
+{
+  "name": "scoped_import",
+  "description": "Output parity: scoped imports inside function bodies (selective and wildcard)",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 42,
+  "compiler_args": ["--import-path", "tests/output_parity/output_090_scoped_import"]
+}

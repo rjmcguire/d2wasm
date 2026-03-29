@@ -231,6 +231,24 @@ class FunctionDeclarationStatement : Statement {
 }
 
 /**
+ * Import declaration as a statement (scoped import inside a function body).
+ * In D, scoped imports restrict imported symbol visibility to the enclosing scope.
+ */
+class ImportDeclarationStatement : Statement {
+    ImportDecl[] importDecls;
+
+    this(SourceLocation loc, ImportDecl[] importDecls) {
+        super(loc);
+        this.importDecls = importDecls;
+    }
+
+    override string toString() const {
+        import std.conv : to;
+        return format("ImportDeclarationStatement(%d imports)", importDecls.length);
+    }
+}
+
+/**
  * Break statement: break;
  * Exits the innermost enclosing loop.
  */

@@ -993,7 +993,8 @@ class FuncContext {
             }
         } else if (cast(ReturnStatement)stmt || cast(ExpressionStatement)stmt
                    || cast(BreakStatement)stmt || cast(ContinueStatement)stmt
-                   || cast(StructDeclarationStatement)stmt) {
+                   || cast(StructDeclarationStatement)stmt
+                   || cast(ImportDeclarationStatement)stmt) {
             // No local declarations to collect
         } else {
             assert(0, "collectLocals: unhandled statement type: " ~ typeid(stmt).name);

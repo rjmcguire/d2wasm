@@ -225,6 +225,7 @@ class DependencyAnalyzer {
             if (tryStmt.finallyBody !is null)
                 calls ~= findCallsInStatement(tryStmt.finallyBody);
         }
+        // ImportDeclarationStatement — no calls to discover
         // Note: AssignmentStatement doesn't exist - assignments are expressions
 
         return calls;

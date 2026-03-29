@@ -442,10 +442,10 @@ int compileFile(CompilerOptions options) {
         inputModule.importDecls = null;
         inputModule.imports = null;
 
-        // Scan AST for ImportDecls
-        foreach (decl; ast) {
-            if (auto imp = cast(ImportDecl)decl)
-                inputModule.importDecls ~= imp;
+        // Scan AST for ImportDecls — top-level and inside function bodies
+        {
+            import semantic.import_resolver : scanDeclsForImports;
+            scanDeclsForImports(ast, inputModule.importDecls);
         }
 
         // Resolve imports recursively (parse-on-demand)

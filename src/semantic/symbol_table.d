@@ -81,6 +81,14 @@ class Symbol {
 }
 
 /**
+ * Entry for selective imports — shared between Scope (scoped imports) and ModuleScope.
+ */
+struct SelectiveEntry {
+    ModuleScope source;
+    string remoteName;
+}
+
+/**
  * Symbol scope for managing symbol visibility
  */
 class Scope {
@@ -90,9 +98,32 @@ class Scope {
     string name;  // For debugging
     uint[] declaredVars;  // Local IDs declared in this scope (for RAII unwind)
 
+    // Scoped imports — same structure as ModuleScope but for function-body imports
+    ModuleScope[] scopedImports;
+    SelectiveEntry[][string] scopedSelectiveImports;
+    ModuleScope[string] scopedModuleAliases;
+
     this(Scope parent = null, string name = "anonymous") {
         this.parent = parent;
         this.name = name;
+    }
+
+    void addScopedImport(ModuleScope imported) {
+        scopedImports ~= imported;
+    }
+
+    void addScopedSelectiveImport(string localName, ModuleScope source, string remoteName) {
+        scopedSelectiveImports[localName] ~= SelectiveEntry(source, remoteName);
+    }
+
+    void addScopedModuleAlias(string aliasName, ModuleScope target) {
+        scopedModuleAliases[aliasName] = target;
+    }
+
+    ModuleScope lookupScopedModuleAlias(string aliasName) {
+        if (auto p = aliasName in scopedModuleAliases) return *p;
+        if (parent) return parent.lookupScopedModuleAlias(aliasName);
+        return null;
     }
 
     void addAlias(string aliasName, Type targetType) {
@@ -199,18 +230,49 @@ class Scope {
     }
     
     /**
-     * Look up symbol in this scope and parent scopes
+     * Look up symbol in this scope and parent scopes.
+     * Checks scoped imports (if any) after local symbols, before parent.
      */
     Symbol lookup(string name) {
         auto local = lookupLocal(name);
         if (local) {
             return local;
         }
-        
+
+        // Check scoped selective imports (highest cross-module priority)
+        if (scopedSelectiveImports.length > 0) {
+            if (auto entries = name in scopedSelectiveImports) {
+                foreach (ref entry; *entries) {
+                    if (auto sym = entry.source.lookupLocal(entry.remoteName))
+                        return sym;
+                }
+            }
+        }
+
+        // Check scoped wildcard imports
+        if (scopedImports.length > 0) {
+            Symbol found = null;
+            foreach (imp; scopedImports) {
+                if (auto sym = imp.lookupLocal(name)) {
+                    if (sym.declaration !is null &&
+                        sym.declaration.visibility == Visibility.private_)
+                        continue;
+                    if (found !is null && found !is sym) {
+                        throw new SemanticError(
+                            format("Ambiguous symbol '%s' in scoped imports", name),
+                            SourceLocation.init);
+                    }
+                    found = sym;
+                }
+            }
+            if (found !is null)
+                return found;
+        }
+
         if (parent) {
             return parent.lookup(name);
         }
-        
+
         return null;
     }
     
@@ -243,10 +305,6 @@ class ModuleScope : Scope {
     ModuleScope[] importedModules;
 
     /// Selective imports: localName → entries from source modules
-    struct SelectiveEntry {
-        ModuleScope source;
-        string remoteName;
-    }
     SelectiveEntry[][string] selectiveImports;
 
     /// Module aliases: "io" → std.stdio's ModuleScope
@@ -379,8 +437,14 @@ class SymbolTable {
         currentScope = moduleScope;
     }
 
-    /// Look up a module alias registered in this module's scope.
+    /// Look up a module alias — check scoped aliases (current scope chain) first,
+    /// then module-level aliases.
     ModuleScope lookupModuleAlias(string name) {
+        // Check scoped module aliases in the current scope chain
+        auto scoped = currentScope.lookupScopedModuleAlias(name);
+        if (scoped !is null)
+            return scoped;
+        // Fall back to module-level aliases
         return moduleScope ? moduleScope.lookupModuleAlias(name) : null;
     }
 
@@ -531,6 +595,27 @@ class SymbolTable {
         currentScope.addSymbol(symbol);
     }
     
+    /**
+     * Add a scoped wildcard import to the current scope.
+     */
+    void addScopedImport(ModuleScope imported) {
+        currentScope.addScopedImport(imported);
+    }
+
+    /**
+     * Add a scoped selective import to the current scope.
+     */
+    void addScopedSelectiveImport(string localName, ModuleScope source, string remoteName) {
+        currentScope.addScopedSelectiveImport(localName, source, remoteName);
+    }
+
+    /**
+     * Add a scoped module alias to the current scope.
+     */
+    void addScopedModuleAlias(string aliasName, ModuleScope target) {
+        currentScope.addScopedModuleAlias(aliasName, target);
+    }
+
     /**
      * Register a type alias in the current scope.
      */

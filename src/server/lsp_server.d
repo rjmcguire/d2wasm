@@ -16,6 +16,7 @@ import std.conv;
 import std.path;
 import std.file;
 import std.array;
+import std.typecons : Nullable;
 
 import ast.nodes;
 import ast.statements;
@@ -267,7 +268,7 @@ class LSPServer {
         caps["signatureHelpProvider"] = sigHelp;
 
         JSONValue completion;
-        completion["triggerCharacters"] = JSONValue(["."]);
+        completion["triggerCharacters"] = JSONValue([".", ":"]);
         caps["completionProvider"] = completion;
 
         // Code lens: reference counts on declarations
@@ -727,12 +728,38 @@ class LSPServer {
 
         uint byteOffset = positionToByteOffset(pos, sourceText);
 
+        JSONValue[] items;
+
+        // Check import contexts first (before member-access detection)
+        auto importCtx = detectImportContext(sourceText, byteOffset);
+        if (importCtx !is null) {
+            items = discoverModulePaths(importCtx);
+
+            JSONValue result;
+            result["isIncomplete"] = false;
+            result["items"] = JSONValue(items);
+            return jsonRPCResult(msg, result);
+        }
+
+        auto selectiveCtx = detectSelectiveImportContext(sourceText, byteOffset);
+        if (!selectiveCtx.isNull) {
+            auto exports = getModuleExports(selectiveCtx.get.modulePath);
+            string selPrefix = selectiveCtx.get.prefix;
+            foreach (ref item; exports) {
+                if (selPrefix.length == 0 || item["label"].str.startsWith(selPrefix))
+                    items ~= item;
+            }
+
+            JSONValue result;
+            result["isIncomplete"] = false;
+            result["items"] = JSONValue(items);
+            return jsonRPCResult(msg, result);
+        }
+
         // Determine completion context: member access (obj.) or identifier
         bool isMemberAccess = false;
         if (byteOffset > 0 && sourceText[byteOffset - 1] == '.')
             isMemberAccess = true;
-
-        JSONValue[] items;
 
         if (isMemberAccess) {
             // Member completion: find the expression before the dot,
@@ -902,6 +929,208 @@ class LSPServer {
     private static bool isIdentChar(char c) {
         return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
             || (c >= '0' && c <= '9') || c == '_';
+    }
+
+    // ── Import Completion Helpers ──
+
+    /// Detect if cursor is inside an import path (e.g. `import std.`).
+    /// Returns partial path components, or null if not in import context.
+    /// Examples: "import " → [""], "import std." → ["std", ""], "import std.al" → ["std", "al"]
+    private string[] detectImportContext(string sourceText, uint byteOffset) {
+        if (byteOffset == 0 || sourceText.length == 0)
+            return null;
+
+        // Find the start of the current line
+        size_t lineStart = byteOffset;
+        while (lineStart > 0 && sourceText[lineStart - 1] != '\n')
+            lineStart--;
+
+        string line = sourceText[lineStart .. byteOffset];
+
+        // Strip leading whitespace
+        string trimmed = line.stripLeft();
+
+        // Strip optional 'static ' prefix
+        if (trimmed.startsWith("static "))
+            trimmed = trimmed["static ".length .. $].stripLeft();
+
+        // Must start with 'import '
+        if (!trimmed.startsWith("import "))
+            return null;
+
+        string afterImport = trimmed["import ".length .. $].stripLeft();
+
+        // If there's a ':' it's a selective import context (Milestone 2)
+        if (afterImport.indexOf(':') >= 0)
+            return null;
+
+        // Split on '.' to get path components
+        // "std." → ["std", ""], "std.al" → ["std", "al"], "" → [""]
+        if (afterImport.length == 0)
+            return [""];
+
+        return afterImport.split(".");
+    }
+
+    /// Detect if cursor is after ':' in a selective import (e.g. `import foo : ba`).
+    /// Returns the module path and the prefix being typed, or null.
+    private auto detectSelectiveImportContext(string sourceText, uint byteOffset) {
+        static struct SelectiveImportContext {
+            string[] modulePath;
+            string prefix;
+        }
+
+        if (byteOffset == 0 || sourceText.length == 0)
+            return Nullable!SelectiveImportContext.init;
+
+        // Find the start of the current line
+        size_t lineStart = byteOffset;
+        while (lineStart > 0 && sourceText[lineStart - 1] != '\n')
+            lineStart--;
+
+        string line = sourceText[lineStart .. byteOffset];
+        string trimmed = line.stripLeft();
+
+        if (trimmed.startsWith("static "))
+            trimmed = trimmed["static ".length .. $].stripLeft();
+
+        if (!trimmed.startsWith("import "))
+            return Nullable!SelectiveImportContext.init;
+
+        string afterImport = trimmed["import ".length .. $].stripLeft();
+
+        auto colonIdx = afterImport.indexOf(':');
+        if (colonIdx < 0)
+            return Nullable!SelectiveImportContext.init;
+
+        // Module path is before the colon
+        string modPart = afterImport[0 .. colonIdx].strip();
+        string afterColon = afterImport[colonIdx + 1 .. $].stripLeft();
+
+        // Handle comma-separated selective imports: "bar, ba" → prefix is "ba"
+        auto lastComma = afterColon.lastIndexOf(',');
+        string prefix;
+        if (lastComma >= 0)
+            prefix = afterColon[lastComma + 1 .. $].stripLeft();
+        else
+            prefix = afterColon;
+
+        // Trim trailing spaces from prefix (it's what user is typing)
+        // but keep it as-is for prefix matching
+
+        auto modulePath = modPart.split(".");
+        if (modulePath.length == 0)
+            return Nullable!SelectiveImportContext.init;
+
+        return Nullable!SelectiveImportContext(SelectiveImportContext(modulePath, prefix));
+    }
+
+    /// Scan import search paths for modules/packages matching a partial import path.
+    private JSONValue[] discoverModulePaths(string[] partialPath) {
+        JSONValue[] items;
+        bool[string] seen; // deduplicate across search paths
+
+        // Directory components (all but last) and prefix filter (last)
+        string[] dirParts = partialPath.length > 1 ? partialPath[0 .. $ - 1] : [];
+        string prefix = partialPath[$ - 1];
+
+        foreach (searchPath; importPaths) {
+            // Build the subdirectory to scan
+            string scanDir = searchPath;
+            foreach (part; dirParts)
+                scanDir = buildPath(scanDir, part);
+
+            if (!exists(scanDir) || !isDir(scanDir))
+                continue;
+
+            try {
+                foreach (entry; dirEntries(scanDir, SpanMode.shallow)) {
+                    string name = baseName(entry.name);
+
+                    if (entry.isDir) {
+                        // Skip hidden directories
+                        if (name.startsWith("."))
+                            continue;
+                        if (prefix.length > 0 && !name.startsWith(prefix))
+                            continue;
+                        if (name in seen)
+                            continue;
+                        seen[name] = true;
+
+                        JSONValue item;
+                        item["label"] = name;
+
+                        // Check if this package has a package.d
+                        if (exists(buildPath(entry.name, "package.d"))) {
+                            item["kind"] = cast(int) CompletionItemKind.Module;
+                            item["detail"] = "package module";
+                        } else {
+                            item["kind"] = cast(int) CompletionItemKind.Folder;
+                            item["detail"] = "package";
+                        }
+                        item["sortText"] = "0_" ~ name; // packages sort first
+                        items ~= item;
+                    } else if (entry.isFile && name.endsWith(".d")) {
+                        string modName = name[0 .. $ - 2]; // strip .d
+                        if (modName == "package")
+                            continue; // handled by directory entry above
+                        if (prefix.length > 0 && !modName.startsWith(prefix))
+                            continue;
+                        if (modName in seen)
+                            continue;
+                        seen[modName] = true;
+
+                        JSONValue item;
+                        item["label"] = modName;
+                        item["kind"] = cast(int) CompletionItemKind.Module;
+                        item["sortText"] = "1_" ~ modName; // modules after packages
+
+                        // Build full dotted path for detail
+                        string fullPath = (dirParts ~ modName).join(".");
+                        item["detail"] = fullPath;
+
+                        items ~= item;
+                    }
+                }
+            } catch (Exception e) {
+                // Skip inaccessible directories
+                continue;
+            }
+        }
+
+        return items;
+    }
+
+    /// Look up a module from the warm state and return its exported declarations.
+    private JSONValue[] getModuleExports(string[] modulePath) {
+        JSONValue[] items;
+
+        if (warmState.moduleRegistry is null)
+            return items;
+
+        import semantic.module_ : Module;
+        string fqn = modulePath.join(".");
+        auto mod = warmState.moduleRegistry.lookupModule(fqn);
+        if (mod is null)
+            return items;
+
+        // Prefer topIndex (populated during symbol collection)
+        if (mod.topIndex.length > 0) {
+            foreach (name, decl; mod.topIndex) {
+                if (name.length == 0)
+                    continue;
+                items ~= makeCompletionItem(name, decl);
+            }
+        } else if (mod.symbolTable !is null && mod.symbolTable.moduleScope !is null) {
+            import semantic.symbol_table : Symbol;
+            foreach (name, sym; mod.symbolTable.moduleScope.symbols) {
+                if (name.length == 0)
+                    continue;
+                items ~= makeCompletionItemFromSymbol(name, sym);
+            }
+        }
+
+        return items;
     }
 
     // ── Code Lens ──

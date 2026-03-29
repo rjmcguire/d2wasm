@@ -104,8 +104,9 @@ mixin template StatementEmitter() {
                 emitLocalGet(out_, tempLocalA);
                 emitI32Store(out_);
             }
-        } else if (cast(StructDeclarationStatement)stmt) {
-            // Inner struct declaration — no runtime code; methods already collected by emitter
+        } else if (cast(StructDeclarationStatement)stmt
+                   || cast(ImportDeclarationStatement)stmt) {
+            // No runtime code
         } else if (auto tryStmt = cast(TryStatement)stmt) {
             emitTryStatement(out_, tryStmt);
         } else {
@@ -621,7 +622,8 @@ mixin template StatementEmitter() {
             || cast(WhileStatement)stmt || cast(ForStatement)stmt
             || cast(BreakStatement)stmt || cast(ContinueStatement)stmt
             || cast(MixinStatement)stmt || cast(StructDeclarationStatement)stmt
-            || cast(FunctionDeclarationStatement)stmt) {
+            || cast(FunctionDeclarationStatement)stmt
+            || cast(ImportDeclarationStatement)stmt) {
             return false;
         }
         assert(0, "alwaysReturns: unhandled statement type: " ~ typeid(stmt).name);

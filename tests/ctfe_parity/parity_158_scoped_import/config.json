@@ -1,0 +1,8 @@
+{
+  "name": "scoped_import",
+  "description": "CTFE parity: scoped imports inside function bodies (selective and wildcard)",
+  "type": "wasm_exec",
+  "entry": "_D4test4mainFZi",
+  "expected_result": 42,
+  "compiler_args": ["--import-path", "tests/ctfe_parity/parity_158_scoped_import"]
+}
