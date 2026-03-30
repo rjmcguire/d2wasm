@@ -122,11 +122,26 @@ class LSPServer {
     // ── Message Dispatch ──
 
     private JSONValue handleMessage(JSONValue msg) {
+        // Ignore responses (messages with id but no method) — e.g., from client
+        if ("method" !in msg)
+            return JSONValue(null);
+
         string method = msg["method"].str;
         bool isRequest = "id" in msg ? true : false;
 
         lspLog("← ", method);
 
+        try {
+            return dispatchMethod(method, isRequest, msg);
+        } catch (Exception e) {
+            lspLog("Error handling ", method, ": ", e.msg);
+            if (isRequest)
+                return jsonRPCError(msg, -32603, "Internal error: " ~ e.msg);
+            return JSONValue(null);
+        }
+    }
+
+    private JSONValue dispatchMethod(string method, bool isRequest, JSONValue msg) {
         switch (method) {
             case "initialize":
                 return handleInitialize(msg);
@@ -2052,11 +2067,12 @@ class LSPServer {
         string path = uriToPath(uri);
         auto absPath = absolutePath(path);
 
-        // Set up compile options
+        // Set up compile options — dry run (parse + type-check only, no codegen)
         CompilerOptions options;
         options.inputFile = path;
         options.outputFile = setExtension(path, ".wasm");
         options.backend = backend;
+        options.dryRun = true;  // LSP only needs diagnostics, not code generation
         options.stackTrace = stackTrace;
         options.importPaths = importPaths.dup;
         options.verbosity = 0;  // suppress output

@@ -144,7 +144,7 @@ private __gshared IM3Runtime g_ctfeRuntime;
  */
 extern(C) const(void)* hostPrintI32(IM3Runtime runtime, IM3ImportContext ctx, uint* stack, void* mem) {
     int value = cast(int)(*stack);
-    writeln("CTFE: ", value);
+    stderr.writeln("CTFE: ", value);
     return null;  // No error
 }
 
@@ -154,7 +154,7 @@ extern(C) const(void)* hostPrintI32(IM3Runtime runtime, IM3ImportContext ctx, ui
  */
 extern(C) const(void)* hostWriteI32(IM3Runtime runtime, IM3ImportContext ctx, uint* stack, void* mem) {
     int value = cast(int)(*stack);
-    write(value);
+    stderr.write(value);
     return null;
 }
 
@@ -178,7 +178,7 @@ extern(C) const(void)* hostWriteStr(IM3Runtime runtime, IM3ImportContext ctx, ui
     }
     
     auto str = cast(char[])wasmMem[ptr .. ptr + len];
-    write(str);
+    stderr.write(str);
     return null;
 }
 
@@ -188,7 +188,7 @@ extern(C) const(void)* hostWriteStr(IM3Runtime runtime, IM3ImportContext ctx, ui
  */
 extern(C) const(void)* hostWriteBool(IM3Runtime runtime, IM3ImportContext ctx, uint* stack, void* mem) {
     int value = cast(int)(*stack);
-    write(value != 0 ? "true" : "false");
+    stderr.write(value != 0 ? "true" : "false");
     return null;
 }
 
@@ -199,7 +199,7 @@ extern(C) const(void)* hostWriteBool(IM3Runtime runtime, IM3ImportContext ctx, u
 extern(C) const(void)* hostWriteI64(IM3Runtime runtime, IM3ImportContext ctx, uint* stack, void* mem) {
     // wasm3 raw stack: i64 occupies two 32-bit slots
     long value = *(cast(long*)&stack[0]);
-    write(value);
+    stderr.write(value);
     return null;
 }
 
@@ -210,7 +210,7 @@ extern(C) const(void)* hostWriteI64(IM3Runtime runtime, IM3ImportContext ctx, ui
 extern(C) const(void)* hostWriteF64(IM3Runtime runtime, IM3ImportContext ctx, uint* stack, void* mem) {
     // wasm3 raw stack: f64 occupies two 32-bit slots
     double value = *(cast(double*)&stack[0]);
-    write(value);
+    stderr.write(value);
     return null;
 }
 
@@ -219,7 +219,7 @@ extern(C) const(void)* hostWriteF64(IM3Runtime runtime, IM3ImportContext ctx, ui
  * Building block for __writeln - just a newline.
  */
 extern(C) const(void)* hostWriteNewline(IM3Runtime runtime, IM3ImportContext ctx, uint* stack, void* mem) {
-    writeln();
+    stderr.writeln();
     return null;
 }
 

@@ -168,8 +168,8 @@ class TreeSitterBridge {
             }
             return parseSourceFileNode(root);
         } catch (Exception e) {
-            import std.stdio : writeln;
-            writeln("Exception in parseSourceFile: ", e.msg);
+            import std.stdio : stderr;
+            stderr.writeln("Exception in parseSourceFile: ", e.msg);
             throw e;
         }
     }

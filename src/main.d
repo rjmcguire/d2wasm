@@ -263,7 +263,7 @@ int compileFile(CompilerOptions options) {
         
         // 1. Read source file
         if (!exists(options.inputFile)) {
-            writeln("Error: Input file not found: ", options.inputFile);
+            stderr.writeln("Error: Input file not found: ", options.inputFile);
             return 1;
         }
         
@@ -282,7 +282,7 @@ int compileFile(CompilerOptions options) {
             printError(e);
             return 1;
         } catch (Exception e) {
-            writeln("Unexpected error during parsing: ", e.msg);
+            stderr.writeln("Unexpected error during parsing: ", e.msg);
             log(1, "Stack trace: ", e.info);
             return 1;
         }
@@ -1010,7 +1010,7 @@ int compileFile(CompilerOptions options) {
             if (!usingWarmState)
                 writeln("Successfully compiled to ", options.outputFile);
         } else {
-            writeln("Dry run complete - frontend phases successful");
+            log(1, "Dry run complete - frontend phases successful");
         }
         
         // Print CTFE stats at verbosity 2+
@@ -1057,7 +1057,7 @@ int compileFile(CompilerOptions options) {
         if (options.warmState !is null) options.warmState.lastError = e;
         return 1;
     } catch (Exception e) {
-        writeln("Internal Error: ", e.msg);
+        stderr.writeln("Internal Error: ", e.msg);
         log(1, "Stack trace:");
         log(1, e.info);
         if (options.warmState !is null) options.warmState.lastError = e;

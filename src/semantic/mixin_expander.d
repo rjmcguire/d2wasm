@@ -19,7 +19,7 @@ import parser.tree_sitter_bridge : ParseError;
 import semantic.symbol_table;
 import semantic.ctfe;
 
-import std.stdio;
+import diagnostic.log : log;
 import std.array;
 import std.algorithm;
 import std.conv : to;
@@ -257,17 +257,17 @@ class MixinExpander {
      * Returns the statements that the mixin expands to.
      */
     private Statement[] expandMixinStatement(MixinStatement mixinStmt) {
-        writeln("Expanding mixin statement: ", mixinStmt.mixinExpr.toString());
+        log(2, "Expanding mixin statement: ", mixinStmt.mixinExpr.toString());
         
         // Evaluate the mixin expression to get a string
         string mixinString = evaluateMixinExpression(mixinStmt.mixinExpr, mixinStmt.location);
         
-        writeln("Mixin statement evaluates to: \"", mixinString, "\"");
+        log(2, "Mixin statement evaluates to: \"", mixinString, "\"");
         
         // Parse the string as D statements
         Statement[] parsed = parseMixinStatementString(mixinString, mixinStmt.location);
         
-        writeln("Mixin statement parsed into ", parsed.length, " statements");
+        log(2, "Mixin statement parsed into ", parsed.length, " statements");
         
         // Store the expanded statements
         mixinStmt.expandedStatements = parsed;
@@ -356,12 +356,12 @@ class MixinExpander {
         currentDepth++;
         scope(exit) currentDepth--;
         
-        writeln("Expanding mixin (depth ", currentDepth, "): ", mixinDecl.mixinExpr.toString());
+        log(2, "Expanding mixin (depth ", currentDepth, "): ", mixinDecl.mixinExpr.toString());
         
         // Evaluate the mixin expression to get a string
         string mixinString = evaluateMixinExpression(mixinDecl.mixinExpr, mixinDecl.location);
         
-        writeln("Mixin evaluates to: \"", mixinString, "\"");
+        log(2, "Mixin evaluates to: \"", mixinString, "\"");
         
         // Parse the string as D code
         Declaration[] parsed = parseMixinString(mixinString, mixinDecl.location);
@@ -385,7 +385,7 @@ class MixinExpander {
             }
         }
         
-        writeln("Mixin parsed into ", result.length, " declarations");
+        log(2, "Mixin parsed into ", result.length, " declarations");
 
         // Stamp origin mixin on all expanded declarations
         // (for incremental compilation — when this mixin's input changes,
@@ -406,7 +406,7 @@ class MixinExpander {
      * Evaluates the condition at compile time and returns only the appropriate branch.
      */
     private Declaration[] expandStaticIf(StaticIfDecl staticIfDecl) {
-        writeln("Expanding static if: ", staticIfDecl.condition.toString());
+        log(2, "Expanding static if: ", staticIfDecl.condition.toString());
         
         // Extract identifiers from the condition (for incremental compilation tracking)
         string[] conditionDeps = extractIdentifiers(staticIfDecl.condition);
@@ -414,16 +414,16 @@ class MixinExpander {
         // Evaluate the condition at compile time
         bool conditionResult = evaluateStaticIfCondition(staticIfDecl.condition, staticIfDecl.location);
         
-        writeln("Static if condition evaluates to: ", conditionResult);
+        log(2, "Static if condition evaluates to: ", conditionResult);
         
         // Select the appropriate branch
         Declaration[] selectedBranch;
         if (conditionResult) {
             selectedBranch = staticIfDecl.thenDeclarations;
-            writeln("Taking then branch with ", selectedBranch.length, " declarations");
+            log(2, "Taking then branch with ", selectedBranch.length, " declarations");
         } else {
             selectedBranch = staticIfDecl.elseDeclarations;
-            writeln("Taking else branch with ", selectedBranch.length, " declarations");
+            log(2, "Taking else branch with ", selectedBranch.length, " declarations");
         }
         
         // Recursively expand any nested static ifs or mixins in the selected branch
@@ -721,7 +721,7 @@ class MixinExpander {
         
         // Check if the initializer is a simple constant
         if (auto literal = cast(LiteralExpression)varDecl.initializer) {
-            writeln("Converting variable '", varDecl.name, "' to manifest constant");
+            log(2, "Converting variable '", varDecl.name, "' to manifest constant");
             auto manifest = new ManifestConstantDecl(varDecl.location, varDecl.name, literal);
             
             // Pre-evaluate the constant

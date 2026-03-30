@@ -36,9 +36,10 @@ class TreeSitterBridge {
     this(string filename, string sourceText) {
         this.filename = filename;
         this.sourceText = sourceText;
-        writeln("Creating TreeSitterParser in bridge...");
+        import std.stdio : stderr;
+        stderr.writeln("Creating TreeSitterParser in bridge...");
         this.parser = new TreeSitterParser();
-        writeln("TreeSitterParser created successfully.");
+        stderr.writeln("TreeSitterParser created successfully.");
     }
     
     /**
