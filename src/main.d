@@ -280,10 +280,12 @@ int compileFile(CompilerOptions options) {
             log(2, "Parsing successful!");
         } catch (ParseError e) {
             printError(e);
+            if (options.warmState !is null) options.warmState.lastError = e;
             return 1;
         } catch (Exception e) {
             stderr.writeln("Unexpected error during parsing: ", e.msg);
             log(1, "Stack trace: ", e.info);
+            if (options.warmState !is null) options.warmState.lastError = e;
             return 1;
         }
         
@@ -538,6 +540,7 @@ int compileFile(CompilerOptions options) {
             controller.ensurePhase(inputModule, ModulePhase.typeChecked);
         } catch (MixinError e) {
             printError(e);
+            if (options.warmState !is null) options.warmState.lastError = e;
             return 1;
         }
 

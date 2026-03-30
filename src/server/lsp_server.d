@@ -2089,11 +2089,39 @@ class LSPServer {
         warningsSink = &warnings;
         scope(exit) warningsSink = null;
 
-        // Compile
+        // Compile — redirect stdout to stderr during compilation to prevent
+        // stray debug writeln() calls from corrupting the JSON-RPC stream.
         Diagnostic[] diagnostics;
         ws.lastError = null;
         ws.lastErrors = null;
-        int result = compileFile(options);
+
+        int result;
+        {
+            import core.sys.posix.unistd : dup, dup2, close;
+            import core.stdc.stdio : fflush;
+
+            stdout.flush();              // flush D stdout buffer
+            fflush(null);                // flush all C stdio buffers
+            int savedFd = dup(1);        // save original stdout fd
+            dup2(2, 1);                  // redirect fd 1 → fd 2 (stderr)
+
+            scope(exit) {
+                stdout.flush();
+                fflush(null);
+                dup2(savedFd, 1);        // restore original stdout
+                close(savedFd);
+            }
+
+            try {
+                result = compileFile(options);
+            } catch (Exception e) {
+                // Catch-all: compileFile should handle its own exceptions,
+                // but protect the LSP server from unexpected crashes.
+                lspLog("Compilation crashed: ", e.msg);
+                ws.lastError = e;
+                result = 1;
+            }
+        }
 
         // Extract diagnostics from compilation errors
         if (result != 0) {
