@@ -189,11 +189,15 @@ class TypeChecker {
                 );
             }
             
+            // Create a Declaration for the parameter so references can be tracked
+            // (used by unused-parameter warnings and LSP find-references)
+            auto paramDecl = new VariableDecl(decl.location, param.name, param.type, null);
+
             auto symbol = new Symbol(
                 param.name,
                 SymbolKind.Parameter,
                 param.type,
-                null,
+                paramDecl,
                 decl.location,
                 false
             );
