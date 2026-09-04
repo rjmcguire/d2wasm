@@ -1,3 +1,7 @@
+## README is outdated...
+
+This is an experiment I ran from about Jan 2026 which started with clawbot making things based on my suggestions. I changed to using Claude code at some point.
+
 # D-to-WASM Compiler Project
 
 A focused, high-performance D language compiler targeting WebAssembly, emphasizing simplicity and predictability by excluding complex runtime features.
