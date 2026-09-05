@@ -18,10 +18,13 @@ import codegen.native.stencil_catalog;
 import core.sys.posix.sys.mman;
 import core.stdc.string : memcpy;
 
-// macOS-specific mmap flags not in D's stdlib
+// mmap flags not uniformly named across platforms
 version (OSX) {
     enum MAP_ANONYMOUS = 0x1000;
     enum MAP_JIT = 0x0800;
+} else {
+    alias MAP_ANONYMOUS = MAP_ANON;
+    enum MAP_JIT = 0;
 }
 
 // setjmp/longjmp - D's stdlib doesn't have these for macOS, so we define them ourselves
@@ -852,11 +855,10 @@ INativeCodeGen createNativeCodeGen(string arch, size_t codeSize = 64 * 1024) {
             import codegen.native.arm64.codegen;
             return ARM64CodeGen.create(codeSize);
         
-        // Future: x86_64
-        // case "x86_64":
-        // case "amd64":
-        //     import codegen.native.x86_64.codegen;
-        //     return X86_64CodeGen.create(codeSize);
+        case "x86_64":
+        case "amd64":
+            // JIT path uses NativeCodeGen in x86_64_codegen.d, not INativeCodeGen.
+            return null;
         
         default:
             return null;

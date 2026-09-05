@@ -1371,6 +1371,10 @@ class TypeChecker {
                         // This is struct construction
                         return checkStructConstruction(structDecl, userType, expr.arguments, expr.location);
                     }
+                    if (auto classDecl = cast(ClassDecl)userType.declaration) {
+                        // ClassName(args) — stack-allocate / construct a class instance
+                        return checkClassConstruction(classDecl, userType, expr.arguments, expr.location);
+                    }
                 }
             }
         }
@@ -2288,6 +2292,57 @@ class TypeChecker {
             }
         }
         
+        return userType;
+    }
+
+    /**
+     * Check class construction expression (ClassName(args...)).
+     * If the class has this(), arguments are matched against constructor
+     * parameters; otherwise they initialize fields in declaration order.
+     */
+    Type checkClassConstruction(ClassDecl classDecl, UserType userType, Expression[] arguments, SourceLocation loc) {
+        if (classDecl.constructor !is null) {
+            auto ctorParams = classDecl.constructor.parameters;
+            if (arguments.length > ctorParams.length) {
+                throw new TypeError(
+                    format("Constructor for '%s' has %d parameters, got %d arguments",
+                           classDecl.name, ctorParams.length, arguments.length),
+                    loc);
+            }
+            for (size_t i = 0; i < arguments.length; i++) {
+                Type argType = checkExpression(arguments[i]);
+                Type paramType = ctorParams[i].type;
+                if (paramType) {
+                    auto compat = checkTypeCompatibility(argType, paramType, arguments[i]);
+                    if (!compat.isCompatible) {
+                        throw new TypeError(
+                            format("Cannot pass '%s' as constructor parameter '%s' of type '%s'",
+                                   argType.toString(), ctorParams[i].name, paramType.toString()),
+                            arguments[i].location);
+                    }
+                }
+            }
+        } else {
+            if (arguments.length > classDecl.fields.length) {
+                throw new TypeError(
+                    format("Class '%s' has %d fields, got %d arguments",
+                           classDecl.name, classDecl.fields.length, arguments.length),
+                    loc);
+            }
+            for (size_t i = 0; i < arguments.length; i++) {
+                Type argType = checkExpression(arguments[i]);
+                Type fieldType = classDecl.fields[i].type;
+                if (fieldType) {
+                    auto compat = checkTypeCompatibility(argType, fieldType, arguments[i]);
+                    if (!compat.isCompatible) {
+                        throw new TypeError(
+                            format("Cannot initialize field '%s' of type '%s' with value of type '%s'",
+                                   classDecl.fields[i].name, fieldType.toString(), argType.toString()),
+                            arguments[i].location);
+                    }
+                }
+            }
+        }
         return userType;
     }
 

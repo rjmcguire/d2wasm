@@ -126,12 +126,16 @@ enum RequiredStencil : string {
  * Hole kinds for patching immediates into stencils.
  */
 enum HoleKind : ubyte {
-    // 16-bit immediate pieces (for load_imm32, load_imm64)
+    // 16-bit immediate pieces (for ARM64 load_imm32, load_imm64)
     imm16_0,      // Bits 0-15
     imm16_1,      // Bits 16-31
     imm16_2,      // Bits 32-47
     imm16_3,      // Bits 48-63
-    
+
+    // Little-endian immediates (x86-64)
+    imm32,        // 32-bit value at hole.offset
+    imm64,        // 64-bit value at hole.offset
+
     // Stack frame offsets
     frame_offset,
     

@@ -16,10 +16,7 @@ import core.sys.posix.sys.mman;
 import core.stdc.string : memcpy;
 import core.stdc.stdlib : malloc, free;
 
-// macOS-specific mmap flags
-version (OSX) {
-    import codegen.native.codegen_interface : MAP_ANONYMOUS, MAP_JIT;
-}
+import codegen.native.codegen_interface : MAP_ANONYMOUS, MAP_JIT;
 
 /// Unresolved branch that needs patching
 struct UnresolvedBranch {

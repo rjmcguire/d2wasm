@@ -1014,9 +1014,17 @@ mixin template StatementEmitter() {
             return;
         }
         
-        // Constructor call: Dog(42)
+        // Constructor / field-init call: Rectangle(0, 0, 10, 5)
         if (auto callExpr = cast(CallExpression)stmt.initializer) {
-            // Initialize fields from constructor arguments (same as struct)
+            if (classDecl.constructor !is null) {
+                emitFPOffset(out_, info.frameOffset); // this
+                foreach (arg; callExpr.arguments)
+                    emitExpression(out_, arg);
+                uint funcIdx = emitter.getFuncIndex(classDecl.constructor.mangledName, stmt.location);
+                emitWasmCall(out_, funcIdx);
+                return;
+            }
+            // No this(): initialize fields from arguments (same as struct)
             for (size_t i = 0; i < classDecl.fields.length && i < callExpr.arguments.length; i++) {
                 auto field = classDecl.fields[i];
                 emitFPOffset(out_, info.frameOffset + cast(int)field.offset);

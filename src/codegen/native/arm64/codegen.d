@@ -12,10 +12,7 @@ import codegen.native.arm64.stencil_table;
 import core.sys.posix.sys.mman;
 import core.stdc.string : memcpy;
 
-version(OSX) {
-    private enum MAP_ANONYMOUS = 0x1000;
-    private enum MAP_JIT = 0x0800;
-}
+import codegen.native.codegen_interface : MAP_ANONYMOUS, MAP_JIT;
 
 /**
  * ARM64 Native Code Generator

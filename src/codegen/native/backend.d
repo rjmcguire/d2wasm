@@ -8,11 +8,20 @@ module codegen.native.backend;
 
 import codegen.backend : Backend, CompiledFunction, ExecutionResult;
 import codegen.target : sliceInfo, SliceInfo;
-import codegen.native.arm64_codegen : NativeCodeGen, CallFrameData, ErrorLocData,
-    createCTFEHostFunctions;
 import codegen.native.macho_writer : RelocType;
-import codegen.native.arm64.stencil_table;
 import codegen.native.stencil_catalog;
+
+version (AArch64) {
+    import codegen.native.arm64_codegen : NativeCodeGen, CallFrameData, ErrorLocData,
+        createCTFEHostFunctions;
+    import codegen.native.arm64.stencil_table;
+} else version (X86_64) {
+    import codegen.native.x86_64_codegen : NativeCodeGen, CallFrameData, ErrorLocData,
+        createCTFEHostFunctions;
+    import codegen.native.x86_64.stencil_table;
+} else {
+    static assert(false, "Native backend requires AArch64 or X86_64");
+}
 import codegen.native.codegen_interface : Label, NativeDataSection, NativeCTFEContext,
     HostFunctionTable, CTFEErrorKind, ctfeErrorMessage, setjmp;
 import ast.nodes;
@@ -1404,7 +1413,7 @@ class NativeCompiledFunction : CompiledFunction {
         version (OSX) {
             import core.sys.darwin.dlfcn : RTLD_DEFAULT;
         } else {
-            import core.sys.posix.dlfcn : RTLD_DEFAULT;
+            import core.sys.linux.dlfcn : RTLD_DEFAULT;
         }
 
         foreach (imp; imports) {
@@ -2267,6 +2276,17 @@ class NativeCompiledFunction : CompiledFunction {
                                     assert(cd is classType,
                                         "Class init type mismatch: expected " ~
                                         classType.name ~ " but got " ~ cd.name);
+                                    if (cd.constructor !is null) {
+                                        // Call this() with the stack instance as 'this'
+                                        string ctorName = getMangledName(cd.constructor);
+                                        auto ctorLabel = ctorName in functionLabels;
+                                        if (ctorLabel is null)
+                                            throw new Exception("Constructor not compiled: " ~ ctorName);
+                                        emitMethodArgs(call.arguments);
+                                        gen.emitStackAddress(nli.offset);
+                                        gen.emitCall(*ctorLabel);
+                                        emitNativeExceptionCheck();
+                                    } else {
                                     // Initialize fields directly at our variable's location
                                     for (size_t i = 0; i < cd.fields.length && i < call.arguments.length; i++) {
                                         auto field = cd.fields[i];
@@ -2288,6 +2308,7 @@ class NativeCompiledFunction : CompiledFunction {
 
                                         compileExpression(call.arguments[i]);
                                         gen.emitStoreLocal32(fieldOffset);
+                                    }
                                     }
                                 }
                             }
@@ -3565,6 +3586,10 @@ class NativeCompiledFunction : CompiledFunction {
                     if (auto structDecl = symbol.type.asStruct()) {
                         // Struct construction: allocate space and init fields
                         compileStructConstruction(structDecl, call.arguments);
+                        return;
+                    }
+                    if (auto classDecl = symbol.type.asClass()) {
+                        compileClassConstruction(classDecl, call.arguments);
                         return;
                     }
                 }
@@ -5442,8 +5467,8 @@ class NativeCompiledFunction : CompiledFunction {
     /// arenaShift=0: args go into x1, x2, x3 (no arena)
     /// arenaShift=1: args go into x2, x3, x4 (x1 reserved for arena)
     private void emitMethodArgs(Expression[] args, int arenaShift = 0) {
-        if (args.length + arenaShift > 3)
-            throw new Exception("Native backend: methods support max 3 user arguments (x0 reserved for this)");
+        if (args.length + arenaShift > 7)
+            throw new Exception("Native backend: methods support max 7 user arguments (x0 reserved for this)");
 
         // Check if any argument contains a function call that would clobber registers
         bool hasNestedCalls = false;
@@ -5799,7 +5824,7 @@ class NativeCompiledFunction : CompiledFunction {
             version (OSX) {
                 import core.sys.darwin.dlfcn : RTLD_DEFAULT;
             } else {
-                import core.sys.posix.dlfcn : RTLD_DEFAULT;
+                import core.sys.linux.dlfcn : RTLD_DEFAULT;
             }
             auto ptr = dlsym(RTLD_DEFAULT, (funcName ~ "\0").ptr);
             if (ptr !is null) {
@@ -5843,6 +5868,39 @@ class NativeCompiledFunction : CompiledFunction {
         gen.emitStackAddress(structOffset);
         // Struct data stays allocated in temp zone — caller's temps.restore() frees it
         // after the struct pointer has been consumed (e.g., passed to a function call).
+    }
+
+    /**
+     * Compile class construction: allocate instance, store vtable, run this()
+     * or field-init. Leaves a pointer to the instance in x0.
+     */
+    private void compileClassConstruction(ClassDecl classDecl, Expression[] args) {
+        size_t classSize = classDecl.classSize > 0 ? classDecl.classSize : 8;
+        size_t classOffset = temps.alloc(classSize);
+
+        ensureNativeVtable(classDecl);
+        uint tableBase = classTableBases[classDecl.name];
+        gen.emitImm32(stencil_load_imm32, cast(int)tableBase);
+        gen.emitStoreLocal32(classOffset);
+
+        if (classDecl.constructor !is null) {
+            string ctorName = getMangledName(classDecl.constructor);
+            auto ctorLabel = ctorName in functionLabels;
+            if (ctorLabel is null)
+                throw new Exception("Constructor not compiled: " ~ ctorName);
+            emitMethodArgs(args);
+            gen.emitStackAddress(classOffset);
+            gen.emitCall(*ctorLabel);
+            emitNativeExceptionCheck();
+        } else {
+            for (size_t i = 0; i < classDecl.fields.length && i < args.length; i++) {
+                auto field = classDecl.fields[i];
+                compileExpression(args[i]);
+                gen.emitStoreLocal32(classOffset + field.offset);
+            }
+        }
+
+        gen.emitStackAddress(classOffset);
     }
     
     /**
@@ -7226,7 +7284,7 @@ class NativeCompiledFunction : CompiledFunction {
         version (OSX) {
             import core.sys.darwin.dlfcn : RTLD_DEFAULT;
         } else {
-            import core.sys.posix.dlfcn : RTLD_DEFAULT;
+            import core.sys.linux.dlfcn : RTLD_DEFAULT;
         }
         auto ptr = dlsym(RTLD_DEFAULT, (funcName ~ '\0').ptr);
         if (ptr is null)
@@ -7283,7 +7341,7 @@ class NativeCompiledFunction : CompiledFunction {
         version (OSX) {
             import core.sys.darwin.dlfcn : RTLD_DEFAULT;
         } else {
-            import core.sys.posix.dlfcn : RTLD_DEFAULT;
+            import core.sys.linux.dlfcn : RTLD_DEFAULT;
         }
 
         // Resolve ObjC runtime functions

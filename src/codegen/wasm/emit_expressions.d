@@ -1375,7 +1375,7 @@ mixin template ExpressionEmitter() {
                 }
             }
 
-            // Implicit field access in method: field.length, field.ptr etc.
+            // Implicit field access in method: field.length, field.ptr, nestedField.x
             if (auto thisInfo = resolveVar(THIS_LOCAL_ID, "this")) {
                 AggregateDecl parent = func.structParent ? cast(AggregateDecl)func.structParent
                                                          : cast(AggregateDecl)func.classParent;
@@ -1394,6 +1394,21 @@ mixin template ExpressionEmitter() {
                                 emitI32Const(out_, cast(int)(field.offset + subOffset));
                                 out_ ~= Op.i32_add;
                                 emitI32Load(out_);
+                                return;
+                            }
+                        }
+                        if (auto nestedStruct = field.type.asStruct()) {
+                            auto subfield = nestedStruct.getField(expr.memberName);
+                            if (subfield) {
+                                emitLocalGet(out_, thisInfo.wasmLocalIdx);
+                                int totalOff = cast(int)(field.offset + subfield.offset);
+                                if (totalOff > 0) {
+                                    emitI32Const(out_, totalOff);
+                                    out_ ~= Op.i32_add;
+                                }
+                                auto bt = cast(BasicType)subfield.type;
+                                bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
+                                emitLoadForSize(out_, cast(uint)subfield.size, isFloat);
                                 return;
                             }
                         }
@@ -2763,6 +2778,34 @@ mixin template ExpressionEmitter() {
             if (info.isSlice && member.memberName == "length") {
                 emitSliceLengthAssignment(out_, objIdent.name, info, value);
                 return;
+            }
+        }
+
+        // Implicit this.field.subfield = value (e.g. topLeft.x = x1 in a method)
+        if (auto thisInfo = resolveVar(THIS_LOCAL_ID, "this")) {
+            AggregateDecl parent = func.structParent ? cast(AggregateDecl)func.structParent
+                                                     : cast(AggregateDecl)func.classParent;
+            if (parent) {
+                auto field = parent.getField(objIdent.name);
+                if (field) {
+                    if (auto nestedStruct = field.type.asStruct()) {
+                        auto subfield = nestedStruct.getField(member.memberName);
+                        if (subfield) {
+                            emitLocalGet(out_, thisInfo.wasmLocalIdx);
+                            int totalOff = cast(int)(field.offset + subfield.offset);
+                            if (totalOff > 0) {
+                                emitI32Const(out_, totalOff);
+                                out_ ~= Op.i32_add;
+                            }
+                            emitExpression(out_, value);
+                            auto bt = cast(BasicType)subfield.type;
+                            bool isFloat = bt && (bt.kind == BasicType.Kind.Float64 || bt.kind == BasicType.Kind.Float32);
+                            emitStoreForSize(out_, cast(uint)subfield.size, isFloat);
+                            emitExpression(out_, value);
+                            return;
+                        }
+                    }
+                }
             }
         }
         

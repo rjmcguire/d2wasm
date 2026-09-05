@@ -3,8 +3,10 @@
 *.wasm
 d2wasm
 *.o
+*.a
 tests/output_parity/**/test_bin
 tests/milestones/**/test_bin
+thirdparty/tree-sitter/
 
 editor
 node_modules/

@@ -169,9 +169,9 @@ extern(C) const(void)* hostWriteStr(IM3Runtime runtime, IM3ImportContext ctx, ui
     uint ptr = stack[0];
     uint len = stack[2];
     
-    // Get memory pointer
-    uint memSize;
-    ubyte* wasmMem = m3_GetMemory(runtime, &memSize, 0);
+    // Get memory pointer from the raw-call _mem argument
+    size_t memSize = m3_GetMemorySizeAt(mem);
+    ubyte* wasmMem = cast(ubyte*)mem;
     
     if (wasmMem is null || ptr + len > memSize) {
         return "CTFE: memory access out of bounds".ptr;
@@ -434,7 +434,7 @@ class CTFERuntime {
         version (OSX) {
             import core.sys.darwin.dlfcn : RTLD_DEFAULT;
         } else {
-            import core.sys.posix.dlfcn : RTLD_DEFAULT;
+            import core.sys.linux.dlfcn : RTLD_DEFAULT;
         }
 
         // Parse ffi_meta entries from WASM binary
@@ -849,8 +849,8 @@ class CTFERuntime {
             throw new CTFERuntimeError("Runtime not initialized");
         }
         
-        uint memSize;
-        ubyte* mem = m3_GetMemory(runtime, &memSize, 0);
+        size_t memSize;
+        ubyte* mem = m3_GetMemory(mod, &memSize, 0);
         
         if (mem is null) {
             throw new CTFERuntimeError("No memory in WASM module");
@@ -911,7 +911,7 @@ class CTFERuntime {
      */
     uint getMemorySize() {
         if (!initialized) return 0;
-        return m3_GetMemorySize(runtime);
+        return cast(uint)m3_GetMemorySize(mod, 0);
     }
     
     /// A single call stack frame read from WASM linear memory.

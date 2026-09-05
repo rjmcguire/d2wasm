@@ -352,6 +352,10 @@ mixin template CallEmitter() {
                 emitStructConstructionToTemp(out_, structDecl, expr.arguments);
                 return;
             }
+            if (auto classDecl = symbol.type.asClass()) {
+                emitClassConstructionToTemp(out_, classDecl, expr.arguments);
+                return;
+            }
         }
         
         // emplace(ptr, args...) — compiler intrinsic: construct struct at pointer
@@ -1748,6 +1752,40 @@ mixin template CallEmitter() {
         emitStructFieldsInit(out_, structDecl, args, EmitAddrMode.fromSP, 0);
         
         // Leave pointer to struct on stack
+        emitGlobalGet(out_, emitter.spGlobal);
+    }
+
+    /**
+     * Emit class construction to a temporary on the shadow stack.
+     * Stores the vtable, runs this() or field-inits, and leaves a pointer
+     * to the instance on the value stack (class reference semantics).
+     */
+    void emitClassConstructionToTemp(ref Appender!(ubyte[]) out_, ClassDecl classDecl, Expression[] args) {
+        uint classSize = cast(uint)classDecl.classSize;
+        if (classSize == 0) classSize = 4; // vtable pointer at minimum
+
+        // Allocate space: SP = SP - classSize
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitI32Const(out_, classSize);
+        out_ ~= Op.i32_sub;
+        emitGlobalSet(out_, emitter.spGlobal);
+
+        // tempLocalA = current SP (instance address)
+        emitGlobalGet(out_, emitter.spGlobal);
+        emitLocalSet(out_, tempLocalA);
+
+        emitVtableStore(out_, classDecl);
+
+        if (classDecl.constructor !is null) {
+            emitLocalGet(out_, tempLocalA); // this
+            foreach (arg; args)
+                emitExpression(out_, arg);
+            uint funcIdx = emitter.getFuncIndex(classDecl.constructor.mangledName, classDecl.location);
+            emitWasmCall(out_, funcIdx);
+        } else {
+            emitFieldStores(out_, classDecl, args);
+        }
+
         emitGlobalGet(out_, emitter.spGlobal);
     }
     

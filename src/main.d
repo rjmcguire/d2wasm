@@ -1073,7 +1073,9 @@ int compileFile(CompilerOptions options) {
  */
 int runWatch(CompilerOptions options) {
     import watcher.watcher : createDebouncedWatcher, DebouncedWatcher;
-    import watcher.fsevents_watcher : FSEventsWatcher;
+    version (OSX) {
+        import watcher.fsevents_watcher : FSEventsWatcher;
+    }
     import cache.entry : SourceHash, CacheEntry;
     import std.datetime : Clock;
     import std.path : dirName;

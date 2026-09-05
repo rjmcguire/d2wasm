@@ -172,9 +172,7 @@ Backend createBackend(string backendName, SymbolTable symbolTable, bool enableSt
                     return new NativeBackend(symbolTable, enableStackTrace);
                 
                 case "x86_64":
-                    throw new Exception(
-                        "Native backend not yet implemented for x86_64. " ~
-                        "Use --backend=wasm or contribute x86_64 support!");
+                    return new NativeBackend(symbolTable, enableStackTrace);
                 
                 default:
                     throw new Exception(
@@ -186,7 +184,8 @@ Backend createBackend(string backendName, SymbolTable symbolTable, bool enableSt
         case "native-arm64":
             return new NativeBackend(symbolTable, enableStackTrace);
         
-        // Future: case "native-x86_64": return new X86_64NativeBackend(symbolTable);
+        case "native-x86_64":
+            return new NativeBackend(symbolTable, enableStackTrace);
         
         default:
             throw new Exception("Unknown backend: " ~ backendName);

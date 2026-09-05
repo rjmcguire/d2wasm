@@ -11,7 +11,15 @@
 #include <string.h>
 #include <stdint.h>
 
-#include <ffi/ffi.h>
+#if defined(__has_include)
+#  if __has_include(<ffi/ffi.h>)
+#    include <ffi/ffi.h>
+#  else
+#    include <ffi.h>
+#  endif
+#else
+#  include <ffi.h>
+#endif
 
 #include "wasm3.h"
 #include "m3_env.h"
@@ -331,8 +339,8 @@ const void *ffi_generic_trampoline(IM3Runtime runtime, IM3ImportContext _ctx,
             const char *native_str = (const char *)(uintptr_t)ret_val;
             uint32_t len = (uint32_t)strnlen(native_str, 4095) + 1;  /* include NUL, cap at 4KB */
 
-            uint32_t mem_size = 0;
-            uint8_t *mem = (uint8_t *)m3_GetMemory(runtime, &mem_size, 0);
+            size_t mem_size = m3_GetMemorySizeAt(_mem);
+            uint8_t *mem = (uint8_t *)_mem;
             if (mem && g_ptr_return_bump + len <= mem_size) {
                 memcpy(mem + g_ptr_return_bump, native_str, len);
                 *((uint64_t *)_sp) = (uint64_t)g_ptr_return_bump;
