@@ -19,7 +19,7 @@ SOCKET="$WORK_DIR/server.sock"
 cleanup() {
     # Shutdown server if socket exists
     if [ -S "$SOCKET" ]; then
-        echo '{"id":999,"method":"shutdown"}' | nc -U "$SOCKET" >/dev/null 2>&1 || true
+        echo '{"id":999,"method":"shutdown"}' | nc -N -U "$SOCKET" >/dev/null 2>&1 || true
         sleep 0.5
     fi
     # Kill server if still running
@@ -62,7 +62,7 @@ fi
 # Test 1: First compile — all cache misses
 ###############################################################################
 echo "Test 1: First compile..."
-RESP1=$(echo '{"id":1,"method":"compile","params":{"file":"'"$WORK_DIR/test.d"'","output":"'"$WORK_DIR/test.wasm"'"}}' | nc -U "$SOCKET")
+RESP1=$(echo '{"id":1,"method":"compile","params":{"file":"'"$WORK_DIR/test.d"'","output":"'"$WORK_DIR/test.wasm"'"}}' | nc -N -U "$SOCKET")
 
 if ! echo "$RESP1" | grep -q '"success":true'; then
     echo "FAIL: First compile failed"
@@ -91,7 +91,7 @@ echo "  OK: result=$RESULT1"
 # Test 2: Same source — warm cache gives all hits
 ###############################################################################
 echo "Test 2: Second compile (same source)..."
-RESP2=$(echo '{"id":2,"method":"compile","params":{"file":"'"$WORK_DIR/test.d"'","output":"'"$WORK_DIR/test.wasm"'"}}' | nc -U "$SOCKET")
+RESP2=$(echo '{"id":2,"method":"compile","params":{"file":"'"$WORK_DIR/test.d"'","output":"'"$WORK_DIR/test.wasm"'"}}' | nc -N -U "$SOCKET")
 
 HITS2=$(echo "$RESP2" | grep -o '"cacheHits":[0-9]*' | grep -o '[0-9]*')
 MISSES2=$(echo "$RESP2" | grep -o '"cacheMisses":[0-9]*' | grep -o '[0-9]*')
@@ -116,7 +116,7 @@ int main() {
 }
 EOF
 
-RESP3=$(echo '{"id":3,"method":"compile","params":{"file":"'"$WORK_DIR/test.d"'","output":"'"$WORK_DIR/test.wasm"'"}}' | nc -U "$SOCKET")
+RESP3=$(echo '{"id":3,"method":"compile","params":{"file":"'"$WORK_DIR/test.d"'","output":"'"$WORK_DIR/test.wasm"'"}}' | nc -N -U "$SOCKET")
 
 HITS3=$(echo "$RESP3" | grep -o '"cacheHits":[0-9]*' | grep -o '[0-9]*')
 MISSES3=$(echo "$RESP3" | grep -o '"cacheMisses":[0-9]*' | grep -o '[0-9]*')
@@ -142,7 +142,7 @@ echo "  OK: result=$RESULT3"
 # Test 5: Status shows 3 compilations
 ###############################################################################
 echo "Test 5: Status check..."
-RESP_STATUS=$(echo '{"id":4,"method":"status"}' | nc -U "$SOCKET")
+RESP_STATUS=$(echo '{"id":4,"method":"status"}' | nc -N -U "$SOCKET")
 
 if ! echo "$RESP_STATUS" | grep -q '"compilations":3'; then
     echo "FAIL: Expected 3 compilations in status"
@@ -155,7 +155,7 @@ echo "  OK: status shows 3 compilations"
 # Test 6: Shutdown
 ###############################################################################
 echo "Test 6: Shutdown..."
-echo '{"id":5,"method":"shutdown"}' | nc -U "$SOCKET" >/dev/null 2>&1 || true
+echo '{"id":5,"method":"shutdown"}' | nc -N -U "$SOCKET" >/dev/null 2>&1 || true
 sleep 1
 
 if kill -0 "$SERVER_PID" 2>/dev/null; then

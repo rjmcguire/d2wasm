@@ -21,7 +21,7 @@ SOCKET="$WORK_DIR/server.sock"
 
 cleanup() {
     if [ -S "$SOCKET" ]; then
-        echo '{"id":999,"method":"shutdown"}' | nc -U "$SOCKET" >/dev/null 2>&1 || true
+        echo '{"id":999,"method":"shutdown"}' | nc -N -U "$SOCKET" >/dev/null 2>&1 || true
         sleep 0.3
     fi
     if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -70,7 +70,7 @@ if [ ! -S "$SOCKET" ]; then
 fi
 
 send_request() {
-    echo "$1" | nc -U "$SOCKET" 2>/dev/null
+    echo "$1" | nc -N -U "$SOCKET" 2>/dev/null
 }
 
 ###############################################################################

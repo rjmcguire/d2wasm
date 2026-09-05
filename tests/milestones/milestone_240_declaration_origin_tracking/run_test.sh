@@ -77,7 +77,7 @@ if [ ! -S "$SOCKET" ]; then
 fi
 
 send_request() {
-    echo "$1" | nc -U "$SOCKET" 2>/dev/null
+    echo "$1" | nc -N -U "$SOCKET" 2>/dev/null
 }
 
 # First compile

@@ -20,7 +20,7 @@ SOCKET="$WORK_DIR/server.sock"
 cleanup() {
     # Shutdown server if running
     if [ -S "$SOCKET" ]; then
-        echo '{"id":999,"method":"shutdown"}' | nc -U "$SOCKET" >/dev/null 2>&1 || true
+        echo '{"id":999,"method":"shutdown"}' | nc -N -U "$SOCKET" >/dev/null 2>&1 || true
         sleep 0.3
     fi
     rm -rf "$WORK_DIR"
@@ -56,9 +56,11 @@ if [ ! -S "$SOCKET" ]; then
     exit 1
 fi
 
-# Helper: send request and read response
+# Helper: send request and read response.
+# -N half-closes after stdin EOF so the server sees disconnect and nc
+# exits after the one-line NDJSON reply (OpenBSD nc default is to hang).
 send_request() {
-    echo "$1" | nc -U "$SOCKET" 2>/dev/null
+    echo "$1" | nc -N -U "$SOCKET" 2>/dev/null
 }
 
 # Test 1: First compile — should succeed
