@@ -75,15 +75,8 @@ run_test() {
         fi
     fi
 
-    # Handle ffi_exec type — compile+run with --run and --link-framework
+    # Handle ffi_exec type — compile+run with --run and optional --link-framework
     if [ "$test_type" = "ffi_exec" ]; then
-        # Only supported on macOS
-        if [ "$(uname)" != "Darwin" ]; then
-            echo -e "${YELLOW}SKIP${NC} $test_name (ffi_exec requires macOS)"
-            return 0
-        fi
-
-        # Build --link-framework flags from config
         local fw_args=""
         local frameworks=$(jq -r '.link_frameworks // [] | .[]' "$config_file")
         for fw in $frameworks; do
@@ -91,6 +84,15 @@ run_test() {
         done
 
         local expected_result=$(jq -r '.expected_result // "null"' "$config_file")
+
+        if [ -n "$frameworks" ] && [ "$(uname)" != "Darwin" ]; then
+            echo -e "${YELLOW}SKIP${NC} $test_name (requires macOS frameworks)"
+            return 0
+        fi
+        if echo "$compiler_args" | grep -q -- '--target=arm64-macos' && [ "$(uname)" != "Darwin" ]; then
+            echo -e "${YELLOW}SKIP${NC} $test_name (requires arm64-macos)"
+            return 0
+        fi
 
         if [ $VERBOSE -eq 1 ]; then
             echo "Running FFI test: $COMPILER --run $fw_args $compiler_args $test_file"

@@ -5188,8 +5188,8 @@ class NativeCompiledFunction : CompiledFunction {
         else
             gen.emitStackAddress(info.offset);
 
-        // Step 6: Indirect call via x9
-        gen.emitCallIndirectX9();
+        // Step 6: Indirect call via x9 (C ABI — callee prologue expects SysV/AAPCS)
+        gen.emitCallIndirectX9CAbi();
         // Check for exception after virtual method call (preserves return value)
         emitNativeExceptionCheckWithValue();
         temps.restore(mark);
@@ -5336,7 +5336,7 @@ class NativeCompiledFunction : CompiledFunction {
             gen.emitMoveX0ToX9();           // x9 = func_ptr
             gen.emitStackAddress(resultOffset);  // x0 = result_ptr (reload cleanly)
 
-            gen.emitCallIndirectX9();
+            gen.emitCallIndirectX9CAbi();
             emitNativeExceptionCheck();
             temps.restore(mark);
         } else if (info.isStruct) {
@@ -5829,7 +5829,7 @@ class NativeCompiledFunction : CompiledFunction {
             auto ptr = dlsym(RTLD_DEFAULT, (funcName ~ "\0").ptr);
             if (ptr !is null) {
                 gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)ptr);
-                gen.emitCallIndirectX9();
+                gen.emitCallIndirectX9CAbi();
             }
         }
     }
@@ -7290,7 +7290,7 @@ class NativeCompiledFunction : CompiledFunction {
         if (ptr is null)
             throw new Exception("Cannot resolve runtime function: " ~ funcName);
         gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)ptr);
-        gen.emitCallIndirectX9();
+        gen.emitCallIndirectX9CAbi();
     }
 
     // ---- ObjC JIT class registration infrastructure ----

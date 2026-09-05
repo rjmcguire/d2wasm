@@ -3,5 +3,5 @@
   "description": "Struct with double fields: store, load, cast to int",
   "type": "ffi_exec",
   "expected_result": 42,
-  "compiler_args": ["--target=arm64-macos"]
+  "compiler_args": ["--target=native"]
 }

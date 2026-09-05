@@ -287,6 +287,22 @@ struct NativeCodeGen {
         emitU8(0x41); emitU8(0xFF); emitU8(0xD3);  // call r11
     }
 
+    /// Virtual ARM-like args (rax,rcx,rdx,rsi,r8,r9) → SysV (rdi,rsi,rdx,rcx,r8,r9).
+    /// Clobbers r11.
+    void emitShuffleVirtualToCAbi() {
+        emitMovRR(R11, RSI);  // save x3
+        emitMovRR(RDI, RAX);  // SysV arg0
+        emitMovRR(RSI, RCX);  // SysV arg1
+        emitMovRR(RCX, R11);  // SysV arg3 (rdx is already arg2)
+    }
+
+    /// Shuffle to SysV then call through r11. Saves the callee in r14.
+    void emitCallIndirectX9CAbi() {
+        emitMovRR(R14, R11);
+        emitShuffleVirtualToCAbi();
+        emitU8(0x41); emitU8(0xFF); emitU8(0xD6);  // call r14
+    }
+
     void emitAddX9X0LSL3() {
         // r11 += rax * 8  →  lea r11, [r11 + rax*8]
         // REX.W+R+B (r11 dest, r11 base): 4D 8D 1C C3
@@ -302,7 +318,7 @@ struct NativeCodeGen {
     void emitIndirectCall(ulong slotAddress) {
         emitLoadImm64ToX9(slotAddress);
         emitLoadFromX9();
-        emitCallIndirectX9();
+        emitCallIndirectX9CAbi();
     }
 
     /// Host call: SysV rdi=ctx, rsi=arg0, rdx=arg1, rcx=arg2
@@ -374,10 +390,7 @@ struct NativeCodeGen {
 
     /// Shuffle virtual args into SysV, then call rel32
     void emitCall(Label target) {
-        emitMovRR(RDI, RAX);
-        emitMovRR(R11, RSI);
-        emitMovRR(RSI, RCX);
-        emitMovRR(RCX, R11);
+        emitShuffleVirtualToCAbi();
         uint off = pos;
         emitU8(0xE8); emitU32(0);
         unresolved ~= UnresolvedBranch(off, target.id, BranchKind.call);
@@ -390,7 +403,9 @@ struct NativeCodeGen {
     }
 
     void emitCallIndirect() {
-        emitU8(0x41); emitU8(0xFF); emitU8(0xD4);  // call r12 (x8)
+        emitMovRR(R14, XR8);  // r12 = x8
+        emitShuffleVirtualToCAbi();
+        emitU8(0x41); emitU8(0xFF); emitU8(0xD6);  // call r14
     }
 
     void emitMoveXReg(uint src, uint dst) {

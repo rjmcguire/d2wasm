@@ -42,7 +42,7 @@ import codegen.native.backend : NativeCompileError;
 struct CompilerOptions {
     string inputFile;
     string outputFile;
-    string target = "wasm";   // Target: "wasm" (default), "arm64-macos"
+    string target = "wasm";   // Target: wasm, native, arm64-macos, x86_64-linux
     string backend = "wasm";  // Backend: "wasm" or "native"
     int verbosity = 0;        // 0=quiet, 1=-v, 2=-vv, 3=-vvv
     bool dryRun = false;
@@ -137,7 +137,7 @@ int main(string[] args) {
             "input|i", "Input D source file", &options.inputFile,
             "output|o", "Output WASM file (default: input.wasm)", &options.outputFile,
             "outdir", "Output directory for parallel mode", &options.outputDir,
-            "target|t", "Target: wasm (default), arm64-macos", &options.target,
+            "target|t", "Target: wasm (default), native, arm64-macos, x86_64-linux", &options.target,
             "backend|b", "Code generation backend: wasm, native (default: wasm)", &options.backend,
             "run|r", "Compile and run immediately (like rdmd)", &options.run,
             "func|f", "Function to run with --run (default: main)", &options.runFunc,
@@ -175,7 +175,9 @@ int main(string[] args) {
         );
         
         log(3, "main() started");
-        
+
+        resolveTargetAlias(options);
+
         if (helpInformation.helpWanted) {
             defaultGetoptPrinter("D-to-WASM Compiler\n" ~
                 "Compiles a subset of D language to WebAssembly\n" ~
@@ -223,7 +225,7 @@ int main(string[] args) {
 
         // Set default output file
         if (options.outputFile.length == 0) {
-            if (options.target == "arm64-macos")
+            if (isNativeJitTarget(options.target))
                 options.outputFile = options.compileOnly
                     ? setExtension(options.inputFile, ".o")
                     : stripExtension(options.inputFile);
@@ -249,12 +251,38 @@ int main(string[] args) {
     }
 }
 
+/// Map --target=native to the host triple.
+void resolveTargetAlias(ref CompilerOptions options) {
+    if (options.target != "native")
+        return;
+    version (OSX) {
+        version (AArch64)
+            options.target = "arm64-macos";
+        else
+            throw new Exception("--target=native is not implemented on this macOS architecture");
+    } else version (linux) {
+        version (X86_64)
+            options.target = "x86_64-linux";
+        else
+            throw new Exception("--target=native is not implemented on this Linux architecture");
+    } else {
+        throw new Exception("--target=native is not supported on this platform");
+    }
+}
+
+/// Targets that execute via in-process native JIT (--run).
+bool isNativeJitTarget(string target) {
+    return target == "arm64-macos" || target == "x86_64-linux";
+}
+
 /**
  * Compile a single D source file to WASM
  */
 int compileFile(CompilerOptions options) {
     import diagnostic.log : log;
-    
+
+    resolveTargetAlias(options);
+
     try {
         log(1, "D-to-WASM Compiler v1.0");
         log(1, "Input: ", options.inputFile);
@@ -614,7 +642,7 @@ int compileFile(CompilerOptions options) {
         {
             import semantic.arena_analyzer : analyzeArenaNeeds;
             log(2, "Analyzing arena allocation needs...");
-            if (options.target == "arm64-macos") {
+            if (isNativeJitTarget(options.target)) {
                 // Native backend compiles all modules — analyze cross-module
                 Declaration[] allModuleDecls;
                 foreach (mod; modulesCtx.modulesInOrder())
@@ -644,10 +672,9 @@ int compileFile(CompilerOptions options) {
         }
 
         // 7. Code generation
-        if (!options.dryRun && options.target == "arm64-macos") {
+        if (!options.dryRun && isNativeJitTarget(options.target)) {
             if (options.run) {
-                // Native ARM64 JIT: compile and run directly
-                log(1, "JIT compiling and running native ARM64...");
+                log(1, "JIT compiling and running native ", options.target, "...");
 
                 import codegen.native.backend : NativeCompiledFunction;
                 import codegen.mangle : computeMangledName;
@@ -690,6 +717,12 @@ int compileFile(CompilerOptions options) {
                 }
 
                 return result;
+            }
+
+            if (options.target != "arm64-macos") {
+                throw new Exception(
+                    "Native AOT object output is not yet implemented for " ~ options.target ~
+                    ". Use --run for in-process JIT execution.");
             }
 
             // Native ARM64 Mach-O object file output

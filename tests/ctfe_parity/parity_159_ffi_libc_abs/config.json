@@ -1,0 +1,6 @@
+{
+  "name": "ffi_libc_abs",
+  "description": "extern(C) FFI call to libc abs(-42) == 42",
+  "type": "ffi_exec",
+  "expected_result": 42
+}

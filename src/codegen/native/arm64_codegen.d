@@ -265,6 +265,13 @@ struct NativeCodeGen {
         emitRaw32(0xD63F0120);
     }
 
+    /// Virtual args already match AAPCS64.
+    void emitShuffleVirtualToCAbi() {}
+
+    void emitCallIndirectX9CAbi() {
+        emitCallIndirectX9();
+    }
+
     /// ADD x9, x9, x0, LSL #3  — x9 += x0 * 8
     /// Used for vtable dispatch: x9 = base + tableIndex * 8
     void emitAddX9X0LSL3() {

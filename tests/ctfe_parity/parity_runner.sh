@@ -105,13 +105,8 @@ run_test_with_backend() {
         fi
     fi
 
-    # Handle ffi_exec — compile+run with --run and --link-framework
+    # Handle ffi_exec — compile+run with --run (and optional --link-framework)
     if [ "$test_type" = "ffi_exec" ]; then
-        if [ "$(uname)" != "Darwin" ]; then
-            echo -e "${YELLOW}SKIP${NC} $test_name [$backend] (ffi_exec requires macOS)"
-            return 0
-        fi
-
         local fw_args=""
         local frameworks=$(jq -r '.link_frameworks // [] | .[]' "$config_file")
         for fw in $frameworks; do
@@ -121,12 +116,29 @@ run_test_with_backend() {
         local expected_result=$(jq -r '.expected_result // "null"' "$config_file")
         local compiler_args=$(jq -r '.compiler_args // [] | join(" ")' "$config_file")
 
+        # Apple frameworks / Mach-O-only targets stay Darwin-only.
+        if [ -n "$frameworks" ] && [ "$(uname)" != "Darwin" ]; then
+            echo -e "${YELLOW}SKIP${NC} $test_name [$backend] (requires macOS frameworks)"
+            return 0
+        fi
+        if echo "$compiler_args" | grep -q -- '--target=arm64-macos' && [ "$(uname)" != "Darwin" ]; then
+            echo -e "${YELLOW}SKIP${NC} $test_name [$backend] (requires arm64-macos)"
+            return 0
+        fi
+
+        # Native CTFE backend: execute via host JIT unless the test already
+        # picks a target (e.g. --target=native for 64-bit runtime tests).
+        local native_run=""
+        if [ "$backend" = "native" ] && ! echo "$compiler_args" | grep -q -- '--target='; then
+            native_run="--target=native"
+        fi
+
         if [ $VERBOSE -eq 1 ]; then
-            echo "  Running FFI: $COMPILER --run --backend=$backend $fw_args $compiler_args $test_file"
+            echo "  Running FFI: $COMPILER --run --backend=$backend $fw_args $native_run $compiler_args $test_file"
         fi
 
         local run_output
-        run_output=$("$COMPILER" --run --backend="$backend" $fw_args $compiler_args "$test_file" 2>&1)
+        run_output=$("$COMPILER" --run --backend="$backend" $fw_args $native_run $compiler_args "$test_file" 2>&1)
         local run_exit=$?
 
         if [ "$expected_result" != "null" ] && [ "$run_exit" -eq "$expected_result" ]; then

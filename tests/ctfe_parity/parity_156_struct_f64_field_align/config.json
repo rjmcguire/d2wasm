@@ -3,5 +3,5 @@
   "description": "Struct with double fields must be 8-byte aligned on stack — ARM64 scaled immediate correctness",
   "type": "ffi_exec",
   "expected_result": 42,
-  "compiler_args": ["--target=arm64-macos"]
+  "compiler_args": ["--target=native"]
 }
