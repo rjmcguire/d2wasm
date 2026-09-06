@@ -3,8 +3,11 @@
 // Opens a window, paints a few rectangles and a label, and quits on
 // keypress or mouse click. Linux analogue of demos/metal/metal_demo.d.
 //
-//   ./d2wasm --target=native --link-dylib X11 demos/x11_window/window.d -o demos/x11_window/window
+//   ./d2wasm -r demos/x11_window/window.d
+//   ./d2wasm --target=native demos/x11_window/window.d -o demos/x11_window/window
 //   ./demos/x11_window/window
+
+pragma(lib, "X11");
 
 // Opaque X11 handles are pointer-sized (Display*, Window, GC).
 extern(C) long XOpenDisplay(long name);
@@ -36,9 +39,10 @@ enum KEY_PRESS = 2;
 enum BUTTON_PRESS = 4;
 enum EXPOSE = 12;
 
-enum KEY_PRESS_MASK = 1;
-enum BUTTON_PRESS_MASK = 4;
-enum EXPOSURE_MASK = 32768;
+// XSelectInput mask is a C long — keep it 64-bit so WASM/native FFI types match.
+enum long KEY_PRESS_MASK = 1;
+enum long BUTTON_PRESS_MASK = 4;
+enum long EXPOSURE_MASK = 32768;
 
 void paint(long dpy, long win, long xgc, long black, long white) {
     XSetForeground(dpy, xgc, white);
@@ -70,7 +74,8 @@ int main() {
 
     long win = XCreateSimpleWindow(dpy, root, 100, 100, 640, 400, 2, black, white);
     XStoreName(dpy, win, "d2wasm\0".ptr);
-    XSelectInput(dpy, win, KEY_PRESS_MASK + BUTTON_PRESS_MASK + EXPOSURE_MASK);
+    long eventMask = KEY_PRESS_MASK + BUTTON_PRESS_MASK + EXPOSURE_MASK;
+    XSelectInput(dpy, win, eventMask);
     XMapWindow(dpy, win);
     XFlush(dpy);
 

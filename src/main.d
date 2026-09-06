@@ -275,6 +275,49 @@ bool isNativeJitTarget(string target) {
     return target == "arm64-macos" || target == "x86_64-linux";
 }
 
+/// dlopen a library named by pragma(lib)/--link-dylib.
+/// Bare names like "X11" try libX11.so.6 / libX11.so so WASM --run can dlsym.
+void* loadHostLibrary(string spec, string sourceDir = "") {
+    import core.sys.posix.dlfcn : dlopen, RTLD_LAZY, RTLD_GLOBAL;
+    import std.path : isAbsolute, buildPath;
+
+    string[] candidates;
+    if (spec.length == 0)
+        return null;
+    if (isAbsolute(spec) || spec.canFind("/")) {
+        candidates ~= isAbsolute(spec) ? spec : buildPath(sourceDir, spec);
+    } else {
+        candidates ~= spec;
+        version (linux) {
+            if (!spec.startsWith("lib") && spec.indexOf('.') < 0) {
+                candidates ~= "lib" ~ spec ~ ".so.6";
+                candidates ~= "lib" ~ spec ~ ".so";
+            }
+        }
+        version (OSX) {
+            if (!spec.endsWith(".dylib") && spec.indexOf('.') < 0)
+                candidates ~= "lib" ~ spec ~ ".dylib";
+        }
+    }
+    foreach (c; candidates) {
+        auto h = dlopen((c ~ "\0").ptr, RTLD_LAZY | RTLD_GLOBAL);
+        if (h !is null)
+            return h;
+    }
+    return null;
+}
+
+/// cc argument for a library spec: "X11" → -lX11, paths left as-is.
+string linkerLibArg(string spec) {
+    import std.path : isAbsolute;
+    if (spec.length == 0 || spec.startsWith("-l") || spec.startsWith("-framework"))
+        return spec;
+    if (isAbsolute(spec) || spec.canFind("/") || spec.endsWith(".so")
+            || spec.endsWith(".a") || spec.endsWith(".o") || spec.endsWith(".dylib"))
+        return spec;
+    return "-l" ~ spec;
+}
+
 /**
  * Compile a single D source file to WASM
  */
@@ -483,12 +526,10 @@ int compileFile(CompilerOptions options) {
         auto importResolver = new ImportResolver(modRegistry, parseFn);
         importResolver.resolveImports(inputModule);
 
-        // Collect pragma(lib, ...) from all modules (user + imported) — load libraries before CTFE
+        // Collect pragma(lib, ...) from all modules — load before CTFE so dlsym sees symbols
         {
-            import core.sys.posix.dlfcn : dlopen, RTLD_LAZY, RTLD_GLOBAL;
             string sourceDir = dirName(absolutePath(options.inputFile));
 
-            // Scan all modules (input + imports) for pragma(lib)
             Declaration[][] allAsts;
             allAsts ~= ast;
             foreach (mod; modRegistry.allModules())
@@ -500,20 +541,14 @@ int compileFile(CompilerOptions options) {
                     if (auto pragma_ = cast(PragmaDeclaration)decl) {
                         if (pragma_.pragmaName == "lib") {
                             foreach (arg; pragma_.arguments) {
-                                // Resolve relative paths against source file directory
-                                string libPath = arg;
-                                if (!isAbsolute(arg))
-                                    libPath = buildPath(sourceDir, arg);
-                                // Skip duplicates
                                 import std.algorithm : canFind;
-                                if (options.pragmaLibs.canFind(libPath)) continue;
-                                auto handle = dlopen((libPath ~ "\0").ptr, RTLD_LAZY | RTLD_GLOBAL);
-                                if (handle is null) {
-                                    log(1, "Warning: pragma(lib) could not load '", libPath, "'");
-                                } else {
-                                    log(2, "Loaded pragma(lib): ", libPath);
-                                }
-                                options.pragmaLibs ~= libPath;
+                                if (options.pragmaLibs.canFind(arg)) continue;
+                                auto handle = loadHostLibrary(arg, sourceDir);
+                                if (handle is null)
+                                    log(1, "Warning: pragma(lib) could not load '", arg, "'");
+                                else
+                                    log(2, "Loaded pragma(lib): ", arg);
+                                options.pragmaLibs ~= arg;
                             }
                         }
                     }
@@ -537,14 +572,13 @@ int compileFile(CompilerOptions options) {
 
         // Load shared libraries for FFI — before CTFE, so dlsym can find symbols
         if (options.linkDylibs.length > 0) {
-            import core.sys.posix.dlfcn : dlopen, RTLD_LAZY, RTLD_GLOBAL;
+            string sourceDir = dirName(absolutePath(options.inputFile));
             foreach (lib; options.linkDylibs) {
-                auto handle = dlopen((lib ~ "\0").ptr, RTLD_LAZY | RTLD_GLOBAL);
-                if (handle is null) {
+                auto handle = loadHostLibrary(lib, sourceDir);
+                if (handle is null)
                     log(1, "Warning: could not load dylib '", lib, "'");
-                } else {
+                else
                     log(2, "Loaded dylib: ", lib);
-                }
             }
         }
 
@@ -835,16 +869,15 @@ int compileFile(CompilerOptions options) {
                 foreach (fw; options.linkFrameworks)
                     ccArgs ~= ["-framework", fw];
                 foreach (lib; options.linkDylibs)
-                    ccArgs ~= ["-l" ~ lib];
+                    ccArgs ~= linkerLibArg(lib);
                 foreach (lib; options.pragmaLibs) {
-                    // Detect framework paths: .../Foo.framework/Foo → -framework Foo
                     import std.string : indexOf;
                     auto fwIdx = indexOf(lib, ".framework/");
                     if (fwIdx >= 0) {
-                        string fwName = lib[fwIdx + 11 .. $]; // after ".framework/"
+                        string fwName = lib[fwIdx + 11 .. $];
                         ccArgs ~= ["-framework", fwName];
                     } else {
-                        ccArgs ~= lib;
+                        ccArgs ~= linkerLibArg(lib);
                     }
                 }
 
