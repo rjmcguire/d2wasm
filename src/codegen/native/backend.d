@@ -641,8 +641,9 @@ class NativeCompiledFunction : CompiledFunction {
         if (!objectExternalSymbols.canFind(funcName))
             objectExternalSymbols ~= funcName;
 
+        gen.emitShuffleVirtualToCAbi();
         uint blOff = gen.pos;
-        gen.emitExternalBranchLink();  // BL #0 (placeholder)
+        gen.emitExternalBranchLink();  // BL/call placeholder
         objectRelocations ~= ObjectReloc(blOff, funcName, RelocType.branch26);
     }
 
@@ -5714,7 +5715,7 @@ class NativeCompiledFunction : CompiledFunction {
             gen.emitStorePtr(slot);
             argSlots ~= slot;
         }
-        uint stackBytes = emitCallArgs(argSlots, 0, cast(int)arguments.length);
+        uint stackBytes = emitCallArgs(argSlots, 0, cast(int)arguments.length, gen.cAbiIntArgRegs());
         temps.restore(mark);
         return stackBytes;
     }
@@ -5749,17 +5750,18 @@ class NativeCompiledFunction : CompiledFunction {
         }
     }
 
-    /// Emit argument loading for a function call following ARM64 AAPCS64.
-    /// Args 0-7 go in x0-x7, args 8+ go on the stack.
+    /// Emit argument loading for a function call.
+    /// The first `maxRegArgs` args go in registers (8 for AAPCS64 / D-to-D,
+    /// 6 for x86-64 SysV C calls); the rest go on the stack.
     /// argSlots = temp slot offsets for each compiled argument.
     /// arenaShift = 1 if callee needs arena in x0 (shifts user args by 1).
     /// totalArgs = total args including arena shift.
     /// Returns bytes of stack space allocated for overflow args (caller must clean up).
-    private uint emitCallArgs(size_t[] argSlots, int arenaShift, int totalArgs) {
+    private uint emitCallArgs(size_t[] argSlots, int arenaShift, int totalArgs, int maxRegArgs = 8) {
         assert(totalArgs == cast(int)argSlots.length + arenaShift,
             "emitCallArgs: totalArgs mismatch with argSlots.length + arenaShift");
 
-        int stackArgs = totalArgs > 8 ? totalArgs - 8 : 0;
+        int stackArgs = totalArgs > maxRegArgs ? totalArgs - maxRegArgs : 0;
         uint stackBytes = 0;
         if (stackArgs > 0) {
             stackBytes = cast(uint)((stackArgs * 8 + 15) & ~15);  // 16-byte aligned
@@ -5767,26 +5769,25 @@ class NativeCompiledFunction : CompiledFunction {
             gen.emitSubSPImm(stackBytes);
         }
 
-        // After SUB SP, all temp slot offsets are relative to the OLD SP.
-        // With the new SP, the same data is at offset + stackBytes.
-        // Compensate when loading from temp slots.
+        // After SUB SP, SP-relative temps move by stackBytes. RBP-relative temps do not.
+        uint tempAdj = gen.tempsUseFramePointer() ? 0 : stackBytes;
 
-        // Store stack args (positions 8+)
+        // Store stack args (positions maxRegArgs+)
         for (int i = 0; i < stackArgs; i++) {
-            int argIdx = 8 - arenaShift + i;
+            int argIdx = maxRegArgs - arenaShift + i;
             assert(argIdx >= 0 && argIdx < cast(int)argSlots.length,
                 "stack arg index out of bounds");
-            gen.emitLoadPtr(argSlots[argIdx] + stackBytes);
+            gen.emitLoadPtr(argSlots[argIdx] + tempAdj);
             gen.emitStorePtrToSP(cast(uint)(i * 8));
         }
 
-        // Load register args (0-7) in reverse order
-        int regArgs = totalArgs > 8 ? 8 : totalArgs;
+        // Load register args in reverse order
+        int regArgs = totalArgs > maxRegArgs ? maxRegArgs : totalArgs;
         for (int i = regArgs - 1; i >= arenaShift; i--) {
             int argIdx = i - arenaShift;
             assert(argIdx >= 0 && argIdx < cast(int)argSlots.length,
                 "register arg index out of bounds");
-            gen.emitLoadPtr(argSlots[argIdx] + stackBytes);
+            gen.emitLoadPtr(argSlots[argIdx] + tempAdj);
             emitMoveX0ToArgRegister(i);
         }
 

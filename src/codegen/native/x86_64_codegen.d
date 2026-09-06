@@ -283,6 +283,12 @@ struct NativeCodeGen {
         emitLeaRbp(XR0, localDisp(off));
     }
 
+    /// SysV integer argument registers (rdi, rsi, rdx, rcx, r8, r9).
+    int cAbiIntArgRegs() { return 6; }
+
+    /// Locals/temps are RBP-relative, so SUB RSP for stack args does not move them.
+    bool tempsUseFramePointer() { return true; }
+
     void emitCallIndirectX9() {
         emitU8(0x41); emitU8(0xFF); emitU8(0xD3);  // call r11
     }

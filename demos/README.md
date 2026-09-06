@@ -22,7 +22,12 @@ Generate getter/setter boilerplate using string mixins.
 - Code generation
 - Metaprogramming
 
-### 4. [Embedded Data](embedded_data/)
+### 4. [X11 Window](x11_window/)
+Native Linux/WSL GUI via `extern(C)` libX11 (ELF AOT). Analogue of the macOS Metal demo.
+- `XCreateSimpleWindow`, expose/key/button events
+- `--target=native --link-dylib X11`
+
+### 5. [Embedded Data](embedded_data/)
 Embed files (shaders, data) directly into WASM using import().
 - Compile-time file reading
 - Asset bundling

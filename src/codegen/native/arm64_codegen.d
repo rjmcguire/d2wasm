@@ -258,6 +258,12 @@ struct NativeCodeGen {
     }
     
     /// Call function at address in x9 (BLR x9)
+    /// AAPCS64 integer argument registers (x0–x7).
+    int cAbiIntArgRegs() { return 8; }
+
+    /// Locals/temps are SP-relative; SUB SP for stack args shifts them.
+    bool tempsUseFramePointer() { return false; }
+
     void emitCallIndirectX9() {
         // BLR x9 = 0xD63F0120
         // Encoding: 1101 0110 0011 1111 0000 0001 0010 0000
