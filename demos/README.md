@@ -25,7 +25,11 @@ Generate getter/setter boilerplate using string mixins.
 ### 4. [X11 Window](x11_window/)
 Native Linux/WSL GUI via `extern(C)` libX11 (ELF AOT). Analogue of the macOS Metal demo.
 - `XCreateSimpleWindow`, expose/key/button events
-- `--target=native --link-dylib X11`
+
+### 4b. [X11 Plasma](x11_plasma/)
+Animated plasma: CTFE sine + RGB palette, `XPutImage` each frame.
+- `enum SINE = makeSine(); enum PAL = makePalette();`
+- `./d2wasm -r demos/x11_plasma/plasma.d`
 
 ### 5. [Embedded Data](embedded_data/)
 Embed files (shaders, data) directly into WASM using import().

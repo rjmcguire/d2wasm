@@ -336,6 +336,10 @@ class NativeCompiledFunction : CompiledFunction {
     private ubyte[] globalData;                  // writable __DATA,__data (object mode)
     private ObjectDataSymbol[] globalDataSymbols;
 
+    // Cached data-section addresses for enum/manifest arrays (enum t = makeTable())
+    private ulong[string] manifestArrayDataAddrs;      // JIT: absolute pointer
+    private string[string] manifestArrayDataSymbols;   // object mode: symbol name
+
     /// Single function constructor (original)
     this(FunctionDecl func, SymbolTable st, bool enableStackTrace = true) {
         import std.stdio : writeln;
@@ -748,6 +752,69 @@ class NativeCompiledFunction : CompiledFunction {
     /// Store a string and emit code to load its address into x0.
     private void emitStringLoad(string str, string nameHint = "__str_") {
         emitDataLoad(cast(const(ubyte)[])str, nameHint);
+    }
+
+    /// Load the address of a CTFE array constant's payload into x0 (cached).
+    private void emitManifestArrayPtr(ManifestConstantDecl manifest) {
+        if (objectMode) {
+            if (auto existing = manifest.name in manifestArrayDataSymbols) {
+                emitLoadDataAddress(*existing);
+                return;
+            }
+            string symName = "__manifest_" ~ manifest.name;
+            uint dataOff = appendObjectData(manifest.ctfeArrayBytes);
+            objectDataSymbols ~= ObjectDataSymbol(symName, dataOff);
+            manifestArrayDataSymbols[manifest.name] = symName;
+            emitLoadDataAddress(symName);
+        } else {
+            if (auto existing = manifest.name in manifestArrayDataAddrs) {
+                gen.emitLoadImm64(*existing);
+                return;
+            }
+            ubyte* dataPtr = dataSection.addData(manifest.ctfeArrayBytes);
+            ulong addr = cast(ulong)cast(size_t)dataPtr;
+            manifestArrayDataAddrs[manifest.name] = addr;
+            gen.emitLoadImm64(addr);
+        }
+    }
+
+    /// Zero `varSize` bytes at local `offset`. Large arrays use a store loop.
+    private void emitZeroLocalBytes(size_t offset, size_t varSize) {
+        if (varSize <= 64) {
+            gen.emitImm32(stencil_load_imm32, 0);
+            for (size_t off = 0; off < varSize; off += 4)
+                gen.emitStoreLocal32(offset + off);
+            return;
+        }
+        auto mark = temps.save();
+        size_t addrTemp = temps.alloc(8);
+        size_t remainTemp = temps.alloc(8);
+        gen.emitStackAddress(offset);
+        gen.emitStorePtr(addrTemp);
+        gen.emitImm32(stencil_load_imm32, cast(int)varSize);
+        gen.emitStoreLocal32(remainTemp);
+        auto loopStart = gen.newLabel();
+        auto loopEnd = gen.newLabel();
+        gen.bindLabel(loopStart);
+        gen.emitLoadLocal32(remainTemp);
+        gen.emitBranchIfZero(loopEnd);
+        gen.emitImm32(stencil_load_imm32, 0);
+        gen.emitMoveX0ToX9();
+        gen.emitLoadPtr(addrTemp);
+        gen.emitStoreToPointerFromX9(0);
+        gen.emitLoadPtr(addrTemp);
+        gen.emitMoveX0ToX1();
+        gen.emitImm32(stencil_load_imm32, 4);
+        gen.emit(stencil_add_i64);
+        gen.emitStorePtr(addrTemp);
+        gen.emitImm32(stencil_load_imm32, 4);
+        gen.emitMoveX0ToX1();
+        gen.emitLoadLocal32(remainTemp);
+        gen.emit(stencil_sub_i32);
+        gen.emitStoreLocal32(remainTemp);
+        gen.emitBranch(loopStart);
+        gen.bindLabel(loopEnd);
+        temps.restore(mark);
     }
 
     /// Get the mangled name for a function.
@@ -2101,10 +2168,7 @@ class NativeCompiledFunction : CompiledFunction {
             // (D guarantees .init = 0 for int types, null for slices)
             if (!varDecl.initializer && varSize > 0) {
                 if (nli.isStaticArray || nli.isStruct || nli.isSlice || (nli.isClass && !isObjCRef)) {
-                    gen.emitImm32(stencil_load_imm32, 0);
-                    for (size_t off = 0; off < varSize; off += 4) {
-                        gen.emitStoreLocal32(nli.offset + off);
-                    }
+                    emitZeroLocalBytes(nli.offset, varSize);
                 } else if (isObjCRef || isPtr) {
                     // ObjC ref / raw pointer: zero 8-byte value
                     gen.emitLoadImm64(0);
@@ -4219,6 +4283,37 @@ class NativeCompiledFunction : CompiledFunction {
                             else
                                 gen.emitLoadFromPointer(0);
                             return;
+                    }
+                }
+                // Manifest constant arrays: enum table = makeTable(); return table[i];
+                auto symbol = symbolTable.lookupSymbol(ident.name);
+                if (symbol && symbol.isConstant) {
+                    if (auto manifest = cast(ManifestConstantDecl)symbol.declaration) {
+                        manifest.ensureEvaluated();
+                        if (manifest.isArrayType && !manifest.isNestedArrayType) {
+                            uint elemSize = manifest.ctfeElementSize > 0 ? manifest.ctfeElementSize : 4;
+                            auto mark = temps.save();
+                            size_t ptrTemp = temps.alloc(8);
+                            emitManifestArrayPtr(manifest);
+                            gen.emitStorePtr(ptrTemp);
+                            compileExpression(indexExpr.index);
+                            if (elemSize > 1) {
+                                gen.emitMoveX0ToX1();
+                                gen.emitImm32(stencil_load_imm32, elemSize);
+                                gen.emit(stencil_mul_i32);
+                            }
+                            gen.emitMoveX0ToX1();
+                            gen.emitLoadPtr(ptrTemp);
+                            gen.emit(stencil_add_i64);
+                            if (elemSize == 1)
+                                gen.emitLoadByteFromPointer(0);
+                            else if (elemSize == 8)
+                                gen.emit(stencil_load_i64);
+                            else
+                                gen.emitLoadFromPointer(0);
+                            temps.restore(mark);
+                            return;
+                        }
                     }
                 }
             }

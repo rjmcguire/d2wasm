@@ -1467,10 +1467,39 @@ mixin template StatementEmitter() {
         // Explicitly zero-initialize (shadow stack may have stale data from prior calls)
         if (!stmt.initializer) {
             auto totalBytes = info.elementCount * info.elementSize;
-            for (uint offset = 0; offset < totalBytes; offset += 4) {
-                emitFPOffset(out_, info.frameOffset + offset);
+            if (totalBytes > 64) {
+                emitFPOffset(out_, info.frameOffset);
+                emitLocalSet(out_, tempLocalA);
+                emitFPOffset(out_, info.frameOffset + cast(int)totalBytes);
+                emitLocalSet(out_, tempLocalB);
+                out_ ~= Op.block;
+                out_ ~= cast(ubyte)BlockType.void_;
+                blockDepth++;
+                out_ ~= Op.loop;
+                out_ ~= cast(ubyte)BlockType.void_;
+                blockDepth++;
+                emitLocalGet(out_, tempLocalA);
+                emitLocalGet(out_, tempLocalB);
+                out_ ~= Op.i32_eq;
+                emitBrIf(out_, 1);
+                emitLocalGet(out_, tempLocalA);
                 emitI32Const(out_, 0);
                 emitI32Store(out_);
+                emitLocalGet(out_, tempLocalA);
+                emitI32Const(out_, 4);
+                out_ ~= Op.i32_add;
+                emitLocalSet(out_, tempLocalA);
+                emitBr(out_, 0);
+                blockDepth--;
+                out_ ~= Op.end;
+                blockDepth--;
+                out_ ~= Op.end;
+            } else {
+                for (uint offset = 0; offset < totalBytes; offset += 4) {
+                    emitFPOffset(out_, info.frameOffset + offset);
+                    emitI32Const(out_, 0);
+                    emitI32Store(out_);
+                }
             }
             return;
         }
