@@ -4,6 +4,9 @@ Animated plasma: a sine table and RGB palette are generated at compile
 time (`enum SINE = makeSine(); enum PAL = makePalette();`), then each
 frame is written into a pixel buffer and blitted with `XPutImage`.
 
+A HUD bar shows host RSS (`getrusage`), the 250 KiB pixel buffer, the
+2 KiB CTFE tables, and instantaneous FPS.
+
 Click the window or press a key to quit.
 
 ```bash

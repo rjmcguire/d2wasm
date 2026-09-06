@@ -27,12 +27,29 @@ extern(C) long XCreateImage(long dpy, long visual, int depth, int format, int of
     char* data, int width, int height, int bitmapPad, int bytesPerLine);
 extern(C) int XPutImage(long dpy, long drawable, long gc, long image,
     int srcX, int srcY, int destX, int destY, int width, int height);
+extern(C) int XSetForeground(long dpy, long gc, long pixel);
+extern(C) int XFillRectangle(long dpy, long win, long gc, int x, int y, int w, int h);
+extern(C) int XDrawString(long dpy, long win, long gc, int x, int y, char* str, int len);
 extern(C) int XCloseDisplay(long dpy);
 extern(C) int usleep(int usec);
+extern(C) int getrusage(int who, RUsage* usage);
+extern(C) int gettimeofday(TimeVal* tv, long tz);
 
 struct XEvent {
     int type;
     long[23] rest;
+}
+
+// Linux x86-64: timeval + timeval + ru_maxrss + 13 more longs = 144 bytes.
+struct RUsage {
+    long[4] times;
+    long maxrss;
+    long[13] rest;
+}
+
+struct TimeVal {
+    long sec;
+    long usec;
 }
 
 enum KEY_PRESS = 2;
@@ -45,6 +62,9 @@ enum ZPIXMAP = 2;
 
 enum W = 320;
 enum H = 200;
+enum HUD_H = 18;
+enum PIX_KB = (W * H * 4) / 1024;
+enum TBL_KB = 2;
 
 // Taylor sine, range-reduced. Used only at compile time.
 double sin_t(double x) {
@@ -105,6 +125,64 @@ int[256] makePalette() {
 enum SINE = makeSine();
 enum PAL = makePalette();
 
+int putStr(char* dst, int pos, char* s, int n) {
+    int i = 0;
+    while (i < n) {
+        dst[pos] = s[i];
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+
+int putInt(char* dst, int pos, int v) {
+    if (v < 0) {
+        dst[pos] = 45;
+        pos = pos + 1;
+        v = 0 - v;
+    }
+    if (v == 0) {
+        dst[pos] = 48;
+        return pos + 1;
+    }
+    int[12] digits;
+    int n = 0;
+    while (v > 0) {
+        digits[n] = 48 + (v % 10);
+        n = n + 1;
+        v = v / 10;
+    }
+    while (n > 0) {
+        n = n - 1;
+        dst[pos] = cast(char)digits[n];
+        pos = pos + 1;
+    }
+    return pos;
+}
+
+int formatHud(char* dst, int rssKb, int fps) {
+    int n = 0;
+    n = putStr(dst, n, "rss \0".ptr, 4);
+    n = putInt(dst, n, rssKb);
+    n = putStr(dst, n, "k  pix \0".ptr, 7);
+    n = putInt(dst, n, PIX_KB);
+    n = putStr(dst, n, "k  tbl \0".ptr, 7);
+    n = putInt(dst, n, TBL_KB);
+    n = putStr(dst, n, "k  \0".ptr, 3);
+    n = putInt(dst, n, fps);
+    n = putStr(dst, n, "fps\0".ptr, 3);
+    return n;
+}
+
+void drawHud(long dpy, long win, long xgc, long black, long white, int rssKb, int fps) {
+    char[64] line;
+    int n = formatHud(line.ptr, rssKb, fps);
+    XSetForeground(dpy, xgc, black);
+    XFillRectangle(dpy, win, xgc, 0, H - HUD_H, W, HUD_H);
+    XSetForeground(dpy, xgc, white);
+    XDrawString(dpy, win, xgc, 6, H - 5, line.ptr, n);
+}
+
 void plasmaFrame(int* pix, int t) {
     int y = 0;
     while (y < H) {
@@ -147,8 +225,16 @@ int main() {
         return 2;
 
     XEvent ev;
+    RUsage ru;
+    TimeVal tv;
+    long lastSec = 0;
+    long lastUsec = 0;
+    int fps = 0;
     int t = 0;
     int running = 1;
+    gettimeofday(&tv, 0);
+    lastSec = tv.sec;
+    lastUsec = tv.usec;
     while (running != 0) {
         while (XPending(dpy) != 0) {
             XNextEvent(dpy, &ev);
@@ -160,6 +246,14 @@ int main() {
         if (running != 0) {
             plasmaFrame(pix.ptr, t);
             XPutImage(dpy, win, xgc, img, 0, 0, 0, 0, W, H);
+            getrusage(0, &ru);
+            gettimeofday(&tv, 0);
+            int dt = cast(int)((tv.sec - lastSec) * 1000000 + (tv.usec - lastUsec));
+            if (dt > 0)
+                fps = 1000000 / dt;
+            lastSec = tv.sec;
+            lastUsec = tv.usec;
+            drawHud(dpy, win, xgc, black, white, cast(int)ru.maxrss, fps);
             XFlush(dpy);
             t = t + 1;
             usleep(16000);
