@@ -1,0 +1,6 @@
+{
+  "name": "elf_aot",
+  "description": "Native AOT: compile to host object, link, run (ELF on Linux)",
+  "type": "shell",
+  "script": "run_test.sh"
+}

@@ -7,6 +7,9 @@
 module codegen.native.native_emitter;
 
 import codegen.native.macho_writer;
+version (X86_64) {
+    import codegen.native.elf_writer : ElfWriter;
+}
 import codegen.native.backend : NativeCompiledFunction;
 import codegen.target : sliceInfo, SliceInfo;
 import codegen.mangle : computeMangledName;
@@ -184,95 +187,125 @@ class NativeModuleEmitter : EmitterCache {
         ubyte[] wrapper = emitMainWrapper(code.length, mainOffset, mainFunc.needsArena,
                                           hasObjCInit ? objcInitOffset : size_t.max);
 
-        // Combine: user functions + _main wrapper
+        // Combine: user functions + C `main` wrapper
         ubyte[] fullCode = code ~ wrapper;
         size_t wrapperOffset = code.length;
 
-        // Build Mach-O .o
-        auto writer = new MachOWriter();
-        writer.setTextSection(fullCode);
-
-        // Constant data section (error messages, C strings → __DATA,__const)
         auto objData = compiled.getObjectData();
         bool hasConstData = objData.length > 0;
-        if (hasConstData)
-            writer.setDataConstSection(objData);
-
-        // Writable data section (mutable globals → __DATA,__data)
         auto globData = compiled.getGlobalData();
         bool hasGlobalData = globData.length > 0;
-        if (hasGlobalData)
-            writer.setDataSection(globData);
 
-        // External undefined symbols (write, _exit, etc. — resolved by linker)
-        foreach (sym; compiled.getObjectExternalSymbols())
-            writer.addExternalSymbol(sym);
-
-        // Const data symbols (section 2: __DATA,__const)
-        ulong dataVmBase = (fullCode.length + 7) & ~7;
-        if (hasConstData) {
-            foreach (ds; compiled.getObjectDataSymbols())
-                writer.addLocalSymbol(ds.name, 2, dataVmBase + ds.offset);
-        }
-
-        // Global data symbols (section 2 or 3 depending on whether const data exists)
-        if (hasGlobalData) {
-            ubyte globalSectIdx = hasConstData ? 3 : 2;
-            ulong constSizePadded = hasConstData ? ((objData.length + 7) & ~7) : 0;
-            ulong globalVmBase = dataVmBase + constSizePadded;
-            foreach (ds; compiled.getGlobalDataSymbols())
-                writer.addLocalSymbol(ds.name, globalSectIdx, globalVmBase + ds.offset);
-        }
-
-        // Relocations (ADRP/ADD for data refs, BL for external calls, unsigned64 for vtable)
-        foreach (r; compiled.getObjectRelocations())
-            writer.addRelocation(r.sectionIndex, r.codeOffset, r.symbol, r.type);
-
-        // Export _main (C entry point).
-        // MachOWriter.addString prepends '_', so pass "main" → "_main" in Mach-O.
-        writer.addExportedSymbol("main", 1, wrapperOffset);
-
-        // Add user functions as local symbols (for debugging/nm)
-        foreach (func; funcs) {
-            string key = mangledNameOf(func);
-            size_t off = compiled.getFunctionOffset(key);
-            if (off != size_t.max)
-                writer.addLocalSymbol(key, 1, off);
-        }
-
-        // Add ObjC trampoline and init symbols (needed for ADRP/ADD relocations)
-        foreach (name; compiled.getObjCSymbolNames()) {
-            size_t off = compiled.getFunctionOffset(name);
-            if (off != size_t.max)
-                writer.addLocalSymbol(name, 1, off);
-        }
-
-        // Capture per-function code into cache for next compilation
-        foreach (ref info; compiled.getPerFunctionCode()) {
-            auto funcBytes = NativeCompiledFunction.extractFunctionBytes(code, info);
-            if (funcBytes !is null) {
-                codeCache[info.mangledName] = funcBytes;
-                // Compute and store source hash using per-module source text
-                foreach (func; funcs) {
-                    if (mangledNameOf(func) == info.mangledName) {
-                        string src = (info.mangledName in funcSourceText)
-                            ? funcSourceText[info.mangledName]
-                            : sourceText;
-                        auto loc = func.location;
-                        if (src.length > 0 && loc.endOffset > loc.startOffset
-                            && loc.endOffset <= src.length) {
-                            sourceHashes[info.mangledName] = CacheEntry.computeHash(
-                                src[loc.startOffset .. loc.endOffset]);
+        version (X86_64) {
+            auto writer = new ElfWriter();
+            writer.setTextSection(fullCode);
+            if (hasConstData)
+                writer.setDataConstSection(objData);
+            if (hasGlobalData)
+                writer.setDataSection(globData);
+            foreach (sym; compiled.getObjectExternalSymbols())
+                writer.addExternalSymbol(sym);
+            // ELF st_value is section-relative
+            if (hasConstData) {
+                foreach (ds; compiled.getObjectDataSymbols())
+                    writer.addLocalSymbol(ds.name, 2, ds.offset);
+            }
+            if (hasGlobalData) {
+                ubyte globalSectIdx = hasConstData ? 3 : 2;
+                foreach (ds; compiled.getGlobalDataSymbols())
+                    writer.addLocalSymbol(ds.name, globalSectIdx, ds.offset);
+            }
+            foreach (r; compiled.getObjectRelocations())
+                writer.addRelocation(r.sectionIndex, r.codeOffset, r.symbol, r.type);
+            writer.addExportedSymbol("main", 1, wrapperOffset);
+            foreach (func; funcs) {
+                string key = mangledNameOf(func);
+                size_t off = compiled.getFunctionOffset(key);
+                if (off != size_t.max)
+                    writer.addLocalSymbol(key, 1, off);
+            }
+            foreach (ref info; compiled.getPerFunctionCode()) {
+                auto funcBytes = NativeCompiledFunction.extractFunctionBytes(code, info);
+                if (funcBytes !is null) {
+                    codeCache[info.mangledName] = funcBytes;
+                    foreach (func; funcs) {
+                        if (mangledNameOf(func) == info.mangledName) {
+                            string src = (info.mangledName in funcSourceText)
+                                ? funcSourceText[info.mangledName]
+                                : sourceText;
+                            auto loc = func.location;
+                            if (src.length > 0 && loc.endOffset > loc.startOffset
+                                && loc.endOffset <= src.length) {
+                                sourceHashes[info.mangledName] = CacheEntry.computeHash(
+                                    src[loc.startOffset .. loc.endOffset]);
+                            }
+                            break;
                         }
-                        break;
                     }
                 }
             }
+            compiled.dispose();
+            return writer.finalize();
+        } else {
+            auto writer = new MachOWriter();
+            writer.setTextSection(fullCode);
+            if (hasConstData)
+                writer.setDataConstSection(objData);
+            if (hasGlobalData)
+                writer.setDataSection(globData);
+            foreach (sym; compiled.getObjectExternalSymbols())
+                writer.addExternalSymbol(sym);
+            ulong dataVmBase = (fullCode.length + 7) & ~7;
+            if (hasConstData) {
+                foreach (ds; compiled.getObjectDataSymbols())
+                    writer.addLocalSymbol(ds.name, 2, dataVmBase + ds.offset);
+            }
+            if (hasGlobalData) {
+                ubyte globalSectIdx = hasConstData ? 3 : 2;
+                ulong constSizePadded = hasConstData ? ((objData.length + 7) & ~7) : 0;
+                ulong globalVmBase = dataVmBase + constSizePadded;
+                foreach (ds; compiled.getGlobalDataSymbols())
+                    writer.addLocalSymbol(ds.name, globalSectIdx, globalVmBase + ds.offset);
+            }
+            foreach (r; compiled.getObjectRelocations())
+                writer.addRelocation(r.sectionIndex, r.codeOffset, r.symbol, r.type);
+            writer.addExportedSymbol("main", 1, wrapperOffset);
+            foreach (func; funcs) {
+                string key = mangledNameOf(func);
+                size_t off = compiled.getFunctionOffset(key);
+                if (off != size_t.max)
+                    writer.addLocalSymbol(key, 1, off);
+            }
+            foreach (name; compiled.getObjCSymbolNames()) {
+                size_t off = compiled.getFunctionOffset(name);
+                if (off != size_t.max)
+                    writer.addLocalSymbol(name, 1, off);
+            }
+
+            foreach (ref info; compiled.getPerFunctionCode()) {
+                auto funcBytes = NativeCompiledFunction.extractFunctionBytes(code, info);
+                if (funcBytes !is null) {
+                    codeCache[info.mangledName] = funcBytes;
+                    foreach (func; funcs) {
+                        if (mangledNameOf(func) == info.mangledName) {
+                            string src = (info.mangledName in funcSourceText)
+                                ? funcSourceText[info.mangledName]
+                                : sourceText;
+                            auto loc = func.location;
+                            if (src.length > 0 && loc.endOffset > loc.startOffset
+                                && loc.endOffset <= src.length) {
+                                sourceHashes[info.mangledName] = CacheEntry.computeHash(
+                                    src[loc.startOffset .. loc.endOffset]);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+
+            compiled.dispose();
+            return writer.finalize();
         }
-
-        compiled.dispose(); // free the malloc'd code buffer
-
-        return writer.finalize();
     }
 
 private:
@@ -286,14 +319,34 @@ private:
         return func.name;
     }
 
-    /// Emit a C ABI _main wrapper that optionally zeroes x0 for the arena parameter:
-    ///   STP x29, x30, [SP, #-16]!
-    ///   MOV x29, SP
-    ///   [MOV x0, #0]          — only if mainNeedsArena
-    ///   BL  <user_main>
-    ///   LDP x29, x30, [SP], #16
-    ///   RET
+    /// C ABI `main` wrapper that calls the D entry and returns its i32 result.
     static ubyte[] emitMainWrapper(size_t codeSize, size_t mainFuncOffset, bool mainNeedsArena,
+                                    size_t objcInitOffset = size_t.max) {
+        version (X86_64)
+            return emitMainWrapperX86(codeSize, mainFuncOffset, mainNeedsArena);
+        else
+            return emitMainWrapperArm64(codeSize, mainFuncOffset, mainNeedsArena, objcInitOffset);
+    }
+
+    ///   push rbp / mov rbp, rsp / [xor edi, edi] / call user_main / pop rbp / ret
+    static ubyte[] emitMainWrapperX86(size_t codeSize, size_t mainFuncOffset, bool mainNeedsArena) {
+        ubyte[] buf;
+        buf ~= 0x55;                               // push rbp
+        buf ~= [0x48, 0x89, 0xE5];                 // mov rbp, rsp
+        if (mainNeedsArena)
+            buf ~= [0x31, 0xFF];                   // xor edi, edi  (arena = 0)
+        uint callOff = cast(uint)buf.length;
+        buf ~= 0xE8;
+        buf ~= [0, 0, 0, 0];                       // call rel32 placeholder
+        int disp = cast(int)(cast(long)mainFuncOffset - cast(long)(codeSize + callOff + 5));
+        buf[callOff + 1 .. callOff + 5] = (cast(ubyte*)&disp)[0 .. 4];
+        buf ~= 0x5D;                               // pop rbp
+        buf ~= 0xC3;                               // ret
+        return buf;
+    }
+
+    /// ARM64: STP x29,x30 / MOV x29,SP / [MOV x0,#0] / BL user_main / LDP / RET
+    static ubyte[] emitMainWrapperArm64(size_t codeSize, size_t mainFuncOffset, bool mainNeedsArena,
                                     size_t objcInitOffset = size_t.max) {
         bool hasObjCInit = objcInitOffset != size_t.max;
         uint instrCount = 5 + (mainNeedsArena ? 1 : 0) + (hasObjCInit ? 1 : 0);

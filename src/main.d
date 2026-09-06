@@ -719,14 +719,8 @@ int compileFile(CompilerOptions options) {
                 return result;
             }
 
-            if (options.target != "arm64-macos") {
-                throw new Exception(
-                    "Native AOT object output is not yet implemented for " ~ options.target ~
-                    ". Use --run for in-process JIT execution.");
-            }
-
-            // Native ARM64 Mach-O object file output
-            log(1, "Generating ARM64 Mach-O object file...");
+            // Native object file (Mach-O on arm64-macos, ELF on x86_64-linux)
+            log(1, "Generating native object file (", options.target, ")...");
 
             import codegen.native.native_emitter : NativeModuleEmitter;
             import cache.compiler_cache : CompilerCache;
@@ -835,7 +829,9 @@ int compileFile(CompilerOptions options) {
                 log(1, "Generated ", objBytes.length, " bytes → ", objFile);
 
                 // Build linker command
-                string[] ccArgs = ["cc", "-o", options.outputFile, objFile, "-lSystem", "-lobjc"];
+                string[] ccArgs = ["cc", "-o", options.outputFile, objFile];
+                if (options.target == "arm64-macos")
+                    ccArgs ~= ["-lSystem", "-lobjc"];
                 foreach (fw; options.linkFrameworks)
                     ccArgs ~= ["-framework", fw];
                 foreach (lib; options.linkDylibs)
