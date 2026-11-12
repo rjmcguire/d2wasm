@@ -1,0 +1,7 @@
+{
+  "name": "win64_host_call",
+  "description": "Native JIT passes an integer through the host C ABI into __writeln and back out",
+  "type": "native_jit",
+  "expected_output": "42",
+  "expected_exit": 43
+}

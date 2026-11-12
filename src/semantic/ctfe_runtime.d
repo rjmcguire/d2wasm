@@ -430,12 +430,7 @@ class CTFERuntime {
      */
     private void linkFFIFunctions(const(ubyte)[] wasmBytes) {
         import runtime.ffi_bindings;
-        import core.sys.posix.dlfcn : dlsym;
-        version (OSX) {
-            import core.sys.darwin.dlfcn : RTLD_DEFAULT;
-        } else {
-            import core.sys.linux.dlfcn : RTLD_DEFAULT;
-        }
+        import runtime.host_dl : hostDlsym;
 
         // Parse ffi_meta entries from WASM binary
         auto entries = parseFFIMetaSection(wasmBytes);
@@ -445,7 +440,7 @@ class CTFERuntime {
         foreach (ref entry; entries) {
             // Resolve native function via dlsym — use nativeName alias if present
             string lookupName = entry.nativeName.length > 0 ? entry.nativeName : entry.name;
-            void* fnPtr = dlsym(RTLD_DEFAULT, lookupName.toStringz);
+            void* fnPtr = hostDlsym(lookupName.toStringz);
             if (fnPtr is null) {
                 stderr.writeln("FFI warning: dlsym failed for '", lookupName, "' — skipping");
                 continue;

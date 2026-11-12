@@ -12,7 +12,7 @@ import codegen.native.stencil_catalog;
 import codegen.native.arm64.stencil_table;
 import codegen.native.codegen_interface : Label, NativeDataSection, NativeCTFEContext, 
     HostFunctionPtr, HostFunctionTable, CTFEErrorKind, ctfeErrorMessage, longjmp;
-import core.sys.posix.sys.mman;
+import codegen.native.host_memory;
 import core.stdc.string : memcpy;
 import core.stdc.stdlib : malloc, free;
 
@@ -386,6 +386,10 @@ struct NativeCodeGen {
 
     // ========== Function Calls ==========
     
+    void emitAllocateShadow() {}
+    void emitReleaseShadow() {}
+    void emitLoadIncomingStackArg(int index) {}
+
     /// Emit BL (branch with link) to a label
     void emitCall(Label target) {
         uint callOffset = pos;

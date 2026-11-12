@@ -2,7 +2,8 @@
 # Milestone 260: Verify AOT ObjC symbol relocations
 # Compiles to native binary (not JIT), links with ObjC frameworks, runs
 DIR="$(cd "$(dirname "$0")" && pwd)"
-COMPILER="$DIR/../../../d2wasm"
+source "$DIR/../../d2wasm_bin.sh"
+COMPILER="$(d2wasm_bin "$DIR/../../..")"
 BIN="$DIR/test_bin"
 
 # Clean up

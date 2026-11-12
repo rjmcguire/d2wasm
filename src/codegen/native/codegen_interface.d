@@ -15,17 +15,8 @@
 module codegen.native.codegen_interface;
 
 import codegen.native.stencil_catalog;
-import core.sys.posix.sys.mman;
+public import codegen.native.host_memory;
 import core.stdc.string : memcpy;
-
-// mmap flags not uniformly named across platforms
-version (OSX) {
-    enum MAP_ANONYMOUS = 0x1000;
-    enum MAP_JIT = 0x0800;
-} else {
-    alias MAP_ANONYMOUS = MAP_ANON;
-    enum MAP_JIT = 0;
-}
 
 // setjmp/longjmp - D's stdlib doesn't have these for macOS, so we define them ourselves
 version (OSX) {
@@ -41,14 +32,26 @@ version (OSX) {
 } else version (linux) {
     // Linux uses the POSIX definitions
     import core.sys.posix.setjmp : jmp_buf;
+} else version (Windows) {
+    // MSVC x64: jmp_buf is SETJMP_FLOAT128[16] (256 bytes, 16-aligned)
+    align(16) struct jmp_buf {
+        ubyte[256] data;
+    }
 } else {
     static assert(false, "Unsupported platform for setjmp");
 }
 
-// Declare setjmp/longjmp as extern(C)
-extern(C) nothrow @nogc {
-    int setjmp(ref jmp_buf env);
-    void longjmp(ref jmp_buf env, int val);
+version (Windows) {
+    extern(C) nothrow @nogc {
+        int _setjmp(ref jmp_buf env);
+        alias setjmp = _setjmp;
+        void longjmp(ref jmp_buf env, int val);
+    }
+} else {
+    extern(C) nothrow @nogc {
+        int setjmp(ref jmp_buf env);
+        void longjmp(ref jmp_buf env, int val);
+    }
 }
 // ============================================================================
 // CTFE Error Handling

@@ -24,6 +24,14 @@ import server.lsp_types;
 import server.warm_state;
 import server.position_index;
 
+version (Windows) {
+    extern (C) nothrow @nogc {
+        int _dup(int);
+        int _dup2(int, int);
+        int _close(int);
+    }
+}
+
 class LSPServer {
     private {
         WarmState warmState;
@@ -2097,19 +2105,31 @@ class LSPServer {
 
         int result;
         {
-            import core.sys.posix.unistd : dup, dup2, close;
             import core.stdc.stdio : fflush;
+            version (Posix) {
+                import core.sys.posix.unistd : dup, dup2, close;
+            }
 
             stdout.flush();              // flush D stdout buffer
             fflush(null);                // flush all C stdio buffers
-            int savedFd = dup(1);        // save original stdout fd
-            dup2(2, 1);                  // redirect fd 1 → fd 2 (stderr)
+            version (Windows) {
+                int savedFd = _dup(1);
+                _dup2(2, 1);
+            } else {
+                int savedFd = dup(1);        // save original stdout fd
+                dup2(2, 1);                  // redirect fd 1 → fd 2 (stderr)
+            }
 
             scope(exit) {
                 stdout.flush();
                 fflush(null);
-                dup2(savedFd, 1);        // restore original stdout
-                close(savedFd);
+                version (Windows) {
+                    _dup2(savedFd, 1);
+                    _close(savedFd);
+                } else {
+                    dup2(savedFd, 1);        // restore original stdout
+                    close(savedFd);
+                }
             }
 
             try {

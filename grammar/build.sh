@@ -5,10 +5,45 @@ set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+is_windows() {
+    if [ "${OS:-}" = "Windows_NT" ]; then
+        return 0
+    fi
+    case "$(uname -s 2>/dev/null || true)" in
+        MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    esac
+    return 1
+}
+
+if is_windows; then
+    CC="${CC:-clang}"
+    OBJEXT=obj
+    LIBEXT=lib
+    PICFLAGS=""
+    EXTRA_CFLAGS="-D_CRT_SECURE_NO_WARNINGS"
+    pack_static() {
+        dest="$1"
+        shift
+        llvm-lib "-out:$dest" "$@"
+    }
+else
+    CC="${CC:-cc}"
+    OBJEXT=o
+    LIBEXT=a
+    PICFLAGS="-fPIC"
+    EXTRA_CFLAGS=""
+    pack_static() {
+        dest="$1"
+        shift
+        ar rcs "$dest" "$@"
+    }
+fi
+
 TS_VER="0.25.10"
 TS_DIR="thirdparty/tree-sitter"
-if [ ! -f "$TS_DIR/libtree-sitter.a" ]; then
-    echo "Building $TS_DIR/libtree-sitter.a"
+TS_LIB="$TS_DIR/libtree-sitter.$LIBEXT"
+if [ ! -f "$TS_LIB" ]; then
+    echo "Building $TS_LIB"
     mkdir -p thirdparty
     if [ ! -f "$TS_DIR/Makefile" ]; then
         curl -fsSL -o /tmp/tree-sitter.tar.gz \
@@ -18,13 +53,22 @@ if [ ! -f "$TS_DIR/libtree-sitter.a" ]; then
         mv "/tmp/tree-sitter-${TS_VER}" "$TS_DIR"
         rm -f /tmp/tree-sitter.tar.gz
     fi
-    make -C "$TS_DIR" -j"$(nproc 2>/dev/null || echo 4)"
+    if is_windows; then
+        ts_obj="$TS_DIR/libtree-sitter.$OBJEXT"
+        $CC -c -O2 -std=c11 $EXTRA_CFLAGS \
+            -I "$TS_DIR/lib/include" -I "$TS_DIR/lib/src" \
+            -o "$ts_obj" "$TS_DIR/lib/src/lib.c"
+        pack_static "$TS_LIB" "$ts_obj"
+        rm -f "$ts_obj"
+    else
+        make -C "$TS_DIR" -j"$(nproc 2>/dev/null || echo 4)"
+    fi
 fi
 
 build_grammar() {
     name="$1"
     dir="grammar/tree-sitter-$name"
-    out="$dir/libtree-sitter-$name.a"
+    out="$dir/libtree-sitter-$name.$LIBEXT"
 
     if [ ! -d "$dir" ]; then
         echo "error: missing $dir (run: git submodule update --init --recursive)" >&2
@@ -58,11 +102,11 @@ build_grammar() {
     echo "Building $out"
     objs=""
     for f in $srcs; do
-        obj="${f%.*}.o"
-        cc -c -O2 -fPIC -I "$dir/src" "$f" -o "$obj"
+        obj="${f%.*}.$OBJEXT"
+        $CC -c -O2 $PICFLAGS $EXTRA_CFLAGS -I "$dir/src" "$f" -o "$obj"
         objs="$objs $obj"
     done
-    ar rcs "$out" $objs
+    pack_static "$out" $objs
     rm -f $objs
 }
 

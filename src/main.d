@@ -42,7 +42,7 @@ import codegen.native.backend : NativeCompileError;
 struct CompilerOptions {
     string inputFile;
     string outputFile;
-    string target = "wasm";   // Target: wasm, native, arm64-macos, x86_64-linux
+    string target = "wasm";   // Target: wasm, native, arm64-macos, x86_64-linux, x86_64-windows
     string backend = "wasm";  // Backend: "wasm" or "native"
     int verbosity = 0;        // 0=quiet, 1=-v, 2=-vv, 3=-vvv
     bool dryRun = false;
@@ -137,7 +137,7 @@ int main(string[] args) {
             "input|i", "Input D source file", &options.inputFile,
             "output|o", "Output WASM file (default: input.wasm)", &options.outputFile,
             "outdir", "Output directory for parallel mode", &options.outputDir,
-            "target|t", "Target: wasm (default), native, arm64-macos, x86_64-linux", &options.target,
+            "target|t", "Target: wasm (default), native, arm64-macos, x86_64-linux, x86_64-windows", &options.target,
             "backend|b", "Code generation backend: wasm, native (default: wasm)", &options.backend,
             "run|r", "Compile and run immediately (like rdmd)", &options.run,
             "func|f", "Function to run with --run (default: main)", &options.runFunc,
@@ -265,6 +265,11 @@ void resolveTargetAlias(ref CompilerOptions options) {
             options.target = "x86_64-linux";
         else
             throw new Exception("--target=native is not implemented on this Linux architecture");
+    } else version (Windows) {
+        version (X86_64)
+            options.target = "x86_64-windows";
+        else
+            throw new Exception("--target=native is not implemented on this Windows architecture");
     } else {
         throw new Exception("--target=native is not supported on this platform");
     }
@@ -272,19 +277,19 @@ void resolveTargetAlias(ref CompilerOptions options) {
 
 /// Targets that execute via in-process native JIT (--run).
 bool isNativeJitTarget(string target) {
-    return target == "arm64-macos" || target == "x86_64-linux";
+    return target == "arm64-macos" || target == "x86_64-linux" || target == "x86_64-windows";
 }
 
 /// dlopen a library named by pragma(lib)/--link-dylib.
 /// Bare names like "X11" try libX11.so.6 / libX11.so so WASM --run can dlsym.
 void* loadHostLibrary(string spec, string sourceDir = "") {
-    import core.sys.posix.dlfcn : dlopen, RTLD_LAZY, RTLD_GLOBAL;
+    import runtime.host_dl : hostLoadLibrary;
     import std.path : isAbsolute, buildPath;
 
     string[] candidates;
     if (spec.length == 0)
         return null;
-    if (isAbsolute(spec) || spec.canFind("/")) {
+    if (isAbsolute(spec) || spec.canFind("/") || spec.canFind("\\")) {
         candidates ~= isAbsolute(spec) ? spec : buildPath(sourceDir, spec);
     } else {
         candidates ~= spec;
@@ -298,9 +303,16 @@ void* loadHostLibrary(string spec, string sourceDir = "") {
             if (!spec.endsWith(".dylib") && spec.indexOf('.') < 0)
                 candidates ~= "lib" ~ spec ~ ".dylib";
         }
+        version (Windows) {
+            if (spec.indexOf('.') < 0) {
+                candidates ~= spec ~ ".dll";
+                if (!spec.startsWith("lib"))
+                    candidates ~= "lib" ~ spec ~ ".dll";
+            }
+        }
     }
     foreach (c; candidates) {
-        auto h = dlopen((c ~ "\0").ptr, RTLD_LAZY | RTLD_GLOBAL);
+        auto h = hostLoadLibrary(c);
         if (h !is null)
             return h;
     }
@@ -558,15 +570,19 @@ int compileFile(CompilerOptions options) {
 
         // Load frameworks for FFI early — before CTFE, so dlsym can find symbols
         if (options.linkFrameworks.length > 0) {
-            import core.sys.posix.dlfcn : dlopen, RTLD_LAZY, RTLD_GLOBAL;
-            foreach (fw; options.linkFrameworks) {
-                string path = "/System/Library/Frameworks/" ~ fw ~ ".framework/" ~ fw;
-                auto handle = dlopen((path ~ "\0").ptr, RTLD_LAZY | RTLD_GLOBAL);
-                if (handle is null) {
-                    log(1, "Warning: could not load framework '", fw, "'");
-                } else {
-                    log(2, "Loaded framework: ", fw);
+            version (OSX) {
+                import core.sys.posix.dlfcn : dlopen, RTLD_LAZY, RTLD_GLOBAL;
+                foreach (fw; options.linkFrameworks) {
+                    string path = "/System/Library/Frameworks/" ~ fw ~ ".framework/" ~ fw;
+                    auto handle = dlopen((path ~ "\0").ptr, RTLD_LAZY | RTLD_GLOBAL);
+                    if (handle is null) {
+                        log(1, "Warning: could not load framework '", fw, "'");
+                    } else {
+                        log(2, "Loaded framework: ", fw);
+                    }
                 }
+            } else {
+                log(1, "Warning: --link-framework is macOS-only");
             }
         }
 
@@ -753,7 +769,7 @@ int compileFile(CompilerOptions options) {
                 return result;
             }
 
-            // Native object file (Mach-O on arm64-macos, ELF on x86_64-linux)
+            // Native object file (Mach-O, ELF, or COFF)
             log(1, "Generating native object file (", options.target, ")...");
 
             import codegen.native.native_emitter : NativeModuleEmitter;
@@ -862,8 +878,12 @@ int compileFile(CompilerOptions options) {
                 std.file.write(objFile, objBytes);
                 log(1, "Generated ", objBytes.length, " bytes → ", objFile);
 
-                // Build linker command
-                string[] ccArgs = ["cc", "-o", options.outputFile, objFile];
+                // Build linker command. Windows has clang, not cc.
+                version (Windows)
+                    string linker = "clang";
+                else
+                    string linker = "cc";
+                string[] ccArgs = [linker, "-o", options.outputFile, objFile];
                 if (options.target == "arm64-macos")
                     ccArgs ~= ["-lSystem", "-lobjc"];
                 foreach (fw; options.linkFrameworks)
@@ -1134,16 +1154,9 @@ int compileFile(CompilerOptions options) {
  * Run watch mode - recompile on file changes.
  */
 int runWatch(CompilerOptions options) {
-    import watcher.watcher : createDebouncedWatcher, DebouncedWatcher;
-    version (OSX) {
-        import watcher.fsevents_watcher : FSEventsWatcher;
-    }
-    import cache.entry : SourceHash, CacheEntry;
-    import std.datetime : Clock;
+    import watcher.watcher : DebouncedWatcher;
     import std.path : dirName;
-    import core.thread : Thread;
-    import core.time : dur;
-    
+
     writeln("[", formatTime(), "] Watching: ", options.inputFile);
     writeln("[", formatTime(), "] Output: ", options.outputFile);
     if (options.cacheDir.length > 0) {
@@ -1151,53 +1164,52 @@ int runWatch(CompilerOptions options) {
     }
     writeln();
     stdout.flush();
-    
-    // Track last error hash to avoid repeating same error
+
     ubyte[32] lastErrorHash;
     bool hadError = false;
-    
+
     // Initial compile
     auto result = compileFileForWatch(options, lastErrorHash, hadError);
-    
-    // Create watcher
-    version(OSX) {
-        auto innerWatcher = new FSEventsWatcher();
-        
-        auto watcher = new DebouncedWatcher(innerWatcher, (paths) {
-            import std.algorithm : any;
-            import std.path : extension;
-            
-            // Filter to only .d files
-            bool hasD = paths.any!(p => p.extension == ".d");
-            if (!hasD) return;
-            
-            writeln();
-            writeln("[", formatTime(), "] Changed: ", options.inputFile);
-            stdout.flush();
-            compileFileForWatch(options, lastErrorHash, hadError);
-            stdout.flush();
-        }, 200);
-        
-        // Watch the directory containing the file
-        innerWatcher.setCallback((paths) {
-            watcher.onRawChange(paths);
-        });
-        
-        string watchDir = dirName(options.inputFile);
-        if (watchDir.length == 0) watchDir = ".";
-        innerWatcher.addPath(watchDir);
-        
-        writeln("[", formatTime(), "] Press Ctrl+C to stop\n");
-        stdout.flush();
-        
-        // This blocks until stopped
-        watcher.start();
+
+    string watchDir = dirName(options.inputFile);
+    if (watchDir.length == 0) watchDir = ".";
+
+    version (OSX) {
+        import watcher.fsevents_watcher : FSEventsWatcher;
+        watchLoop(new FSEventsWatcher(), options, lastErrorHash, hadError, watchDir);
+    } else version (Windows) {
+        import watcher.win32_watcher : Win32Watcher;
+        watchLoop(new Win32Watcher(), options, lastErrorHash, hadError, watchDir);
     } else {
         writeln("Watch mode not supported on this platform");
         return 1;
     }
-    
-    return 0;
+    return result;
+}
+
+/// Block on a platform watcher and recompile when a .d file in the directory changes.
+private void watchLoop(Watcher)(Watcher inner, ref CompilerOptions options,
+        ref ubyte[32] lastErrorHash, ref bool hadError, string watchDir) {
+    import watcher.watcher : DebouncedWatcher;
+    import std.algorithm : any;
+    import std.path : extension;
+
+    auto watcher = new DebouncedWatcher(inner, (paths) {
+        if (!paths.any!(p => p.extension == ".d"))
+            return;
+        writeln();
+        writeln("[", formatTime(), "] Changed: ", options.inputFile);
+        stdout.flush();
+        compileFileForWatch(options, lastErrorHash, hadError);
+        stdout.flush();
+    }, 200);
+
+    inner.setCallback((paths) { watcher.onRawChange(paths); });
+    inner.addPath(watchDir);
+
+    writeln("[", formatTime(), "] Press Ctrl+C to stop\n");
+    stdout.flush();
+    watcher.start();
 }
 
 /// Format current time for log output

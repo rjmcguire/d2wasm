@@ -148,10 +148,13 @@ class DebouncedWatcher : IFileWatcher {
  * Create a platform-appropriate file watcher.
  */
 IFileWatcher createWatcher() {
-    version(OSX) {
+    version (OSX) {
         import watcher.fsevents_watcher : FSEventsWatcher;
         return new FSEventsWatcher();
-    } else version(linux) {
+    } else version (Windows) {
+        import watcher.win32_watcher : Win32Watcher;
+        return new Win32Watcher();
+    } else version (linux) {
         // TODO: Implement inotify watcher
         assert(false, "Linux watcher not yet implemented");
     } else {

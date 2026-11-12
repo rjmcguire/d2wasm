@@ -232,9 +232,14 @@ void printError(E)(E exception) if (is(typeof(exception.location) : SourceLocati
  * Detect if we're running in a TTY and enable/disable colors
  */
 shared static this() {
-    import core.sys.posix.unistd : isatty, STDERR_FILENO;
-    version(Posix) {
+    version (Posix) {
+        import core.sys.posix.unistd : isatty, STDERR_FILENO;
         Colors.enabled = isatty(STDERR_FILENO) != 0;
+    } else version (Windows) {
+        import core.sys.windows.winbase : GetStdHandle, STD_ERROR_HANDLE;
+        import core.sys.windows.wincon : GetConsoleMode;
+        uint mode;
+        Colors.enabled = GetConsoleMode(GetStdHandle(STD_ERROR_HANDLE), &mode) != 0;
     } else {
         Colors.enabled = false;
     }

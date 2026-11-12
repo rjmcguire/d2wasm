@@ -7,7 +7,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-COMPILER="$SCRIPT_DIR/d2wasm"
+source "$SCRIPT_DIR/tests/d2wasm_bin.sh"
+COMPILER="$(d2wasm_bin "$SCRIPT_DIR")"
 TESTS_DIR="$SCRIPT_DIR/tests/milestones"
 
 # Colors
@@ -86,6 +87,12 @@ run_test() {
         local expected_result=$(jq -r '.expected_result // "null"' "$config_file")
 
         if [ -n "$frameworks" ] && [ "$(uname)" != "Darwin" ]; then
+            echo -e "${YELLOW}SKIP${NC} $test_name (requires macOS frameworks)"
+            return 0
+        fi
+        # Same dependency, written into the source as pragma(lib) or extern(Objective-C)
+        # instead of link_frameworks. Darwin still runs the test with no extra flags.
+        if [ "$(uname)" != "Darwin" ] && grep -qE '/System/Library/Frameworks|extern\(Objective-C\)' "$test_file"; then
             echo -e "${YELLOW}SKIP${NC} $test_name (requires macOS frameworks)"
             return 0
         fi
@@ -198,6 +205,35 @@ run_test() {
             if [ $VERBOSE -eq 1 ]; then
                 echo "  Output: $run_output"
             fi
+            return 1
+        fi
+    fi
+
+    # Host-ABI JIT: --backend native --target native, on whatever this machine is.
+    if [ "$test_type" = "native_jit" ]; then
+        local run_output
+        run_output=$("$COMPILER" --backend native --target native --run "$test_file" 2>&1)
+        local run_exit=$?
+
+        local expected_output=$(jq -r '.expected_output // "null"' "$config_file")
+        if [ "$expected_output" != "null" ]; then
+            if ! echo "$run_output" | grep -qF "$expected_output"; then
+                echo -e "${RED}FAIL${NC} $test_name"
+                echo "  Expected output: $expected_output"
+                echo "  Actual output: $run_output"
+                echo "  Exit code: $run_exit"
+                return 1
+            fi
+        fi
+
+        if [ "$run_exit" -eq "$expected_exit" ]; then
+            echo -e "${GREEN}PASS${NC} $test_name (native jit exit: $run_exit)"
+            return 0
+        else
+            echo -e "${RED}FAIL${NC} $test_name"
+            echo "  Expected exit code: $expected_exit"
+            echo "  Actual exit code: $run_exit"
+            echo "  Output: $run_output"
             return 1
         fi
     fi
@@ -339,7 +375,8 @@ run_test() {
             
         wasm_import_exec)
             # Test with host function imports - uses import_test_harness
-            local harness="$SCRIPT_DIR/tests/import_test_harness"
+            local harness
+            harness="$(host_exe "$SCRIPT_DIR/tests" import_test_harness)"
             if [ ! -x "$harness" ]; then
                 # Try to build it
                 if [ -f "$harness.d" ]; then
@@ -447,6 +484,13 @@ run_test() {
             # Shell script test - run a custom test script
             local script=$(jq -r '.script // "run_test.sh"' "$config_file")
             local script_path="$test_dir/$script"
+
+            # AOT ObjC tests are shell scripts that link Foundation. The
+            # ffi_exec skip above does not apply to this type.
+            if [ "$(uname)" != "Darwin" ] && [ -f "$test_file" ] && grep -qE '/System/Library/Frameworks|extern\(Objective-C\)' "$test_file"; then
+                echo -e "${YELLOW}SKIP${NC} $test_name (requires macOS frameworks)"
+                return 0
+            fi
             
             if [ ! -x "$script_path" ]; then
                 echo -e "${RED}FAIL${NC} $test_name"

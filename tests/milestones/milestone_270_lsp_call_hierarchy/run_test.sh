@@ -9,8 +9,9 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-COMPILER="$SCRIPT_DIR/../../../d2wasm"
-WORK_DIR=$(mktemp -d)
+source "$SCRIPT_DIR/../../d2wasm_bin.sh"
+COMPILER="$(d2wasm_bin "$SCRIPT_DIR/../../..")"
+WORK_DIR=$(native_workdir "$(mktemp -d)")
 
 cleanup() {
     rm -rf "$WORK_DIR"

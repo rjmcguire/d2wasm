@@ -2,6 +2,8 @@
 # Build artifacts
 *.wasm
 d2wasm
+tests/unix_ndjson
+tests/unix_ndjson.exe
 *.o
 *.a
 tests/output_parity/**/test_bin

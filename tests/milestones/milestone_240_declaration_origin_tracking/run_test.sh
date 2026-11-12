@@ -10,8 +10,10 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-COMPILER="$SCRIPT_DIR/../../../d2wasm"
-WORK_DIR=$(mktemp -d)
+source "$SCRIPT_DIR/../../d2wasm_bin.sh"
+source "$SCRIPT_DIR/../../unix_sock.sh"
+COMPILER="$(d2wasm_bin "$SCRIPT_DIR/../../..")"
+WORK_DIR=$(native_workdir "$(mktemp -d)")
 
 cleanup() {
     rm -rf "$WORK_DIR"
@@ -66,10 +68,10 @@ EOF
 SERVER_PID=$!
 
 for i in $(seq 1 50); do
-    if [ -S "$SOCKET" ]; then break; fi
+    if server_ready "$SOCKET"; then break; fi
     sleep 0.1
 done
-if [ ! -S "$SOCKET" ]; then
+if ! server_ready "$SOCKET"; then
     echo "FAIL: Server did not start"
     cat "$WORK_DIR/server.log"
     kill "$SERVER_PID" 2>/dev/null || true
@@ -77,7 +79,7 @@ if [ ! -S "$SOCKET" ]; then
 fi
 
 send_request() {
-    echo "$1" | nc -N -U "$SOCKET" 2>/dev/null
+    echo "$1" | unix_request "$SOCKET" 2>/dev/null
 }
 
 # First compile

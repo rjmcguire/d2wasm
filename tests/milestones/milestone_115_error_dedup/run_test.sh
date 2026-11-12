@@ -4,7 +4,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-COMPILER="$SCRIPT_DIR/../../../d2wasm"
+source "$SCRIPT_DIR/../../d2wasm_bin.sh"
+COMPILER="$(d2wasm_bin "$SCRIPT_DIR/../../..")"
 TEST_DIR=$(mktemp -d)
 OUTPUT_FILE="$TEST_DIR/output.log"
 

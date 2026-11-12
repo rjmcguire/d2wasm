@@ -15,13 +15,15 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-COMPILER="$SCRIPT_DIR/../../../d2wasm"
-WORK_DIR=$(mktemp -d)
+source "$SCRIPT_DIR/../../d2wasm_bin.sh"
+source "$SCRIPT_DIR/../../unix_sock.sh"
+COMPILER="$(d2wasm_bin "$SCRIPT_DIR/../../..")"
+WORK_DIR=$(native_workdir "$(mktemp -d)")
 SOCKET="$WORK_DIR/server.sock"
 
 cleanup() {
-    if [ -S "$SOCKET" ]; then
-        echo '{"id":999,"method":"shutdown"}' | nc -N -U "$SOCKET" >/dev/null 2>&1 || true
+    if server_ready "$SOCKET"; then
+        echo '{"id":999,"method":"shutdown"}' | unix_request "$SOCKET" >/dev/null 2>&1 || true
         sleep 0.3
     fi
     if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -60,17 +62,17 @@ EOF
 SERVER_PID=$!
 
 for i in $(seq 1 50); do
-    if [ -S "$SOCKET" ]; then break; fi
+    if server_ready "$SOCKET"; then break; fi
     sleep 0.1
 done
-if [ ! -S "$SOCKET" ]; then
+if ! server_ready "$SOCKET"; then
     echo "FAIL: Server did not start"
     cat "$WORK_DIR/server.log"
     exit 1
 fi
 
 send_request() {
-    echo "$1" | nc -N -U "$SOCKET" 2>/dev/null
+    echo "$1" | unix_request "$SOCKET" 2>/dev/null
 }
 
 ###############################################################################

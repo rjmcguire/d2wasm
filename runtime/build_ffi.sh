@@ -6,6 +6,27 @@ set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+is_windows() {
+    if [ "${OS:-}" = "Windows_NT" ]; then
+        return 0
+    fi
+    case "$(uname -s 2>/dev/null || true)" in
+        MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    esac
+    return 1
+}
+
+if is_windows; then
+    # No libffi on the Windows host path yet — stubs keep the linker happy.
+    CC="${CC:-clang}"
+    OUT="runtime/ffi_trampoline.obj"
+    SRC="runtime/ffi_stubs.c"
+    if [ ! -f "$OUT" ] || [ "$SRC" -nt "$OUT" ]; then
+        $CC -c -O2 -D_CRT_SECURE_NO_WARNINGS "$SRC" -o "$OUT"
+    fi
+    exit 0
+fi
+
 WASM3_INC=""
 for d in \
     "$ROOT/thirdparty/wasm3-d/wasm3-main/source" \

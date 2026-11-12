@@ -5,9 +5,12 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/../../d2wasm_bin.sh"
+
 BACKEND="${1:?usage: run_test.sh <backend> <compiler>}"
 COMPILER="${2:?usage: run_test.sh <backend> <compiler>}"
-WORK_DIR=$(mktemp -d)
+WORK_DIR=$(native_workdir "$(mktemp -d)")
 
 cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT

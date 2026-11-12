@@ -9,7 +9,7 @@ module codegen.native.arm64.codegen;
 import codegen.native.codegen_interface;
 import codegen.native.stencil_catalog;
 import codegen.native.arm64.stencil_table;
-import core.sys.posix.sys.mman;
+import codegen.native.host_memory;
 import core.stdc.string : memcpy;
 
 import codegen.native.codegen_interface : MAP_ANONYMOUS, MAP_JIT;

@@ -117,8 +117,9 @@ int compileViaServer(CompilerOptions options) {
 }
 
 private Socket connectToServer(string socketPath) {
+    import server.unix_addr : unixSocketAddress;
     auto sock = new Socket(AddressFamily.UNIX, SocketType.STREAM);
-    sock.connect(new UnixAddress(socketPath));
+    sock.connect(unixSocketAddress(socketPath));
     return sock;
 }
 
@@ -137,9 +138,13 @@ private bool startServer(string socketPath, CompilerOptions options) {
 
     try {
         // Spawn server in background
+        version (Windows)
+            auto devNull = std.stdio.File("NUL", "w");
+        else
+            auto devNull = std.stdio.File("/dev/null", "w");
         auto pid = spawnProcess(args,
             std.stdio.stdin,
-            std.stdio.File("/dev/null", "w"),  // stdout
+            devNull,
             std.stdio.stderr);                  // stderr stays visible
         return true;
     } catch (Exception) {

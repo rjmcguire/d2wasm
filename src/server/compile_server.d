@@ -79,12 +79,14 @@ class CompileServer {
     }
 
     private bool bind() {
+        import server.unix_addr : unixSocketAddress;
+
         // Remove stale socket if it exists
         if (exists(socketPath)) {
             // Try to connect — if it succeeds, another server is running
             try {
                 auto testSock = new Socket(AddressFamily.UNIX, SocketType.STREAM);
-                testSock.connect(new UnixAddress(socketPath));
+                testSock.connect(unixSocketAddress(socketPath));
                 testSock.close();
                 stderr.writeln("Error: another compile server is already running at ", socketPath);
                 return false;
@@ -101,7 +103,7 @@ class CompileServer {
 
         listener = new Socket(AddressFamily.UNIX, SocketType.STREAM);
         listener.blocking = true;
-        listener.bind(new UnixAddress(socketPath));
+        listener.bind(unixSocketAddress(socketPath));
         listener.listen(4);
 
         // Set a timeout on accept so we can check idle timeout periodically

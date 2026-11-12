@@ -8,7 +8,8 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-COMPILER="$PROJECT_DIR/d2wasm"
+source "$PROJECT_DIR/tests/d2wasm_bin.sh"
+COMPILER="$(d2wasm_bin "$PROJECT_DIR")"
 TESTS_DIR="$SCRIPT_DIR/tests"
 
 # Colors

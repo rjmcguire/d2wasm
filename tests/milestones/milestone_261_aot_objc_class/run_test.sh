@@ -1,7 +1,8 @@
 #!/bin/bash
 # Milestone 261: D-defined ObjC class in AOT binary
 DIR="$(cd "$(dirname "$0")" && pwd)"
-COMPILER="$DIR/../../../d2wasm"
+source "$DIR/../../d2wasm_bin.sh"
+COMPILER="$(d2wasm_bin "$DIR/../../..")"
 BIN="$DIR/test_bin"
 
 rm -f "$BIN"

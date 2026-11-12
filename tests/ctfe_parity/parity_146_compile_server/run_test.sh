@@ -12,15 +12,18 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/../../unix_sock.sh"
+
 BACKEND="${1:?usage: run_test.sh <backend> <compiler>}"
 COMPILER="${2:?usage: run_test.sh <backend> <compiler>}"
-WORK_DIR=$(mktemp -d)
+WORK_DIR=$(native_workdir "$(mktemp -d)")
 SOCKET="$WORK_DIR/server.sock"
 
 cleanup() {
     # Shutdown server if running
-    if [ -S "$SOCKET" ]; then
-        echo '{"id":999,"method":"shutdown"}' | nc -N -U "$SOCKET" >/dev/null 2>&1 || true
+    if server_ready "$SOCKET"; then
+        echo '{"id":999,"method":"shutdown"}' | unix_request "$SOCKET" >/dev/null 2>&1 || true
         sleep 0.3
     fi
     rm -rf "$WORK_DIR"
@@ -44,13 +47,13 @@ SERVER_PID=$!
 
 # Wait for server to be ready
 for i in $(seq 1 50); do
-    if [ -S "$SOCKET" ]; then
+    if server_ready "$SOCKET"; then
         break
     fi
     sleep 0.1
 done
 
-if [ ! -S "$SOCKET" ]; then
+if ! server_ready "$SOCKET"; then
     echo "FAIL: Server did not start"
     kill $SERVER_PID 2>/dev/null || true
     exit 1
@@ -60,7 +63,7 @@ fi
 # -N half-closes after stdin EOF so the server sees disconnect and nc
 # exits after the one-line NDJSON reply (OpenBSD nc default is to hang).
 send_request() {
-    echo "$1" | nc -N -U "$SOCKET" 2>/dev/null
+    echo "$1" | unix_request "$SOCKET" 2>/dev/null
 }
 
 # Test 1: First compile — should succeed

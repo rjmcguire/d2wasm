@@ -646,9 +646,11 @@ class NativeCompiledFunction : CompiledFunction {
             objectExternalSymbols ~= funcName;
 
         gen.emitShuffleVirtualToCAbi();
+        gen.emitAllocateShadow();
         uint blOff = gen.pos;
         gen.emitExternalBranchLink();  // BL/call placeholder
         objectRelocations ~= ObjectReloc(blOff, funcName, RelocType.branch26);
+        gen.emitReleaseShadow();
     }
 
     /// Collect module-level global variables and allocate storage.
@@ -1031,16 +1033,17 @@ class NativeCompiledFunction : CompiledFunction {
         }
     }
 
-    /// Load a parameter that arrived in a register (0-7) or on the stack (8+) into x0.
-    /// For stack params, uses the caller's stack frame: [FP + totalLocalBytes + 16 + (paramReg-8)*8]
+    /// Load a parameter that arrived in a register or on the stack into x0.
+    /// Register count is the C ABI's (8 AAPCS, 6 SysV, 4 Win64).
     private void loadParamToX0(int paramReg) {
-        if (paramReg < 8) {
+        int nreg = gen.cAbiIntArgRegs();
+        if (paramReg < nreg) {
             moveRegToX0(paramReg);
+        } else if (gen.tempsUseFramePointer()) {
+            gen.emitLoadIncomingStackArg(paramReg - nreg);
         } else {
-            // Stack parameter: load from caller's stack frame
-            // After prologue: FP + totalLocalBytes + 16 is the old SP
-            // Stack arg i is at old_SP + (paramReg - 8) * 8
-            size_t stackArgOffset = totalLocalBytes + 16 + cast(size_t)(paramReg - 8) * 8;
+            // ARM64: FP + totalLocalBytes + 16 is the old SP.
+            size_t stackArgOffset = totalLocalBytes + 16 + cast(size_t)(paramReg - nreg) * 8;
             gen.emitLoadPtr(stackArgOffset);
         }
     }
@@ -1477,18 +1480,12 @@ class NativeCompiledFunction : CompiledFunction {
     /// Resolve extern(C) FFI imports via dlsym and store function pointers in the data section.
     private void resolveFFIImports(ImportedFunctionDecl[] imports) {
         if (imports is null) return;
-        import core.sys.posix.dlfcn : dlsym;
-        version (OSX) {
-            import core.sys.darwin.dlfcn : RTLD_DEFAULT;
-        } else {
-            import core.sys.linux.dlfcn : RTLD_DEFAULT;
-        }
+        import runtime.host_dl : hostDlsym;
 
         foreach (imp; imports) {
             if (imp.moduleName != "ffi") continue;
 
-            // dlsym to find the native function pointer
-            auto ptr = dlsym(RTLD_DEFAULT, (imp.name ~ "\0").ptr);
+            auto ptr = hostDlsym((imp.name ~ "\0").ptr);
             if (ptr is null) continue;  // symbol not found — skip silently
 
             // Store the function pointer in the data section (8 bytes, aligned)
@@ -5916,13 +5913,8 @@ class NativeCompiledFunction : CompiledFunction {
             emitObjectExternalCall(funcName);
         } else {
             // JIT mode: resolve via dlsym and call directly
-            import core.sys.posix.dlfcn : dlsym;
-            version (OSX) {
-                import core.sys.darwin.dlfcn : RTLD_DEFAULT;
-            } else {
-                import core.sys.linux.dlfcn : RTLD_DEFAULT;
-            }
-            auto ptr = dlsym(RTLD_DEFAULT, (funcName ~ "\0").ptr);
+            import runtime.host_dl : hostDlsym;
+            auto ptr = hostDlsym((funcName ~ "\0").ptr);
             if (ptr !is null) {
                 gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)ptr);
                 gen.emitCallIndirectX9CAbi();
@@ -7376,13 +7368,8 @@ class NativeCompiledFunction : CompiledFunction {
     /// Emit a call to a runtime function resolved via dlsym (JIT mode only).
     private void emitJITExternalCall(string funcName) {
         // Resolve via dlsym at compile time, call via indirect x9
-        import core.sys.posix.dlfcn : dlsym;
-        version (OSX) {
-            import core.sys.darwin.dlfcn : RTLD_DEFAULT;
-        } else {
-            import core.sys.linux.dlfcn : RTLD_DEFAULT;
-        }
-        auto ptr = dlsym(RTLD_DEFAULT, (funcName ~ '\0').ptr);
+        import runtime.host_dl : hostDlsym;
+        auto ptr = hostDlsym((funcName ~ '\0').ptr);
         if (ptr is null)
             throw new Exception("Cannot resolve runtime function: " ~ funcName);
         gen.emitLoadImm64ToX9(cast(ulong)cast(size_t)ptr);
@@ -7433,12 +7420,7 @@ class NativeCompiledFunction : CompiledFunction {
     /// Register extern(Objective-C) classes with the ObjC runtime via dlsym'd runtime functions.
     /// Called after gen.finalize() when code addresses are resolved.
     private void registerObjCClassesJIT(ClassDecl[] classDecls) {
-        import core.sys.posix.dlfcn : dlsym;
-        version (OSX) {
-            import core.sys.darwin.dlfcn : RTLD_DEFAULT;
-        } else {
-            import core.sys.linux.dlfcn : RTLD_DEFAULT;
-        }
+        import runtime.host_dl : hostDlsym;
 
         // Resolve ObjC runtime functions
         alias ObjcGetClassFn = extern(C) void* function(const(char)* name);
@@ -7447,11 +7429,11 @@ class NativeCompiledFunction : CompiledFunction {
         alias ObjcRegisterClassPairFn = extern(C) void function(void* cls);
         alias SelRegisterNameFn = extern(C) void* function(const(char)* name);
 
-        auto objc_getClass_fn = cast(ObjcGetClassFn) dlsym(RTLD_DEFAULT, "objc_getClass");
-        auto objc_allocateClassPair_fn = cast(ObjcAllocClassPairFn) dlsym(RTLD_DEFAULT, "objc_allocateClassPair");
-        auto class_addMethod_fn = cast(ClassAddMethodFn) dlsym(RTLD_DEFAULT, "class_addMethod");
-        auto objc_registerClassPair_fn = cast(ObjcRegisterClassPairFn) dlsym(RTLD_DEFAULT, "objc_registerClassPair");
-        auto sel_registerName_fn = cast(SelRegisterNameFn) dlsym(RTLD_DEFAULT, "sel_registerName");
+        auto objc_getClass_fn = cast(ObjcGetClassFn) hostDlsym("objc_getClass");
+        auto objc_allocateClassPair_fn = cast(ObjcAllocClassPairFn) hostDlsym("objc_allocateClassPair");
+        auto class_addMethod_fn = cast(ClassAddMethodFn) hostDlsym("class_addMethod");
+        auto objc_registerClassPair_fn = cast(ObjcRegisterClassPairFn) hostDlsym("objc_registerClassPair");
+        auto sel_registerName_fn = cast(SelRegisterNameFn) hostDlsym("sel_registerName");
 
         if (objc_getClass_fn is null || objc_allocateClassPair_fn is null ||
             class_addMethod_fn is null || objc_registerClassPair_fn is null ||

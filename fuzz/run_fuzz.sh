@@ -8,7 +8,9 @@
 #   // STATUS: bug         — known bug, expected to fail
 #   (no status)            — expected to pass
 
-COMPILER="./d2wasm"
+_D2WASM_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$_D2WASM_ROOT/tests/d2wasm_bin.sh"
+COMPILER="$(d2wasm_bin "$_D2WASM_ROOT")"
 FUZZ_DIR="$(dirname "$0")"
 PASS=0
 FAIL=0

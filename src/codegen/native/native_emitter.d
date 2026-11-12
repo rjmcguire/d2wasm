@@ -8,7 +8,10 @@ module codegen.native.native_emitter;
 
 import codegen.native.macho_writer;
 version (X86_64) {
-    import codegen.native.elf_writer : ElfWriter;
+    version (Windows)
+        import codegen.native.coff_writer : CoffWriter;
+    else
+        import codegen.native.elf_writer : ElfWriter;
 }
 import codegen.native.backend : NativeCompiledFunction;
 import codegen.target : sliceInfo, SliceInfo;
@@ -197,7 +200,10 @@ class NativeModuleEmitter : EmitterCache {
         bool hasGlobalData = globData.length > 0;
 
         version (X86_64) {
-            auto writer = new ElfWriter();
+            version (Windows)
+                auto writer = new CoffWriter();
+            else
+                auto writer = new ElfWriter();
             writer.setTextSection(fullCode);
             if (hasConstData)
                 writer.setDataConstSection(objData);
@@ -328,18 +334,26 @@ private:
             return emitMainWrapperArm64(codeSize, mainFuncOffset, mainNeedsArena, objcInitOffset);
     }
 
-    ///   push rbp / mov rbp, rsp / [xor edi, edi] / call user_main / pop rbp / ret
+    /// SysV:  push rbp / mov rbp, rsp / [xor edi, edi] / call / pop rbp / ret
+    /// Win64: the same, with 32 bytes of shadow and the arena in ecx.
     static ubyte[] emitMainWrapperX86(size_t codeSize, size_t mainFuncOffset, bool mainNeedsArena) {
         ubyte[] buf;
         buf ~= 0x55;                               // push rbp
         buf ~= [0x48, 0x89, 0xE5];                 // mov rbp, rsp
-        if (mainNeedsArena)
+        version (Windows) {
+            buf ~= [0x48, 0x83, 0xEC, 0x20];       // sub rsp, 32
+            if (mainNeedsArena)
+                buf ~= [0x31, 0xC9];               // xor ecx, ecx  (arena = 0)
+        } else if (mainNeedsArena) {
             buf ~= [0x31, 0xFF];                   // xor edi, edi  (arena = 0)
+        }
         uint callOff = cast(uint)buf.length;
         buf ~= 0xE8;
         buf ~= [0, 0, 0, 0];                       // call rel32 placeholder
         int disp = cast(int)(cast(long)mainFuncOffset - cast(long)(codeSize + callOff + 5));
         buf[callOff + 1 .. callOff + 5] = (cast(ubyte*)&disp)[0 .. 4];
+        version (Windows)
+            buf ~= [0x48, 0x83, 0xC4, 0x20];       // add rsp, 32
         buf ~= 0x5D;                               // pop rbp
         buf ~= 0xC3;                               // ret
         return buf;

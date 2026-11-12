@@ -8,8 +8,11 @@
  *   x0=rax  x1=rcx  x2=rdx  x3=rsi  x4=r8  x5=r9  x6=r10  x7=rdi
  *   x8=r12  x9=r11  x10=r13
  *
- * Function entry shuffles SysV (rdi,rsi,rdx,rcx,r8,r9) into that mapping.
+ * Function entry shuffles the platform C ABI into that mapping.
+ *   SysV:  rdi, rsi, rdx, rcx, r8, r9
+ *   Win64: rcx, rdx, r8, r9, plus a 32-byte shadow and no red zone
  * Locals are RBP-relative so CALL (which pushes a return address) is safe.
+ * The JIT is entered with extern(C), so the ABI is the host's.
  */
 module codegen.native.x86_64_codegen;
 
@@ -18,7 +21,7 @@ import codegen.native.x86_64.stencil_table;
 import codegen.native.codegen_interface : Label, NativeDataSection, NativeCTFEContext,
     HostFunctionPtr, HostFunctionTable, CTFEErrorKind, ctfeErrorMessage, longjmp,
     MAP_ANONYMOUS, MAP_JIT;
-import core.sys.posix.sys.mman;
+import codegen.native.host_memory;
 import core.stdc.string : memcpy;
 import core.stdc.stdlib : malloc, free;
 
@@ -40,6 +43,19 @@ enum ubyte XR7 = RDI;
 enum ubyte XR8 = R12;
 enum ubyte XR9 = R11;
 enum ubyte XR10 = R13;
+
+/// C ABI used at every call boundary. Internal virtual registers stay the same.
+enum CAbi {
+    sysv,   // rdi, rsi, rdx, rcx, r8, r9 — six integer registers, no shadow
+    win64,  // rcx, rdx, r8, r9 — four integer registers, 32-byte shadow
+}
+
+CAbi hostCAbi() {
+    version (Windows)
+        return CAbi.win64;
+    else
+        return CAbi.sysv;
+}
 
 /// ARM xN -> x86 encoding (unmapped registers become R14)
 private immutable ubyte[11] xReg = [
@@ -73,22 +89,28 @@ struct NativeCodeGen {
     bool relocatable;
     bool finalized;
 
-    /// Bytes from RBP down to SP after prologue (saved r12/r13 + locals)
+    /// Bytes from RBP down to SP after prologue (callee-saves + locals)
     uint frameSize;
     uint localAlloc;  // extra SUB RSP amount (aligned localBytes)
+    CAbi abi;
 
     static NativeCodeGen alloc(size_t initialSize = 64 * 1024) {
-        auto mem = cast(ubyte*)malloc(initialSize);
-        if (mem is null) return NativeCodeGen.init;
-        return NativeCodeGen(mem, initialSize, 0);
+        auto gen = allocRaw(initialSize);
+        gen.abi = hostCAbi();
+        return gen;
     }
 
     static NativeCodeGen allocRelocatable(size_t initialSize = 64 * 1024) {
-        auto mem = cast(ubyte*)malloc(initialSize);
-        if (mem is null) return NativeCodeGen.init;
-        auto gen = NativeCodeGen(mem, initialSize, 0);
+        auto gen = allocRaw(initialSize);
+        gen.abi = hostCAbi();
         gen.relocatable = true;
         return gen;
+    }
+
+    private static NativeCodeGen allocRaw(size_t initialSize) {
+        auto mem = cast(ubyte*)malloc(initialSize);
+        if (mem is null) return NativeCodeGen.init;
+        return NativeCodeGen(mem, initialSize, 0);
     }
 
     private bool ensureCapacity(size_t needed) {
@@ -283,8 +305,14 @@ struct NativeCodeGen {
         emitLeaRbp(XR0, localDisp(off));
     }
 
-    /// SysV integer argument registers (rdi, rsi, rdx, rcx, r8, r9).
-    int cAbiIntArgRegs() { return 6; }
+    /// Integer argument registers for the active C ABI.
+    int cAbiIntArgRegs() { return abi == CAbi.win64 ? 4 : 6; }
+
+    /// Bytes occupied by callee-saved pushes below RBP (not including saved RBP).
+    private uint calleeSaveBytes() {
+        // SysV: r12, r13. Win64 also preserves rdi, rsi, r14, r15.
+        return abi == CAbi.win64 ? 48 : 16;
+    }
 
     /// Locals/temps are RBP-relative, so SUB RSP for stack args does not move them.
     bool tempsUseFramePointer() { return true; }
@@ -293,20 +321,50 @@ struct NativeCodeGen {
         emitU8(0x41); emitU8(0xFF); emitU8(0xD3);  // call r11
     }
 
-    /// Virtual ARM-like args (rax,rcx,rdx,rsi,r8,r9) → SysV (rdi,rsi,rdx,rcx,r8,r9).
-    /// Clobbers r11.
+    /// Virtual args (rax,rcx,rdx,rsi,r8,r9) → the active C ABI. Clobbers r10/r11.
     void emitShuffleVirtualToCAbi() {
-        emitMovRR(R11, RSI);  // save x3
-        emitMovRR(RDI, RAX);  // SysV arg0
-        emitMovRR(RSI, RCX);  // SysV arg1
-        emitMovRR(RCX, R11);  // SysV arg3 (rdx is already arg2)
+        if (abi == CAbi.win64) {
+            // rax,rcx,rdx,rsi → rcx,rdx,r8,r9
+            emitMovRR(R11, RAX);
+            emitMovRR(R10, RCX);
+            emitMovRR(RAX, RDX);
+            emitMovRR(R9, RSI);
+            emitMovRR(RCX, R11);
+            emitMovRR(RDX, R10);
+            emitMovRR(R8, RAX);
+        } else {
+            emitMovRR(R11, RSI);  // save x3
+            emitMovRR(RDI, RAX);  // SysV arg0
+            emitMovRR(RSI, RCX);  // SysV arg1
+            emitMovRR(RCX, R11);  // SysV arg3 (rdx is already arg2)
+        }
     }
 
-    /// Shuffle to SysV then call through r11. Saves the callee in r14.
+    /// 32-byte home area required before every Win64 call. No-op on SysV.
+    void emitAllocateShadow() {
+        if (abi == CAbi.win64)
+            emitSubSPImm(32);
+    }
+
+    void emitReleaseShadow() {
+        if (abi == CAbi.win64)
+            emitAddSPImm(32);
+    }
+
+    /// First incoming stack argument is at [rbp+16] on SysV, [rbp+48] on Win64
+    /// (return address, then the 32-byte shadow).
+    void emitLoadIncomingStackArg(int index) {
+        int disp = (abi == CAbi.win64 ? 48 : 16) + index * 8;
+        emitLoad64Rbp(RAX, disp);
+    }
+
+    /// Shuffle to the C ABI then call through r11. Saves the callee in r14.
     void emitCallIndirectX9CAbi() {
         emitMovRR(R14, R11);
         emitShuffleVirtualToCAbi();
+        emitAllocateShadow();
         emitU8(0x41); emitU8(0xFF); emitU8(0xD6);  // call r14
+        emitReleaseShadow();
     }
 
     void emitAddX9X0LSL3() {
@@ -327,9 +385,26 @@ struct NativeCodeGen {
         emitCallIndirectX9CAbi();
     }
 
-    /// Host call: SysV rdi=ctx, rsi=arg0, rdx=arg1, rcx=arg2
-    /// Virtual incoming: rax=arg0, rcx=arg1, rdx=arg2
+    /// Host call. Virtual incoming: rax=arg0, rcx=arg1, rdx=arg2.
+    /// SysV:  rdi=ctx, rsi=arg0, rdx=arg1, rcx=arg2.
+    /// Win64: rcx=ctx, rdx=arg0, r8=arg1, r9=arg2, with shadow space.
     void emitHostCall(ulong funcSlotAddress, ulong contextSlotAddress) {
+        if (abi == CAbi.win64) {
+            emitMovRR(R10, RAX);   // park arg0
+            emitMovRR(R11, RCX);   // park arg1
+            emitMovRR(RAX, RDX);   // park arg2
+            emitMovRR(R9, RAX);    // arg2 -> r9 before rax is reused
+            emitLoadImm64(contextSlotAddress);
+            emitU8(0x48); emitU8(0x8B); emitU8(0x08); // mov rcx, [rax]  ctx
+            emitMovRR(RDX, R10);   // arg0
+            emitMovRR(R8, R11);    // arg1
+            emitLoadImm64ToX9(funcSlotAddress);
+            emitLoadFromX9();
+            emitAllocateShadow();
+            emitCallIndirectX9();
+            emitReleaseShadow();
+            return;
+        }
         emitMovRR(RSI, RAX);          // rsi = arg0
         emitMovRR(R11, RCX);          // save arg1
         emitMovRR(RCX, RDX);          // rcx = arg2
@@ -394,12 +469,14 @@ struct NativeCodeGen {
         unresolved ~= UnresolvedBranch(off, target.id, BranchKind.conditional);
     }
 
-    /// Shuffle virtual args into SysV, then call rel32
+    /// Shuffle virtual args into the C ABI, then call rel32.
     void emitCall(Label target) {
         emitShuffleVirtualToCAbi();
+        emitAllocateShadow();
         uint off = pos;
         emitU8(0xE8); emitU32(0);
         unresolved ~= UnresolvedBranch(off, target.id, BranchKind.call);
+        emitReleaseShadow();
     }
 
     void emitLoadLabelAddress(Label target) {
@@ -409,9 +486,11 @@ struct NativeCodeGen {
     }
 
     void emitCallIndirect() {
-        emitMovRR(R14, XR8);  // r12 = x8
+        emitMovRR(R14, XR8);
         emitShuffleVirtualToCAbi();
+        emitAllocateShadow();
         emitU8(0x41); emitU8(0xFF); emitU8(0xD6);  // call r14
+        emitReleaseShadow();
     }
 
     void emitMoveXReg(uint src, uint dst) {
@@ -516,29 +595,58 @@ struct NativeCodeGen {
         emitU8(cast(ubyte)(0x58 | (r & 7)));
     }
 
-    /// SysV → virtual register shuffle (after frame is set up, args still in SysV regs)
-    private void emitSysVShuffle() {
-        emitMovRR(R11, RCX);  // save SysV arg3
-        emitMovRR(RAX, RDI);  // x0 = arg0
-        emitMovRR(RCX, RSI);  // x1 = arg1
-        // rdx already x2
-        emitMovRR(RSI, R11);  // x3 = arg3
-        // r8, r9 already x4, x5
+    /// C ABI → virtual registers. Args are still in the ABI registers.
+    private void emitIncomingShuffle() {
+        if (abi == CAbi.win64) {
+            // rcx, rdx, r8, r9 → rax, rcx, rdx, rsi
+            emitMovRR(R11, R9);
+            emitMovRR(RAX, RCX);
+            emitMovRR(RCX, RDX);
+            emitMovRR(RDX, R8);
+            emitMovRR(RSI, R11);
+        } else {
+            emitMovRR(R11, RCX);  // save SysV arg3
+            emitMovRR(RAX, RDI);  // x0 = arg0
+            emitMovRR(RCX, RSI);  // x1 = arg1
+            // rdx already x2
+            emitMovRR(RSI, R11);  // x3 = arg3
+            // r8, r9 already x4, x5
+        }
+    }
+
+    private void emitPushCalleeSaves() {
+        emitU8(0x41); emitU8(0x54);           // push r12
+        emitU8(0x41); emitU8(0x55);           // push r13
+        if (abi == CAbi.win64) {
+            emitU8(0x57);                     // push rdi
+            emitU8(0x56);                     // push rsi
+            emitU8(0x41); emitU8(0x56);       // push r14
+            emitU8(0x41); emitU8(0x57);       // push r15
+        }
+    }
+
+    private void emitPopCalleeSaves() {
+        if (abi == CAbi.win64) {
+            emitU8(0x41); emitU8(0x5F);       // pop r15
+            emitU8(0x41); emitU8(0x5E);       // pop r14
+            emitU8(0x5E);                     // pop rsi
+            emitU8(0x5F);                     // pop rdi
+        }
+        emitU8(0x41); emitU8(0x5D);           // pop r13
+        emitU8(0x41); emitU8(0x5C);           // pop r12
     }
 
     void emitPrologue() {
         emitU8(0x55);                         // push rbp
         emitMovRR(RBP, RSP);                  // mov rbp, rsp
-        emitU8(0x41); emitU8(0x54);           // push r12
-        emitU8(0x41); emitU8(0x55);           // push r13
-        frameSize = 16;
+        emitPushCalleeSaves();
+        frameSize = calleeSaveBytes();
         localAlloc = 0;
-        emitSysVShuffle();
+        emitIncomingShuffle();
     }
 
     void emitEpilogue() {
-        emitU8(0x41); emitU8(0x5D);           // pop r13
-        emitU8(0x41); emitU8(0x5C);           // pop r12
+        emitPopCalleeSaves();
         emitU8(0x5D);                         // pop rbp
         emitU8(0xC3);                         // ret
     }
@@ -564,21 +672,19 @@ struct NativeCodeGen {
     void emitPrologueWithLocals(size_t localBytes) {
         emitU8(0x55);
         emitMovRR(RBP, RSP);
-        emitU8(0x41); emitU8(0x54);  // push r12
-        emitU8(0x41); emitU8(0x55);  // push r13
+        emitPushCalleeSaves();
         uint aligned = cast(uint)((localBytes + 15) & ~15);
         localAlloc = aligned;
-        frameSize = 16 + aligned;
+        frameSize = calleeSaveBytes() + aligned;
         if (aligned > 0)
             emitSubSPImm(aligned);
-        emitSysVShuffle();
+        emitIncomingShuffle();
     }
 
     void emitEpilogueWithLocals(size_t localBytes) {
         if (localAlloc > 0)
             emitAddSPImm(localAlloc);
-        emitU8(0x41); emitU8(0x5D);
-        emitU8(0x41); emitU8(0x5C);
+        emitPopCalleeSaves();
         emitU8(0x5D);
         emitU8(0xC3);
     }
